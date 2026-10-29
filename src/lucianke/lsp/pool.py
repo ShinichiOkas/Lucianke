@@ -61,6 +61,7 @@ from lucianke.lsp.servers import (
     build_settings,
     find_command,
     find_tsserver,
+    host_venv,
     servers_for,
 )
 from lucianke.workspace.paths import to_file_uri
@@ -137,8 +138,17 @@ def venv_root_of(ws: Workspace) -> Path | None:
 
 
 def default_resolver(defn: LspServerDef, ws: Workspace) -> list[str] | None:
-    """既定の探索（``find_command``）: 環境変数 → ワークスペースの venv → ``node_modules/.bin`` → ``PATH``。"""
-    return find_command(defn, workspace_root=ws.root, venv=venv_root_of(ws))
+    """既定の探索（``find_command``）: 環境変数 → ワークスペースの venv → ``node_modules/.bin`` → Lucianke 自身の Python 環境 → ``PATH``。
+
+    Lucianke 自身の環境（``host_venv``）を PATH より先に見るのは、``.venv`` の無いワークスペースでも Lucianke と一緒に入った
+    basedpyright・ruff を使うため（起動した venv が有効化されていなければ PATH に無く、PATH 上の別の pyright に落ちる。BUG-0037）。"""
+    return find_command(defn, workspace_root=ws.root, venv=venv_root_of(ws), host_venv=host_venv())
+
+
+def _brief(text: str | None, limit: int = 300) -> str:
+    """ログ用に ``last_error``（切断の理由・stderr の末尾）を 1 行 ``limit`` 文字までに縮める。"""
+    one = " ".join((text or "-").split())
+    return one if len(one) <= limit else one[: limit - 1] + "…"
 
 
 class _Unavailable(Exception):
@@ -199,7 +209,12 @@ class LspHandle:
         self.started_at = self._pool._wall_clock().isoformat(timespec="milliseconds")
 
     def snapshot(self) -> PoolStatus:
-        return PoolStatus(self.state.public, self.progress, self.server_name, self.pid, self.reason)
+        name = self.server_name
+        if self.state is LspState.STANDBY:  # 止まっている間の名前は、次に起こす定義（前回の定義が残っていても、環境が変わりうる）
+            defs = self._pool._defs(self.language_id, self.role)
+            if defs:
+                name = self._pool._expected_name(self.language_id, self.ws, self.role, defs)
+        return PoolStatus(self.state.public, self.progress, name, self.pid, self.reason)
 
     def touch(self) -> None:
         """要求で使った（アイドル停止の判定を延ばす）。"""
@@ -209,10 +224,11 @@ class LspHandle:
         """ワークスペースの設定が変わった（``set_python_env``・除外・``default_base_ref`` …）。新しい ``Workspace`` に差し替える。
 
         ``self.ws`` と、``documents`` / ``diagnostics``（URI の変換に ``ws`` を使う）が同じ ``ws`` を持つ。``on_diagnostics`` の
-        ``ws`` 引数も新しい方になる。除外などの変更は LSP の設定に出ない（``build_settings`` が使うのは Python のインタープリタと
-        tsserver だけ）ので、再起動は要らず ``workspace/didChangeConfiguration`` も送らない。
+        ``ws`` 引数も新しい方になる。除外などの変更は LSP の設定に出ない（``build_settings`` が使うのは Python のインタープリタ・
+        import の根〔``extra_paths``〕・tsserver だけ）ので、再起動は要らず
+        ``workspace/didChangeConfiguration`` も送らない。
 
-        **Python 系（``language_id == "python"``）はインタープリタが変わったら再起動する**（仕様書 T-00 事後条件 3: ``set_python_env`` の
+        **Python 系（``language_id == "python"``）はインタープリタか import の根が変わったら再起動する**（仕様書 T-00 事後条件 3: ``set_python_env`` の
         後の ``started_at`` が呼び出し時刻より後。basedpyright はインタープリタを ``workspace/configuration`` の応答でしか受け取らず、
         起動時の値で環境を作る〔設計書 §7.5.1〕）。起動中・起動済み（``starting`` / ``indexing`` / ``ready``）なら止めてすぐ起動し直す
         （クラッシュではないので ``restarts`` は増やさない）。``unavailable``（新しい venv にサーバーが入っているかもしれない）は
@@ -226,8 +242,10 @@ class LspHandle:
         self.ws = ws
         self.documents.ws = ws
         self.diagnostics.ws = ws
-        old_py = old.python_env.interpreter if old.python_env is not None else None
-        new_py = ws.python_env.interpreter if ws.python_env is not None else None
+        old_py = (
+            (old.python_env.interpreter, old.python_env.extra_paths) if old.python_env is not None else None
+        )
+        new_py = (ws.python_env.interpreter, ws.python_env.extra_paths) if ws.python_env is not None else None
         needs_restart = ws.root != old.root or (self.language_id == "python" and old_py != new_py)
         if not needs_restart or self.state is LspState.STANDBY:
             return False
@@ -462,7 +480,9 @@ class LspPool:
         defs = self._defs(language_id, role)
         if not defs:
             return PoolStatus(LspStatus.NOT_APPLICABLE, None, None, None, None)
-        return PoolStatus(LspStatus.STANDBY, None, defs[0].name, None, None)
+        return PoolStatus(
+            LspStatus.STANDBY, None, self._expected_name(language_id, ws, role, defs), None, None
+        )
 
     def get(
         self, language_id: str, ws: Workspace, *, role: Role = "types", start_if_needed: bool = True
@@ -510,7 +530,7 @@ class LspPool:
         h.timeouts = 0
         if h.server_name is None:
             defs = self._defs(h.language_id, h.role)
-            h.server_name = defs[0].name if defs else None
+            h.server_name = defs[0].name if defs else None  # 直後の ``_run_once`` が実際の名前に直す
         h._set_state(LspState.STARTING)
         h._mark_started()
         h._task = asyncio.create_task(self._supervise(h), name=f"lsp-pool:{h.language_id}:{h.role}")
@@ -534,24 +554,26 @@ class LspPool:
                 if h.restarts >= self._restart_max:
                     reason = "init_failed" if failure == "init_failed" else "crashed_3x"
                     _log.error(
-                        "LSP %s/%s: giving up after %d restarts (%s)",
+                        "LSP %s/%s: giving up after %d restarts (%s): %s",
                         h.language_id,
                         h.server_name,
                         h.restarts,
                         failure,
+                        _brief(h.last_error),
                     )
                     h._set_state(LspState.UNAVAILABLE, reason)
                     return
                 delay = self._backoff_s[min(h.restarts, len(self._backoff_s) - 1)]
                 h.restarts += 1
                 _log.warning(
-                    "LSP %s/%s %s; restart %d/%d in %ss",
+                    "LSP %s/%s %s; restart %d/%d in %ss: %s",
                     h.language_id,
                     h.server_name,
                     failure,
                     h.restarts,
                     self._restart_max,
                     delay,
+                    _brief(h.last_error),
                 )
                 h.progress = None
                 h._set_state(LspState.STARTING, "restarting")
@@ -564,19 +586,41 @@ class LspPool:
 
     def _pick(self, h: LspHandle) -> tuple[LspServerDef, list[str], Path | None]:
         """起動する定義・argv・tsserver の場所。優先順に探し、``tsserver.js`` を要るのに無い定義（tsls）は飛ばす（S-5）。"""
-        defs = self._defs(h.language_id, h.role)
+        return self._pick_for(h.language_id, h.ws, h.role)
+
+    def _pick_for(
+        self, language_id: str, ws: Workspace, role: Role
+    ) -> tuple[LspServerDef, list[str], Path | None]:
+        defs = self._defs(language_id, role)
         tsserver: Path | None = None
         tsserver_known = False
         for defn in defs:
             if defn.tsserver_via is not None or defn.needs_workspace_tsserver:
                 if not tsserver_known:
-                    tsserver, tsserver_known = find_tsserver(h.ws.root), True
+                    tsserver, tsserver_known = find_tsserver(ws.root), True
                 if defn.needs_workspace_tsserver and tsserver is None:
                     continue
-            argv = self._resolver(defn, h.ws)
+            argv = self._resolver(defn, ws)
             if argv:
                 return defn, argv, tsserver
-        raise _Unavailable("not_found", ", ".join(d.name for d in defs) or h.language_id)
+        names = ", ".join(f"{d.name} ({d.argv_candidates[0][0]})" for d in defs) or language_id
+        raise _Unavailable(
+            "not_found",
+            f"no LSP server found for {language_id}/{role}: {names}; searched LUCIANKE_LSP_*_CMD, the workspace and "
+            "Lucianke Python environments, node_modules/.bin and PATH",
+        )
+
+    def _expected_name(
+        self, language_id: str, ws: Workspace, role: Role, defs: tuple[LspServerDef, ...]
+    ) -> str:
+        """起こすサーバーの名前: 優先順で最初に見つかる定義。どれも見つからなければ既定（先頭）の名前。
+
+        ブロックしない（ファイルの有無を引くだけ）。まだ起こしていない（standby）ときの ``status`` が、起こした後に出る名前と
+        食い違わないようにする（既定が見つからず代替に落ちるのに、起こす前は既定の名前を返していた。BUG-0037）。"""
+        try:
+            return self._pick_for(language_id, ws, role)[0].name
+        except _Unavailable:
+            return defs[0].name
 
     async def _run_once(self, h: LspHandle) -> str | None:
         """1 回起動して、切断されるまで見張る。戻り値は失敗の種類（``init_failed`` / ``crashed``）。止めている最中は ``None``。"""
@@ -591,8 +635,12 @@ class LspPool:
         h.diagnostics.reset()
 
         client = LspClient(defn.name)
-        python = h.ws.python_env.interpreter if h.ws.python_env is not None else None
-        client.set_settings(build_settings(defn, python_path=python, tsserver_path=tsserver))
+        env = h.ws.python_env
+        python = env.interpreter if env is not None else None
+        extra = [h.ws.root / p for p in env.extra_paths] if env is not None else []
+        client.set_settings(
+            build_settings(defn, python_path=python, extra_paths=extra, tsserver_path=tsserver)
+        )
         h.diagnostics.attach(client)
         client.on_notification("$/progress", h._on_progress)
         client.on_notification(PUBLISH_DIAGNOSTICS, h._on_first_publish)

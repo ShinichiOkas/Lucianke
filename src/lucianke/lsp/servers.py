@@ -27,7 +27,8 @@ TypeScript / JavaScript（S-5）: **既定は typescript-language-server（tsls�
 ``workspace/configuration`` の応答（``vtsls.autoUseWorkspaceTsdk`` + ``typescript.tsdk``）で渡す。
 
 起動コマンドの探索順（``find_command``）: 環境変数（サーバー名 ``LUCIANKE_LSP_<NAME>_CMD`` → 言語 ``LUCIANKE_LSP_<LANG>_CMD``）→
-指定された venv の ``Scripts|bin`` → ワークスペースの ``.venv/Scripts|bin`` → ``node_modules/.bin`` → ``PATH``。
+指定された venv の ``Scripts|bin`` → ワークスペースの ``.venv/Scripts|bin`` → ``node_modules/.bin`` →
+**Lucianke 自身の Python 環境**（``host_venv``。``pip install lucianke[python]`` / ``uv sync`` が入れた basedpyright・ruff）→ ``PATH``。
 Windows は ``.exe`` / ``.cmd`` / ``.bat`` も探す。探索は ``shutil.which`` を使わず自前で行う（Windows の ``which`` は
 カレントディレクトリを先に見るため、ワークスペース直下に置かれた実行ファイルを掴まないようにする）。
 """
@@ -40,7 +41,7 @@ import os
 import re
 import shlex
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -272,6 +273,7 @@ def build_settings(
     defn: LspServerDef,
     *,
     python_path: str | os.PathLike[str] | None = None,
+    extra_paths: Sequence[str | os.PathLike[str]] = (),
     tsserver_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """``defn.settings`` の複製に、実行時にしか決まらない値を重ねる（``LspClient.set_settings`` に渡す）。
@@ -279,12 +281,22 @@ def build_settings(
     * ``python_path``: ワークスペースの Python インタープリタ（``python.pythonPath``）。basedpyright / pyright が import を
       解決するのに使う。**``workspace/configuration`` の ``python`` セクションでしか渡せない**（``initializationOptions`` は
       効かない。渡さないと依存パッケージが ``reportMissingImports`` になる。S-4）。
+    * ``extra_paths``: import の根に足すディレクトリ（src レイアウトの ``src`` など。絶対パスで渡す。``PythonEnv.extra_paths``）。
+      ``python.analysis.extraPaths``（basedpyright は ``basedpyright.analysis.extraPaths`` にも）に入れる。渡さないと
+      ``tests/`` などから ``src/`` の下のパッケージが解決されず（hover が Unknown）、参照・rename が取りこぼす。
+      ``defn.settings`` が既に ``extraPaths`` を持つならそれが先。利用者の ``pyrightconfig.json`` は pyright 自身が優先する。
     * ``tsserver_path``: vtsls へ ``vtsls.autoUseWorkspaceTsdk`` と ``typescript.tsdk``（``tsserver.js`` のある ``lib``）を返して
       ワークスペースの TypeScript を使わせる。返さないと同梱の TypeScript を使う（S-5）。
     """
     settings: dict[str, Any] = copy.deepcopy(dict(defn.settings))
     if python_path is not None and defn.language_id == "python" and defn.role == "types":
         settings.setdefault("python", {})["pythonPath"] = os.fspath(python_path)
+    if extra_paths and defn.language_id == "python" and defn.role == "types":
+        for section in ("python", "basedpyright"):
+            if section == "python" or section in settings:
+                settings.setdefault(section, {}).setdefault("analysis", {}).setdefault(
+                    "extraPaths", [os.fspath(p) for p in extra_paths]
+                )
     if defn.tsserver_via == "settings" and tsserver_path is not None:
         settings.setdefault("vtsls", {})["autoUseWorkspaceTsdk"] = True
         settings.setdefault("typescript", {})["tsdk"] = os.fspath(Path(tsserver_path).parent)
@@ -369,17 +381,29 @@ def _override_argv(defn: LspServerDef, env: Mapping[str, str]) -> list[str] | No
     return None
 
 
+def host_venv() -> Path:
+    """Lucianke 自身が動いている Python 環境の根（``sys.prefix``。venv の中なら venv の根）。``find_command`` の ``host_venv`` に渡す。"""
+    return Path(sys.prefix)
+
+
 def find_command(
     defn: LspServerDef,
     *,
     workspace_root: str | os.PathLike[str],
     venv: str | os.PathLike[str] | None = None,
+    host_venv: str | os.PathLike[str] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> list[str] | None:
     """``defn`` の起動 argv を探す。見つからなければ ``None``（呼び手が ``unavailable: not_found`` にする）。
 
     探索順: 環境変数 → ``venv``（Python 環境の根。省略可）の ``Scripts|bin`` → ``<workspace_root>/.venv/Scripts|bin`` →
-    ``<workspace_root>/node_modules/.bin`` → ``PATH``。候補（``argv_candidates``）は先頭から順に、候補ごとに上の順で探す。
+    ``<workspace_root>/node_modules/.bin`` → ``host_venv``（Lucianke 自身の Python 環境の根。省略可。``host_venv()`` が返す）の
+    ``Scripts|bin`` → ``PATH``。候補（``argv_candidates``）は先頭から順に、候補ごとに上の順で探す。
+
+    ``host_venv`` は **ワークスペースに venv が無いとき**（``.venv`` の無いプロジェクト、使い捨て作業ツリーのコピーなど）に、Lucianke と
+    一緒に入った basedpyright・ruff を拾うためのもの。これが無いと、起動した venv を有効化していない限り PATH にしか無く、
+    PATH 上の別の ``pyright-langserver`` を代替として掴んでしまう（BUG-0037）。ワークスペースの venv は先に見る（プロジェクトが
+    固定したサーバーの版が勝つ）。省略（``None``）すると見ない（探索の単体テストが環境に依らないように、既定では足さない）。
 
     環境変数は ``defn.server_env_var``（``LUCIANKE_LSP_<サーバー名>_CMD``。そのサーバーだけ上書き）→ ``defn.env_var``
     （``LUCIANKE_LSP_<言語>_CMD``。同じ言語・役の定義すべてに効く）の順。値は **そのまま argv になる**
@@ -396,6 +420,8 @@ def find_command(
         dirs += _venv_bin_dirs(Path(venv))
     dirs += _venv_bin_dirs(root / ".venv")
     dirs.append(root / "node_modules" / ".bin")
+    if host_venv is not None:
+        dirs += _venv_bin_dirs(Path(host_venv))
     dirs += _path_dirs(_env_get(env, "PATH"))
 
     for exe, *args in defn.argv_candidates:

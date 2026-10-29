@@ -11,6 +11,9 @@ class PythonEnv:
     interpreter: str | None  # 実行ファイルの絶対パス。無ければ None
     version: str | None = None
     manager: str | None = None  # "venv" | "uv" | "poetry" | "conda" | "path" | "explicit"
+    # import の根に足すディレクトリ（ルート相対・'/' 区切り・昇順）。src レイアウトの ``src`` など。
+    # 利用者の pyright 設定が ``extraPaths`` / ``executionEnvironments`` を持つときは空（利用者の設定が先）。
+    extra_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

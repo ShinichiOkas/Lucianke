@@ -2,11 +2,13 @@
 
 * 実機: ``.venv`` の basedpyright に ``tests/fixtures/poly``（``tmp_path`` に複製）を読ませ、``Pipeline`` 経由でツールを呼ぶ。
   見つからなければ skip。位置の単位は UTF-16（絵文字・日本語の行で確かめる）。
+* import の根: ``poly`` は src レイアウトで、``tests/test_payment.py`` から ``shop.*`` を解決するには ``src`` が要る。複製に
+  ``pyrightconfig.json`` は置かず、検出した ``PythonEnv.extra_paths``（``detect_python_env``）が LSP の
+  ``python.analysis.extraPaths`` に渡る（20d）ので、参照にも rename にも ``tests/test_payment.py`` が入る。
 * 冷間の対策は BUG-0012 と同じ（``_t11_harness.warm_up``）: ``ready`` のあとで対象の文書を開き、最初の診断が届くのを待つ。
   新しく作るファイルも、開いて最初の診断を待ってから rename する（basedpyright は ``didOpen`` か
   ``workspace/didChangeWatchedFiles`` を受けるまで、作業ツリーの新規ファイルを rename に含めない）。
-* 事後条件 3 は「LSP の参照件数 + 1」で確かめる（仕様書の「T-06 の参照件数 + 1」は、basedpyright が
-  ``tests/test_payment.py`` の呼び出しを参照にも rename にも含めない分だけ合わない。T-06 と T-11 は同じ LSP の答えを使う）。
+* 事後条件 3 は「LSP の参照件数 + 1」で確かめる（T-06 の参照件数 + 1 と同じ。T-06 と T-11 は同じ LSP の答えを使う）。
 """
 
 from __future__ import annotations
@@ -46,17 +48,15 @@ from lucianke.index.writer import IndexWriter
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspPool
 from lucianke.tools._services import analyze_file
-from lucianke.workspace.types import PythonEnv, Workspace
+from lucianke.workspace.pyenv import detect_python_env
+from lucianke.workspace.types import Workspace
 
 
-async def start_real(
-    tmp_path: Path, procs: ProcessRegistry, index_writer: IndexWriter, *, pyright_config: str | None = None
-) -> AsyncIterator[Rig]:
+async def start_real(tmp_path: Path, procs: ProcessRegistry, index_writer: IndexWriter) -> AsyncIterator[Rig]:
     """複製した ``poly`` に basedpyright を起こし、``PY_FILES`` の最初の診断が届いてから ``Rig`` を渡す。"""
     root = copy_poly(tmp_path)
-    if pyright_config is not None:
-        (root / "pyrightconfig.json").write_text(pyright_config, encoding="utf-8")
-    ws = Workspace(workspace_id=WS, root=root, python_env=PythonEnv(interpreter=sys.executable))
+    ws = Workspace(workspace_id=WS, root=root, python_env=detect_python_env(root, sys.executable))
+    assert ws.python_env is not None and ws.python_env.extra_paths == ("src",)
     pool = LspPool(
         procs,
         servers=[BASEDPYRIGHT],
@@ -80,15 +80,6 @@ async def start_real(
 @pytest.fixture
 async def real(tmp_path: Path, procs: ProcessRegistry, index_writer: IndexWriter) -> AsyncIterator[Rig]:
     async for rig in start_real(tmp_path, procs, index_writer):
-        yield rig
-
-
-@pytest.fixture
-async def real_src_root(
-    tmp_path: Path, procs: ProcessRegistry, index_writer: IndexWriter
-) -> AsyncIterator[Rig]:
-    """``src`` を import の根に足した設定つき。``tests/test_payment.py`` から ``shop.*`` が解決される。"""
-    async for rig in start_real(tmp_path, procs, index_writer, pyright_config='{"extraPaths": ["src"]}'):
         yield rig
 
 
@@ -137,7 +128,7 @@ async def test_real_rename_method_postconditions(real: Rig):
     assert data["edits_count"] == len(uses) + 1 == len(data["edits"])
     # 同名の別物（ほかの語・ほかのスコープ）を巻き込まず、旧名はコードから消えた
     for p in PY_FILES:
-        assert "process_charge" not in real.read(p) or p == TESTS
+        assert "process_charge" not in real.read(p)
     assert "await processor.charge_order(req)" in real.read(ROUTES)
     assert real.read(RST) == (POLY / RST).read_text(encoding="utf-8")  # 文書は触らない
     first = data["edits"][0]
@@ -238,7 +229,7 @@ async def test_real_dry_run_and_stale_expected_sha_write_nothing(real: Rig):
     dry = await real.rename(target, "charge_order", dry_run=True)
     assert not dry.is_error, dry.text
     d = dry.structured["data"]
-    assert d["applied"] is False and d["edit_id"] is None and d["edits_count"] == 3 and d["urn_map"]
+    assert d["applied"] is False and d["edit_id"] is None and d["edits_count"] == 4 and d["urn_map"]
     assert "charge_order" in d["diff"] and snapshot(real.root) == before  # EP-2
 
     stale = await real.rename(target, "charge_order", expected_file_sha256s={ROUTES: "0" * 64})
@@ -276,13 +267,14 @@ async def test_real_rename_argument_errors(real: Rig):
 
 
 @needs_basedpyright
-async def test_real_rename_reaches_the_test_module_when_its_imports_resolve(real_src_root: Rig):
-    """``tests/test_payment.py`` から ``shop.*`` が解決される設定なら、LSP の参照にも rename にも 3 ファイル目が入る。
+async def test_real_rename_reaches_the_test_module_through_the_detected_src_root(real: Rig):
+    """``tests/test_payment.py`` から ``shop.*`` が解決されるので、LSP の参照にも rename にも 3 ファイル目が入る。
 
-    ``poly`` を設定なしで開くと、``tests/`` からは ``shop`` が解決されず（``p`` が Unknown）呼び出しは参照に含まれない。
-    これは LSP の答えで、T-06 と T-11 は同じ答えを使う。事後条件 3 は「LSP の参照件数 + 1」。
+    ``pyrightconfig.json`` が無くても、``src`` レイアウトの検出（``PythonEnv.extra_paths``）が LSP の ``extraPaths`` に渡る。
+    渡さないと ``tests/`` からは ``shop`` が解決されず（``p`` が Unknown）呼び出しは参照に含まれない（20d 以前の取りこぼし）。
+    T-06 と T-11 は同じ LSP の答えを使う。事後条件 3 は「LSP の参照件数 + 1」。
     """
-    rig = real_src_root
+    rig = real
     uses = await features.references(
         rig.handle, RelPath(ROUTES), rig.pos(ROUTES, "process_charge"), include_declaration=False
     )

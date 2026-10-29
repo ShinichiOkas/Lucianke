@@ -35,7 +35,8 @@ from lucianke.tools import _lsp_exact
 from lucianke.tools import t06_find_references_and_implementations as t06
 from lucianke.tools import t07_query_call_hierarchy as t07
 from lucianke.tools._services import ToolServices
-from lucianke.workspace.types import PythonEnv, Workspace
+from lucianke.workspace.pyenv import detect_python_env
+from lucianke.workspace.types import Workspace
 
 REPO = Path(__file__).resolve().parents[2]
 POLY = REPO / "tests" / "fixtures" / "poly"
@@ -197,9 +198,12 @@ async def real(registry: ProcessRegistry, tmp_path: Path):
     _lsp_exact.MEMO.clear()
     root = tmp_path / "poly"
     shutil.copytree(POLY, root, ignore=shutil.ignore_patterns("__pycache__"))
-    # tests/ から `shop`（src/ の下）を import 解決できるようにする（フィクスチャ本体は触らず、複製にだけ置く）
-    (root / "pyrightconfig.json").write_text('{"extraPaths": ["src"]}', encoding="utf-8")
-    ws = Workspace(workspace_id=WS, root=root.resolve(), python_env=PythonEnv(interpreter=sys.executable))
+    # tests/ から `shop`（src/ の下）を import 解決できるのは、検出した import の根（`src`）が LSP の extraPaths に渡るから
+    # （pyrightconfig.json は置かない。20d）。本番と同じ検出を通す
+    ws = Workspace(
+        workspace_id=WS, root=root.resolve(), python_env=detect_python_env(root.resolve(), sys.executable)
+    )
+    assert ws.python_env is not None and ws.python_env.extra_paths == ("src",)
     pool = LspPool(
         registry,
         servers=[_BASEDPYRIGHT],
