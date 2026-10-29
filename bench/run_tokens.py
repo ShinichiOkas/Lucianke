@@ -4,6 +4,9 @@
     uv run --with tiktoken python bench/run_tokens.py                    # F-PY・F-TS の S1・S2・S4 を全部
     uv run --with tiktoken python bench/run_tokens.py -f F-PY -s S1      # 絞る
     uv run --with tiktoken python bench/run_tokens.py --baseline-only    # B だけ（サーバーを起こさない）
+    uv run --with tiktoken python bench/run_tokens.py -s S1 --variant t04  # S1 の別案（台本の lucianke_t04。無い台本は既定の手順）
+    uv run --with tiktoken python bench/run_tokens.py --no-count-schema  # 判定を tools/list のスキーマ無しの L で（既定はスキーマ込み）
+    uv run --with tiktoken python bench/run_tokens.py --server-cmd "C:/x/python.exe -P -m lucianke"  # サーバーの起動コマンドの差し替え
 
 台本は bench/scenarios/f-py.toml・f-ts.toml。各シナリオ:
   baseline の手順（基準値 B）:
@@ -13,9 +16,19 @@
     op = "shell"  コマンドを fixture で実行し、その出力を数える（{repo} {path} {diag_cmd} を展開）
     op = "edit"   old/new の文字列（入力）と "ok"（出力）
   lucianke の手順（測定値 L）: tool と args。実プロセスのサーバーに MCP stdio で呼ぶ。入力 = ツール名 + args の JSON、出力 = 応答テキスト。
-計数は o200k_base。判定は 1 - L/B >= 0.75。tools/list のスキーマ記述のトークンは別欄（参考）に記録し、L には入れない。
+    測定の前に**条件待ち**をする（固定 sleep ではない。待ちの呼び出しは L に数えない）: (1) ``configure_workspace`` の走査ジョブが done かつ files > 0、
+    (2) ``get_diagnostics``（台本の ``warmup_path`` か S4 の ``path``）の応答ヘッダーが ``lsp=ready``（または ``n/a``）。
+    手順に ``until = "<正規表現>"`` があれば、その手順を（書き換えるツール以外）応答が一致するまで測定前に呼び直す。
+    手順に ``expect = "<正規表現>"`` があれば、測定した応答がそれに一致することを確かめる。外れたら verdict=error（測定不成立。
+    「索引にまだ無い」「LSP 起動前の降格応答」のような空の応答を、小さい L として合格に数えないため）。
+計数は o200k_base。判定は 1 - L/B >= 0.75。
+tools/list のスキーマ記述のトークン（``tools_list_schema_tokens``。ツール名・description・inputSchema の JSON）は、既定では各シナリオの L に
+**1 回分含める**（``--count-schema``。厳しめの数え方＝セッション開始時にモデルへ渡るツール一覧の分）。含めた値（``tokens_with_schema``）と
+含めない値（``tokens_calls``）は常に両方を結果に書き、削減率・合否も両方（``reduction_with_schema`` / ``reduction_without_schema``、
+``verdict_with_schema`` / ``verdict_without_schema``）。``verdict`` / ``reduction`` / ``L.tokens`` は ``--count-schema`` の側（既定はスキーマ込み）。
 S4 は固定の注入（inject）を作業コピーに行ってから測り、終わりに ``git checkout`` で戻す。
-サーバーは fixture を cwd にして ``uv run --project <repo> lucianke`` で起動する（``--directory`` は cwd を変えるため使えない）。
+サーバーは fixture を cwd にして ``python -m lucianke`` で起動する（``server_command``。``tests/_server_cmd.py`` と同じ形。
+``uv run ... lucianke`` は ``lucianke.exe`` を握って他の ``uv run`` の同期を壊すので使わない。BUG-0030）。``--server-cmd`` で差し替えられる。
 ツールが未登録の手順があるシナリオの L は「skip: ツール未登録」とし、そこまでの呼び出しは記録する。落ちない。
 結果: bench/results/<日時>-<OS>-tokens.json（フィクスチャ SHA、Lucianke のコミット、機材、生データ、判定）。
 """
@@ -68,6 +81,13 @@ def rec(kind: str, label: str, inp: str, out: str, **extra: Any) -> dict[str, An
 
 def total(steps: list[dict[str, Any]]) -> int:
     return sum(s["input_tokens"] + s["output_tokens"] for s in steps)
+
+
+def server_command(override: str | None = None) -> list[str]:
+    """サーバーの起動 argv。既定は ``python -m lucianke``（``-P`` は cwd＝fixture を ``sys.path`` に足さない。BUG-0030）。"""
+    if override:
+        return shlex.split(override, posix=(os.name != "nt"))
+    return [sys.executable, "-P", "-m", "lucianke"]
 
 
 # --- 基準値 B ------------------------------------------------------------------------------------
@@ -154,14 +174,80 @@ def original_symbol_text(root: Path, inj: dict[str, str]) -> str:
     return "\n".join(orig[i : j + 1])
 
 
-async def run_lucianke(sc: dict[str, Any], root: Path, cache_dir: Path, key: str) -> dict[str, Any]:
+LSP_RE = re.compile(r"\blsp=(\S+)")
+MUTATING = {"edit_symbol_body", "rename_symbol", "structural_search_replace", "apply_code_action"}
+SCAN_TIMEOUT_S = 180.0
+LSP_TIMEOUT_S = 180.0
+UNTIL_TIMEOUT_S = 90.0
+
+
+def text_of(res: Any) -> str:
+    return "\n".join(getattr(b, "text", "") for b in res.content)
+
+
+async def warm_up(c: Any, tools: dict[str, Any], sc: dict[str, Any], key: str, warmup_path: str | None) -> dict[str, Any]:
+    """測定前の条件待ち（固定 sleep ではない）。待ちの呼び出しは L に数えない。所要と、待ちを打ち切ったかを記録する。"""
+    info: dict[str, Any] = {"scan": None, "lsp": None, "until": []}
+    t0 = time.perf_counter()
+    if "configure_workspace" in tools:
+        polls = 0
+        while True:
+            polls += 1
+            res = await c.call_tool("configure_workspace", {"format": "json"})
+            done = False
+            try:
+                data = json.loads(text_of(res)).get("data") or {}
+                jobs = data.get("jobs") or []
+                done = bool(jobs) and all(j.get("state") == "done" for j in jobs) and (data.get("cache") or {}).get("files", 0) > 0
+            except (ValueError, AttributeError):
+                pass
+            if done or time.perf_counter() - t0 > SCAN_TIMEOUT_S:
+                info["scan"] = {"done": done, "polls": polls, "s": round(time.perf_counter() - t0, 1)}
+                break
+            await asyncio.sleep(0.5)
+    path = warmup_path or sc.get("path")
+    if path and "get_diagnostics" in tools:
+        t1 = time.perf_counter()
+        polls = 0
+        lsp = None
+        while True:
+            polls += 1
+            res = await c.call_tool("get_diagnostics", {"paths": [path], "min_severity": "error", "max_tokens": 2000})
+            m = LSP_RE.search(text_of(res).split("\n", 1)[0])
+            lsp = m.group(1) if m else None
+            ok = lsp in ("ready", "n/a")
+            if ok or time.perf_counter() - t1 > LSP_TIMEOUT_S:
+                info["lsp"] = {"ready": ok, "last": lsp, "polls": polls, "s": round(time.perf_counter() - t1, 1)}
+                break
+            await asyncio.sleep(1.5)
+    for st in sc[key]:
+        pat = st.get("until")
+        if not pat or st["tool"] in MUTATING or st["tool"] not in tools:
+            continue
+        t2 = time.perf_counter()
+        polls = 0
+        while True:
+            polls += 1
+            res = await c.call_tool(st["tool"], st["args"])
+            ok = bool(re.search(pat, text_of(res)))
+            if ok or time.perf_counter() - t2 > UNTIL_TIMEOUT_S:
+                info["until"].append({"tool": st["tool"], "pattern": pat, "matched": ok, "polls": polls, "s": round(time.perf_counter() - t2, 1)})
+                break
+            await asyncio.sleep(1.5)
+    info["s"] = round(time.perf_counter() - t0, 1)
+    return info
+
+
+async def run_lucianke(
+    sc: dict[str, Any], root: Path, cache_dir: Path, key: str, argv: list[str], warmup_path: str | None = None
+) -> dict[str, Any]:
     from mcp import Client, StdioServerParameters
     from mcp.shared.exceptions import MCPDeprecationWarning
 
     warnings.filterwarnings("ignore", category=MCPDeprecationWarning)
     params = StdioServerParameters(
-        command="uv",
-        args=["run", "--project", str(REPO), "lucianke"],
+        command=argv[0],
+        args=argv[1:],
         cwd=str(root),
         env={**os.environ, "PYTHONUTF8": "1", "LUCIANKE_CACHE_DIR": str(cache_dir)},
     )
@@ -172,6 +258,9 @@ async def run_lucianke(sc: dict[str, Any], root: Path, cache_dir: Path, key: str
         tools = {t.name: t for t in (await c.list_tools()).tools}
         listing = [{"name": t.name, "description": t.description, "inputSchema": t.input_schema} for t in tools.values()]
         schema_tokens = tok(json.dumps(listing, ensure_ascii=False))
+        schema_by_tool = {x["name"]: tok(json.dumps(x, ensure_ascii=False)) for x in listing}
+        warm = await warm_up(c, tools, sc, key, warmup_path)
+        t0 = time.perf_counter()
         for st in sc[key]:
             name = st["tool"]
             if name not in tools:
@@ -183,7 +272,8 @@ async def run_lucianke(sc: dict[str, Any], root: Path, cache_dir: Path, key: str
             t1 = time.perf_counter()
             res = await c.call_tool(name, args)
             ms = round((time.perf_counter() - t1) * 1000, 1)
-            text = "\n".join(getattr(b, "text", "") for b in res.content)
+            text = text_of(res)
+            expect = st.get("expect")
             steps.append(
                 rec(
                     "tool",
@@ -192,16 +282,22 @@ async def run_lucianke(sc: dict[str, Any], root: Path, cache_dir: Path, key: str
                     text,
                     is_error=bool(res.is_error),
                     client_ms=ms,
+                    header=text.split("\n", 1)[0][:200],
+                    expect=expect,
+                    expect_met=None if not expect else bool(re.search(expect, text)),
                     response=text[:20000],
                 )
             )
     return {
-        "tokens": total(steps),
+        "tokens_calls": total(steps),
+        "tokens_with_schema": total(steps) + schema_tokens,
         "calls": len(steps),
         "steps": steps,
         "skipped_tools": skipped,
         "tools_registered": sorted(tools),
+        "warmup": warm,
         "tools_list_schema_tokens": schema_tokens,
+        "tools_list_schema_tokens_by_tool": schema_by_tool,
         "wall_s": round(time.perf_counter() - t0, 2),
     }
 
@@ -242,8 +338,99 @@ def lucianke_commit() -> dict[str, Any]:
     return {"sha": run("rev-parse", "HEAD"), "src_dirty": bool(run("status", "--porcelain", "--", "src"))}
 
 
+def inject(root: Path, sc: dict[str, Any]) -> None:
+    """台本の固定の型エラー注入（1 行）を作業コピーに行う。"""
+    inj = sc.get("inject")
+    if not inj:
+        return
+    p = root / inj["path"]
+    text = read_text(p)
+    assert inj["old"] in text, f"inject.old not found in {inj['path']}"
+    p.write_bytes(text.replace(inj["old"], inj["new"], 1).encode("utf-8"))
+
+
 def reset_fixture(root: Path) -> None:
     subprocess.run(["git", "checkout", "-q", "--", "."], cwd=root, check=False)
+
+
+def judge(row: dict[str, Any], count_schema: bool) -> None:
+    """row（B と L が入っている）に削減率・合否を書く。スキーマを含める値・含めない値の両方を書き、``verdict`` は ``count_schema`` の側。"""
+    L = row["L"]
+    basis = "tokens_with_schema" if count_schema else "tokens_calls"
+    L["tokens"] = L[basis]
+    L["tokens_basis"] = "with_schema" if count_schema else "calls_only"
+    errs = [x["label"] for x in L["steps"] if x["is_error"]]
+    unmet = [f"{x['label']} expect /{x['expect']}/ header={x['header']}" for x in L["steps"] if x.get("expect_met") is False]
+    if errs:
+        row.update(verdict="error", reason="ツールがエラーを返した（測定不成立）: " + ", ".join(errs))
+    elif unmet:
+        row.update(verdict="error", reason="応答が期待と違う（測定不成立）: " + "; ".join(unmet))
+    elif L["skipped_tools"]:
+        row.update(verdict="skip", reason="ツール未登録: " + ", ".join(sorted(set(L["skipped_tools"]))))
+    else:
+        for tag, key in (("with_schema", "tokens_with_schema"), ("without_schema", "tokens_calls")):
+            red = 1 - L[key] / row["B"]["tokens"]
+            row[f"reduction_{tag}"] = round(red, 4)
+            row[f"verdict_{tag}"] = "pass" if red >= THRESHOLD else "fail"
+        tag = "with_schema" if count_schema else "without_schema"
+        row.update(reduction=row[f"reduction_{tag}"], verdict=row[f"verdict_{tag}"])
+    if L["tokens_calls"] and row["B"]["tokens"]:
+        row["reduction_partial"] = round(1 - L["tokens"] / row["B"]["tokens"], 4)
+
+
+def judgement(verdicts: list[str]) -> dict[str, Any]:
+    return {
+        "pass": verdicts.count("pass"),
+        "fail": verdicts.count("fail"),
+        "skip": verdicts.count("skip"),
+        "error": verdicts.count("error"),
+        "all_pass": bool(verdicts) and all(v == "pass" for v in verdicts if v != "skip") and "pass" in verdicts,
+    }
+
+
+def pct(x: float | None) -> str:
+    return "-" if x is None else f"{x * 100:.1f}%"
+
+
+def line(row: dict[str, Any]) -> str:
+    L = row.get("L")
+    head = f"{row['fixture']} {row['scenario']}: B={row['B']['tokens']} ({row['B']['calls']} calls)"
+    if not L:
+        return f"{head} -> {row['verdict']} {row.get('reason', '')}"
+    return (
+        f"{head} L={L['tokens_calls']} (+schema {L['tokens_with_schema'] - L['tokens_calls']} = {L['tokens_with_schema']}) "
+        f"reduction w/o schema={pct(row.get('reduction_without_schema'))} with schema={pct(row.get('reduction_with_schema'))} "
+        f"-> {row['verdict']} {row.get('reason', '')}"
+    )
+
+
+def breakdown(row: dict[str, Any]) -> str:
+    """L の内訳（ツール呼び出しごとの入力・出力トークン）と、B の内訳。"""
+    L = row["L"]
+    schema = L["tokens_with_schema"] - L["tokens_calls"]
+    out = [f"  L の内訳 {row['fixture']} {row['scenario']} ({row.get('variant', 'default')}):"]
+    out.append(f"    tools/list スキーマ（{len(L['tools_registered'])} 本）: {schema}")
+    for st in L["steps"]:
+        flag = " [ERROR]" if st["is_error"] else ""
+        out.append(f"    {st['label']}: 入力 {st['input_tokens']} + 出力 {st['output_tokens']} = {st['input_tokens'] + st['output_tokens']}{flag}")
+    out.append(f"  B の内訳（{row['B']['tokens']}）:")
+    for st in row["B"]["steps"]:
+        out.append(f"    {st['kind']} {st['label'][:60]}: 入力 {st['input_tokens']} + 出力 {st['output_tokens']}")
+    return "\n".join(out)
+
+
+def summary_table(results: dict[str, Any]) -> str:
+    rows = [
+        "| fixture | scenario | variant | B | L(呼び出しのみ) | L(+スキーマ) | 削減率(スキーマ無) | 削減率(スキーマ込) | 判定(込) | 判定(無) |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|---|",
+    ]
+    for r in results["scenarios"]:
+        L = r.get("L") or {}
+        rows.append(
+            f"| {r['fixture']} | {r['scenario']} | {r.get('variant', '-')} | {r.get('B', {}).get('tokens', '-')} | {L.get('tokens_calls', '-')} | {L.get('tokens_with_schema', '-')} "
+            f"| {pct(r.get('reduction_without_schema'))} | {pct(r.get('reduction_with_schema'))} | {r.get('verdict_with_schema', r['verdict'])} | {r.get('verdict_without_schema', r['verdict'])} |"
+        )
+    return "\n".join(rows)
 
 
 def main(argv: list[str]) -> int:
@@ -252,6 +439,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("-s", "--scenario", action="append", help="S1 / S2 / S4（省略で全部）")
     ap.add_argument("--baseline-only", action="store_true", help="B だけ測る（サーバーを起こさない）")
     ap.add_argument("--variant", default="", help="L の手順の別案（台本の lucianke_<variant>。例: t04 = resolve_symbols 版）")
+    ap.add_argument(
+        "--count-schema",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="判定の L に tools/list のスキーマ記述のトークンを 1 回分含める（既定オン）。含める値・含めない値は常に両方を結果に書く",
+    )
+    ap.add_argument("--server-cmd", default=None, help="サーバーの起動コマンド（既定: <この python> -P -m lucianke）")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
@@ -261,6 +455,8 @@ def main(argv: list[str]) -> int:
         "date": datetime.now().astimezone().isoformat(timespec="seconds"),
         "encoding": "o200k_base",
         "threshold": THRESHOLD,
+        "count_schema": args.count_schema,
+        "server_argv": server_command(args.server_cmd),
         "machine": machine(),
         "lucianke": lucianke_commit(),
         "fixtures": {},
@@ -284,44 +480,34 @@ def main(argv: list[str]) -> int:
                 results["scenarios"].append(row)
                 continue
             try:
-                if "inject" in sc:
-                    inj = sc["inject"]
-                    p = root / inj["path"]
-                    text = read_text(p)
-                    assert inj["old"] in text, f"inject.old not found in {inj['path']}"
-                    p.write_bytes(text.replace(inj["old"], inj["new"], 1).encode("utf-8"))
+                inject(root, sc)
                 row["B"] = run_baseline(sc, root, scn)
+                if not args.baseline_only:
+                    # B の edit は作業コピーを実際に直す（次の診断は直した後の出力）ので、L の前に戻して注入し直す。
+                    # これをしないと L の最初の診断は 0 件・編集は no-op になり、小さい L を合格に数えてしまう
+                    reset_fixture(root)
+                    inject(root, sc)
                 if args.baseline_only:
                     row.update(verdict="baseline-only")
                 else:
-                    key = "lucianke" + (f"_{args.variant}" if args.variant else "")
-                    row["variant"] = args.variant or "default"
-                    row["L"] = asyncio.run(run_lucianke(sc, root, cache_dir, key))
-                    errs = [x["label"] for x in row["L"]["steps"] if x["is_error"]]
-                    if errs:
-                        row.update(verdict="error", reason="ツールがエラーを返した（測定不成立）: " + ", ".join(errs))
-                    elif row["L"]["skipped_tools"]:
-                        row.update(verdict="skip", reason="ツール未登録: " + ", ".join(sorted(set(row["L"]["skipped_tools"]))))
-                    else:
-                        red = 1 - row["L"]["tokens"] / row["B"]["tokens"]
-                        row.update(reduction=round(red, 4), verdict="pass" if red >= THRESHOLD else "fail")
-                    if row["L"]["tokens"] and row["B"]["tokens"]:
-                        row["reduction_partial"] = round(1 - row["L"]["tokens"] / row["B"]["tokens"], 4)
+                    key = "lucianke" + (f"_{args.variant}" if args.variant and f"lucianke_{args.variant}" in sc else "")
+                    row["variant"] = args.variant if key != "lucianke" else "default"
+                    row["L"] = asyncio.run(
+                        run_lucianke(sc, root, cache_dir, key, server_command(args.server_cmd), scn.get("warmup_path"))
+                    )
+                    judge(row, args.count_schema)
             finally:
                 reset_fixture(root)
             results["scenarios"].append(row)
-            lt = row.get("L", {}).get("tokens")
-            red = row.get("reduction", row.get("reduction_partial"))
-            print(f"{fname} {sid}: B={row['B']['tokens']} ({row['B']['calls']} calls) L={lt} reduction={red} -> {row['verdict']} {row.get('reason', '')}")
-    verdicts = [r["verdict"] for r in results["scenarios"]]
-    results["judgement"] = {
-        "pass": verdicts.count("pass"),
-        "fail": verdicts.count("fail"),
-        "skip": verdicts.count("skip"),
-        "error": verdicts.count("error"),
-        "all_pass": bool(verdicts) and all(v == "pass" for v in verdicts if v != "skip") and "pass" in verdicts,
-    }
-    out = args.out or BENCH / "results" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{platform.system()}-tokens.json"
+            print(line(row))
+            if row["verdict"] in ("fail", "error") or row.get("verdict_without_schema") == "fail":
+                print(breakdown(row))
+    results["judgement"] = judgement([r["verdict"] for r in results["scenarios"]])
+    results["judgement_with_schema"] = judgement([r.get("verdict_with_schema", r["verdict"]) for r in results["scenarios"]])
+    results["judgement_without_schema"] = judgement([r.get("verdict_without_schema", r["verdict"]) for r in results["scenarios"]])
+    print(summary_table(results))
+    suffix = f"-{args.variant}" if args.variant else ""
+    out = args.out or BENCH / "results" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{platform.system()}-tokens{suffix}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"wrote {out}")

@@ -5,6 +5,7 @@
 fixture = "F-PY"
 src_glob = ["*.py"]                       # grep の対象ファイルの種類
 scope = ["httpx", "tests"]                 # grep の対象ディレクトリ（src_dirs + test_dirs）
+warmup_path = "httpx/_urls.py"             # 測定前に LSP が ready になるのを待つのに診断を引くファイル（待ちの呼び出しは L に数えない）
 
 [S1]
 title = "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る"
@@ -30,6 +31,7 @@ pattern = '\bdef request\b'
 [[S1.lucianke]]
 tool = "get_file_skeleton"
 args = { paths = ["httpx/_client.py", "httpx/_models.py", "httpx/_urls.py", "httpx/_api.py"], include_private = false, include_urns = "none", include_imports = false, max_tokens = 12000 }
+expect = 'raise_for_status'                # 測定した応答がこれに一致しなければ測定不成立（空の応答を小さい L として数えない）
 
 [[S1.lucianke_t04]]
 tool = "resolve_symbols"
@@ -40,6 +42,7 @@ args = { targets = [
   { path = "httpx/_urls.py", symbol_name = "URL.join" },
   { path = "httpx/_api.py", symbol_name = "request" },
 ], max_tokens = 3000 }
+expect = 'raise_for_status'
 
 [S2]
 title = "メソッド URL.copy_with の全呼び出し元と、それを呼ぶテストを列挙する"
@@ -52,6 +55,8 @@ pattern = '\bcopy_with\b'
 [[S2.lucianke]]
 tool = "find_references_and_implementations"
 args = { target = { path = "httpx/_urls.py", symbol_name = "URL.copy_with" }, query_type = "references", include_tests = true, max_tokens = 6000 }
+until = 'references: [1-9]\d* files?, [1-9]\d* sites?'   # 測定前に、この応答が出るまで呼び直す（LSP が ready になった後の答え）
+expect = 'references: [1-9]\d* files?, [1-9]\d* sites?'
 
 [S3]
 skip = "S3 は T-09 analyze_change_impact が M2 のため M1 では対象外（§15.2 M1-4）"
@@ -81,6 +86,8 @@ cmd = "{diag_cmd}"
 [[S4.lucianke]]
 tool = "get_diagnostics"
 args = { paths = ["httpx/_urls.py"], min_severity = "error", max_tokens = 2000 }
+until = 'diagnostics: [1-9]'               # 注入した型エラーが見えるまで（測定前に）
+expect = 'diagnostics: [1-9]'
 [[S4.lucianke]]
 tool = "edit_symbol_body"
 args = { target = { path = "httpx/_urls.py", symbol_name = "URL.is_absolute_url" }, operation = "replace_body", new_code = '''    @property
@@ -94,6 +101,8 @@ args = { target = { path = "httpx/_urls.py", symbol_name = "URL.is_absolute_url"
         # What we actually care about is if the URL provides
         # a scheme and hostname to which connections should be made.
         return bool(self._uri_reference.scheme and self._uri_reference.host)''', max_tokens = 1500 }
+expect = 'applied: true'
 [[S4.lucianke]]
 tool = "get_diagnostics"
 args = { paths = ["httpx/_urls.py"], min_severity = "error", max_tokens = 2000 }
+expect = 'diagnostics: 0 '                  # 直した後に残る診断が 0（これが目的）
