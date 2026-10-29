@@ -349,6 +349,24 @@ def fast_estimator(cols: list[str], coef: list[Fraction]):
     return count
 
 
+TERM_DEFS: dict[str, dict[str, str]] = {  # 提案の各項の定義（計数の単位と正規表現）
+    "letters_runs": {"count": "matches", "regex": _P["letters"].pattern},
+    "letters_chars": {"count": "chars", "regex": _P["letters"].pattern},
+    "digits_chars": {"count": "chars", "regex": _P["digits"].pattern},
+    "digits_runs": {"count": "matches", "regex": _P["digits"].pattern},
+    "space_chars": {"count": "chars", "regex": _P["space"].pattern},
+    "space_runs_multi": {"count": "matches", "regex": "[ 	]{2,}"},
+    "nl_chars": {"count": "chars", "regex": _P["nl"].pattern},
+    "symbol_runs": {"count": "matches", "regex": _P["symbol"].pattern},
+    "symbol_chars": {"count": "chars", "regex": _P["symbol"].pattern},
+    "kana": {"count": "chars", "regex": _P["kana"].pattern},
+    "kanji": {"count": "chars", "regex": _P["kanji"].pattern},
+    "cjkpunct": {"count": "chars", "regex": _P["cjkpunct"].pattern},
+    "other": {"count": "chars", "regex": _OTHER.pattern},
+    "blob_chars": {"count": "chars", "regex": _BLOB.pattern},
+}
+
+
 def main() -> None:
     est = TokenEstimator()
     corpus = load_corpus()
@@ -379,7 +397,7 @@ def main() -> None:
     # 2. 当てはめ（チャンク標本）。ファイル単位の交差検証（偶数番／奇数番のファイル）
     samples = []
     idx_in_kind: dict[str, int] = defaultdict(int)
-    for kind, name, text in corpus:
+    for kind, _name, text in corpus:
         fold = SINGLE_FILE_FOLD if kind in SINGLE_FILE_KINDS else idx_in_kind[kind] % 2
         idx_in_kind[kind] += 1
         pieces = [text] if kind in {"compact", "spec_json_sql"} else chunks(text)
@@ -397,7 +415,7 @@ def main() -> None:
             tr = [s for s in samples if s["fold"] != hold]
             coef = rationalize(fit(tr, cols))
             idx = defaultdict(int)
-            for kind, name, text in corpus:
+            for kind, name, _text in corpus:
                 fold = SINGLE_FILE_FOLD if kind in SINGLE_FILE_KINDS else idx[kind] % 2
                 idx[kind] += 1
                 if fold != hold and not (fold == SINGLE_FILE_FOLD and hold == 0):
@@ -473,12 +491,10 @@ def main() -> None:
         "rounding": "ceil（整数演算: units = sum(係数 × 数) / DEN の切り上げ）",
         "den": 100,
         "terms": [
-            {"name": c, "tokens_per_unit": str(k),
-             "unit": {"_chars": "文字数", "_runs": "連の数", "_multi": "2 文字以上の連の数"}.get(
-                 next((s for s in ("_chars", "_runs", "_multi") if c.endswith(s)), ""), "文字数"),
-             "regex": _P[c.split("_")[0]].pattern if c.split("_")[0] in _P else "(合計 - 上記の文字の和)"}
+            {"name": c, "tokens_per_unit": str(k), **TERM_DEFS[c]}
             for c, k in zip(cols, coef, strict=True)
         ],
+        "order": "blob_chars を先に数えて本文から取り除き、残りの本文に他の項を当てる。ASCII だけの文字列は kana/kanji/cjkpunct を省いてよい",
         "expected_error_cv": candidates_out[chosen]["cv"],
         "expected_error_fit": candidates_out[chosen]["stats"],
     }
