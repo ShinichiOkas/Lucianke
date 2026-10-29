@@ -117,8 +117,9 @@ timeout_s = 1800
 est_min = 10
 needs = ["fixture:F-PY", "fixture:F-TS"]
 requires_files = ["tests/contract_fixtures"]
-# 未整備（2026-10-29）: bench/fetch_fixtures.py で取得はできるが、tests/contract は F-POLY（tests/fixtures/poly）の複製だけを
-# ワークスペースにしている。F-PY / F-TS を使うのは bench の台本だけで、契約テストを回す仕組みが無い。
+# 整備済み（BUG-0036、2026-10-29）: tests/contract_fixtures/ が F-PY・F-TS を tmp_path に複製して結線済みのサーバー（RuntimeHub + LspPool +
+# Pipeline）を組み、T-00〜T-08・T-10・T-11・T-13・T-19・T-20 の事後条件を確かめる。取得されていなければ rig が理由つきで skip する（skips = "fail" が未検証と扱う）。
+# TypeScript の LSP が無い環境の F-TS は、exact 水準だけが条件の事後条件を降格応答の約束で確かめる（BUG-0057）。
 
 # ======================================================================================
 # M1-2  §10.10 の EP-1〜EP-9 を満たす
