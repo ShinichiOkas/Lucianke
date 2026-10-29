@@ -10,9 +10,8 @@
   の順に落とし、``- truncated: N members omitted`` を足す）。入らなければ ``None``。
 
 行の組み立て関数（``file_block_header`` ・``import_line`` ・``symbol_line`` ・``attr_line`` ・``note``）は
-``mcp/render/compact.py`` の同名の関数と **同じ文法・同じ署名** で、ここに複製してある。``syntax`` は ``mcp`` を
-import できない（``tests/unit/test_import_graph.py``。設計書 §4.2）ので、呼び出せないため。複製が離れないよう、
-``tests/unit/test_syntax_skeleton.py`` が両者の出力を突き合わせる。共通化するなら行の組み立てを ``core`` へ移す。
+``core/compact_lines.py`` のものを使う（``mcp/render/compact.py`` も同じものを再公開する）。
+``syntax`` は ``mcp`` を import できない（``tests/unit/test_import_graph.py``。設計書 §4.2）ので、共有の部品を ``core`` に置いた。
 
 位置: SymbolRecord は内部表現（0 始まり）。外へ出す行は ``Range.line_span_external()``（1 始まり・両端を含む）。
 本体の畳み方: 畳む行数 = 範囲の行数 − デコレータ行 − シグネチャ行（定義の見出し〜本体の直前）− 出した子シンボルの範囲の行数。
@@ -24,10 +23,19 @@ from __future__ import annotations
 import dataclasses
 import re
 import unicodedata
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from lucianke.core.compact_lines import (
+    MODIFIERS,
+    attr_line,
+    file_block_header,
+    import_line,
+    note,
+    one_line,
+    symbol_line,
+)
 from lucianke.core.model import Confidence, Kind, SymbolRecord
 from lucianke.core.records import Record
 from lucianke.syntax.support import SUPPORT
@@ -44,113 +52,7 @@ __all__ = [
     "symbol_line",
 ]
 
-LINE_LIMIT = 200  # 仕様書 §6.1 規約 6（doc）
-MODIFIERS: tuple[str, ...] = ("pub", "priv", "prot", "static", "async", "abstract", "export")
-_KINDS: frozenset[str] = frozenset(k.value for k in Kind)
 _CALLABLE_KINDS = frozenset({Kind.FUNCTION, Kind.METHOD, Kind.CONSTRUCTOR})
-_SHA_RE = re.compile(r"[0-9a-fA-F]{12,}")
-
-
-# --- compact.py と同じ行の組み立て関数（複製。モジュール docstring を参照） ------------------------------
-
-
-def _one_line(text: object) -> str:
-    parts = [p.strip() for p in str(text).splitlines()]
-    return " ".join(p for p in parts if p)
-
-
-def _ind(level: int) -> str:
-    if level < 0:
-        raise ValueError(f"indent must be >= 0: {level}")
-    return "  " * level
-
-
-def _fit(prefix: str, text: str, suffix: str = "") -> str:
-    if len(prefix) + len(text) + len(suffix) <= LINE_LIMIT:
-        return text
-    keep = max(LINE_LIMIT - len(prefix) - len(suffix) - 1, 0)
-    return text[:keep].rstrip() + "…"
-
-
-def file_block_header(
-    path: str,
-    *,
-    lines: int,
-    cells: int | None = None,
-    skeleton_lines: int | None = None,
-    sha12: str | None = None,
-) -> str:
-    """``=== <path> (<N> lines[, <M> cells][, skeleton: <K> lines][, sha=<12hex>]) ===``。"""
-    inner = [f"{lines} lines"]
-    if cells is not None:
-        inner.append(f"{cells} cells")
-    if skeleton_lines is not None:
-        inner.append(f"skeleton: {skeleton_lines} lines")
-    if sha12 is not None:
-        if not _SHA_RE.fullmatch(sha12):
-            raise ValueError(f"sha12 は 16 進 12 桁以上: {sha12!r}")
-        inner.append(f"sha={sha12[:12].lower()}")
-    return f"=== {_one_line(path)} ({', '.join(inner)}) ==="
-
-
-def import_line(items: Iterable[str]) -> str:
-    """``imports: [a, b, c]``。"""
-    return f"imports: [{', '.join(_one_line(i) for i in items)}]"
-
-
-def symbol_line(
-    kind: Kind | str,
-    name: str,
-    *,
-    indent: int = 0,
-    modifiers: Iterable[str] = (),
-    sig: str | None = None,
-    ret: str | None = None,
-    start_line: int,
-    end_line: int | None = None,
-    fold_lines: int | None = None,
-) -> str:
-    """``[Kind] [mods ]name[(sig)[ -> ret]] @L<a>[-<b>][ { ...N lines omitted }]``（行は 1 始まり）。"""
-    kind_text = str(kind.value if isinstance(kind, Kind) else kind)
-    if kind_text not in _KINDS:
-        raise ValueError(f"kind は {sorted(_KINDS)} のいずれか: {kind_text!r}")
-    mods = list(modifiers)
-    for m in mods:
-        if m not in MODIFIERS:
-            raise ValueError(f"modifier は {MODIFIERS} のいずれか: {m!r}")
-    if start_line < 1:
-        raise ValueError(f"start_line は 1 始まり（>= 1）: {start_line}")
-    if end_line is not None and end_line < start_line:
-        raise ValueError(f"end_line < start_line: {end_line} < {start_line}")
-    head = f"{_ind(indent)}[{kind_text}] " + "".join(f"{m} " for m in mods) + _one_line(name)
-    if sig is not None:
-        inline = _one_line(sig)
-        if not inline.startswith("("):
-            inline = f"({inline})"
-        if ret and " -> " not in inline:
-            inline += f" -> {_one_line(ret)}"
-        head += inline
-    elif ret:
-        raise ValueError("ret には sig が必要（sig-inline = '(' text ')' [' -> ' text]）")
-    rng = f"{start_line}" if end_line is None or end_line == start_line else f"{start_line}-{end_line}"
-    line = f"{head} @L{rng}"
-    if fold_lines is not None:
-        line += f" {{ ...{fold_lines} lines omitted }}"
-    return line
-
-
-def attr_line(key: str, value: object, *, indent: int) -> str:
-    """``<key>: <value>``。``indent`` は属性を持つ ``symbol_line`` の段数（属性行はその 1 段内側）。"""
-    prefix = f"{_ind(indent + 1)}{key}: "
-    text = _one_line(value)
-    if key in ("doc", "when"):
-        text = _fit(prefix, text)
-    return prefix + text
-
-
-def note(text: object) -> str:
-    """``- <text>``。"""
-    return f"- {_one_line(text)}"
 
 
 # --- トークンの見積もり（mcp.budget.TokenEstimator と同じ係数。syntax から mcp は import できないので近似を持つ） ----
@@ -366,7 +268,7 @@ def _read_info(parsed: ParsedFile, sym: SymbolRecord, span: tuple[int, int]) -> 
             decorator_nodes = [c for c in parent.children if c.type == "decorator"] + decorator_nodes
     first, last = span[0], span[1]
     for d in decorator_nodes:
-        info.decorators.append(_one_line(_text(parsed, d)))
+        info.decorators.append(one_line(_text(parsed, d)))
         a, b = d.start_point.row + 1, d.end_point.row + 1
         info.decorator_lines += max(0, min(b, last) - max(a, first) + 1)
     target = node
