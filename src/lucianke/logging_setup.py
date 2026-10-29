@@ -26,8 +26,8 @@ _LOG_NAME_RE = re.compile(r"^lucianke-(\d{4}-\d{2}-\d{2})\.log$")
 _ATTACHED = ("lucianke", "mcp")  # 自前と SDK のロガーに同じハンドラを付ける
 
 # extra= で渡されたらそのまま JSON に載せる項目（設計書 §9.2「必ず残すフィールド」。lsp は lsp_language -> "lsp.language"）
-_FIELDS = ("tool", "workspace_id", "timing_ms", "confidence", "error_code", "edit_id", "log_ref", "args")
-_DOTTED = {"lsp_language": "lsp.language", "lsp_state": "lsp.state"}
+_FIELDS = ("tool", "workspace_id", "timing_ms", "confidence", "error_code", "edit_id", "log_ref")
+_DOTTED = {"lsp_language": "lsp.language", "lsp_state": "lsp.state", "call_args": "args"}  # LogRecord.args と衝突するため call_args
 
 
 class JsonLinesFormatter(logging.Formatter):

@@ -135,22 +135,24 @@ class Pipeline:
         t0 = self._clock()
         state = _CallState(call=self._fallback_call(spec, raw))
         confidence: str | None = None
+        error_code: str | None = None
         try:
             rendered, meta = await self._run(spec, raw, request_id, log, state, t0)
             confidence = str(meta.confidence_level)
         except LuciankeError as err:
+            error_code = err.code.value
             rendered = self._render_failure(spec, state.call, err, t0, log)
         except Exception as exc:  # noqa: BLE001  想定外の例外は E_INTERNAL。スタックはログだけ（設計書 §9.1）
             log.error("internal error: %s", type(exc).__name__, exc_info=True,
                       extra={"event": "tool_internal_error", "error_code": ErrorCode.E_INTERNAL.value, "log_ref": request_id})  # fmt: skip
+            error_code = ErrorCode.E_INTERNAL.value
             err = LuciankeError(ErrorCode.E_INTERNAL, INTERNAL_MESSAGE, details={"log_ref": request_id})
             rendered = self._render_failure(spec, state.call, err, t0, log)
         timing_ms = self._elapsed_ms(t0)
-        error_code = rendered.structured["error"]["code"] if rendered.is_error and rendered.structured else None
         log.info(
             "tool call finished",
             extra={"event": "tool_call", "timing_ms": timing_ms, "confidence": confidence,
-                   "error_code": error_code, "args": summarize_args(raw), "workspace_id": state.call.workspace_id},
+                   "error_code": error_code, "call_args": summarize_args(raw), "workspace_id": state.call.workspace_id},
         )  # fmt: skip
         return rendered
 
