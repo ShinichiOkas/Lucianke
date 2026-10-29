@@ -27,7 +27,9 @@
   結ばないため）。
 
   素の識別子は、囲みの定義を内側から外へたどった修飾名（``outer.name``）→ トップレベルの定義 → ``resolve_name`` の順。
-  ローカルに束縛された名前は参照に数えない。
+  ローカルに束縛された名前は参照に数えない。ただし ``def`` / ``class`` の中の ``import`` が束縛した名前は、そのスコープ
+  （内側の関数とクラス直下を含む）の使用を、その import の先への参照にする（``resolve_import``。モジュール直下の同名の
+  import や、別の関数の同名の import は巻き込まない）。
 * ``guard_condition`` は ``CALLS`` のとき ``guards.guard_for`` の結果。``confidence`` は ``structural``。
 
 ``syntax`` は ``index`` を import できないので、``index.ingest.RelationFact`` と同じ形の ``RelationCandidate`` をここで持つ。
@@ -50,7 +52,10 @@ from lucianke.syntax.builtin_names import JS_GLOBALS, PYTHON_BUILTINS
 from lucianke.syntax.guards import guard_for
 from lucianke.syntax.types import ParsedFile
 
-__all__ = ["RelationCandidate", "extract_relations", "load_refs_source"]
+__all__ = ["ImportKey", "RelationCandidate", "extract_relations", "load_refs_source"]
+
+# import 文の開始位置（0 始まりの行, コードポイント列）。``ImportFact.range.start`` と同じ
+ImportKey = tuple[int, int]
 
 _EXTERNAL_PREFIX = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
 _PYTHON = "python"
@@ -182,19 +187,30 @@ def extract_relations(
     rel: RelPath,
     resolve_name: Callable[[str], str | None] | None = None,
     builtins_package: str | None = None,
+    resolve_import: Callable[[ImportKey, str], str | None] | None = None,
 ) -> list[RelationCandidate]:
     """構文木から ``structural`` の関係の候補を作る。文書順（行、列）。構文エラーがあっても拾えた分を返す。
 
     ``symbols`` はこのファイルの ``symbols.extract`` の結果。``resolve_name`` は import 表から作った「名前 → URN」
     （``imports.imported_name_map`` と ``resolve_module`` から、定義元ファイルの URN に直したもの。解決できない import は外部 URN）。
     ``builtins_package`` は言語の組み込み名の外部パッケージ名（Python は ``"builtins"``、TS / JS は ``"globals"``）。``None`` なら
-    組み込み名を解決しない。
+    組み込み名を解決しない。``resolve_import`` は ``def`` / ``class`` の中の import（``ImportFact.nested``）が束縛した名前の解決
+    （``(import 文の開始位置, 名前) → URN``）。``None`` なら ``resolve_name`` で引く（名前表がスコープを区別しないときの代用）。
     """
     family = _FAMILIES.get(language_id)
     if family is None:
         raise ValueError(f"relation extraction is not supported for language {language_id!r}")
     return _Extractor(
-        parsed, language_id, family, language, symbols, workspace_id, rel, resolve_name, builtins_package
+        parsed,
+        language_id,
+        family,
+        language,
+        symbols,
+        workspace_id,
+        rel,
+        resolve_name,
+        builtins_package,
+        resolve_import,
     ).run()
 
 
@@ -224,6 +240,9 @@ class _Scan:
     globals: dict[int, set[str]] = field(default_factory=dict)
     var_types: dict[int, dict[str, str]] = field(default_factory=dict)  # スコープノード → 変数名 → 型名
     attr_types: dict[int, dict[str, str]] = field(default_factory=dict)  # クラスノード → 属性名 → 型名
+    # 関数・クラスノード → import で束縛した名前 → 文の位置
+    imports: dict[int, dict[str, ImportKey]] = field(default_factory=dict)
+    nested_imports: set[ImportKey] = field(default_factory=set)  # def / class の中の import 文の位置
 
 
 def _text(node: Node) -> str:
@@ -242,6 +261,7 @@ class _Extractor:
         rel: RelPath,
         resolve_name: Callable[[str], str | None] | None,
         builtins_package: str | None = None,
+        resolve_import: Callable[[ImportKey, str], str | None] | None = None,
     ) -> None:
         self.parsed = parsed
         self.language_id = language_id
@@ -251,6 +271,8 @@ class _Extractor:
         self.rel = rel
         self.file_urn = str(Urn(workspace_id, str(rel)))
         self._resolve_raw = resolve_name
+        self._resolve_import_raw = resolve_import
+        self._import_cache: dict[tuple[ImportKey, str], str | None] = {}
         self._builtins_package = builtins_package
         self._builtin_names = PYTHON_BUILTINS if family == _PYTHON else JS_GLOBALS
         self._resolve_cache: dict[str, str | None] = {}
@@ -269,7 +291,6 @@ class _Extractor:
         self.symbols = sorted(symbols, key=lambda s: (s.range.start, _neg_pos(s.range.end)))
         self.scan = _Scan()
         self.class_bases: dict[str, list[str]] = {}  # クラスの修飾名 → 基底クラス名（同じファイルでの解決用）
-        self._eff_locals: dict[int, frozenset[str]] = {}
 
     # --- 名前解決の窓口 ---
 
@@ -279,6 +300,15 @@ class _Extractor:
         if name not in self._resolve_cache:
             self._resolve_cache[name] = self._resolve_raw(name)
         return self._resolve_cache[name]
+
+    def resolve_scoped(self, key: ImportKey, name: str) -> str | None:
+        """``def`` / ``class`` の中の import 文（開始位置 ``key``）が束ねた ``name`` の URN。"""
+        if self._resolve_import_raw is None:
+            return self.resolve(name)
+        ck = (key, name)
+        if ck not in self._import_cache:
+            self._import_cache[ck] = self._resolve_import_raw(key, name)
+        return self._import_cache[ck]
 
     def resolve_builtin(self, name: str) -> str | None:
         """言語の組み込み名なら ``lk://_ext/<builtins_package>#<name>``。"""
@@ -426,12 +456,14 @@ class _Extractor:
         if not name:
             return None
         target: str | None = None
+        key = self._import_key(node)
+        resolve = self.resolve if key is None else (lambda n: self.resolve_scoped(key, n))
         if imp.alias:
-            target = self.resolve(imp.alias)
+            target = resolve(imp.alias)
         if target is None:
-            target = self.resolve(name)
+            target = resolve(name)
         if target is None and imp.module and imp.alias is None:
-            target = self.resolve(name.split(".")[0])
+            target = resolve(name.split(".")[0])
         container = self._container(chain)
         return RelationCandidate(
             source_urn=str(container.urn) if container is not None else self.file_urn,
@@ -442,6 +474,16 @@ class _Extractor:
             call_site_col=position.col,
             use_kind="import",
         )
+
+    def _import_key(self, node: Node) -> ImportKey | None:
+        """名前ノードを含む import 文が ``def`` / ``class`` の中にあれば、その開始位置。"""
+        stmt: Node | None = node
+        while stmt is not None and stmt.type not in ("import_statement", "import_from_statement"):
+            stmt = stmt.parent
+        if stmt is None:
+            return None
+        p = self.pos(stmt)
+        return (p.line, p.col) if (p.line, p.col) in self.scan.nested_imports else None
 
     def _container(self, chain: list[SymbolRecord]) -> SymbolRecord | None:
         for s in reversed(chain):
@@ -499,30 +541,33 @@ class _Extractor:
 
     # --- 素の識別子の解決 ---
 
-    def _enclosing_functions(self, node: Node) -> list[Node]:
-        out: list[Node] = []
+    def _binding(self, name: str, node: Node) -> tuple[str, ImportKey | None]:
+        """``node`` から見た ``name`` の束縛: ``("local", None)``（パラメータ・代入など）、``("import", 文の位置)``
+        （``def`` / ``class`` の中の import）、``("none", None)``（関数・クラスの中では束縛されていない）。
+
+        内側のスコープから外へ、最初に見つかったものが勝つ（Python の名前解決と同じ）。クラス直下の束縛は、使用箇所がその
+        クラス直下（間に関数が無い）のときだけ見える。``global`` で宣言された名前はモジュールの名前。
+        """
+        innermost = True
         anc = node.parent
         while anc is not None:
             if anc.type in self.functions:
-                out.append(anc)
+                if name in self.scan.globals.get(anc.id, ()):
+                    return "none", None
+                key = self.scan.imports.get(anc.id, {}).get(name)
+                if key is not None:
+                    return "import", key
+                if name in self.scan.locals.get(anc.id, ()):
+                    return "local", None
+                innermost = False
+            elif anc.type in self.classes:
+                if innermost:
+                    key = self.scan.imports.get(anc.id, {}).get(name)
+                    if key is not None:
+                        return "import", key
+                innermost = False
             anc = anc.parent
-        return out
-
-    def _effective_locals(self, fn: Node) -> frozenset[str]:
-        got = self._eff_locals.get(fn.id)
-        if got is None:
-            names = set(self.scan.locals.get(fn.id, ()))
-            names -= self.scan.globals.get(fn.id, set())
-            parent = fn.parent
-            outer: frozenset[str] = frozenset()
-            while parent is not None:
-                if parent.type in self.functions:
-                    outer = self._effective_locals(parent)
-                    break
-                parent = parent.parent
-            got = frozenset(names | outer)
-            self._eff_locals[fn.id] = got
-        return got
+        return "none", None
 
     def _resolve_bare(self, name: str, node: Node, chain: list[SymbolRecord]) -> tuple[bool, str | None]:
         """``(ローカルか, URN)``。ローカルに束縛された名前は ``(True, None)``。"""
@@ -534,16 +579,18 @@ class _Extractor:
             hit = self.by_qualified.get(f"{s.qualified_name}.{name}")
             if hit is not None:
                 return False, str(hit.urn)
-        if self._is_local(name, node):
+        kind, key = self._binding(name, node)
+        if kind == "local":
             return True, None
+        if kind == "import" and key is not None:  # def / class の中の import が束ねた名前: その import の先
+            return False, self.resolve_scoped(key, name)
         top = self.by_qualified.get(name)
         if top is not None:
             return False, str(top.urn)
         return False, self.resolve(name) or self.resolve_builtin(name)
 
     def _is_local(self, name: str, node: Node) -> bool:
-        fns = self._enclosing_functions(node)
-        return bool(fns) and name in self._effective_locals(fns[0])
+        return self._binding(name, node)[0] == "local"
 
     # --- 属性アクセスの解決 ---
 
@@ -608,11 +655,11 @@ class _Extractor:
                 return self._class_ref(cls)
             tname = self._variable_type(text, node)
             if tname is not None:
-                return self._name_ref(tname, chain)
+                return self._name_ref(tname, chain, node)
             if self._is_local(text, node):
                 return None  # 型の分からないローカル変数（同名の import を隠す）
             return self._name_ref(
-                text, chain
+                text, chain, node
             )  # クラス名・モジュール名そのもの（``Foo.create()``、``mod.f()``）
         if t in _ATTRIBUTE_NODES:
             obj = recv.child_by_field_name("object")
@@ -622,7 +669,7 @@ class _Extractor:
                 if cls is not None:
                     tname = self.scan.attr_types.get(cls.id, {}).get(_text(prop))
                     if tname is not None:
-                        return self._name_ref(tname, chain)
+                        return self._name_ref(tname, chain, node)
             elif obj is not None and prop is not None and obj.type in ("identifier", *_ATTRIBUTE_NODES):
                 # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）
                 inner = self._type_ref(obj, node, chain)
@@ -635,7 +682,7 @@ class _Extractor:
             if fn is not None and fn.type == "identifier":
                 text = _text(fn)
                 if t == "new_expression" or self._looks_like_class(text):
-                    return self._name_ref(text, chain)
+                    return self._name_ref(text, chain, node)
         return None
 
     def _looks_like_class(self, name: str) -> bool:
@@ -644,7 +691,14 @@ class _Extractor:
             return local.kind in _CLASS_KINDS
         return name[:1].isupper()
 
-    def _name_ref(self, name: str, chain: list[SymbolRecord]) -> tuple[str, str] | None:
+    def _name_ref(
+        self, name: str, chain: list[SymbolRecord], node: Node | None = None
+    ) -> tuple[str, str] | None:
+        """型名・モジュール名 ``name``（``node`` の位置から見える束縛）を ``("local", 修飾名)`` か ``("urn", URN)`` に。"""
+        kind, key = self._binding(name, node) if node is not None else ("none", None)
+        if kind == "import" and key is not None:
+            urn = self.resolve_scoped(key, name)
+            return ("urn", urn) if urn is not None else None
         local = self.by_qualified.get(name)
         if local is not None and local.kind in _CLASS_KINDS | {Kind.MODULE}:
             return ("local", local.qualified_name)
@@ -675,8 +729,10 @@ class _Extractor:
                 got = self.scan.var_types.get(anc.id, {}).get(name)
                 if got is not None:
                     return got
-                if anc.type in self.functions and name in self.scan.locals.get(anc.id, ()):
-                    return None  # 型の分からないローカルが外側の同名変数を隠す
+                if anc.type in self.functions and (
+                    name in self.scan.locals.get(anc.id, ()) or name in self.scan.imports.get(anc.id, {})
+                ):
+                    return None  # 型の分からないローカル（import を含む）が外側の同名変数を隠す
             anc = anc.parent
         return None
 
@@ -785,19 +841,31 @@ class _Extractor:
                     if n.type == "identifier":
                         self._bind(n, fn)
             elif t in ("import_statement", "import_from_statement"):
-                if fn is not None:
-                    for n in node.children_by_field_name("name"):
-                        bound = n.child_by_field_name("alias") if n.type == "aliased_import" else n
-                        if bound is None:
-                            continue
-                        first = bound if bound.type == "identifier" else (bound.named_children or [None])[0]
-                        if first is not None:
-                            self.scan.locals.setdefault(fn.id, set()).add(_text(first))
+                if scope.parent is not None:  # def / class の中（モジュール直下は名前表がそのまま使える）
+                    self._py_scoped_import(node, scope)
             elif t == "global_statement" and fn is not None:
                 for n in node.named_children:
                     self.scan.globals.setdefault(fn.id, set()).add(_text(n))
             for c in reversed(node.children):
                 stack.append((c, child_fn, child_scope, child_cls))
+
+    def _py_scoped_import(self, stmt: Node, scope: Node) -> None:
+        """``def`` / ``class`` の中の import 文が、そのスコープで束縛する名前を控える（ローカル変数とは別に。使用箇所は import の先を指す）。"""
+        p = self.pos(stmt)
+        key = (p.line, p.col)
+        self.scan.nested_imports.add(key)
+        table = self.scan.imports.setdefault(scope.id, {})
+        for n in stmt.children_by_field_name("name"):
+            bound = n.child_by_field_name("alias") if n.type == "aliased_import" else n
+            if bound is None:
+                continue
+            first = bound if bound.type == "identifier" else (bound.named_children or [None])[0]
+            if first is None:
+                continue
+            name = _text(first)
+            if name in self.scan.globals.get(scope.id, ()):
+                continue  # ``global X`` + ``import X``: モジュールの名前を束ねる
+            table[name] = key
 
     def _record_bases(self, name_node: Node, bases: list[str]) -> None:
         position = self.pos(name_node)

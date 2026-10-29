@@ -69,7 +69,13 @@ from lucianke.index.ingest import (
 from lucianke.index.writer import IndexWriter
 from lucianke.syntax import heuristic, relations
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
-from lucianke.syntax.imports import external_name_map, extract_imports, imported_name_map, make_resolver
+from lucianke.syntax.imports import (
+    ImportFact,
+    external_name_map,
+    extract_imports,
+    imported_name_map,
+    make_resolver,
+)
 from lucianke.syntax.parsers import TreeCache
 from lucianke.syntax.support import get_adapter, get_support
 from lucianke.syntax.symbols import extract_detailed, load_query_source
@@ -793,21 +799,27 @@ class Indexer:
         """関係の候補 → ``RelationFact``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順で、解決できなければ捨てる。"""
         ws_id = self._ws.workspace_id
         external: dict[str, str] = {}
+        # def / class の中の import 文（開始位置ごと）
+        nested: dict[relations.ImportKey, list[ImportFact]] = {}
         try:
             facts = extract_imports(parsed, language_id=lang)  # type: ignore[arg-type]
             resolver = make_resolver(
                 from_rel=rel, language_id=lang, exists=reresolve.ProbeRecorder(self._exists, probes)
             )
-            name_map = imported_name_map(facts, resolver)
-            external = external_name_map(facts, language_id=lang, internal=name_map)
+            module_facts = [f for f in facts if not f.nested]
+            for f in facts:
+                if f.nested:
+                    nested.setdefault((f.range.start.line, f.range.start.col), []).append(f)
+            name_map = imported_name_map(module_facts, resolver)
+            external = external_name_map(module_facts, language_id=lang, internal=name_map)
         except Exception:
             _log.warning("import resolution failed for %s", rel, exc_info=True)
             name_map = {}
 
-        def resolve_name(name: str) -> str | None:
-            hit = name_map.get(name)
+        def urn_of(names: dict[str, tuple[RelPath, str]], externals: dict[str, str], name: str) -> str | None:
+            hit = names.get(name)
             if hit is None:
-                return external.get(name)
+                return externals.get(name)
             path, original = hit
             try:
                 if original == "*":  # モジュールそのもの
@@ -818,6 +830,23 @@ class Indexer:
             except ValueError:
                 return None
 
+        def resolve_name(name: str) -> str | None:
+            return urn_of(name_map, external, name)
+
+        scoped: dict[relations.ImportKey, tuple[dict[str, tuple[RelPath, str]], dict[str, str]]] = {}
+
+        def resolve_import(key: relations.ImportKey, name: str) -> str | None:
+            """def / class の中の import 文（開始位置 ``key``）が束ねた ``name``。同じスコープの別の import や、モジュール直下の同名は引かない。"""
+            if key not in scoped:
+                group = nested.get(key, [])
+                try:
+                    names = imported_name_map(group, resolver)
+                    scoped[key] = (names, external_name_map(group, language_id=lang, internal=names))
+                except Exception:
+                    _log.warning("scoped import resolution failed for %s", rel, exc_info=True)
+                    scoped[key] = ({}, {})
+            return urn_of(*scoped[key], name)
+
         candidates = relations.extract_relations(
             parsed,  # type: ignore[arg-type]
             language_id=lang,
@@ -827,6 +856,7 @@ class Indexer:
             rel=rel,
             resolve_name=resolve_name,
             builtins_package=BUILTINS_PACKAGE if lang == "python" else GLOBALS_PACKAGE,
+            resolve_import=resolve_import,
         )
         return [
             RelationFact(

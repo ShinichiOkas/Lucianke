@@ -82,6 +82,7 @@ class ImportFact:
     range: Range
     kind: ImportKind
     reexport: bool = False  # ``export ... from``: このファイルの名前空間には束ねない（再エクスポート）
+    nested: bool = False  # Python: ``def`` / ``class`` の中の import（束縛はそのスコープの中だけ。ファイルの名前表には入れない）
 
 
 # --- 抽出 -------------------------------------------------------------------------------
@@ -143,7 +144,8 @@ def extract_imports(parsed: ParsedFile, *, language_id: str | None = None) -> li
     facts: list[ImportFact] = []
     for _key, node in sorted(nodes.items(), key=lambda kv: kv[0][:2]):
         if family == "python":
-            facts.extend(_python_facts(node, rng(node)))
+            found = _python_facts(node, rng(node))
+            facts.extend([replace(f, nested=True) for f in found] if _in_scope_body(node) else found)
         elif node.type == "call_expression":
             facts.extend(_require_facts(node, rng))
         else:
@@ -152,6 +154,18 @@ def extract_imports(parsed: ParsedFile, *, language_id: str | None = None) -> li
 
 
 # --- Python -----------------------------------------------------------------------------
+
+_PY_SCOPE_BODIES = frozenset({"function_definition", "class_definition"})
+
+
+def _in_scope_body(node: Node) -> bool:
+    """``node`` が ``def`` / ``class`` の中にあるか（``if TYPE_CHECKING:`` や ``try:`` のモジュール直下は含まない）。"""
+    anc = node.parent
+    while anc is not None:
+        if anc.type in _PY_SCOPE_BODIES:
+            return True
+        anc = anc.parent
+    return False
 
 
 def _python_facts(node: Node, rng: Range) -> list[ImportFact]:

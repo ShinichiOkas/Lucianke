@@ -938,3 +938,73 @@ async def test_real_file_created_after_its_importer_is_seen_by_t06_t07(tmp_path:
         await indexer.aclose()
         readers.close()
         writer.close()
+
+
+async def test_real_t06_use_after_a_function_local_import_is_a_reference(tmp_path: Path) -> None:
+    """BUG-0048: 関数の中の ``from app.errors import AppError`` で束縛した名前の使用（``pytest.raises(AppError)``）も参照に載る。
+
+    同名を別のモジュールから別の関数の中で import していても、そちらの使用は巻き込まない。
+    """
+    root = tmp_path / "scoped"
+    (root / "app").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "app/__init__.py").write_text("", encoding="utf-8")
+    (root / "app/errors.py").write_text("class AppError(Exception):\n    pass\n", encoding="utf-8")
+    (root / "app/other.py").write_text("class AppError:\n    pass\n", encoding="utf-8")
+    test_text = (
+        "import pytest\n"
+        "\n"
+        "\n"
+        "def test_raises():\n"
+        "    from app.errors import AppError\n"
+        "\n"
+        "    with pytest.raises(AppError):\n"
+        "        raise AppError()\n"
+        "\n"
+        "\n"
+        "def test_other():\n"
+        "    from app.other import AppError\n"
+        "\n"
+        "    assert AppError()\n"
+    )
+    (root / "tests/test_errors.py").write_text(test_text, encoding="utf-8")
+    db = tmp_path / "db" / "paad.sqlite"
+    writer = IndexWriter(db)
+    readers = ReaderPool(db, size=2)
+    indexer = Indexer(Workspace(workspace_id="scoped", root=root.resolve()), writer, readers, TreeCache())
+    try:
+        report = await indexer.scan()
+        assert not report.errors, report.errors
+        registry = ToolRegistry()
+        registry.register(t06.TOOL_SPEC)
+        base = build_services(lambda: [str(root)])
+
+        @dataclass(slots=True)
+        class Services(ToolServices):
+            db_path: Path | None = None
+
+        pipe = Pipeline(
+            registry, services=Services(roots=base.roots, trees=base.trees, lines=base.lines, db_path=db)
+        )
+
+        errors = await refs(
+            pipe, {"path": "app/errors.py", "symbol_name": "AppError"}, include_declaration=True
+        )
+        assert not errors.is_error, errors.text
+        in_tests = sorted(
+            x["line"] for x in errors.structured["data"]["references"] if x["path"] == "tests/test_errors.py"
+        )
+        assert in_tests == [5, 7, 8], errors.text  # import の行、pytest.raises(AppError)、raise AppError()
+
+        other = await refs(
+            pipe, {"path": "app/other.py", "symbol_name": "AppError"}, include_declaration=True
+        )
+        assert not other.is_error, other.text
+        other_in_tests = sorted(
+            x["line"] for x in other.structured["data"]["references"] if x["path"] == "tests/test_errors.py"
+        )
+        assert other_in_tests == [12, 14], other.text
+    finally:
+        await indexer.aclose()
+        readers.close()
+        writer.close()
