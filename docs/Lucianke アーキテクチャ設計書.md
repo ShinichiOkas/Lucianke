@@ -1141,7 +1141,7 @@ class DiagnosticsHub:   # LSP サーバー 1 つ分。attach(client) で textDoc
         # sent_at は DocumentSync.sent_at_of。min_publishes は版を付けないサーバーで発行を数える (d)。settle_ms は依存元の静止 (b)
 ```
 
-1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。**`DiagnosticsHub` 自身は index に書かない**: 受信のたびに `on_diagnostics(path, diags, version)` を呼ぶだけで、`LspPool` がサーバー名を足した 4 引数 `on_diagnostics(path, diags, version, source)` を呼び手（Index 側）に渡す（実装で確定 2026-10-29）。`wait_for` は編集層の `DiagnosticsWaiter`（§7.7.6）の土台。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
+1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。**`DiagnosticsHub` 自身は index に書かない**: 受信のたびに `on_diagnostics(path, diags, version)` を呼ぶだけで、`LspPool` がサーバー名を足した 4 引数 `on_diagnostics(path, diags, version, source)` を呼び手（Index 側）に渡す（実装で確定 2026-10-29）。`on_diagnostics` が返す awaitable か `concurrent.futures.Future`（`IndexWriter.submit` の戻り）は、**書き込みが済むまで `wait_for` を「揃った」にしない**（§7.7.6 手順 4、EP-7。Future を捨てるとこの順序の保証が外れる。書き込みが失敗したら次の受信まで揃わず、タイムアウトで pending。BUG-0007、706f253）。`wait_for` は編集層の `DiagnosticsWaiter`（§7.7.6）の土台。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
 2. `wait_for` の条件（S-4・S-5 で確認）:
    - (a) 自分が `didChange` した文書は `version >= min_version`（`==` ではなく `>=`）。basedpyright は連続した変更を畳んで最後の版だけ、ruff は版ごとに届く。診断が変わらない変更（コメントだけ）でも basedpyright は毎回 1 件届く。想定の待ち時間は basedpyright が `didChange` から約 0.3 s、ruff が 1 ms 未満。
    - (b) 依存元の文書は、`version` が自分の旧い版のまま再送されるので、`workspace/didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止で「揃った」とする。
