@@ -167,7 +167,7 @@ def is_test(rel: RelPath | str, extra_globs: Iterable[str] = ()) -> bool:
 
     ``test/`` / ``tests/`` ディレクトリの配下、または名前が ``*_test.*``・``*.spec.*``・``*.test.*``・
     ``test_*.py``。大文字小文字は区別しない。``extra_globs`` は言語サポートが足す追加パターン
-    （``LanguageSupport.test_path_globs``、設計書 §7.3.3）で、``/`` を含めばパス全体、含まなければ名前に当てる。
+    （``LanguageSupport.test_path_globs``、設計書 §7.3.3）で、``/`` を含めばパス全体、含まなければ名前に当てる（``fnmatch`` なので ``*`` は ``/`` を越える）。
     """
     parts = [p.casefold() for p in str(rel).split("/") if p]
     if not parts:
@@ -246,15 +246,16 @@ def _extension(lowered_name: str) -> str:
 # OpenAPI: 名前（openapi.yaml / swagger.json / foo.openapi.yaml）または最上位キーで判定する。迷ったら元の yaml / json。
 _OPENAPI_STEMS = frozenset({"openapi", "swagger"})
 _OPENAPI_YAML = re.compile(r"""^(?:openapi\s*:\s*["']?3\.\d|swagger\s*:\s*["']?2\.0)""", re.MULTILINE)
-_OPENAPI_JSON = re.compile(r"""^\s{0,4}"(?:openapi"\s*:\s*"3\.\d|swagger"\s*:\s*"2\.0")""", re.MULTILINE)
+_OPENAPI_JSON = re.compile(r"""(?:^|[{,])\s*"(?:openapi"\s*:\s*"3\.\d|swagger"\s*:\s*"2\.0")""", re.MULTILINE)
 
 
 def _openapi_or(language: str, lowered: str, ext: str, text: str) -> str:
     stem = lowered[: -len(ext)] if ext else lowered
     if stem in _OPENAPI_STEMS or stem.endswith((".openapi", ".swagger")):
         return "openapi"
-    pattern = _OPENAPI_YAML if language == "yaml" else _OPENAPI_JSON
-    return "openapi" if pattern.search(text) else language
+    # JSON の最上位キーは先頭付近にある。深い入れ子の同名キーを拾わないよう、見る範囲を絞る。
+    found = _OPENAPI_YAML.search(text) if language == "yaml" else _OPENAPI_JSON.search(text[:2048])
+    return "openapi" if found else language
 
 
 # --- シバン ------------------------------------------------------------------------------
