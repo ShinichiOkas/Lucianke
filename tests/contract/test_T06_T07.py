@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import shutil
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -25,14 +26,18 @@ from lucianke.app import build_services
 from lucianke.core.model import Confidence, Kind, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn
-from lucianke.index.connection import open_writer
+from lucianke.engine.indexer import Indexer
+from lucianke.index.connection import ReaderPool, open_reader, open_writer
 from lucianke.index.ingest import FileFacts, RelationFact, ingest_file, upsert_workspace
 from lucianke.index.migrate import ensure_schema
+from lucianke.index.writer import IndexWriter
 from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
+from lucianke.syntax.parsers import TreeCache
 from lucianke.tools import t06_find_references_and_implementations as t06
 from lucianke.tools import t07_query_call_hierarchy as t07
 from lucianke.tools._services import ToolServices, analyze_file
+from lucianke.workspace.types import Workspace
 
 POLY = Path(__file__).resolve().parents[1] / "fixtures" / "poly"
 WS = "poly"
@@ -674,3 +679,159 @@ async def test_t06_lexical_refs_in_other_files_are_marked_and_mixed(pipeline: Pi
     c = await refs(pipeline, PC, "compact", include_lexical_in_other_files=True)
     assert g.validate(c.text) == [], g.validate(c.text)
     assert re.search(rf"^{RST}:\d+:\d+  \[r\] .*  conf=lexical_fallback$", c.text, re.M), c.text
+
+
+# --- 実索引（Indexer が F-POLY から作った relations）で T-06・T-07 を呼ぶ ----------------------------------
+#
+# 上のテストは手書きの RelationFact で、抽出器の出来に左右されない。ここは抽出器（syntax/relations.py）と取り込み
+# （engine/indexer.py）が、T-06・T-07 の求める relations を実際に作ることを確かめる（7j）。
+
+TS_CLIENT = "web/src/payment.ts"
+TS_APP = "web/src/app.ts"
+
+
+@pytest.fixture(scope="module")
+def real_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    base = tmp_path_factory.mktemp("real")
+    root = base / WS  # ワークスペース ID はフォルダ名（poly）
+    shutil.copytree(POLY, root)
+    db = base / "db" / "paad.sqlite"
+
+    async def build() -> None:
+        writer = IndexWriter(db)
+        readers = ReaderPool(db, size=2)
+        indexer = Indexer(Workspace(workspace_id=WS, root=root.resolve()), writer, readers, TreeCache())
+        try:
+            report = await indexer.scan()
+            assert not report.errors, report.errors
+        finally:
+            await indexer.aclose()
+            readers.close()
+            writer.close()
+
+    asyncio.run(build())
+    return db
+
+
+@pytest.fixture
+def real(real_db: Path) -> Pipeline:
+    registry = ToolRegistry()
+    registry.register(t06.TOOL_SPEC)
+    registry.register(t07.TOOL_SPEC)
+    base = build_services(lambda: [str(real_db.parent.parent / WS)])
+
+    @dataclass(slots=True)
+    class Services(ToolServices):
+        db_path: Path | None = None
+
+    svc = Services(roots=base.roots, trees=base.trees, lines=base.lines, db_path=real_db)
+    return Pipeline(registry, services=svc)
+
+
+def sql(db: Path, query: str, *args: object) -> list[tuple[Any, ...]]:
+    conn = open_reader(db)
+    try:
+        return [tuple(r) for r in conn.execute(query, args).fetchall()]
+    finally:
+        conn.close()
+
+
+async def test_real_incoming_calls_of_process_charge_have_enclosing_definitions_and_when(
+    real: Pipeline,
+) -> None:
+    """(a)(b): 呼び出し元は最内の定義（関数・メソッド）、when は呼び出しを囲む if の条件。"""
+    r = await calls(real, PC, "incoming", depth=1)
+    assert not r.is_error, r.text
+    by_name = {n["name"]: n for n in r.structured["data"]["nodes"]}
+    assert set(by_name) == {"create_order", "retry_order", "test_charge_ok"}
+    assert by_name["create_order"]["when"] == GUARD_CREATE
+    assert by_name["retry_order"]["when"] == GUARD_RETRY
+    assert by_name["test_charge_ok"]["when"] is None and by_name["test_charge_ok"]["is_test"] is True
+    assert by_name["create_order"]["call_site_path"] == ROUTES
+    line = find_line(ROUTES, "await processor.process_charge(req)", 0)
+    assert by_name["create_order"]["call_site_line"] == line
+    c = await calls(real, PC, "incoming", "compact", depth=1)
+    assert g.validate(c.text) == [], g.validate(c.text)
+    assert f"  when: {GUARD_CREATE}" in c.text
+
+
+async def test_real_call_hierarchy_create_order_to_process_charge_and_beyond(real: Pipeline) -> None:
+    """create_order → process_charge → _validate_limit / PaymentDeclined（when は途中の if の条件）。"""
+    r = await calls(real, {"urn": U(ROUTES, "create_order")}, "outgoing", depth=3, exclude_external=False)
+    assert not r.is_error, r.text
+    nodes = r.structured["data"]["nodes"]
+    path = [(n["name"], n["depth"]) for n in nodes if not n["is_external"]]
+    assert ("PaymentRequest", 1) in path and (PROCESS_CHARGE, 1) in path
+    assert ("PaymentProcessor._validate_limit", 2) in path and ("PaymentDeclined", 2) in path
+    assert ("Receipt", 2) in path
+    pc = next(n for n in nodes if n["name"] == PROCESS_CHARGE)
+    assert pc["when"] == GUARD_CREATE and pc["parent_urn"] == U(ROUTES, "create_order")
+    declined = next(n for n in nodes if n["name"] == "PaymentDeclined")
+    assert declined["when"] == "not self._validate_limit(req.amount)"
+    assert declined["parent_urn"] == U(PAY, PROCESS_CHARGE)
+
+
+async def test_real_class_target_is_reached_by_constructor_calls(real: Pipeline) -> None:
+    """(d): ``Foo(...)`` はクラス URN への CALLS。T-07 のクラス対象はコンストラクタ呼び出しから始まる。"""
+    r = await calls(real, {"urn": U(PAY, "PaymentRequest")}, "incoming", depth=1)
+    assert not r.is_error, r.text
+    assert {n["name"] for n in r.structured["data"]["nodes"]} == {
+        "create_order",
+        "retry_order",
+        "test_charge_ok",
+    }
+    pp = await calls(real, {"urn": U(PAY, "PaymentProcessor")}, "incoming", depth=1)
+    names = [n["name"] for n in pp.structured["data"]["nodes"]]
+    assert "test_charge_ok" in names and any(
+        "(module)" in n for n in names
+    )  # routes.py 直下の processor = ...
+
+
+def real_db_of(pipeline: Pipeline) -> Path:
+    return Path(pipeline.services.db_path)  # type: ignore[attr-defined]
+
+
+async def test_real_type_hierarchy_from_inherits_rows(real: Pipeline) -> None:
+    """(c)(e): ``class PaymentDeclined(Exception)`` は ``lk://_ext/builtins#Exception`` への INHERITS。"""
+    r = await refs(real, {"urn": EXT_EXCEPTION}, query_type="type_hierarchy")
+    assert not r.is_error, r.text
+    subs = r.structured["data"]["type_hierarchy"]["subtypes"]
+    assert [s["qualified_name"] for s in subs] == ["LimitExceeded", "PaymentDeclined"]
+    sup = await refs(real, {"urn": U(LIM, "LimitExceeded")}, query_type="type_hierarchy")
+    supers = sup.structured["data"]["type_hierarchy"]["supertypes"]
+    assert [s["qualified_name"] for s in supers] == ["Exception"]
+    rows = sql(real_db_of(real), "SELECT kind, is_external FROM symbols WHERE urn = ?", EXT_EXCEPTION)
+    assert rows == [("Class", 1)]
+
+
+async def test_real_external_nodes_have_stable_kinds_and_are_leaves(real: Pipeline) -> None:
+    """(e)(f): 未解決の import は ``lk://_ext/<pkg>#<name>``。kind は名前の形と使われ方から決まる。"""
+    kinds = dict(sql(real_db_of(real), "SELECT urn, kind FROM symbols WHERE is_external = 1"))
+    assert kinds[EXT_DECIMAL] == "Class"  # IMPORTS・CALLS・TYPE_USES のどれが先でも
+    assert kinds[EXT_EXCEPTION] == "Class"
+    assert kinds[str(Urn.external("builtins", None, "ValueError"))] == "Class"
+    assert kinds[str(Urn.external("dataclasses", None, "dataclass"))] == "Function"
+    assert kinds[str(Urn.external("os"))] == "Module"
+    out = await calls(real, {"urn": U(ROUTES, "create_order")}, "outgoing", depth=3)
+    ext_json = out.structured["data"]["nodes"]
+    leaf = next(n for n in ext_json if n["is_external"])
+    assert leaf["urn"] == EXT_DECIMAL and not any(n["parent_urn"] == EXT_DECIMAL for n in ext_json)
+    uses = await refs(real, {"urn": EXT_DECIMAL})
+    assert not uses.is_error, uses.text
+    assert {x["use"] for x in uses.structured["data"]["references"]} >= {"call", "type", "import"}
+
+
+async def test_real_typescript_call_through_a_module_variable_reaches_the_overloaded_method(
+    real: Pipeline,
+) -> None:
+    """TS: ``client.charge(...)``（``const client = new PaymentClient()``）→ 実装シグネチャ。``new`` もクラスへの CALLS。"""
+    impl = sql(
+        real_db_of(real),
+        "SELECT urn FROM symbols WHERE qualified_name = 'PaymentClient.charge' ORDER BY start_line DESC LIMIT 1",
+    )[0][0]
+    r = await calls(real, {"urn": impl}, "incoming", depth=1)
+    assert not r.is_error, r.text
+    nodes = r.structured["data"]["nodes"]
+    assert [(n["name"], n["call_site_path"]) for n in nodes] == [("checkout", TS_APP)]
+    cls = await calls(real, {"urn": U(TS_CLIENT, "PaymentClient")}, "incoming", depth=1)
+    assert any(n["call_site_path"] == TS_APP for n in cls.structured["data"]["nodes"])
