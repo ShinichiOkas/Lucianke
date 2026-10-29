@@ -29,6 +29,7 @@ from lucianke.mcp.budget import CursorCodec, Packer
 from lucianke.mcp.envelope import build_meta
 from lucianke.mcp.registry import MILESTONES, ToolRegistry
 from lucianke.mcp.render import compact as compact_render
+from lucianke.mcp.render import graph as graph_render
 from lucianke.mcp.render import json_out as json_render
 from lucianke.mcp.types import CallInfo, Rendered, RenderInput
 from lucianke.tools._base import GRAPH_FORMATS, WORKING_TREE, Services, ToolContext, ToolSpec
@@ -38,6 +39,7 @@ Renderer = Callable[[RenderInput], Rendered]
 _log = logging.getLogger("lucianke.pipeline")
 _SUMMARY_KEYS = ("path", "paths", "urn", "urns", "symbol_name", "revision", "format", "workspace_id", "max_tokens")
 _CURSOR_EXCLUDED = frozenset({"cursor", "max_tokens", "format"})  # ページごとに変えてよい引数はカーソルの照合から外す
+_FORMATS: tuple[str, ...] = ("compact", "json", *GRAPH_FORMATS)  # 失敗の描画で要求の形式を尊重できる形式（§5.4.3）
 INTERNAL_MESSAGE = "Internal error. Quote details.log_ref when reporting."
 
 
@@ -58,7 +60,12 @@ class CallLogger(logging.LoggerAdapter):
 
 
 def default_renderers() -> dict[str, Renderer]:
-    return {"compact": compact_render.render, "json": json_render.render}
+    return {
+        "compact": compact_render.render,
+        "json": json_render.render,
+        "dot": graph_render.render_dot,
+        "mermaid": graph_render.render_mermaid,
+    }
 
 
 def summarize_args(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -219,8 +226,13 @@ class Pipeline:
     # --- 失敗経路 -----------------------------------------------------------------------
 
     def _render_failure(self, spec: ToolSpec, call: CallInfo, err: LuciankeError, t0: float, log: CallLogger) -> Rendered:
-        """``LuciankeError`` を成功と同じ経路で描画する（``isError`` を立てる）。部分結果があれば詰めて添える。"""
-        fmt = call.format if call.format in ("compact", "json") and call.format in self.renderers else "compact"
+        """``LuciankeError`` を成功と同じ経路で描画する（``isError`` を立てる）。部分結果があれば詰めて添える。
+
+        失敗は要求された形式で返す。dot / mermaid はコメント形式のヘッダとメッセージ（``// `` / ``%% ``。仕様書 §5.4.3）。
+        グラフ非対応のツールに dot / mermaid が指定された ``E_INVALID_ARGUMENT`` も同じ（要求の形式のコメントで返す）。
+        要求の形式のレンダラが無いとき（未知の形式・差し替えで外れているとき）だけ compact にする。
+        """
+        fmt = call.format if call.format in _FORMATS and call.format in self.renderers else "compact"
         call = dataclasses.replace(call, format=fmt, timing_ms=self._elapsed_ms(t0))
         out = page = None
         shown = err
@@ -258,7 +270,7 @@ class Pipeline:
             tool=spec.name,
             revision=revision if isinstance(revision, str) else WORKING_TREE,
             workspace_id=workspace_id if isinstance(workspace_id, str) else None,
-            format=fmt if fmt in ("compact", "json") else "compact",
+            format=fmt if isinstance(fmt, str) and fmt in _FORMATS else "compact",
             max_tokens=max_tokens if isinstance(max_tokens, int) and max_tokens >= MIN_MAX_TOKENS
             and not isinstance(max_tokens, bool) else spec.default_max_tokens,
         )  # fmt: skip
