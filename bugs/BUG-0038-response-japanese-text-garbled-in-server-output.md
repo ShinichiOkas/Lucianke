@@ -36,3 +36,4 @@
 ## 確認
 - 上の 4 環境で実プロセスの生バイトが UTF-8 であることを確認（T-06 の降格の警告、T-10 の `→` と `…`、stdin の日本語コメントがディスクに UTF-8 で書かれる）。
 - `tests/invariants/test_stdout_purity.py` を 3 回続けて green（6 件）。歯の確認: stdout の包みを cp932 に差し替えた複製（`PYTHONPATH` で先に読ませた使い捨て）では、このテストが落ちる。
+- 追記（観測側の直し）: 応答を print する bench の台本・探針（`bench/dogfood/*_probe.py`・`run_dogfood.py`・`bench/run_edit_safety.py`・`run_reaction.py`・`bench/e2e/run_session.py`）の `main` の先頭に `sys.stdout.reconfigure(encoding="utf-8")` を足した（`run_tokens.py`・`run_exit_criteria.py` は済み）。`bench/dogfood/run_dogfood2.py` にも同じ 1 行を作業ツリーで足したが、持ち主が書きかけ（ruff の F401・F841 が既存）のためコミットしていない。`bench/run_latency.py` は他の役の編集中のため未着手（`main` の先頭に同じ 1 行を足す）。
