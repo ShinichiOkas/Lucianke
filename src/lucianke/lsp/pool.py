@@ -19,7 +19,8 @@
   プロセスを落として ``unavailable``（``timeout_3x``）。
 * 終了は ``LspClient.shutdown``（``shutdown`` → ``exit`` → ``ProcessRegistry.terminate``。Windows は Job Object で孫ごと）。
 * ``LspHandle.documents`` / ``.diagnostics`` はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。
-* index への診断の書き込みは呼び手の ``on_diagnostics(path, diags, version, source)`` に任せる（``source`` はサーバー名）。
+* index への診断の書き込みは呼び手の ``on_diagnostics(path, diags, version, source, ws)`` に任せる（``source`` はサーバー名、
+  ``ws`` はそのハンドルのワークスペース。複数ルートでも診断を送り元の DB へ書ける）。
   書き込みを非同期にするときは、その完了を表す awaitable か ``IndexWriter.submit`` の ``Future`` を **返す**こと
   （``DiagnosticsHub.wait_for`` はそれが済むまで返らない。捨てると EP-7 の順序が崩れる。BUG-0007）。
 """
@@ -66,8 +67,9 @@ TIMEOUTS_TO_UNAVAILABLE = 3
 
 _ROLES: tuple[Role, ...] = ("types", "lint")
 
-OnDiagnostics = Callable[[RelPath, list[dict[str, Any]], int | None, str], Any]
-"""``on_diagnostics(path, diags, version, source)``: ``source`` は LSP サーバー名（``basedpyright`` / ``ruff`` …）。
+OnDiagnostics = Callable[[RelPath, list[dict[str, Any]], int | None, str, Workspace], Any]
+"""``on_diagnostics(path, diags, version, source, ws)``: ``source`` は LSP サーバー名（``basedpyright`` / ``ruff`` …）、
+``ws`` はそのハンドルのワークスペース（``LspHandle.rebind`` の後は新しい方）。
 
 返り値は ``DiagnosticsCallback`` と同じ: 非同期の書き込みなら awaitable か ``concurrent.futures.Future`` を返す（``lsp/diagnostics.py``）。
 """
@@ -268,7 +270,7 @@ class LspHandle:
         cb = self._pool._on_diagnostics
         if cb is None:
             return None
-        return cb(path, diags, version, self.server_name or self.language_id)
+        return cb(path, diags, version, self.server_name or self.language_id, self.ws)
 
     def _on_progress_create(self, _params: Any) -> None:
         return None

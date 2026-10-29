@@ -441,7 +441,7 @@ async def test_lru_eviction_sends_did_close(env: Env, ws: Workspace):
 
 
 async def test_diagnostics_wait_with_version(env: Env, ws: Workspace):
-    seen: list[tuple[RelPath, list[dict[str, Any]], int | None, str]] = []
+    seen: list[tuple[RelPath, list[dict[str, Any]], int | None, str, Workspace]] = []
     pool = env.pool(on_diagnostics=lambda *a: seen.append(a))
     await pool.ensure_started("fake", ws)
     await wait_until(lambda: pool.handles(ws) and pool.handles(ws)[0].state is LspState.INDEXING)
@@ -457,6 +457,7 @@ async def test_diagnostics_wait_with_version(env: Env, ws: Workspace):
     entry = h.diagnostics.get(A)
     assert entry is not None and entry.version == v and entry.diagnostics[0]["message"] == f"v{v}"
     assert [(s[0], s[2], s[3]) for s in seen][-1] == (A, v, "fakels")
+    assert all(s[4] is ws for s in seen)  # 5 引数目: そのハンドルのワークスペース
 
 
 async def test_diagnostics_wait_without_version_uses_sent_at(env: Env, ws: Workspace):
