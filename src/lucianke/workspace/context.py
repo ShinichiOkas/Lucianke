@@ -242,8 +242,9 @@ class WorkspaceContext:
         """ルートを登録し、登録したワークスペースを ``paths`` の順（重複は除く）で返す。最初のものがアクティブになる。
 
         存在するディレクトリでないパスが 1 つでもあれば、何も変えずに ``E_INVALID_ARGUMENT``。
-        既に登録済みのルートはそのまま（同じ ID・同じオブジェクト）。``replace=True`` のときは、``paths`` に
-        無いワークスペースを登録から外す（ID は覚えておき、再登録で同じ ID を返す）。
+        既に登録済みのルートはそのまま（同じ ID・同じオブジェクト。ツールでの明示と ``.lucianke.toml`` 由来の設定も保つ）。
+        ``replace=True`` のときは、``paths`` に無いワークスペースを登録から外す（その設定も消す。ID は覚えておき、
+        再登録で同じ ID を返す）。
         """
         if isinstance(paths, str) or not isinstance(paths, Sequence) or not paths:
             raise LuciankeError(
@@ -271,8 +272,10 @@ class WorkspaceContext:
         table = {} if replace else dict(self._table)
         by_key = {_root_key(ws.root): ws for ws in self._table.values()}
         ids = dict(self._ids)
-        file_settings = {} if replace else dict(self._file_settings)
-        tool_args = {} if replace else dict(self._tool_args)
+        # 設定の表は ``replace`` でも空にしない: 残るルートの「ツールでの明示」と ``.lucianke.toml`` の内容を保つ。
+        # 外れたルートの分は、最後に ``table`` に残る ID で絞って消す（BUG-0021）。
+        file_settings = dict(self._file_settings)
+        tool_args = dict(self._tool_args)
         warnings: list[str] = list(settings_file.env_settings(self._env).warnings)
         result: list[Workspace] = []
         for root in roots:
@@ -286,6 +289,7 @@ class WorkspaceContext:
             ws, loaded = self._build(ws_id, root, warnings)
             table[ws_id] = ws
             file_settings[ws_id] = loaded
+            tool_args.pop(ws_id, None)  # 新しいルートに前のルートの明示を持ち越さない
             result.append(ws)
 
         self._table = table
