@@ -20,6 +20,8 @@
 * 終了は ``LspClient.shutdown``（``shutdown`` → ``exit`` → ``ProcessRegistry.terminate``。Windows は Job Object で孫ごと）。
 * ``LspHandle.documents`` / ``.diagnostics`` はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。
 * index への診断の書き込みは呼び手の ``on_diagnostics(path, diags, version, source)`` に任せる（``source`` はサーバー名）。
+  書き込みを非同期にするときは、その完了を表す awaitable か ``IndexWriter.submit`` の ``Future`` を **返す**こと
+  （``DiagnosticsHub.wait_for`` はそれが済むまで返らない。捨てると EP-7 の順序が崩れる。BUG-0007）。
 """
 
 from __future__ import annotations
@@ -65,7 +67,10 @@ TIMEOUTS_TO_UNAVAILABLE = 3
 _ROLES: tuple[Role, ...] = ("types", "lint")
 
 OnDiagnostics = Callable[[RelPath, list[dict[str, Any]], int | None, str], Any]
-"""``on_diagnostics(path, diags, version, source)``: ``source`` は LSP サーバー名（``basedpyright`` / ``ruff`` …）。"""
+"""``on_diagnostics(path, diags, version, source)``: ``source`` は LSP サーバー名（``basedpyright`` / ``ruff`` …）。
+
+返り値は ``DiagnosticsCallback`` と同じ: 非同期の書き込みなら awaitable か ``concurrent.futures.Future`` を返す（``lsp/diagnostics.py``）。
+"""
 
 Resolver = Callable[[LspServerDef, Workspace], list[str] | None]
 """``resolver(defn, ws) -> argv | None``: 起動コマンドの探索。``None`` は ``not_found``。"""
