@@ -649,8 +649,13 @@ def _check_ref(ref: str | None) -> str | None:
     return ref
 
 
-async def _rebind(hub: Any, ws: Workspace, warnings: list[str]) -> None:
-    """設定を変えた ``Workspace`` を束と LSP に渡し直す（``hub.workspace_changed``）。"""
+async def _rebind(hub: Any, ws: Workspace, warnings: list[str]) -> list[Any]:
+    """設定を変えた ``Workspace`` を束と LSP に渡し直す（``hub.workspace_changed``）。
+
+    戻りは ``workspace_changed`` が再起動した LSP ハンドル（Python 環境が変わって止めて起動し直したもの）。LSP を再起動する責任は
+    ``LspPool.rebind`` にあるので、呼び手はこのハンドルをもう一度再起動してはならない（BUG-0035）。結線されていない・答えない
+    ハブ（``None``）のときは空。
+    """
     hook = getattr(hub, "workspace_changed", None)
     if hook is None:
         if hub.runtime(ws.workspace_id) is not None:
@@ -658,8 +663,8 @@ async def _rebind(hub: Any, ws: Workspace, warnings: list[str]) -> None:
                 f"{ws.workspace_id}: the running index keeps the previous settings until the server restarts "
                 "(hub.workspace_changed is not wired)"
             )
-        return
-    await _maybe_await(hook(ws))
+        return []
+    return list(await _maybe_await(hook(ws)) or [])
 
 
 async def _set_roots(
@@ -721,17 +726,24 @@ async def _set_python_env(
     )  # 実行できなければ E_INVALID_ARGUMENT（変更なし）
     if base_ref is not None:
         new_ws = wc.update(ws.workspace_id, default_base_ref=base_ref)
-    await _rebind(hub, new_ws, warnings)
+    restarted = await _rebind(hub, new_ws, warnings)
 
     pool = getattr(hub, "lsp_pool", None)
+    # 再起動の責任は ``LspPool.rebind``（``workspace_changed`` の中）にある: インタープリタが変わって動いていた Python 系は、
+    # そこで止めて起動し直し済み（``started_at`` も新しい）。ここでもう一度止めると 1 回の ``set_python_env`` で 2 回起動する
+    # （BUG-0035）。ここで受け持つのは rebind が起こさなかった分だけ:
+    #   * 同じインタープリタを指定し直した（pip install 後などの取り直し）: 動いていても止めて起動し直す（事後条件 3）
+    #   * まだ起動していない・止まっていた・unavailable から戻された（standby）: 起動する
+    did_restart = any(getattr(h, "language_id", None) == PYTHON_LANGUAGE for h in restarted)
 
     async def restart() -> None:
         if pool is None:
             return
         for handle in pool.handles(new_ws, PYTHON_LANGUAGE):
-            handle.ws = new_ws  # 起動時の Workspace を持ち続けるので、新しい環境で上がるよう差し替える
-        await pool.reset(PYTHON_LANGUAGE, new_ws)
-        await pool.ensure_started(PYTHON_LANGUAGE, new_ws)
+            handle.ws = new_ws  # rebind を持たないハブ・プールでも、新しい環境で上がるよう差し替える（rebind 済みなら同じ値）
+        if not did_restart:
+            await pool.reset(PYTHON_LANGUAGE, new_ws)
+        await pool.ensure_started(PYTHON_LANGUAGE, new_ws)  # standby だけ起動する（rebind が起こした starting 以降は何もしない）
 
     if pool is None:
         warnings.append(f"{ws.workspace_id}: no LSP pool is running; nothing to restart")

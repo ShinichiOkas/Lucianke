@@ -1,0 +1,19 @@
+# SYNC-5 DocumentRouter・import 元の解き直し・PageRank・T-01/T-03/T-04/T-05/T-06/T-07/T-10/T-11 の実装との差の反映
+
+日付 2026-10-29。設計書 = `docs/Lucianke アーキテクチャ設計書.md`、仕様書 = `docs/Lucianke仕様書.md`。節番号は変えていない。実装で決まった点には `（実装で確定 2026-10-29）` を添えた。第 1〜4 回は [SYNC-1.md](SYNC-1.md)〜[SYNC-4.md](SYNC-4.md)。
+
+共有作業ツリーで十数本の役が並行しているので、コミットは自分の編集（仕様書・設計書・本書・README）だけにした。
+
+## 反映した点（表の 1 行 = 1 点）
+
+| 節 | 何を | 根拠 |
+|---|---|---|
+| 設計書 §7.5.2 | `OnDiagnostics` を 5 引数 `(path, diags, version, source, ws)` に。5 引数目は `LspHandle` の `Workspace`（複数ルートでも送り元の DB へ書ける。受けない呼び手は `RuntimeHub.on_diagnostics` を直す）。§7.5.5 の 1 も同じ | fccee0a |
+| 設計書 §7.5.2 | `LspPool.router(ws)`・`LspPool.rebind(ws)`・`LspHandle.rebind(ws)`・`LspHandle.started_at`（UTC ISO 8601、ミリ秒、起動のたびに更新、停止で `None`）をシグネチャと本文に。`rebind` は**ルートが変わったとき（言語を問わない）と Python 系でインタープリタが変わったとき**だけ再起動（`restarts` は増えない。`unavailable` は `standby` に戻す）。除外などは LSP の設定に出ないので再起動も `didChangeConfiguration` も不要。T-00 事後条件 3 の根拠 | 8a6f40f、c84b7a0（da81727）、BUG-0023 |
+| 設計書 §7.5.4 | `DocumentRouter` を新設: 言語の `ready` な全サーバー（`types` が先）へ `sync`、版と送信時刻をサーバーごとに記録、`wait_for` は全サーバーを**同時に**待って全部揃ったときだけ True（時間はサーバー数で増えない）、**版なしの待ち〔依存元〕は `lint` を待たない**（ruff は再発行しない）、版の検査は `WorkspaceEdit` を出したサーバーの `DocumentSync` に対して | 8a6f40f、BUG-0023 |
+| 設計書 §7.5.4・§4.1 の `documents.py`・§8.4 の 8 | `edit_transaction` は LSP プールが `router(ws)` を持てば口を常に `DocumentRouter` に（T-13 が `lsp=` に渡した `LspHandle` は「LSP で検証する」手がかり・状態を `READY` にするだけ）。ルーターを出せないプール（偽物）のときだけ 1 サーバー | 7b4fa68、68b6023 |
+| 設計書 §7.6.2 | 「import 元の解き直し」（`engine/reresolve.py`）: 取り込み時に import 解決で調べたパスの**語幹**を内部表 `_import_probes(file_id, stem)`（schema v3）へ。ファイル作成・削除で該当 import 元だけを同じトランザクションで取り込み直す（`data_version` は 1 回。`scan` は最後に別トランザクションで）。取り込み直した側は `exact` を失い `structural` に戻る。`symbols` の URN の集合が変わった編集も同じ扱い（BUG-0034）、本文だけの編集は触れない | edb72e4、BUG-0025・BUG-0034 |
+| 設計書 §7.6.2・§6.2・§7.6.5・§4.1 | PageRank（`index/rank.py`）: グラフの定義（`CALLS` / `REFERENCES` / `IMPORTS` / `INHERITS` / `IMPLEMENTS`、ワークスペース内のシンボルを指す辺だけ、重み 1、d=0.85、決定的）、`_symbol_rank(urn, workspace_id, score, fan_in)`（schema v2）、`files.pagerank_score`、`data_version` は進めない。デバウンス付きの再計算（`engine/rank_scheduler.py`: 約 1 秒おとなしくなってから 1 回、最中の更新は終わった後にもう一度、`aclose` で取り消し、走査の最後の計算を古い結果で上書きしない）。内部表一覧と `schema_version`（現在 3）、モジュール表・ディレクトリ図に `rank.py`・`reresolve.py`・`rank_scheduler.py` | 809eff4、bdacc4a、a4b1229 |
+| 仕様書 §9.4 | 更新規約の表: 差分索引の `files.pagerank_score`、ファイル監視で作成・削除したとき import している側の `relations` も解き直す、`files.pagerank_score` の再計算は約 1 秒後に 1 回（`data_version` を進めない） | edb72e4、a4b1229 |
+| 仕様書 T-03 処理規約 2 | 同じ一致の質ならコードのシンボルを `Key` / `Tag` より先、次にファイルの `pagerank`（`FileInfo.pagerank`、未計算は 0）降順、パスの辞書順。既定の `symbol_kinds` は全種別のまま | 73ee3fb、8139279 |
+| 仕様書 T-01 処理規約 2・3・4 と例 | 公開シンボルの定義（`priv` / `prot` を持たず、`Field` / `Property` / `Column` / `Cell` / `Key` / `Tag` 以外、修飾子が空は公開で `conf=heuristic`）、`alpha` への降格（`relations` が空、または辺が 1 本も無い＝`_symbol_rank` が空）、グラフの定義、ディレクトリ要約行（トップレベル別・多い順に 12 件・`+N more dirs`、ルート直下は `./`）、json の `tree[]` を `max_tokens ÷ 40` 件に、縮退でディレクトリ要約行も最後に外す、1 レコードを切らずに縮退版（シグネチャ → シンボル数 → ヘッダのみ）、`rank` は先頭を 1.00 とした相対値（例の 0.91 / 0.84 を 1.00 / 0.92 に） | 458a4cb、3e8d099、21a の判断 |

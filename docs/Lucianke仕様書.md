@@ -1071,10 +1071,10 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 
 | 契機 | 更新するテーブル | 単位 |
 |---|---|---|
-| 起動時の差分索引 | `files`, `symbols`, `relations`（`IMPORTS` と構文木から取れる関係） | ファイル |
+| 起動時の差分索引 | `files`, `symbols`, `relations`（`IMPORTS` と構文木から取れる関係）、`files.pagerank_score`（走査の最後に 1 回計算） | ファイル |
 | LSP の `publishDiagnostics` | `diagnostics`（当該ファイルの行を全置換） | ファイル |
 | LSP による参照・呼び出し階層の取得 | `relations`（取得した範囲を `exact` で上書き。`structural` 行は同一 `(source, target, kind)` で置換） | 要求に応じて遅延 |
-| ファイル監視イベント | `files`, `symbols`, `relations`, `diagnostics`（構文エラー分） | ファイル |
+| ファイル監視イベント | `files`, `symbols`, `relations`, `diagnostics`（構文エラー分）。**ファイルが作られた・消えた**とき（および `symbols` の URN の集合が変わったとき）は、それを `import` している側のファイルの `relations` も同じトランザクションで解き直す（内部表 `_import_probes` で引く。BUG-0025・BUG-0034）。`files.pagerank_score` は最後の更新の約 1 秒後に 1 回だけ計算し直す（`data_version` は進めない） | ファイル |
 | 編集トランザクションの確定 | 同上。さらに `cursors` の失効 | ファイル |
 | Git 取り込み（M2） | `git_commits`, `git_symbol_changes`, `git_co_changes` | コミット。`HEAD` の移動を監視して増分 |
 | T-14 / T-15 / T-16 の実行 | `dataflows`, `contracts`（結果をキャッシュとして保存） | 要求 |
@@ -1350,9 +1350,14 @@ json の `data`:
 **処理規約**:
 
 1. `files` テーブルから `scope_paths` と除外規則で対象を絞る。
-2. `pagerank` は `relations` の `CALLS` / `REFERENCES` / `IMPORTS` / `INHERITS` / `IMPLEMENTS` エッジ上でシンボル単位に計算し、ファイルのスコアは所属シンボル上位 `max_symbols_per_file` 件の和とする。`relations` が空（初回インデックス前）なら `alpha` に自動降格し `warnings[]` に `ranking=alpha (graph not ready)` を記録する。
-3. 詰める順序は、①ディレクトリ要約行（ファイル数）、②スコア降順のファイルブロック、③各ブロック内は公開シンボルをスコア降順に `max_symbols_per_file` 件まで、とする。
-4. 予算が尽きたら残りのファイルをディレクトリ別件数で `# summary:` 行に要約し、`next_cursor` を発行する。1 レコードは 1 ファイルブロック。
+2. `pagerank` は `relations` の `CALLS` / `REFERENCES` / `IMPORTS` / `INHERITS` / `IMPLEMENTS` エッジ上でシンボル単位に計算し、ファイルのスコアは所属する**公開シンボル**上位 `max_symbols_per_file` 件の和とする。`fan_in` は同じ件数の `fan_in`（別ファイルからの辺の本数）の和、`alpha` はパス順。同点はパスの辞書順。`relations` が空（初回インデックス前）または**ワークスペース内のシンボルを指す辺が 1 本も無い**（実装では `_symbol_rank` が空）なら `alpha` に自動降格し `warnings[]` に `ranking=alpha (graph not ready)` を記録する（実装で確定 2026-10-29、458a4cb）。
+   - **グラフの定義**（`index/rank.py`、809eff4）: 辺はワークスペース内のシンボル（`is_external = 0`）を指すものだけ（`lk://_ext/` の外部シンボルは辺にしない。`Exception` や `Decimal` が上位を占めないため）。自己ループは捨て、`(始点, 終点)` の組は種別・参照箇所の数に関わらず 1 本。テストファイルからの辺も数える（索引上の重要度は `include_tests` に依らず、`include_tests: false` はテストファイルを表示と順位から外すだけ）。減衰係数 0.85、同じ入力なら同じ値（決定的）。
+   - **公開シンボル**（21a の判断。実装で確定 2026-10-29）: 修飾子に `priv` / `prot` を持たず、種別が `Field` / `Property` / `Column` / `Cell` / `Key` / `Tag` でないもの。修飾子が空（ctags 由来など可視性の分からないもの）は公開として扱い、`conf=heuristic` を付ける。データ形式の最上位の節 `Key` / `Tag` と、クラスやテーブルの中身は、親が代表になるので地図に出さない。
+   - 表示する `rank` は先頭のファイルを 1.00 とした相対値（`alpha` は 0.00）。
+3. 詰める順序は、①ディレクトリ要約行、②スコア降順のファイルブロック、③各ブロック内は公開シンボルをスコア降順に `max_symbols_per_file` 件まで、とする。
+   - **ディレクトリ要約行**（実装で確定 2026-10-29、458a4cb・3e8d099）は、トップレベルのディレクトリ別のファイル数を多い順（同数はパスの辞書順）に 12 件まで出し、超えた分は `+N more dirs` とする（例: `- src/ (42 files), tests/ (18 files), +3 more dirs`）。ルート直下のファイルはルート（`./`）に数える。
+   - 予算が小さいとき、縮退の最後にディレクトリ要約行も外す。json の `tree[]` は `max_tokens ÷ 40` 件（最低 1 件、ファイル数の多い順）までに絞る（予約分が予算を食い尽くさないため）。
+4. 予算が尽きたら残りのファイルをディレクトリ別件数で `# summary:` 行に要約し、`next_cursor` を発行する。1 レコードは 1 ファイルブロック（途中で切らない。入らないブロックは縮退版にする: シグネチャを外す → 重要でない順にシンボルを減らす → ヘッダだけ）。
 5. Tier 4 ファイルは ctags 推定のシンボルがあればそれを `conf=heuristic` 付きで載せ、無ければファイル名だけを載せる。
 
 **出力**（compact）:
@@ -1361,11 +1366,11 @@ json の `data`:
 # get_repo_map ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~1480/1500tok
 - src/ (42 files), tests/ (18 files), notebooks/ (3 files), conf/ (2 files)
 === src/services/payment.py (245 lines) ===
-- rank: 0.91 fan_in: 23
+- rank: 1.00 fan_in: 23
 [Class] PaymentProcessor @L25-240
   [Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L40-115
 === src/api/routes.py (310 lines) ===
-- rank: 0.84 fan_in: 17
+- rank: 0.92 fan_in: 17
 [Function] pub create_order(req: OrderIn) -> OrderOut @L80-120
 # summary: 38 more files (src: 30, notebooks: 3, conf: 2, tests: 3)
 # more: cursor=eyJyYW5rIjoyfQ remaining≈38
@@ -1515,7 +1520,7 @@ json の `data`:
 **処理規約**:
 
 1. `symbols` テーブルを引く。`fuzzy` と `prefix` は FTS5 相当の索引、`exact` は `name`（最後の部分）の等価比較だけで、`Class.method` のような限定名では当てず、`regex` は索引を使わない走査で 200 ms を上限とし、超えたら部分結果付きの `E_TIMEOUT`。
-2. 順位は、完全一致 > 前方一致 > 部分一致の順、同順位内は `pagerank` 降順、さらにパスの辞書順とする。
+2. 順位は、完全一致 > 前方一致 > 部分一致の順、同順位内は**コードのシンボル（`Key` / `Tag` 以外）をデータファイル（JSON / YAML / TOML / XML。Tier 3）の `Key` / `Tag` より先**、次に**そのシンボルのファイルの `pagerank`**（`files.pagerank_score`。`FileInfo.pagerank`。未計算・グラフ未準備は 0）降順、さらにパスの辞書順とする（73ee3fb・8139279。実装で確定 2026-10-29）。`symbol_kinds` を渡さない既定では全種別が混ざるので、設定ファイルのキーがコードの定義を押しのけないための規則。`Key` / `Tag` だけが欲しいときは `symbol_kinds` で指定する（既定の `symbol_kinds` は全種別のまま）。
 3. `type_signature_filter` は `->` で分けて、左側を `signature` の引数部、右側を `return_type` に対して部分文字列一致で適用する。
 4. 0 件かつ `fallback_grep: true` のとき、Tier 4 ファイルに対して `\bquery\b` と定義パターン（`query\s*[:=(]`）で内部 grep を実行し、`lex:` セレクタの URN で返す。このとき `is_degraded: true`、先頭に `! DEGRADED` 行（MUST）。
 5. 1 レコードは 1 シンボル。`limit` 件を超える一致は `page.total_estimate` に総数を入れ、`next_cursor` を発行する。

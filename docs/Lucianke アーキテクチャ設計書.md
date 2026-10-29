@@ -315,7 +315,7 @@ Lucianke/
 │  │  ├─ servers.py          #   LspServerDef（言語 → コマンド探索・初期化オプション・位置単位の既定）
 │  │  ├─ client.py           #   JSON-RPC over pipes、要求・通知、タイムアウト、位置変換の境界（ADR-14）
 │  │  ├─ pool.py             #   言語 × ワークスペースごとの状態機械（standby/starting/indexing/ready/unavailable）
-│  │  ├─ documents.py        #   didOpen/didChange/didClose、版番号、LRU 200
+│  │  ├─ documents.py        #   didOpen/didChange/didClose、版番号、LRU 200。DocumentRouter（言語の全サーバーへ sync・診断の待ちを合わせる。§7.5.4）
 │  │  ├─ diagnostics.py      #   DiagnosticsHub: publishDiagnostics の受信・版待ち（wait_for。編集層の DiagnosticsWaiter の土台）。Index への書き込みは呼び手（on_diagnostics）
 │  │  └─ features.py         #   definition / references / call_hierarchy / rename / code_actions / hover の呼び出しと PaaD への書き込み
 │  │
@@ -325,6 +325,7 @@ Lucianke/
 │  │  ├─ writer.py           #   IndexWriter スレッド、ジョブキュー、data_version
 │  │  ├─ ingest.py           #   ファイル単位の取り込み（files/symbols/relations/diagnostics の差分更新）。解析結果は FileFacts で受け取り、呼び手のトランザクション内で実行（index は syntax/lsp を import しない）
 │  │  ├─ queries.py          #   ツールが使うパラメータ化クエリ（名前つき）
+│  │  ├─ rank.py             #   参照グラフ上の PageRank・fan_in・ファイルのスコア（_symbol_rank、files.pagerank_score。T-01・T-03 の並びの元）
 │  │  ├─ public.py           #   query_project_db 用: 文の検査、authorizer、progress handler、行数上限
 │  │  └─ migrate.py          #   スキーマ版管理
 │  │
@@ -339,7 +340,9 @@ Lucianke/
 │  │
 │  ├─ engine/
 │  │  ├─ selector.py         #   EngineSelector（ADR-10）、警告文の雛形
-│  │  └─ indexer.py          #   Indexer: 走査・解析（スレッド）・バッチ化・背景ジョブ・_settle_relations。DB への書き込みは index/ingest.py へ渡す（§7.6.2。実装で確定 2026-10-29）
+│  │  ├─ indexer.py          #   Indexer: 走査・解析（スレッド）・バッチ化・背景ジョブ・_settle_relations。DB への書き込みは index/ingest.py へ渡す（§7.6.2。実装で確定 2026-10-29）
+│  │  ├─ reresolve.py        #   後から作られた・消えたファイルを import している側の relations を解き直す（_import_probes。§7.6.2。BUG-0025）
+│  │  └─ rank_scheduler.py   #   PageRank の再計算のデバウンス（最後の更新の約 1 秒後に 1 回。§7.6.2）
 │  │
 │  ├─ git/                   # M2。M1 ではリビジョン解決と blob 取得（T-02/T-05 の revision 対応）だけ
 │  │  ├─ repo.py             #   dulwich ラッパ: 参照解決、blob、ツリー差分、log --follow 相当
@@ -398,7 +401,7 @@ app / lifecycle ─► すべて（合成ルート）
 | `workspace/paths.py` | 相対化・正規化・実体解決・ルート配下検査。失敗は `E_INVALID_ARGUMENT` | ファイルの読み書き |
 | `syntax/symbols.py` | 構文木 → `SymbolRecord`。修飾名・種別・範囲・選択範囲・修飾子・doc 要約・`body_sha256` | DB 書き込み |
 | `index/ingest.py` | `FileFacts` を受けて 1 ファイルの差分取り込みを（呼び手が開いた）トランザクションの中で。`ingest_file` / `remove_file` / `upsert_workspace` / `upsert_exact_relations` / `replace_lsp_diagnostics`。`data_version` は `IndexWriter` が進める | 構文解析、走査 |
-| `engine/indexer.py` | ワークスペースの走査（`.gitignore` と `exclude_globs`）、1 ファイルの解析（`syntax`）→ `FileFacts`、バッチ化（`INGEST_BATCH_FILES` = 50）、背景ジョブ（T-00 `reindex`）、取り込み後の `_settle_relations` | DB の SQL（`ingest.py` と `IndexWriter` に任せる） |
+| `engine/indexer.py` | ワークスペースの走査（`.gitignore` と `exclude_globs`）、1 ファイルの解析（`syntax`）→ `FileFacts`、バッチ化（`INGEST_BATCH_FILES` = 50）、背景ジョブ（T-00 `reindex`）、取り込み後の `_settle_relations`、import 元の解き直し（`reresolve.py`）、PageRank の再計算（`rank_scheduler.py`） | DB の SQL（`ingest.py` と `IndexWriter` に任せる） |
 | `lsp/pool.py` | 状態機械・再起動・バックオフ・待機解放 | 要求の意味 |
 | `lsp/features.py` | 各要求の呼び出し、結果の `SymbolRecord` / `relations` 化、PaaD への書き込み要求 | 直列化形式 |
 | `edit/transaction.py` | 8 段の順序と失敗時の不変条件 | hunk の内容 |
@@ -525,7 +528,7 @@ class LuciankeError(Exception):
 - WAL のチェックポイントは `IndexWriter` が暇なときと終了時に行う。
 - **作り直し**（`reindex`、移行できない古い `schema_version`）は DB ファイルを削除せず、書き込み接続の中で全オブジェクトを `DROP` して流し直す（§7.6.5。Windows では読み取り接続が開いている DB ファイルを消せない。実装で確定 2026-10-29）。
 - `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（LSP 由来の `relations` 更新を含む）。`diagnostics` だけの更新では進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
-- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + `sha256`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。
+- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + `sha256`）、`_symbol_rank`（シンボル単位の PageRank と fan_in。schema v2。`index/rank.py`）、`_import_probes`（import の解決で調べたパスの語幹。schema v3。`engine/reresolve.py`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。公開 DDL（仕様書 §9.2）に列や表を足さないための表で、`schema.sql` に写しを置く。
 
 ## 6.3 ロックと順序
 
@@ -1053,8 +1056,9 @@ M1 の定義（Python と TypeScript / JavaScript の起動コマンド・初期
 ```python
 class LspPool:   # 言語 × ワークスペース × 役（types / lint）ごとに 1 つの LspHandle を持つ
     def __init__(self, registry: ProcessRegistry, *, on_diagnostics: OnDiagnostics | None = None, …)
-        # OnDiagnostics = Callable[[RelPath, list[dict], int | None, str], Any]  → on_diagnostics(path, diags, version, source)
+        # OnDiagnostics = Callable[[RelPath, list[dict], int | None, str, Workspace], Any]  → on_diagnostics(path, diags, version, source, ws)
         # 4 引数目の source はサーバー名（"basedpyright" / "ruff" …）。§7.5.5 の (file_id, source) 単位の全置換に要る
+        # 5 引数目の ws はそのハンドルのワークスペース（複数ルートでも診断を送り元の DB へ書ける。fccee0a。5 引数を受けない呼び手は RuntimeHub.on_diagnostics を直す）
     def get(self, language_id, ws, *, role="types", start_if_needed=True) -> LspHandle | None   # ready のときだけ返す。ブロックしない
     def status(self, language_id, ws, role="types") -> PoolStatus       # (state, progress, server_name, pid, reason)
     def handles(self, ws=None, language_id=None) -> list[LspHandle]
@@ -1062,11 +1066,15 @@ class LspPool:   # 言語 × ワークスペース × 役（types / lint）ご�
     async def wait_ready(self, language_id, ws, timeout_ms, *, role="types") -> bool
     async def notify_watched(self, ws, changes: Iterable[tuple[RelPath, int]]) -> float
         # workspace/didChangeWatchedFiles を稼働中（indexing / ready）の全 LSP へ。送信前の perf_counter を返す（DiagnosticsHub.wait_for の sent_at にそのまま渡せる）
+    def router(self, ws) -> DocumentRouter                             # ws の DocumentRouter（同じ workspace_id なら同じもの。§7.5.4。8a6f40f）
+    async def rebind(self, ws) -> list[LspHandle]                      # 設定変更（set_python_env・set_roots …）を既存のハンドルに取り込み、再起動したハンドルを返す。ハンドルが無ければ何もしない
     async def reset(self, language_id: str | None, ws) -> None         # reindex_scope: "lsp"。停止の回収を待つので async
     async def shutdown_all(self, grace_ms: int | None = None) -> None  # 終了手順（§6.5）: shutdown → exit → terminate（Windows は Job Object で孫ごと）。以後は起動しない
     async def sweep_idle(self, now=None, idle_s=LSP_IDLE_SHUTDOWN_S) -> list[LspHandle]   # MAY: 30 分無要求の稼働中を止めて standby へ
 
 class LspHandle:   # 状態の読み取りと、機能呼び出しが使う client / documents / diagnostics
+    started_at: str | None                  # 直近に起動を始めた時刻（UTC・ISO 8601・ミリ秒）。再起動のたびに更新。T-00 の lsp_daemons[].started_at
+    async def rebind(self, ws) -> bool      # 新しい Workspace に差し替える（documents / diagnostics の ws も）。再起動したら True
     def record_ok(self) -> None             # 要求が時間内に答えた: 連続タイムアウトの数え直し
     def record_timeout(self) -> bool        # 連続 3 回に達したらプロセスを落として unavailable（timeout_3x）にし True を返す
 ```
@@ -1088,6 +1096,8 @@ class LspHandle:   # 状態の読み取りと、機能呼び出しが使う clie
 - **要求のタイムアウトはプールから見えない**。機能呼び出し側（`lsp/features.py`）が、時間内に答えたら `LspHandle.record_ok()`、`TimeoutError` なら `record_timeout()` を呼ぶ（連続 3 回で `timeout_3x`。降格は呼び手が `engine.selector.on_lsp_timeout` で行う）。
 - `reset` は停止の回収を待つので `async`。`unavailable` も解く（次の要求で再起動）。`shutdown_all` は 1 つだけ（初版の本書は 2 つ書いていた）。
 - `LspHandle.documents`（`DocumentSync`）と `.diagnostics`（`DiagnosticsHub`）はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。外へ出す `LspStatus` では `starting` を `indexing` に含める。
+- **`rebind`（8a6f40f・c84b7a0、BUG-0023）**: 設定が変わったとき（`set_python_env`・`set_roots`・除外・`default_base_ref`）、`LspPool.rebind(ws)` が `workspace_id` の同じ既存のハンドルすべてに `LspHandle.rebind(ws)` を呼ぶ。`ws` と `documents.ws` / `diagnostics.ws`（URI の変換に使う）を差し替え、`on_diagnostics` の 5 引数目も新しい `ws` になる。**再起動するのは、ルートが変わったとき（言語を問わない）と、Python 系でインタープリタが変わったとき**だけ（basedpyright はインタープリタを `workspace/configuration` の応答でしか受け取らず、起動時の値で環境を作る〔§7.5.1〕ため、`set_python_env` の後は `started_at` が呼び出し時刻より後になる〔仕様書 T-00 事後条件 3〕）。除外などは LSP の設定に出ない（`build_settings` が使うのはインタープリタと tsserver だけ）ので再起動も `workspace/didChangeConfiguration` も要らない。再起動はクラッシュではないので `restarts` は増えない。`unavailable` は再起動せず `standby` に戻す（`reset` と同じ。次の要求で、新しい venv にサーバーが入っていれば起動する）。`standby` は差し替えだけ。
+- **`started_at`**: ハンドルが `starting` に入るたびにプールの壁時計（UTC）で ISO 8601（ミリ秒）に更新し、停止で `None` に戻す。
 
 `didOpen` 直後（解析中）の `definition` はサーバー内で約 0.6 s 待たされて正しい結果が返る（`null` は返さない。3 秒の `LSP_TIMEOUT_*` に収まる）ので、`indexing` 中の要求を `None` で返す設計（ADR-6 (b)）は安全側で変更不要（S-4 で確認）。
 
@@ -1138,6 +1148,14 @@ class DocumentSync:   # LSP サーバー 1 つ分の「開いている文書」�
 
 開いている文書は `LSP_OPEN_DOCS_MAX`（200）の LRU。要求で初めて触れたファイルを開き、超えたら使われたのが最も古い文書から `didClose`（いま開こうとしている文書は閉じない）。送信に失敗（`ConnectionError`）したら状態を変えずに送出し、サーバーの再起動では台帳ごと作り直す。ファイル内容は呼び手が渡す（`text`）。`didChange` は全文（増分は MAY）。`revision != WORKING_TREE` の内容は開かない（LSP は作業ツリーしか知らない）。
 
+**`DocumentRouter`（`lsp/documents.py`、`LspPool.router(ws)`。8a6f40f・c84b7a0、BUG-0023。実装で確定 2026-10-29）**: 1 言語に複数のサーバー（Python は `basedpyright`〔`types`〕と `ruff`〔`lint`〕、§7.5.1）が動くので、`EditTransaction` が求める `documents`（`sync(path, text, language_id)`・`sent_at_of(path)`・`is_open(path)`）と `diagnostics_hub`（`wait_for`）の口を、ワークスペース 1 つにつき 1 つの `DocumentRouter` が持つ。サーバー 1 つ分の `DocumentSync` / `DiagnosticsHub` をそのまま渡すと、書き込み後の `didChange` と診断の待ちが片方のサーバーにしか届かず、`diagnostics` の差分が狂う（BUG-0023）。`LspPool.router(ws)` は同じ `workspace_id` なら同じものを返す。
+
+- **`sync`**: その言語の `ready` なハンドルすべて（`types` が先、`lint` が後）の `DocumentSync` に同期する。`didOpen` の `languageId` はハンドルの定義の `document_language_id`（`c_sharp` → `csharp`）に直す。サーバーごとに版の数え方が違うので、返す版は代表（`types` 優先）の版にすぎず、**サーバーごとの `(版, 送信時刻)` を記録**して `wait_for` が使う。一部への送信が `ConnectionError` でも残りには送る。動いているサーバーが無い、または全部失敗したら `ConnectionError`（トランザクションは警告にして続ける）。**起動はしない**（`ready` でないハンドルは対象外）。
+- **`is_open` / `sent_at_of`**: どれかのハンドルが開いていれば真 / 開いているハンドルの送信時刻の**最小**（`wait_for(sent_at=)` の下限を甘い側にして、後から開いたサーバーの診断を取りこぼさない）。
+- **`diagnostics_hub.wait_for`**: その文書を開いている `ready` のサーバーすべてを**同時に**待ち、すべて揃ったときだけ `True`（1 つでも遅れたら pending。診断は index から全 `source` ぶんを読むので、1 つでも古いと差分が狂う）。待ちの時間はサーバー数で増えない（`timeout_ms` を共有する）。版つきの待ち（`min_version` あり＝編集した文書）は**記録したサーバーごとの版と送信時刻**で待つ（呼び手の `min_version` は代表の版なので他のサーバーには使わない。記録の無いサーバーは版なしで待つ）。**版なしの待ち（`min_version=None`＝LSP に見せただけの依存元）は `lint` のサーバーを待たない**（ruff は 1 ファイル内の検査で、依存元は内容が変わらないので再発行しない。待つと必ず時間切れになる）。`lint` しか開いていなければ全部待つ。
+- **版の検査**（`edit/workspace_edit.py` の `DocumentVersions`）は**`WorkspaceEdit` を出したサーバーの** `DocumentSync` に対して行う（ルーターは `version_of` を持たない）。T-08 など個別のハンドルの診断を読む呼び手は `handles_for` / `hubs_for`。
+- **結線（7b4fa68）**: `WiredServices.edit_transaction` は、プールが `router(ws)` を持てば**口を常に `DocumentRouter`** にする。T-13 が `lsp=` に QuickFix を供給した `LspHandle` を渡しても、`lsp` は「LSP で検証する」手がかり（LSP の状態を `READY` にする）にとどまり、`documents` / `diagnostics_hub` は 1 サーバー分でなくルーターになる。`lsp` が無いときの LSP の状態は言語ごとにプールの `status`。ルーターを出せないプール（偽物）のときだけ、渡されたハンドルの 1 サーバー。
+
 ### 7.5.5 診断の受信と版待ち（diagnostics.py）
 
 ```python
@@ -1150,7 +1168,7 @@ class DiagnosticsHub:   # LSP サーバー 1 つ分。attach(client) で textDoc
         # sent_at は DocumentSync.sent_at_of。min_publishes は版を付けないサーバーで発行を数える (d)。settle_ms は依存元の静止 (b)
 ```
 
-1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。**`DiagnosticsHub` 自身は index に書かない**: 受信のたびに `on_diagnostics(path, diags, version)` を呼ぶだけで、`LspPool` がサーバー名を足した 4 引数 `on_diagnostics(path, diags, version, source)` を呼び手（Index 側）に渡す（実装で確定 2026-10-29）。`on_diagnostics` が返す awaitable か `concurrent.futures.Future`（`IndexWriter.submit` の戻り）は、**書き込みが済むまで `wait_for` を「揃った」にしない**（§7.7.6 手順 4、EP-7。Future を捨てるとこの順序の保証が外れる。書き込みが失敗したら次の受信まで揃わず、タイムアウトで pending。BUG-0007、706f253）。`wait_for` は編集層の `DiagnosticsWaiter`（§7.7.6）の土台。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
+1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。**`DiagnosticsHub` 自身は index に書かない**: 受信のたびに `on_diagnostics(path, diags, version)` を呼ぶだけで、`LspPool` がサーバー名とハンドルのワークスペースを足した 5 引数 `on_diagnostics(path, diags, version, source, ws)` を呼び手（Index 側）に渡す（実装で確定 2026-10-29。`ws` は fccee0a で追加。複数ルートでも送り元のワークスペースの DB へ書ける）。`on_diagnostics` が返す awaitable か `concurrent.futures.Future`（`IndexWriter.submit` の戻り）は、**書き込みが済むまで `wait_for` を「揃った」にしない**（§7.7.6 手順 4、EP-7。Future を捨てるとこの順序の保証が外れる。書き込みが失敗したら次の受信まで揃わず、タイムアウトで pending。BUG-0007、706f253）。`wait_for` は編集層の `DiagnosticsWaiter`（§7.7.6）の土台。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
 2. `wait_for` の条件（S-4・S-5 で確認）:
    - (a) 自分が `didChange` した文書は `version >= min_version`（`==` ではなく `>=`）。basedpyright は連続した変更を畳んで最後の版だけ、ruff は版ごとに届く。診断が変わらない変更（コメントだけ）でも basedpyright は毎回 1 件届く。想定の待ち時間は basedpyright が `didChange` から約 0.3 s、ruff が 1 ms 未満。
    - (b) 依存元の文書は、`version` が自分の旧い版のまま再送されるので、`workspace/didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止で「揃った」とする。
@@ -1259,6 +1277,13 @@ def replace_lsp_diagnostics(conn, …)                                   # (file
 - **バッチ**: 起動時の差分索引は 1 トランザクションに最大 `INGEST_BATCH_FILES`（50）ファイル。走査中は 1 バッチの書き込みを待たず次のバッチの解析へ進む（書き込みは常に 1 バッチだけ先行）。`data_version` はトランザクションごとに 1 回だけ進む。
 - **import 表から作った関係の後始末（`_settle_relations`）**: import の解決は定義元の存在を確かめずに URN を作る（走査の順序に依存させないため）。そこで、取り込み後に同じトランザクションの中で (1) `symbols` に無いシンボルを指す目標（`#` を含む URN）の行を消し、(2) `target_file_id` を目標のシンボルの持ち主で埋める（目標のファイルが後から取り込まれた場合に備える）。外部シンボル（`lk://_ext/`）は `ingest_file` が `symbols` に最小の行（`is_external`）を作る（`_ensure_external`）ので消えない。
 - **未解決の import は外部扱いにする（決定 2026-10-29）**: 解決できない import（標準ライブラリ・`site-packages` / `node_modules` の第三者・解決失敗）は、**捨てずに** `lk://_ext/<パッケージ>#<名前>`（`<パッケージ>` は import 先の最上位モジュール名。§7.4.3 項 9）を `target_urn` にして `relations` に残す。理由: T-06 / T-07 が外部ノードを必要とする（外部の呼び先を返す）。**現状の実装は捨てている**（`engine/indexer.py` の `_relations` が解決できない名前の関係を落とす）。実装は別の役（7j）が本書に合わせて直す。
+- **import 元の解き直し（`engine/reresolve.py`、edb72e4、BUG-0025・BUG-0034。実装で確定 2026-10-29）**: import の解決は、定義元のファイルの有無を**取り込んだ時点のファイルシステム**で決める（走査の順序に依存させないため、定義元の存在は確かめずに URN を作る）。そのままだと、`a.py` を取り込んだ後で `b.py` が作られても `a.py` の行は `lk://_ext/pkg#b.helper`（外部）のまま、相対 import なら行そのものが無いまま残り、逆に `b.py` が消えると指す先が宙に浮く。そこで次のようにする。
+  - 取り込むとき、`resolve_module` が調べたパス（当たった・外れた両方）の**語幹**（パスから拡張子と `__init__` / `index` を除いたもの。`pkg/b.py` も `pkg/b/__init__.py` も `pkg/b`）を内部表 **`_import_probes(file_id, stem)`**（schema v3、`file_id` は `ON DELETE CASCADE`、`stem` に索引）に書く。`FileFacts.import_stems` を `ingest_file` がファイルごとに全置換する。
+  - ファイル `P` が**作られた・消えた**とき、`stem_of(P)` を持つ `_import_probes` の行から import している側を引き、**その範囲だけ**を解析し直して取り込み直す（全体の再走査はしない）。`index_file` / `remove` では `P` の取り込み・削除と**同じトランザクション**に入れる（`prepare_importers` で書き込みの前に事実を作り、`ingest_importers` で書く。`data_version` は 1 回だけ進む）。`scan` は最後に、この走査で取り込まなかった側を別のトランザクション（`data_version` は進めない。`_settle_relations` と同じ扱い）で解き直す。取り込み直した側は、同じ内容でも `exact` の行を失い `structural` に戻る（ADR-8。次に LSP が答えたとき戻る）。
+  - 語幹の一致は「`P` を調べたパスと同じ語幹を持つ」という意味で、実際に `P` に解決されるとは限らない（大目に引く）。取り込み直した結果が前と同じなら行は変わらない。
+  - 既存ファイルの編集でも、**シンボルの集合が変わった**（URN が足された・消えた）ときは同じ扱いにする（BUG-0034）。import 元の行は、定義元に目標のシンボルがまだ無いと `_settle_relations` に捨てられ（`_ext` にもならない）、後から足されても元に戻らないため。**本文だけの編集（集合が同じ）では import 元に触れない**（編集のたびに解析し直す費用と `exact` の行を失う副作用を避ける）。
+- **PageRank（`index/rank.py`、809eff4。実装で確定 2026-10-29）**: T-01 の `ranking: "pagerank"` と T-03 の同順位の並びの元。グラフは `relations` のうち `CALLS` / `REFERENCES` / `IMPORTS` / `INHERITS` / `IMPLEMENTS` の行で、**ワークスペース内のシンボル**（`is_external = 0`）を指すものだけを辺にする（`lk://_ext/` を辺にしないのは `Decimal` や `Exception` が上位を占めないため）。始点は参照箇所を含むシンボル、またはモジュール直下のコード（セレクタの無い URN）。自己ループは捨て、`(始点, 終点)` の組は種別・参照箇所の数に関わらず 1 本（重み 1）。テストファイルからの辺も数える（索引上の重要度は `include_tests` に依らない。T-01 が表示から外すだけ）。減衰係数 0.85、出次数 0 の頂点の質量は全頂点に均等配分、初期値は一様、最大 200 反復で L1 差が 1e-10 未満なら止める。頂点は URN の辞書順、辺も整列してから足すので**決定的**（同じ入力なら浮動小数の加算順まで同じ）。numpy は使わない（10 万シンボル・40 万辺で約 2.5 秒）。**シンボルのスコア**はワークスペース内のシンボルの PageRank をその最大値で割った値（最大 1.0、小数 12 桁）を**内部表 `_symbol_rank(urn, workspace_id, score, fan_in)`**（schema v2。`fan_in` は別ファイルからの辺の本数）に、**ファイルのスコア**は公開シンボル（定義は仕様書 T-01 処理規約 2）の上位 5 件の和を最大のファイルを 1.0 とした値で `files.pagerank_score` に書く。T-01 の `max_symbols_per_file` は `_symbol_rank` から要求の件数で計算し直す。辺が 1 本も無いときは何も書かず、`files.pagerank_score` と `_symbol_rank` を空にする。T-01 はこれを「グラフ未準備」として `alpha` に降格する。計算は読み取り接続のスレッドで行い（書き手を止めない）、書き込みは短いジョブ 1 つで、**`data_version` は進めない**（並び順の付加情報で、カーソルの断面を変えない）。
+- **PageRank の再計算のデバウンス（`engine/rank_scheduler.py`、bdacc4a・a4b1229）**: `Indexer.scan` は全体の取り込みの後に 1 回計算する。監視や編集ツールによる `index_file` / `remove` は 1 ファイルずつ来るので、そのたびに全体を計算し直すと重い。`RankScheduler.touch()` が「最後の更新から約 1 秒（`RANK_DEBOUNCE_S`）、次の更新が来なければ 1 回だけ再計算」を予約する（連続 10 回で再計算 1 回）。再計算の最中の更新は、終わった後にもう一度（さらに 1 秒待ってから）計算する（途中の取り消しはしない。書き込みジョブを中途半端に止めない）。`aclose()` で待ちも再計算も取り消す。再計算は走査のジョブの終わりを待つ（走査の最後の計算を古い結果で上書きしない）。失敗は握って記録する（順位は付加情報で、取り込みの成否に影響させない）。待ち（`sleep`）は差し替えられる。
 - **Tier 3**: `FormatAdapter` は既定ではシンボルを返さず `files` 行だけを作る（`confidence = lexical_fallback`）。`symbols(source, *, rel, workspace_id)` が非空を返すアダプタ（JSON / YAML / TOML / XML。最上位の節だけ。§7.4.1）はそのシンボルも入れる（持てば `structural`）。
 - 秘密ファイル・バイナリ・`MAX_FILE_BYTES` 超過・タグクエリの無い言語は、`files` 行だけ（本文は解析しない）か Tier 4 の `heuristic.outline` に回す。
 
@@ -1283,7 +1308,7 @@ def replace_lsp_diagnostics(conn, …)                                   # (file
 | `references_to(urn, use_kinds, include_tests, offset, limit)`, `count_references_to(urn, …)` | T-06 | 1 参照 = 1 行。`offset` はカーソルの `o` |
 | `callers(urn, depth, max_children)`, `callees(…)` | T-07 / T-09 | 再帰 CTE。循環は経路配列で検出 |
 | `diagnostics_for(file_ids, min_severity, sources)` | T-08 | |
-| `repo_map(ws, scope, ranking, per_file)` | T-01 | `pagerank_score` は `relations` から Indexer が背景で計算して `files` / `symbols` に書く（空なら `alpha`） |
+| `repo_map(ws, scope, ranking, per_file)` | T-01 | `files.pagerank_score` と `_symbol_rank` は `relations` から Indexer が背景で計算して書く（§7.6.2。`index/rank.py` の `repo_map_files`。空なら `alpha`） |
 | `data_version(ws)` | パイプライン・カーソル | |
 
 性能の目安は「10 万シンボルで各関数 10 ms 以下」。S-9 のベンチで確かめ、超えるものは索引を足す。
@@ -1330,7 +1355,7 @@ FTS5 の内部読み取りと利用者の `SELECT * FROM symbols_fts_data` は a
 
 ### 7.6.5 スキーマ版管理と起動時の差分索引
 
-- `_meta(schema_version INTEGER, data_version INTEGER, edit_seq INTEGER, lucianke_version TEXT, created_at TEXT)`。`schema.sql` の先頭コメントに `schema_version` を書き、`migrate.py` が前方向の移行を順に適用する。移行が用意されていない古い版は DB を作り直す（PaaD はキャッシュであり、再索引で復元できる。MUST）。**作り直しは DB ファイルの削除ではなく、書き込み接続の中で全オブジェクト（テーブル・ビュー・トリガ・仮想テーブル・索引）を `DROP` して `schema.sql` を流し直す**（Windows では読み取り接続が開いている DB ファイルを削除・改名できないため）。`_meta.edit_seq` は作り直しをまたいで引き継ぐ（`edit_id` を再利用しない。実装で確定 2026-10-29）。
+- `_meta(schema_version INTEGER, data_version INTEGER, edit_seq INTEGER, lucianke_version TEXT, created_at TEXT)`。`schema.sql` の先頭コメントに `schema_version`（現在 3）を書き、`migrate.py` が前方向の移行を順に適用する（v1→v2: `_symbol_rank` を足す。v2→v3: `_import_probes` を足す。値は各ファイルの次の取り込みで入る）。移行が用意されていない古い版は DB を作り直す（PaaD はキャッシュであり、再索引で復元できる。MUST）。**作り直しは DB ファイルの削除ではなく、書き込み接続の中で全オブジェクト（テーブル・ビュー・トリガ・仮想テーブル・索引）を `DROP` して `schema.sql` を流し直す**（Windows では読み取り接続が開いている DB ファイルを削除・改名できないため）。`_meta.edit_seq` は作り直しをまたいで引き継ぐ（`edit_id` を再利用しない。実装で確定 2026-10-29）。
 - `schema.sql` と仕様書 §9.2 の DDL の差分はテスト（`tests/unit/test_schema_matches_spec.py`）で検出する。追加したトリガと `_` 内部テーブルは許容リストに書く。
 - 起動時の差分索引: `.gitignore` と `exclude_globs` を尊重してファイルを列挙 → `files` の `(path, byte_size, mtime)` と比べ、変わったものだけ `sha256` → 違えば `ingest_file`、無くなったものは `remove_file`、新しいものは `ingest_file`。背景ジョブとして進捗を T-00 の `jobs[]` に出し、索引中もツールは答える（`warnings` に「index in progress N%」）。`files.indexed_at` は取り込み時刻。
 
@@ -1791,7 +1816,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
   │                  workspace.watcher expect(path, sha_after)
   │ ── unlock ───────edit.lock
   └────────────────────────────────────────────────────────────────────────────┘
-  8. Diagnosed       edit.verify       参照元を didOpen → DiagnosticsWaiter.wait(paths, v_n, diagnostics_wait_ms)
+  8. Diagnosed       edit.verify       参照元を didOpen（DocumentRouter 経由）→ DiagnosticsWaiter.wait(paths, v_n, diagnostics_wait_ms)
                                         → diagnostics 現在行 − スナップショット → DiagDelta(status)
   9. 応答            tools.t10 → Packer → render（applied:, files_changed:, syntax_check:, new_diagnostics: と diag-line）
 ```
