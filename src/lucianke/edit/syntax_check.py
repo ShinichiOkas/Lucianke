@@ -41,6 +41,7 @@ __all__ = [
     "SyntaxIssue",
     "check_after",
     "check_fragment",
+    "starts_with_definition",
     "to_error_details",
 ]
 
@@ -310,6 +311,49 @@ def _has_code(text: str, language_id: str) -> bool:
     return any(ln.strip() and not ln.strip().startswith(comment) for ln in text.splitlines())
 
 
+def _dedented(new_code: str) -> str:
+    """改行を LF にそろえ、共通先頭空白と前後の空行を除く（断片を解析する前の正規化）。"""
+    return textwrap.dedent(new_code.replace("\r\n", "\n").replace("\r", "\n")).strip("\n")
+
+
+# 定義の前に付く付帯要素（コメント・属性）の型。**構文木の型で** 読み飛ばす: 複数行にまたがるデコレータ・属性の
+# 2 行目以降（``("a", "b"),`` や ``Debug,`` など）は行頭の文字では見分けられない。Python のデコレータは
+# ``decorated_definition`` の中に入るので読み飛ばす必要が無い。
+_LEADING_TRIVIA: dict[str, frozenset[str]] = {
+    "python": frozenset({"comment"}),
+    "rust": frozenset({"line_comment", "block_comment", "attribute_item"}),
+}
+_PYTHON_DEFINITIONS = frozenset({"function_definition", "class_definition", "decorated_definition"})
+_RUST_EXTRA_DEFINITIONS = frozenset({"use_declaration", "extern_crate_declaration"})
+
+
+def _is_definition_node(language_id: str, node_type: str) -> bool:
+    if language_id == "python":
+        return node_type in _PYTHON_DEFINITIONS
+    # Rust: ``fn`` / ``struct`` / ``enum`` / ``impl`` / ``trait`` / ``type`` / ``mod`` / ``const`` … は ``*_item`` 型
+    return node_type.endswith("_item") or node_type in _RUST_EXTRA_DEFINITIONS
+
+
+def starts_with_definition(language_id: str, new_code: str) -> bool | None:
+    """``new_code`` の最初の文（コメント・属性を除く）が定義か（T-10 ``replace_body`` は定義全体を要する）。
+
+    Python と Rust だけが対象（この 2 言語は本体の文が単体でも構文エラーにならず、構文検証では断片を見分けられない）。
+    判定できないときは ``None``: 対象外の言語、文法が無い、``new_code`` 自体に構文エラーがある
+    （その報告は ``check_fragment`` の仕事）。
+    """
+    if language_id not in _LEADING_TRIVIA:
+        return None
+    an = _analyze(language_id, (_dedented(new_code) + "\n").encode("utf-8"))
+    if an is None or an.errors or an.timed_out:
+        return None
+    trivia = _LEADING_TRIVIA[language_id]
+    for node in an.parsed.tree.root_node.children:
+        if node.type in trivia:
+            continue
+        return _is_definition_node(language_id, node.type)
+    return False
+
+
 def check_fragment(language_id: str, new_code: str, *, wrap: Wrap = "none") -> SyntaxCheckResult:
     """``new_code`` 単体の構文を検証する（T-10 処理規約 3）。エラーが 0 なら ``ok``、あれば ``failed``。
 
@@ -324,7 +368,7 @@ def check_fragment(language_id: str, new_code: str, *, wrap: Wrap = "none") -> S
     容器を持たない言語に ``class_body`` / ``module`` を指定したときは、包まずに解析する。位置は断片の座標に戻して返す。
     文法が無い言語は ``skipped``。
     """
-    code = textwrap.dedent(new_code.replace("\r\n", "\n").replace("\r", "\n")).strip("\n")
+    code = _dedented(new_code)
     table = {"class_body": _CLASS_BODY, "module": _MODULE}.get(wrap, {})
     header, footer, indent = table.get(language_id, ("", "", ""))
     if header:

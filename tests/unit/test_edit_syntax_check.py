@@ -15,6 +15,7 @@ from lucianke.edit.syntax_check import (
     SyntaxIssue,
     check_after,
     check_fragment,
+    starts_with_definition,
     to_error_details,
 )
 
@@ -350,3 +351,47 @@ def test_multi_hunk_plan_on_crlf_bom_file():
     r = check_after("python", before, bad_after, edited_ranges_after=ranges)
     assert r.status == "failed"
     assert any(2 <= e["line"] <= 5 for e in to_error_details(r)["errors"])
+
+
+# --- starts_with_definition（T-10 replace_body の「定義全体か」。BUG-0045）-----------------------------------
+
+
+@pytest.mark.parametrize(
+    "language_id, code, expected",
+    [
+        # Python: 複数行のデコレータの 2 行目以降（``("a", "b"),`` など）を読み飛ばさず、構文木で判定する
+        ("python", "def f():\n    pass\n", True),
+        ("python", "async def f():\n    pass\n", True),
+        ("python", "class C:\n    x = 1\n", True),
+        ("python", "@d\ndef f():\n    pass\n", True),
+        ("python", "@pytest.mark.parametrize(\n    ('a', 'b'),\n    [(1, 2)],\n)\ndef f(a, b):\n    pass\n", True),
+        (
+            "python",
+            "@d(  # open (\n    a=[1,\n       2],\n    # note )\n    b={'k': (1, 2)},  # tail )\n)\n@e\nasync def f():\n    pass\n",
+            True,
+        ),
+        ("python", "# lead\n@d(\n    1,\n)\nclass C: ...\n", True),
+        ("python", "    @d(\n        1,\n    )\n    def m(self):\n        pass\n", True),  # 字下げされた断片
+        ("python", "@d(\r\n    1,\r\n)\r\ndef f():\r\n    pass\r\n", True),
+        ("python", "return a + b\n", False),
+        ("python", "x = (\n    1,\n)\n", False),
+        ("python", "# only a comment\n", False),
+        ("python", "@d(\n    1,\n)\nx = 1\n", None),  # デコレータの後が定義でない → 構文エラー（報告は check_fragment の仕事）
+        ("python", "def f(:\n", None),
+        # Rust: 複数行の属性・Doc コメント・ブロックコメントを読み飛ばす
+        ("rust", "fn f() {}\n", True),
+        ("rust", "pub async fn f() {}\n", True),
+        ("rust", "#[derive(\n    Debug,\n    Clone,\n)]\npub struct S {\n    pub x: i32,\n}\n", True),
+        ("rust", '#[cfg_attr(\n    feature = "x",\n    derive(Debug)\n)]\n/// doc\n/* a\n b */\nimpl S {}\n', True),
+        ("rust", "unsafe impl Send for S {}\n", True),
+        ("rust", "const N: u32 = 1;\n", True),
+        ("rust", "let y = 2;\n", False),
+        ("rust", "x * 2;\n", False),
+        ("rust", "#[inline]\n", False),
+        # 対象外の言語（構文検証だけで判定する）
+        ("typescript", "@Component({\n  a: 1,\n})\nexport class C {}\n", None),
+        ("go", "func f() {}\n", None),
+    ],
+)  # fmt: skip
+def test_starts_with_definition(language_id: str, code: str, expected: bool | None) -> None:
+    assert starts_with_definition(language_id, code) is expected
