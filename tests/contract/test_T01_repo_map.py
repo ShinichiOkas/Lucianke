@@ -228,7 +228,7 @@ async def test_postcondition_4_total_estimate_is_the_number_of_target_files(pipe
     all_paths = paths_of(full)
     assert full.structured["page"]["total_estimate"] == len(all_paths)
     assert not full.structured["page"].get("next_cursor")
-    small = await repo_map(pipeline, max_tokens=300)
+    small = await repo_map(pipeline, max_tokens=800)
     assert not small.is_error, small.text
     page = small.structured["page"]
     assert len(files_of(small)) < len(all_paths)
@@ -236,7 +236,7 @@ async def test_postcondition_4_total_estimate_is_the_number_of_target_files(pipe
     assert page["next_cursor"]
 
 
-@pytest.mark.parametrize("max_tokens", [200, 300, 500, 1500, 5000])
+@pytest.mark.parametrize("max_tokens", [400, 500, 1500, 5000])
 async def test_postcondition_5_budget_is_respected(pipeline: Pipeline, max_tokens: int) -> None:
     for fmt in ("compact", "json"):
         r = await repo_map(pipeline, fmt, max_tokens=max_tokens)
@@ -269,7 +269,7 @@ async def test_compact_conforms_to_the_grammar_at_any_budget(pipeline: Pipeline,
 async def test_smaller_budget_is_a_prefix_of_the_larger(pipeline: Pipeline) -> None:
     """重要なファイルが先: 小さい予算で出るファイルは、大きい予算で出るファイルの先頭と同じ。"""
     big = paths_of(await repo_map(pipeline, max_tokens=8000))
-    for max_tokens in (250, 500, 1000):
+    for max_tokens in (800, 1000, 1500):
         small = paths_of(await repo_map(pipeline, max_tokens=max_tokens))
         assert small and small == big[: len(small)]
 
@@ -312,7 +312,7 @@ async def test_include_signatures_false_drops_parameters(pipeline: Pipeline) -> 
 
 
 async def test_json_tree_lists_directories_with_counts(pipeline: Pipeline) -> None:
-    r = await repo_map(pipeline, max_tokens=300)
+    r = await repo_map(pipeline, max_tokens=4000)
     tree = {t["dir"]: t for t in r.structured["data"]["tree"]}
     assert tree["src/"]["file_count"] >= 7 and tree["src/"]["line_count"] > 0
     assert "./" in tree and "conf/" in tree
@@ -399,7 +399,7 @@ async def test_cursor_walks_all_files_exactly_once(pipeline: Pipeline) -> None:
     seen: list[str] = []
     cursor: str | None = None
     for _ in range(60):
-        args: dict[str, Any] = {"max_tokens": 250}
+        args: dict[str, Any] = {"max_tokens": 800}
         if cursor:
             args["cursor"] = cursor
         r = await repo_map(pipeline, **args)

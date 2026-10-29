@@ -45,6 +45,8 @@ from lucianke.workspace.types import Workspace
 
 GRAPH_NOT_READY = "ranking=alpha (graph not ready)"
 TREE_LINE_MAX_DIRS = 12
+TREE_JSON_TOKENS_PER_DIR = 40
+"""json の ``tree[]`` に載せるディレクトリ数の上限は ``max_tokens`` をこれで割った数（予約分が予算を食い尽くさないため。ファイル数の多い順）。"""
 SUMMARY_MAX_GROUPS = 8
 EXTRA_RECORDS = 3
 """予算を超えたあとにも作っておくファイルブロックの数（パッカーの ``# summary:`` が「残り」を見られるように）。"""
@@ -263,12 +265,13 @@ def _make_record(
             candidates.append((shown, False))
         if reselect is not None:
             candidates += [(reselect(k), False) for k in range(len(shown) - 1, -1, -1)]
-        for subset, sigs in candidates:
-            text = "\n".join(_block(L, f, rank_value, subset, with_signatures=sigs, tree_note=tree_note))
-            if _EST.count(text) <= budget:
-                return _make_record(
-                    L, f, index, rank_value, subset, with_signatures=sigs, tree_note=tree_note, reselect=None
-                )
+        for note in (tree_note, None):  # 最後の手段としてディレクトリ要約行も外す
+            for subset, sigs in candidates + ([([], False)] if note is None else []):
+                text = "\n".join(_block(L, f, rank_value, subset, with_signatures=sigs, tree_note=note))
+                if _EST.count(text) <= budget:
+                    return _make_record(
+                        L, f, index, rank_value, subset, with_signatures=sigs, tree_note=note, reselect=None
+                    )
         return None
 
     return Record(
@@ -453,7 +456,10 @@ async def handler(ctx: ToolContext, args: GetRepoMapArgs) -> ToolOutput:
         max_confidence=Confidence.STRUCTURAL,
         engine=EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL),
         page_unit="file",
-        data_static={"ranking_used": built.ranking_used, "tree": built.tree},
+        data_static={
+            "ranking_used": built.ranking_used,
+            "tree": built.tree[: max(1, ctx.call.max_tokens // TREE_JSON_TOKENS_PER_DIR)],
+        },
         summarize=_summarizer(built.ordered, len(built.records)),
         tier=built.tier,
         detected_language=built.languages,
