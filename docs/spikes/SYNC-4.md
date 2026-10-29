@@ -14,7 +14,7 @@
 | 仕様書 §12.2 | `positionEncoding` が無ければ UTF-16、サーバー別の上書きは持たない、送る列は文字境界だけ、丸めが要るときは降格（ruff はパニック）、実測 4 サーバー | 432c6c0、SYNC-3 申し送り 1、S-11 |
 | 仕様書 §12.3 | 環境変数はサーバー名単位 `LUCIANKE_LSP_<サーバー名>_CMD` が先、言語単位が後（lint は `…_LINT_CMD`）。TypeScript の既定は typescript-language-server、代替は vtsls | 432c6c0、SYNC-3 申し送り 3、設計書 §7.5.1 |
 | 仕様書 §12.7 | `LUCIANKE_LSP_<サーバー名>_CMD` と `lsp.position_encodings`（MAY、既定 `["utf-8","utf-16"]`、**未実装**の印） | 432c6c0、SYNC-3 申し送り 2 |
-| 仕様書 T-06・T-07 事後条件 | 未解決 import が外部シンボル `lk://_ext/<パッケージ名>#<名前>`（`is_external`）として現れる。T-06 は `import` の使用箇所を返す、T-07 は `children` を持たない葉ノード | 432c6c0、SYNC-3 申し送り 4、53ef0e2 → 53ce5aa、`tests/contract/test_T06_T07.py` |
+| 仕様書 T-06・T-07 事後条件 | 未解決 import が外部シンボル `lk://_ext/<パッケージ名>#<名前>`（`is_external`）として現れる。T-06 は `import` の使用箇所を返す、T-07 は `children` を持たない葉ノード | 432c6c0、SYNC-3 申し送り 4、53ce5aa、`tests/contract/test_T06_T07.py` |
 | 設計書 §7.2.1 | 「提案」を**採用済み**（27e0821）に。`tokens.toml` は設けず `core/tokens.py` の `TOKEN_COEFFICIENTS`（旧名 `TOKENS_PER_CHAR` は別名）。×1.03 は見送り（合成 base64 が −8.3%）。回帰テスト `test_core_tokens_calibration.py` と結果、速度。1 レコードの推定に行末の改行を数える（改行 0.25 → 0.6）、縮退に終端の改行の分を引いた予算、`estimate_tokens` も同じ推定器 | 0ee8775、27e0821、`docs/spikes/S-12.md`「反映」 |
 | 設計書 §12.1 S-12 行、§13 R-12 | 「代替で合格見込み」→「`lean_wide` に替えて合格。27e0821 で置き換え済み」。R-12 に採用済みと残り（TS・Go・Rust・韓国語は未検証、×1.03 見送り） | 0ee8775 |
 | 仕様書 T-08 | 規約 4: `revision` が `WORKING_TREE` 以外は M1 では `E_UNSUPPORTED`（`revision_not_supported_until_M2`）。(a) のみを返すのは M2。エラー一覧にも追記。`lsp_sources[]` に `role`（`types` / `lint`）で言語 × 役ごと。QuickFix の ID は `qf_` + 4 桁 16 進の連番、問い合わせは現在ページ（`cursor` 以降）の先頭から LSP 由来の error / warning 100 件まで。規約 9: ワークスペース全体では LSP に開かせるのは 100 ファイルまで（超過分は構文エラーだけ + `warnings`） | 0ee8775、`tools/t08_get_diagnostics.py`、`lsp/action_store.py` |
@@ -29,7 +29,7 @@
 | 仕様書 T-05・T-12 の例 | コードブロックを含む compact の例は外側のフェンスを 4 つに（規約 5 のとおり。3 つだと Markdown が入れ子で閉じてしまい、後ろの例の抽出も狂う） | 7073ef0、5a7940a |
 | 仕様書 T-16・T-17 の例 | 文法に当てはまらなかった行を `- ` の note 行にした: T-16 の `trace:` の各ステップ、T-17 に `commits:` の見出しを足してコミット行。検査器と合う（T-16 は M3、T-17 は M2 で未実装。実装するときは note 行で出す） | 7073ef0 |
 | 設計書 §7.4.1、§7.6.2 | `FormatAdapter` の Protocol に `skeleton_record` と `symbols`、`selector` は式の文字列（`"jsonpath:$.a"`）。Tier 3 の索引は最上位の節だけをシンボルに（JSON / YAML / TOML は `Key`、XML は根と直下の子の `Tag`。128 KiB 超・JSONL・根が配列・ipynb・壊れたファイルは `files` 行だけ。1 ファイル 500 件まで） | 7073ef0、a9e9818（7f） |
-| 設計書 §7.7（T-05 の失敗分岐） | 「1 件も入らない → `next_cursor` + `warnings`」を「`next_cursor` なし」に（§5.6-4 と設計書 §7.2.2 は 4414fad で済み。残っていた 1 か所） | 432c6c0、4414fad（BUG-0015） |
+| 設計書 §8.2（読み取りツールの往復の失敗分岐） | 「1 件も入らない → `next_cursor` + `warnings`」を「`next_cursor` なし」に（§5.6-4 と設計書 §7.2.2 は 4414fad で済み。残っていた 1 か所） | 432c6c0、4414fad（BUG-0015） |
 
 ## 確認だけで変えなかったもの
 
