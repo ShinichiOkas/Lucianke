@@ -1,8 +1,8 @@
 """T-10 ``edit_symbol_body``（仕様書 §11.5 T-10、第 10 章）。シンボルを単位にコードを置換し、同じ応答で構文妥当性と診断差分を返す。
 
-範囲: ``replace_body``（Python・TypeScript・JavaScript・Rust など文法のある言語。定義ノード全体を ``new_code`` で置き換える）。
-``insert_before`` / ``insert_after`` / ``insert_member``（``edit/builders_insert.py``）も実装済み。``delete_symbol`` は引数としては受け付けるが、ビルダー
-が未実装の間は ``E_UNSUPPORTED``（``details.reason: "operation_not_implemented"``）を返す。
+範囲: 5 操作すべて（Python・TypeScript・JavaScript など文法のある言語）。ビルダーは ``replace_body`` が ``edit/builders.py``、
+``insert_before`` / ``insert_after`` / ``insert_member`` が ``edit/builders_insert.py``、``delete_symbol`` が
+``edit/builders_delete.py``。
 Tier 2・3（セレクタ）は M2。
 
 編集そのもの（ロック・前提検証・降格インターロック・構文検証・ジャーナル・書き込み・再索引・診断差分）は
@@ -147,7 +147,7 @@ def _plan_builder(
         return delete_symbol_builder(target)
     raise LuciankeError(
         ErrorCode.E_UNSUPPORTED,
-        f"operation {args.operation} is not implemented yet (replace_body only)",
+        f"operation {args.operation} is not implemented",
         details={"reason": "operation_not_implemented", "operation": args.operation},
     )
 
