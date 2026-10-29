@@ -193,7 +193,7 @@ def default_client_capabilities() -> dict[str, Any]:
         "workspace": {
             "configuration": True,
             "workspaceFolders": True,
-            "applyEdit": False,
+            "applyEdit": True,
             "workspaceEdit": {"documentChanges": True, "resourceOperations": [], "failureHandling": "abort"},
             "didChangeConfiguration": {"dynamicRegistration": False},
             "didChangeWatchedFiles": {"dynamicRegistration": False},
