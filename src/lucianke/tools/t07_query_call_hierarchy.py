@@ -306,11 +306,17 @@ def _node_json(n: _Node, include_guard: bool) -> dict[str, Any]:
 
 
 def _edges(root_urn: str, all_nodes: Sequence[_Node], include_guard: bool) -> list[dict[str, Any]]:
+    """木のノードごとの呼び出しエッジ（呼び出し元 → 呼び出し先）。``both`` で同じエッジが 2 度出ないよう、箇所で重複を除く。"""
     out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
     for n in all_nodes:
         parent = n.parent_urn or root_urn
         src, dst = (n.urn, parent) if n.direction == "incoming" else (parent, n.urn)
         for s in n.sites:
+            key = (src, dst, s.path, s.line)
+            if key in seen:
+                continue
+            seen.add(key)
             out.append(
                 {
                     "source_urn": src,

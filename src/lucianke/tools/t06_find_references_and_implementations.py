@@ -27,6 +27,7 @@ from pydantic import Field
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Confidence, EngineChoice, Kind, SymbolRecord, Tier
 from lucianke.core.records import Record, ToolOutput
+from lucianke.core.urn import LexSel, Urn
 from lucianke.index import queries
 from lucianke.syntax.heuristic import lexical_scan
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
@@ -224,7 +225,7 @@ def _implementations(
             found.implementations_note = "(none)"
         else:
             impls = []
-            found.implementations_note = "(none; concrete class — see type_hierarchy for subclasses)"
+            found.implementations_note = "(none; concrete class, see type_hierarchy for subclasses)"
     elif sym.kind in (Kind.METHOD, Kind.FUNCTION, Kind.CONSTRUCTOR, Kind.PROPERTY):
         owner = _owner_class(conn, ws_id, sym)
         impls = []
@@ -344,7 +345,7 @@ def _lexical_refs(
                     line=key[1],
                     col=key[2],
                     use="w" if hit.is_definition else "r",
-                    source_urn=file_urn(ws.workspace_id, str(info.path)),
+                    source_urn=str(Urn(ws.workspace_id, str(info.path), LexSel(sym.name, key[1]))),
                     enclosing_urn=None,
                     enclosing_name=None,
                     snippet=hit.line_text.strip() if args.context_snippet else "",
@@ -404,14 +405,21 @@ def _sym_list(symbols: list[SymbolRecord], total: int) -> str:
 
 def _ref_record(L: Any, r: _Ref, priority: int, target_urn: str, show_snippet: bool) -> Record:
     snippet = r.snippet if show_snippet else ""
-    line = L.ref_line(r.path, r.line, r.col, use=r.use, enclosing=r.enclosing_name, snippet=snippet)
-    if r.lexical:
-        line = line.rstrip() + "  conf=lexical_fallback"
+    suffix = "  conf=lexical_fallback" if r.lexical else ""
+    if suffix and snippet:  # 末尾の印を足しても 200 文字に収める（規約 6）
+        head = L.ref_line(r.path, r.line, r.col, use=r.use, enclosing=r.enclosing_name, snippet="x")[:-1]
+        room = L.LINE_LIMIT - len(head) - len(suffix)
+        if len(snippet) > room:
+            snippet = snippet[: max(room - 1, 0)].rstrip() + "…"
+    line = (
+        L.ref_line(r.path, r.line, r.col, use=r.use, enclosing=r.enclosing_name, snippet=snippet).rstrip()
+        + suffix
+    )
     return Record(
         kind="ref",
         key=f"{r.path}:{r.line}:{r.col}",
         priority=priority,
-        lines=(line.rstrip(),),
+        lines=(line,),
         data={
             "path": r.path,
             "line": r.line,

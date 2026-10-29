@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -21,7 +22,8 @@ import compact_grammar as g
 import pytest
 
 from lucianke.app import build_services
-from lucianke.core.model import Confidence, Kind, SymbolRecord
+from lucianke.core.model import Confidence, Kind, RelPath, SymbolRecord, Tier
+from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn
 from lucianke.index.connection import open_writer
 from lucianke.index.ingest import FileFacts, RelationFact, ingest_file, upsert_workspace
@@ -38,6 +40,7 @@ PAY = "src/shop/services/payment.py"
 LIM = "src/shop/services/limits.py"
 ROUTES = "src/shop/api/routes.py"
 TESTS = "tests/test_payment.py"
+RST = "docs/api.rst"  # Tier 3。process_charge の語を含む（include_lexical_in_other_files 用）
 FILES = (PAY, LIM, ROUTES, TESTS)
 PROCESS_CHARGE = "PaymentProcessor.process_charge"
 GUARD_CREATE = "req.amount > 0 and not paid"
@@ -287,6 +290,19 @@ def build_db(db: Path) -> None:
                 relations=relations[p],
             )
             tx(conn, lambda c, f=facts: ingest_file(c, f))
+        rst = (POLY / RST).read_bytes()
+        rst_facts = FileFacts(
+            workspace_id=WS,
+            path=RelPath(RST),
+            language="rst",
+            tier=Tier.T3,
+            line_count=LineIndex(rst).content_line_count,
+            byte_size=len(rst),
+            sha256=hashlib.sha256(rst).hexdigest(),
+            is_test=False,
+            confidence=Confidence.LEXICAL_FALLBACK,
+        )
+        tx(conn, lambda c: ingest_file(c, rst_facts))
     finally:
         conn.close()
 
@@ -638,3 +654,23 @@ async def test_t07_graph_output_draws(pipeline: Pipeline) -> None:
     assert not mm.is_error and "flowchart LR" in mm.text and "CALLS" in mm.text
     # 循環はグラフでは 2 ノード・2 エッジの輪になる
     assert mm.text.count("-->") == 2
+
+
+async def test_t06_lexical_refs_in_other_files_are_marked_and_mixed(pipeline: Pipeline) -> None:
+    """include_lexical_in_other_files: Tier 3 のファイルの単語一致が lexical_fallback で加わる（応答は mixed）。"""
+    plain = await refs(pipeline, PC)
+    assert not any(x["path"] == RST for x in plain.structured["data"]["references"])
+    r = await refs(pipeline, PC, include_lexical_in_other_files=True)
+    assert not r.is_error, r.text
+    rows = r.structured["data"]["references"]
+    lex = [x for x in rows if x["path"] == RST]
+    assert len(lex) == 1 and lex[0]["confidence_level"] == "lexical_fallback"
+    assert lex[0]["line"] == find_line(RST, "process_charge") and lex[0]["use"] == "r"
+    assert "process_charge" in lex[0]["snippet"]
+    meta = r.structured["_resolution_meta"]
+    assert meta["mixed"] is True and meta["confidence_level"] == "lexical_fallback"
+    assert meta["confidence_breakdown"] == {"structural": 3, "lexical_fallback": 1}
+    assert len(rows) == 4 and rows == sorted(rows, key=lambda x: (x["path"], x["line"], x["col"]))
+    c = await refs(pipeline, PC, "compact", include_lexical_in_other_files=True)
+    assert g.validate(c.text) == [], g.validate(c.text)
+    assert re.search(rf"^{RST}:\d+:\d+  \[r\] .*  conf=lexical_fallback$", c.text, re.M), c.text
