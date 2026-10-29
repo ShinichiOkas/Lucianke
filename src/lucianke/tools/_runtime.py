@@ -526,10 +526,22 @@ class WiredServices(ToolServices):
         """
         rt = self.runtime(ws.workspace_id)
         if rt is None or self.hub is None:
+            hub = self.hub
+            if hub is not None and not hub._started.is_set():  # noqa: SLF001  同じモジュールの束
+                # 起動の最中（最初の ``sync_roots`` が終わっていない。入口の ``ready_gate`` の上限を超えた）。待てば直る状態を
+                # 「未対応」（E_UNSUPPORTED = その操作を提供しない）として返さない。再試行を促す（BUG-0046）
+                raise LuciankeError(
+                    ErrorCode.E_TIMEOUT,
+                    "the workspace index is still opening; retry in a moment",
+                    details={"reason": "index_opening", "workspace_id": ws.workspace_id, "retry_after_ms": 1000},
+                )
+            details: dict[str, Any] = {"reason": "index_not_open", "workspace_id": ws.workspace_id}
+            if hub is not None and ws.workspace_id in hub.failed:
+                details["open_error"] = hub.failed[ws.workspace_id]  # 開けなかった理由（次に起きたとき、応答だけで原因が分かる）
             raise LuciankeError(
                 ErrorCode.E_UNSUPPORTED,
                 "editing is not available: the index for this workspace is not open",
-                details={"reason": "index_not_open", "workspace_id": ws.workspace_id},
+                details=details,
             )
         kw: dict[str, Any] = {
             "locks": self.hub.locks,

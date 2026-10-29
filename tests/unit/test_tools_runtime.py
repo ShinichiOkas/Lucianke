@@ -600,3 +600,22 @@ async def test_edit_transaction_with_the_real_lsp_pool_uses_its_document_router(
     finally:
         await _shut(hub)
         await pool.shutdown_all()
+
+
+async def test_edit_transaction_before_the_first_sync_is_retryable_not_unsupported(project: Path, tmp_path: Path) -> None:
+    """BUG-0046: 束の表（hub）があるが最初の ``sync_roots`` がまだ（入口の待ちの上限を超えた）→ 再試行を促す ``E_TIMEOUT``。
+    開けなかった束は従来どおり ``E_UNSUPPORTED``（``index_not_open``）で、開けなかった理由が ``details.open_error`` に載る。"""
+    hub = RuntimeHub(tmp_path / "cache", TreeCache())
+    svc = _services(hub, [str(project)])
+    ws = svc.workspace()
+    with pytest.raises(LuciankeError) as excinfo:
+        svc.edit_transaction(ws)
+    assert excinfo.value.code is ErrorCode.E_TIMEOUT
+    assert excinfo.value.details["reason"] == "index_opening" and excinfo.value.details["retry_after_ms"] > 0
+
+    hub._started.set()  # noqa: SLF001  最初の sync_roots が終わった（が、この束は開けなかった）
+    hub.failed[ws.workspace_id] = "OSError: disk full"
+    with pytest.raises(LuciankeError) as excinfo2:
+        svc.edit_transaction(ws)
+    assert excinfo2.value.code is ErrorCode.E_UNSUPPORTED
+    assert excinfo2.value.details["reason"] == "index_not_open" and excinfo2.value.details["open_error"] == "OSError: disk full"
