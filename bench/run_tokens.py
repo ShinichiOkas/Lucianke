@@ -216,13 +216,17 @@ async def warm_up(c: Any, tools: dict[str, Any], sc: dict[str, Any], key: str, w
             m = LSP_RE.search(text_of(res).split("\n", 1)[0])
             lsp = m.group(1) if m else None
             ok = lsp in ("ready", "n/a")
-            if ok or time.perf_counter() - t1 > LSP_TIMEOUT_S:
+            # unavailable（起動に失敗して再起動も打ち切った）は待っても変わらない。待たずに記録して、expect で測定不成立にする
+            if ok or lsp == "unavailable" or time.perf_counter() - t1 > LSP_TIMEOUT_S:
                 info["lsp"] = {"ready": ok, "last": lsp, "polls": polls, "s": round(time.perf_counter() - t1, 1)}
                 break
             await asyncio.sleep(1.5)
     for st in sc[key]:
         pat = st.get("until")
         if not pat or st["tool"] in MUTATING or st["tool"] not in tools:
+            continue
+        if (info["lsp"] or {}).get("last") == "unavailable":
+            info["until"].append({"tool": st["tool"], "pattern": pat, "matched": False, "polls": 0, "skipped": "lsp unavailable"})
             continue
         t2 = time.perf_counter()
         polls = 0
