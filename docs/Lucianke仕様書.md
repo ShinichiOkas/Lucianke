@@ -1184,10 +1184,10 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 | 直前の Doc コメント（JSDoc, Rustdoc `///`, Python の直後 docstring） | 常に含める（Python の docstring は本体の一部）。**Doc コメントとシンボルの間に空行があっても含める**（実装で確定 2026-10-29） |
 | 直前の通常コメント | シンボルとの間に空行が無く、**かつそのコメントの行に他のコードが無い**（コードの行末コメントではない）場合のみ含める（実装で確定 2026-10-29） |
 | 末尾の同一行コメント | 含める |
-| 直後の空行 | 含めない。`delete_symbol` では直後の連続空行を 1 行に詰める |
+| 空行 | 含めない（範囲の核は空行を含まない）。`delete_symbol` は行単位で取り除き、**直前の連続空行**を一緒に取り除く。直前に空行が無い（ファイルや本体の先頭のメンバー）ときだけ**直後**の連続空行を取り除く。これで隣り合う定義の間の空行は削除前と同じ数のまま残る（Python のトップレベルの 2 行、クラス内の 1 行。「直後の空行を 1 行に詰める」から改めた〔cc031cc。実装で確定 2026-10-29〕）。取り除く範囲がファイルの終端に届き、ファイルが最終改行で終わらないときは、手前の行の行末から取り除く（最終改行を勝手に足さない） |
 | 可視性修飾子・`async`・`export` | 含める |
 
-`insert_member` の挿入位置は、親（クラス・構造体・モジュール）の最後のメンバーの直後。親にメンバーが無ければ本体の先頭（Python の `pass` または `...` だけの本体は、その文を置換対象にする）。`insert_before` / `insert_after` は上の境界の外側に挿入し、前後に空行を置く。`blank_lines_around`（前後の空行数）は **Python のトップレベルの関数・クラスだけ 2**、それ以外（クラス内のメソッド、他の言語）は 1 とする（実装で確定 2026-10-29）。
+`insert_member` の挿入位置は、親（クラス・構造体・モジュール）の最後のメンバーの直後。親にメンバーが無ければ本体の先頭（Python の `pass` または `...` だけの本体は、その文を置換対象にする）。`insert_before` / `insert_after` は上の境界の外側に挿入し、前後に空行を置く。`blank_lines_around`（前後の空行数）は **Python のトップレベルの関数・クラスだけ 2**、それ以外（クラス内のメソッド、他の言語）は 1 とする（実装で確定 2026-10-29）。既存の空行を数えて、前後が合わせて `blank_lines_around` 行になるよう足す（隣に兄弟が居ないとき、つまり本体の先頭・末尾では足さない。96866a5。T-10 処理規約 4(e)）。
 
 ## 10.9 新規コードの正規化
 
@@ -2097,9 +2097,9 @@ compact では、これらを `applied:` 行、`files_changed:` 行、`syntax_ch
 **処理規約**:
 
 1. `target` を §5.3 で 1 件に解決し、その **定義ノード** の範囲を取る。範囲は §10.8 の境界規則で決める（デコレータ・属性・`export` 等の修飾子と直前の Doc コメントを含み、空行で隔てられた通常コメントは含まない）。この範囲は T-05 が `context_lines: 0` で返す範囲と一致する。
-2. `replace_body` は定義ノード全体を `new_code` で置き換える（名前やシグネチャの変更を含んでよい）。`insert_before` / `insert_after` は定義ノードの直前・直後に、同じ親の兄弟として挿入する。`insert_member` は `target` が本体ブロックを持つノード（クラス・構造体・enum・impl・モジュール）であることを要し、そうでなければ `E_INVALID_ARGUMENT`。`delete_symbol` は定義ノードと、その直後の空行のうち言語慣習で余剰になる分を削除する。
-3. **構文検証（書き込み前）**: `new_code` を共通先頭空白を除いた形で対象ファイルの文法で解析する。`insert_member` では親と同種のダミー容器で包んで解析する。`new_code` 単体に `ERROR` / `MISSING` ノードがあれば `E_SYNTAX_INVALID`。続いて編集をメモリ上で適用して再解析し、編集前に存在しなかった `ERROR` / `MISSING` ノードが 1 つでも生じれば `E_SYNTAX_INVALID`（書き込まない）。`delete_symbol` で親の本体が空になり構文エラーになる場合も同様で、サーバーは `pass` 等を補ってはならない（MUST NOT）。`details.hint` に理由を書く。
-4. **インデント正規化**: (a) 対象ファイルのインデント単位は、行頭空白の増分を集計して多数派（タブ or スペース、幅 2/4/8）を採る。集計できなければ言語既定（Python 4 スペース、JavaScript/TypeScript 2 スペース、Rust 4 スペース、Go タブ）。(b) `new_code` の共通先頭空白を除き、`new_code` 内のインデント単位を同じ方法で推定して対象ファイルの単位に変換する。`new_code` がタブとスペースを混在させていれば `E_INVALID_ARGUMENT`（`details.param: "new_code"`）。(c) 基準列は、`replace_body` と `insert_before` / `insert_after` では元の定義ノードの先頭行の列、`insert_member` では既存メンバの先頭行の列（メンバが無ければ親の列 + 1 単位）。(d) 改行コードは対象ファイルの多数派（CRLF / LF）に合わせ、BOM と末尾改行の有無は保持する。(e) 挿入時の空行は言語慣習に従う（Python: モジュール直下 2 行・クラス内 1 行、それ以外: 1 行）。
+2. `replace_body` は定義ノード全体を `new_code` で置き換える（名前やシグネチャの変更を含んでよい）。`insert_before` / `insert_after` は定義ノードの直前・直後に、同じ親の兄弟として挿入する。`insert_member` は `target` が本体ブロックを持つノード（クラス・構造体・enum・impl・モジュール）であることを要し、そうでなければ `E_INVALID_ARGUMENT`。`delete_symbol` は定義ノードを**行単位**で取り除き、**直前の連続空行**を一緒に取り除く（直前に空行が無い、つまりファイルや本体の先頭のメンバーのときだけ**直後**の連続空行を取り除く）。これで隣り合う定義の間の空行は削除前と同じ数のまま残る（実装で確定 2026-10-29、cc031cc。§10.8）。
+3. **構文検証（書き込み前）**: `new_code` を共通先頭空白を除いた形で対象ファイルの文法で解析する。`insert_member` では親と同種のダミー容器で包んで解析する。`new_code` 単体に `ERROR` / `MISSING` ノードがあれば `E_SYNTAX_INVALID`。続いて編集をメモリ上で適用して再解析し、編集前に存在しなかった `ERROR` / `MISSING` ノードが 1 つでも生じれば `E_SYNTAX_INVALID`（書き込まない）。`delete_symbol` で親の本体が空になり構文エラーになる場合も同様で、サーバーは `pass` 等を補ってはならない（MUST NOT）。`details.hint` に理由を書く。Python で**親の本体の唯一の文**（コメントは文に数えない）である定義を消す場合は、書き込み前に `E_SYNTAX_INVALID`（`details.reason: "parent_body_would_be_empty"`）で拒否する（クラスや関数の唯一のメソッド・文を消す場合。親ごと消すか別の文を残す）。波括弧の言語は空の本体が妥当なので、そのまま消す。モジュール直下は空でもよい（cc031cc）。
+4. **インデント正規化**: (a) 対象ファイルのインデント単位は、行頭空白の増分を集計して多数派（タブ or スペース、幅 2/4/8）を採る。集計できなければ言語既定（Python 4 スペース、JavaScript/TypeScript 2 スペース、Rust 4 スペース、Go タブ）。(b) `new_code` の共通先頭空白を除き、`new_code` 内のインデント単位を同じ方法で推定して対象ファイルの単位に変換する。`new_code` がタブとスペースを混在させていれば `E_INVALID_ARGUMENT`（`details.param: "new_code"`）。(c) 基準列は、`replace_body` と `insert_before` / `insert_after` では元の定義ノードの先頭行の列、`insert_member` では既存メンバの先頭行の列（メンバが無ければ親の列 + 1 単位）。(d) 改行コードは対象ファイルの多数派（CRLF / LF）に合わせ、BOM と末尾改行の有無は保持する。(e) 挿入時の空行は言語慣習に従う（Python: モジュール直下の関数・クラスの前後 2 行・クラス内 1 行、それ以外: 1 行）。**既存の空行を数えて、前後が合わせて `N` 行（`blank_lines_around`）になるよう足す**: `insert_before` は定義の行頭に `new_code` と空行 `N` 行を差し込み、直前に兄弟が居れば既存の空行と合わせて `N` 行にする（本体の先頭なら足さない）。`insert_after` は定義の行末に改行 + 空行 `N` 行 + `new_code` を差し込み（元の行の終端は後ろに残るので末尾改行の有無が変わらない）、直後に兄弟が居れば既存の空行と合わせて `N` 行にする。`insert_member` はメンバーの間を空行 1 行にし（`position: "end"` は最後のメンバーの直後、`"start"` は最初のメンバー〔Python の docstring があればその後ろ〕の前）、本体が空なら Python は `pass` / `...` だけの本体を置換、波括弧の言語は `{` の直後に差し込む（`class E {}` は閉じ括弧を次の行に送る）。
 5. 前提検証・原子的書き込み・再索引・診断・応答は §10 の手順に従う。再索引後、置換・挿入したシンボルの新しい URN と範囲を `target_urn` / `new_range` に入れる。compact の `files_changed` の sha256 は先頭 12 桁 + `…` で示す（json の `sha256_before` / `sha256_after` は 64 桁。実装で確定 2026-10-29）。
 6. **Tier 2・3 の対象（M2。§8.6 の B2 編集・B4 置換。M1 では Tier 2〜3 への編集は `E_UNSUPPORTED`）**: `.ipynb` は仮想 Python セル（§8）上で同じ操作を行い、元の JSON の他セル・`outputs`・`metadata` を変更せずに書き戻す。XML / JSON / YAML / TOML はセレクタ（`xpath:`, `jsonpath:`, `jq:`, `toml:`, `yaml:`）で選んだ要素・値に対して `replace_body` と `delete_symbol` を提供し、書き込み前にそのフォーマットのパーサで再解析できることを確認する。`insert_*` は Tier 3 では `E_UNSUPPORTED`。
 7. 1 回の呼び出しで変更するファイルは常に 1 つである。
@@ -2135,7 +2135,7 @@ json `data`（共通フィールドに加えて）:
 - `E_PRECONDITION_FAILED`: `expected_file_sha256` 不一致、または解決から書き込みまでの間に外部変更を検知（§10.4）。
 - `E_SYNTAX_INVALID`: 処理規約 3 のいずれか。
 - `E_MUTATION_BLOCKED`: `allow_heuristic_mutation: true` だが、`heuristic` / `lexical_fallback` の推定で定義ノードの終了行を一意に決められない（ブロック境界の候補が 2 つ以上）。
-- `E_UNSUPPORTED`: Tier 3 への `insert_*`、または構文木もヒューリスティックも持たない対象。
+- `E_UNSUPPORTED`: Tier 3 への `insert_*`、または構文木もヒューリスティックも持たない対象。`details.reason` は、`no_symbol_range`（構文木か解決したシンボルが無い）、`insert_not_allowed_for_lexical_fallback`、`empty_body_unsupported`（波括弧の空の本体の `{` が見つからない）、**`definition_shares_line`**（`insert_before`、および `insert_member` で最初のメンバーの前に差し込むとき〔`position: "start"`〕に、基準にする定義が、同じ行の前に別のコードがあって行頭から始まらない。例: `class A { foo() {} }` の 1 行。行を割らずに差し込めないため。`delete_symbol` は先行する空白を含めて核の範囲だけを取り除き、結果の構文が壊れるなら構文検証が拒否する）（96866a5、実装で確定 2026-10-29）。
 - `E_TIMEOUT`: 書き込みロックの待機が 5,000 ms を超えた。
 
 **精度と降格**:
