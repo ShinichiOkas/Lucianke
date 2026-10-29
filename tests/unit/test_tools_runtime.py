@@ -562,3 +562,27 @@ async def test_workspace_changed_prefers_the_pool_level_rebind(project: Path, tm
         assert rt is not None and rt.indexer.workspace is new_ws
     finally:
         await _shut(hub)
+
+
+async def test_edit_transaction_with_the_real_lsp_pool_uses_its_document_router(project: Path, tmp_path: Path) -> None:
+    """実物の ``LspPool``（プロセスは起こさない）: 口は ``pool.router(ws)``、診断は ``router.diagnostics_hub``、状態はプールの ``status``。"""
+    from lucianke.core.model import LspStatus
+    from lucianke.core.procs import ProcessRegistry
+    from lucianke.lsp.pool import LspPool
+
+    if not hasattr(LspPool, "router"):
+        pytest.skip("LspPool.router（16c）がまだ無い")
+    hub = RuntimeHub(tmp_path / "cache", TreeCache())
+    pool = LspPool(ProcessRegistry(), on_diagnostics=hub.on_diagnostics)
+    hub.lsp_pool = pool
+    svc = _services(hub, [str(project)])
+    (ws,) = await hub.sync_roots([str(project)])
+    try:
+        tx = svc.edit_transaction(ws)
+        router = pool.router(ws)
+        assert tx._documents is router and tx._hub is router.diagnostics_hub
+        assert tx._lsp_status("python") is LspStatus.STANDBY  # 起こしていない: 待たずに構文検証へ降格する
+        assert tx._lsp_status("cobol") is LspStatus.NOT_APPLICABLE
+    finally:
+        await _shut(hub)
+        await pool.shutdown_all()
