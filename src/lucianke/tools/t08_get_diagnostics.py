@@ -543,7 +543,8 @@ def _counts(diags: Sequence[_Diag]) -> tuple[dict[str, int], dict[str, int], int
 def _head_line(by_sev: Mapping[str, int], files: int, min_severity: str) -> str:
     total = sum(by_sev.values())
     parts = [f"{by_sev[s]} {_LETTER[s]}" for s in SEVERITIES if by_sev[s]]
-    inner = ", ".join(parts + [f"min_severity={min_severity}"]) if parts else f"min_severity={min_severity}"
+    counts = ", ".join(parts)
+    inner = f"{counts}; min_severity={min_severity}" if parts else f"min_severity={min_severity}"
     file_word = "file" if files == 1 else "files"
     return f"{total} in {files} {file_word} ({inner})"
 
