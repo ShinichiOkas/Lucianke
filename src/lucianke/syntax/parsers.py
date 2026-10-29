@@ -118,6 +118,10 @@ def _parse_with_deadline(
     t_end = None if deadline_ms is None else time.perf_counter() + deadline_ms / 1000.0
     stopped: list[int | None] = [None]
     parsing = [True]
+    # 直近に返した塊をつなぎとめる（BUG-0051）。py-tree-sitter 0.26.0 の ``Node.text`` は、コールバックの戻り値の ``bytes`` を
+    # 返す前に解放して使う（解放後の読み取り）。16 KiB の塊は解放で OS に返ることがあり、木の走査が続くとアクセス違反になる。
+    # 木はこの関数を保持するので、直近の塊は木と同じ寿命で残る（最大 16 KiB）。
+    last: list[bytes] = [b""]
 
     def read(offset: int, _point: Any) -> bytes:
         # 期限と打ち切りは **解析の間だけ** 効かせる。木はこの関数を保持し、``Node.text`` のたびに呼び直す（解析が終わった後も）。
@@ -130,7 +134,8 @@ def _parse_with_deadline(
             if t_end is not None and time.perf_counter() >= t_end:
                 stopped[0] = offset
                 return b""
-        return source[offset : offset + PARSE_CHUNK_BYTES]
+        chunk = last[0] = source[offset : offset + PARSE_CHUNK_BYTES]
+        return chunk
 
     try:
         tree = parser.parse(read)
