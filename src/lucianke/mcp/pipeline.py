@@ -199,7 +199,12 @@ class Pipeline:
         if not spec.accepts_revision and args.revision != WORKING_TREE:
             warnings.append(f"revision {args.revision!r} ignored: {spec.name} has no revision support")
 
-        workspace_id = args.workspace_id
+        # ワークスペースの解決（設計書 §7.1.2 手順 3）。省略は実在の ID にして、ヘッダ・カーソル・ハンドラが同じ値を見る
+        workspace_id = self.services.resolve_workspace_id(args.workspace_id)
+        if workspace_id != args.workspace_id:
+            args = args.model_copy(update={"workspace_id": workspace_id})
+            call = dataclasses.replace(call, workspace_id=workspace_id)
+            state.call = call
         cursor_args = args.model_dump(mode="json", exclude=_CURSOR_EXCLUDED)
         data_version = self.data_version_provider()
         cursor_offset = 0
@@ -211,6 +216,7 @@ class Pipeline:
         ctx = ToolContext(call=call, services=self.services, args=args, log=log, request_id=request_id,
                           cursor_offset=cursor_offset)  # fmt: skip
         out = await spec.handler(ctx, args)
+        warnings.extend(out.warnings)  # ハンドラの警告（§5.4.4 の失敗件数など）はパイプラインの警告の後ろへ
 
         def cursor_factory(offset: int) -> str:
             return self.cursor_codec.encode(tool=spec.name, args=cursor_args, offset=offset,

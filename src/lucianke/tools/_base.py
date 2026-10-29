@@ -63,7 +63,15 @@ class CallView(Protocol):
 
 @dataclass(slots=True)
 class Services:
-    """ハンドラが使うサービスの入れ物。いまは空。後でワークスペース・索引・LSP などが入る（合成ルートが組み立てる）。"""
+    """ハンドラが使うサービスの入れ物。後でワークスペース・索引・LSP などが入る（合成ルートが組み立てる）。"""
+
+    def resolve_workspace_id(self, workspace_id: str | None) -> str | None:
+        """引数の ``workspace_id`` を、解決後のワークスペース ID にする（設計書 §7.1.2 手順 3）。
+
+        ワークスペースを知らない入れ物は引数をそのまま返す。知っている入れ物（``ToolServices``）は上書きし、
+        省略（``None``）を実在の ID にする。解決できなければ ``E_WORKSPACE_NOT_CONFIGURED``。
+        """
+        return workspace_id
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

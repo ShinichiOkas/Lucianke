@@ -50,6 +50,7 @@ async def test_stdio_vertical_slice() -> None:
         print("\n" + "\n".join(text.splitlines()[:15]))
         assert not skel.is_error and g.validate(text) == []
         assert text.startswith("# get_file_skeleton ok conf=structural")
+        assert re.search(r" ws=\S+ ", text.splitlines()[0]) and " ws=- " not in text.splitlines()[0]  # 解決後の ID（BUG-0004）
         assert "=== src/lucianke/core/urn.py (" in text and "=== src/lucianke/mcp/pipeline.py (" in text
         assert "[Function] pub parse(text: str) -> Urn" in text
         assert "[Class] pub Pipeline @L" in text
@@ -58,10 +59,18 @@ async def test_stdio_vertical_slice() -> None:
             "get_symbol_bodies", {"targets": [{"path": "src/lucianke/core/urn.py", "symbol_name": "workspace_id_from_dirname"}]}
         )
         btext = body.content[0].text
+        assert " ws=- " not in btext.splitlines()[0]
         print("\n".join(btext.splitlines()[:15]))
         assert not body.is_error and g.validate(btext) == []
         assert "def workspace_id_from_dirname(name: str) -> str:" in btext
         assert re.search(r"^@L\d+: def workspace_id_from_dirname", btext, re.M)
+
+        # 一部失敗: 全体は ok、失敗項目の件数が warnings[] に出る（§5.4.4、BUG-0004）
+        part = await c.call_tool(
+            "get_file_skeleton", {"paths": ["src/lucianke/core/urn.py", "no/such/file.py"], "format": "json"}
+        )
+        assert not part.is_error and part.structured_content["ok"] is True
+        assert len(part.structured_content["warnings"]) == 1 and "1 of 2 items failed" in part.structured_content["warnings"][0]
 
         # 構造化結果（json）でも同じ本体
         j = await c.call_tool(

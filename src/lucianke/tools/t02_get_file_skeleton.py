@@ -15,7 +15,7 @@ from lucianke.core.limits import BATCH_MAX_ITEMS
 from lucianke.core.model import Confidence, EngineChoice, Tier
 from lucianke.core.records import Record, ToolOutput
 from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._services import analyze_file, services_of
+from lucianke.tools._services import analyze_file, batch_warnings, services_of
 from lucianke.tools._skeleton_fallback import SkeletonOpts, build_file_record
 
 
@@ -91,6 +91,7 @@ async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
         page_unit="file",
         tier=tier,
         detected_language=",".join(languages) if languages else "n/a",
+        warnings=batch_warnings(len(errors), len(args.paths)),
     )
 
 

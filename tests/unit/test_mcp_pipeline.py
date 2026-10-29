@@ -8,6 +8,7 @@ json の ``ok`` / ``tool`` / ``error.code``）を見る。
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from typing import Any
@@ -22,6 +23,7 @@ from lucianke.mcp.budget import CursorState
 from lucianke.mcp.pipeline import INTERNAL_MESSAGE, Pipeline, UnknownToolError
 from lucianke.mcp.registry import CommonArgs, ToolRegistry, ToolSpec, build_input_schema
 from lucianke.mcp.types import Page, Rendered, RenderInput
+from lucianke.tools._base import Services
 
 SECRET = "SECRET-INTERNAL-DETAIL"
 
@@ -156,6 +158,69 @@ async def test_default_renderers_smoke():
     j = await p.call_tool("echo_tool", {"format": "json"})
     assert j.is_error is False and j.structured is not None and j.structured["ok"] is True and j.structured["tool"] == "echo_tool"
     assert json.loads(j.text)["tool"] == "echo_tool"
+
+
+class ResolvingServices(Services):
+    """ワークスペースを知っている入れ物の代役。省略（None）を ``resolved-ws`` にし、それ以外の ID は拒む。"""
+
+    def resolve_workspace_id(self, workspace_id: str | None) -> str | None:
+        if workspace_id is not None and workspace_id != "resolved-ws":
+            raise LuciankeError(ErrorCode.E_WORKSPACE_NOT_CONFIGURED, f"unknown workspace_id {workspace_id!r}")
+        return "resolved-ws"
+
+
+async def test_omitted_workspace_id_is_resolved_before_the_header_is_drawn():
+    h = Harness()
+    codec = FakeCodec()
+    p = h.pipeline(services=ResolvingServices(), cursor_codec=codec)
+    await p.call_tool("echo_tool", {"cursor": "c1"})
+    (ctx, args), = h.calls
+    assert args.workspace_id == "resolved-ws" and ctx.call.workspace_id == "resolved-ws"  # ハンドラも同じ値を見る
+    assert h.capture.last.call.workspace_id == "resolved-ws"
+    assert codec.decoded[0]["workspace_id"] == "resolved-ws"  # カーソルも解決後の ID に結び付く
+
+
+async def test_header_shows_the_resolved_workspace_id_with_the_real_renderers():
+    h = Harness()
+    p = Pipeline(h.registry, services=ResolvingServices())  # 本実装のレンダラ
+    compact = await p.call_tool("echo_tool", {})
+    assert " ws=resolved-ws " in compact.text.splitlines()[0]
+
+
+async def test_unresolvable_workspace_id_is_an_error_result_not_a_handler_call():
+    h = Harness()
+    rendered = await h.pipeline(services=ResolvingServices()).call_tool("echo_tool", {"workspace_id": "other"})
+    assert rendered.is_error is True and h.calls == []
+    assert h.capture.last.error is not None and h.capture.last.error.code is ErrorCode.E_WORKSPACE_NOT_CONFIGURED
+
+
+async def test_services_without_workspaces_keep_the_argument_as_is():
+    h = Harness()
+    await h.pipeline().call_tool("echo_tool", {})
+    assert h.capture.last.call.workspace_id is None
+    await h.pipeline().call_tool("echo_tool", {"workspace_id": "ws1"})
+    assert h.capture.last.call.workspace_id == "ws1"
+
+
+def _with_warnings(*warnings: str):
+    return lambda ctx, args: dataclasses.replace(make_output(2), warnings=warnings)
+
+
+async def test_handler_warnings_reach_the_render_input_after_pipeline_warnings():
+    h = Harness(behavior=_with_warnings("1 of 2 items failed"), accepts_revision=False)
+    await h.pipeline().call_tool("echo_tool", {"revision": "HEAD"})
+    warnings = list(h.capture.last.warnings)
+    assert len(warnings) == 2 and "ignored" in warnings[0] and warnings[1] == "1 of 2 items failed"
+
+
+async def test_handler_warnings_show_as_bang_line_in_compact_and_warnings_array_in_json():
+    h = Harness(behavior=_with_warnings("1 of 2 items failed"))
+    p = Pipeline(h.registry)  # 本実装のレンダラ
+    compact = await p.call_tool("echo_tool", {})
+    assert "! 1 of 2 items failed" in compact.text.splitlines()[:3]
+    j = await p.call_tool("echo_tool", {"format": "json"})
+    assert j.structured is not None and j.structured["ok"] is True
+    assert j.structured["warnings"] == ["1 of 2 items failed"]
 
 
 async def test_unknown_tool_raises_for_the_transport_layer():

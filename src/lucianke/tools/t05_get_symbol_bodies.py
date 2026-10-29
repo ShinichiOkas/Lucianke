@@ -22,7 +22,14 @@ from lucianke.core.records import Record, ToolOutput
 from lucianke.core.urn import CodeSel, Urn, parse, relax
 from lucianke.syntax.boundaries import definition_range
 from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._services import FileAnalysis, ToolServices, analyze_file, estimate_tokens, services_of
+from lucianke.tools._services import (
+    FileAnalysis,
+    ToolServices,
+    analyze_file,
+    batch_warnings,
+    estimate_tokens,
+    services_of,
+)
 from lucianke.tools.t02_get_file_skeleton import failure_record
 
 _SELECTOR_PREFIXES = ("xpath:", "jsonpath:", "jq:", "toml:", "yaml:", "cell:")
@@ -313,6 +320,7 @@ async def handler(ctx: ToolContext, args: GetSymbolBodiesArgs) -> ToolOutput:
         page_unit="target",
         tier=tier,
         detected_language=",".join(languages) if languages else "n/a",
+        warnings=batch_warnings(len(errors), len(args.targets)),
     )
 
 

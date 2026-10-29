@@ -194,3 +194,22 @@ async def test_non_working_tree_revision_is_unsupported(pipeline: Pipeline) -> N
 async def test_unknown_workspace_id(pipeline: Pipeline) -> None:
     r = await call(pipeline, "json", paths=[PAY_PY], workspace_id="nope")
     assert r.is_error and r.structured["error"]["code"] == "E_WORKSPACE_NOT_CONFIGURED"
+
+
+async def test_partial_failure_counts_failed_items_in_warnings(pipeline: Pipeline) -> None:
+    """§5.4.4: 失敗項目の件数を warnings[] に書く（compact は `! ` 行）。全件成功なら warnings は空。"""
+    j = await call(pipeline, "json", paths=[PAY_PY, "src/missing.py", "../outside.py"])
+    assert not j.is_error and j.structured["ok"] is True
+    assert len(j.structured["warnings"]) == 1 and j.structured["warnings"][0].startswith("2 of 3 items failed")
+    r = await call(pipeline, paths=[PAY_PY, "src/missing.py"])
+    assert g.validate(r.text) == [] and any(ln.startswith("! 1 of 2 items failed") for ln in r.text.splitlines()[:3])
+    assert (await call(pipeline, "json", paths=[PAY_PY])).structured["warnings"] == []
+
+
+async def test_header_shows_the_resolved_workspace_id_when_omitted(pipeline: Pipeline) -> None:
+    """§5.4.2・§5.2: workspace_id 省略でも、ヘッダの ws= は解決後の ID（`-` ではない）。"""
+    r = await call(pipeline, paths=[PAY_PY])
+    header = r.text.splitlines()[0]
+    assert " ws=poly " in header and " ws=- " not in header
+    explicit = await call(pipeline, paths=[PAY_PY], workspace_id="poly")
+    assert " ws=poly " in explicit.text.splitlines()[0]

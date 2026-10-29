@@ -68,6 +68,16 @@ class ToolServices(Services):
             )
         return ws
 
+    def resolve_workspace_id(self, workspace_id: str | None) -> str | None:
+        return self.workspace(workspace_id).workspace_id
+
+
+def batch_warnings(failed: int, total: int) -> tuple[str, ...]:
+    """バッチ入力の一部失敗の件数（仕様書 §5.4.4）。全件成功なら空。全件失敗は呼び出し側がエラーにする。"""
+    if failed <= 0:
+        return ()
+    return (f"{failed} of {total} items failed (see the failed items for the error of each)",)
+
 
 def services_of(obj: Services) -> ToolServices:
     if not isinstance(obj, ToolServices):

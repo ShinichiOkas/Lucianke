@@ -59,6 +59,8 @@ class ToolOutput:
         engine: 代表のエンジン選択（``lsp_status``、``warning`` の元）。
         page_unit: 1 レコードの意味（事後条件の文言と一致させる）。
         summarize: 残りの要約文（``# summary:`` 行）を作る関数。
+        warnings: ハンドラが応答に添える警告（仕様書 §5.4.4: バッチの一部失敗の件数など）。パイプラインが
+            ``RenderInput.warnings`` へ流し、compact は ``! `` 行、json は ``warnings[]`` になる。
     """
 
     records: Sequence[Record]
@@ -71,6 +73,7 @@ class ToolOutput:
     tier: Tier = Tier.T1  # _resolution_meta.tier（混在時は最も大きい数）
     detected_language: str = "n/a"  # _resolution_meta.detected_language
     total_estimate: int | None = None  # 範囲内の総数をツールが知っているとき（遅延列のとき）
+    warnings: Sequence[str] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
