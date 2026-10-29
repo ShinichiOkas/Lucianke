@@ -400,6 +400,7 @@ class IpynbAdapter:
     language_id = "ipynb"
     tier = Tier.T2
     extensions = (".ipynb",)
+    selectors = ("cell",)  # 受け付けるセレクタの接頭辞（DataAdapter と同じ形）
 
     def skeleton(self, source: bytes, opts: SkeletonOptions) -> list[Record]:
         """``rel`` と ``sha256`` の受け口が Protocol に無いため、``rel`` は空・``sha256`` は ``source`` から計算する。
