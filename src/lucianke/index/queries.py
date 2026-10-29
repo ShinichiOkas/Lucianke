@@ -40,6 +40,7 @@ __all__ = [
     "diagnostics_for",
     "file_by_path",
     "files_in_scope",
+    "references_from",
     "references_to",
     "search_symbols_fts",
     "symbol_at",
@@ -436,6 +437,57 @@ def references_to(
         " FROM relations r LEFT JOIN files f ON f.file_id = r.source_file_id"
         + where
         + " ORDER BY f.path, r.call_site_line, r.call_site_col, r.relation_id LIMIT :limit OFFSET :offset"
+    )
+    params["limit"] = -1 if limit is None else max(0, int(limit))
+    params["offset"] = max(0, int(offset))
+    out: list[ReferenceRow] = []
+    for src, tgt, kind, path, line, col, use, guard, conf, is_test in conn.execute(sql, params):
+        site = Position(int(line) - 1, max(int(col or 1) - 1, 0)) if line is not None else None
+        out.append(
+            ReferenceRow(
+                source_urn=src,
+                target_urn=tgt,
+                relation_kind=kind,
+                path=None if path is None else RelPath(path),
+                site=site,
+                use_kind=use,
+                guard_condition=guard,
+                confidence=Confidence(conf),
+                is_test=bool(is_test),
+            )
+        )
+    return out
+
+
+def references_from(
+    conn: sqlite3.Connection,
+    source_urn: Urn | str,
+    kinds: Iterable[str] | None = None,
+    *,
+    use_kinds: Iterable[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[ReferenceRow]:
+    """``source_urn`` から出る関係（T-07 の outgoing 用。``references_to`` の逆向き）。
+
+    ``path`` / ``site`` / ``is_test`` は **参照元（``source_urn`` の持ち主）のファイル** のもの（呼び出し箇所の位置）。
+    並びは、呼び出し位置、``relation_id`` の順。
+    """
+    params: dict[str, object] = {"source": str(source_urn)}
+    where = " WHERE r.source_urn = :source"
+    for column, values, prefix in (("relation_kind", kinds, "rk"), ("use_kind", use_kinds, "uk")):
+        if values:
+            names = []
+            for i, v in enumerate(sorted(set(values))):
+                params[f"{prefix}{i}"] = v
+                names.append(f":{prefix}{i}")
+            where += f" AND r.{column} IN ({', '.join(names)})"
+    sql = (
+        "SELECT r.source_urn, r.target_urn, r.relation_kind, f.path, r.call_site_line, r.call_site_col,"
+        " r.use_kind, r.guard_condition, r.confidence_level, COALESCE(f.is_test, 0)"
+        " FROM relations r LEFT JOIN files f ON f.file_id = r.source_file_id"
+        + where
+        + " ORDER BY r.call_site_line, r.call_site_col, r.relation_id LIMIT :limit OFFSET :offset"
     )
     params["limit"] = -1 if limit is None else max(0, int(limit))
     params["offset"] = max(0, int(offset))
