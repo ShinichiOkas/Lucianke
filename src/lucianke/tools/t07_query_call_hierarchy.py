@@ -78,17 +78,13 @@ class QueryCallHierarchyArgs(CommonArgs):
     target: TargetRefArg
     direction: Literal["incoming", "outgoing", "both"]
     depth: int = Field(default=2, ge=1, le=DEPTH_MAX)
-    include_guard_conditions: bool = Field(
-        default=True
-    )
+    include_guard_conditions: bool = Field(default=True)
     exclude_external: bool = Field(
         default=True,
-        description="Show stdlib/package functions as '(external)' leaves.",
+        description="Hide language builtins (print, ValueError...); other external callees stay '(external)' leaves.",
     )
     include_tests: bool = Field(default=True)
-    max_children: int = Field(
-        default=20, ge=1, le=500
-    )
+    max_children: int = Field(default=20, ge=1, le=500)
 
 
 # --- 木 -----------------------------------------------------------------------------------------

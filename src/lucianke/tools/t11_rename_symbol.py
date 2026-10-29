@@ -74,6 +74,7 @@ from lucianke.syntax.support import get_support
 from lucianke.syntax.symbols import extract, load_query_source
 from lucianke.tools import _t11_degrade
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._edit_output import diag_line
 from lucianke.tools._nav import TargetRefArg
 from lucianke.tools._services import ToolServices, services_of
 from lucianke.workspace.languages import HEAD_BYTES, detect
@@ -87,7 +88,6 @@ _OPTIONAL_SERVICES = ("indexer", "watcher", "reader_pool", "trees", "has_ctags",
 _IDENTIFIER_NODES = frozenset(
     {"identifier", "property_identifier", "type_identifier", "shorthand_property_identifier"}
 )
-_SEVERITY_LETTER = {"error": "E", "warning": "W", "information": "I", "info": "I", "hint": "H"}
 _WORD = re.compile(r"\w+")
 
 
@@ -98,9 +98,7 @@ class RenameSymbolArgs(CommonArgs):
         default=None,
         description="Lexical (degraded) renames only.",
     )
-    dry_run: bool = Field(
-        default=False
-    )
+    dry_run: bool = Field(default=False)
     allow_heuristic_mutation: bool = Field(
         default=False,
         description="Allow writing a degraded (heuristic) file.",
@@ -544,22 +542,6 @@ def _degraded_builder(
 # --- 応答 -------------------------------------------------------------------------------------
 
 
-def _diag_kv(svc: ToolServices, obj: dict[str, Any]) -> str:
-    sev = _SEVERITY_LETTER.get(str(obj.get("severity", "")).lower(), "I")
-    source, code = obj.get("source"), obj.get("code")
-    pair: dict[str, Any] = {}
-    if source:
-        pair = {"source": str(source), "code": str(code) if code else "-"}
-    return svc.lines.diag_line(
-        sev,
-        str(obj["path"]),
-        int(obj["start_line"]),
-        int(obj["start_col"]),
-        message=str(obj["message"]),
-        **pair,
-    )
-
-
 def _edit_record(svc: ToolServices, site: _Site, confidence: Confidence) -> Record:
     line, col = site.position.line + 1, site.position.col + 1
     text = svc.lines.ref_line(
@@ -634,8 +616,8 @@ def _build_output(svc: ToolServices, args: RenameSymbolArgs, result: EditResult,
                 f"{delta.status} (+{len(delta.added)} -{len(delta.resolved)}) checked={len(delta.checked_files)} files",
             )
         )
-    kv += [("added", _diag_kv(svc, dict(o))) for o in delta.added]
-    kv += [("resolved", _diag_kv(svc, dict(o))) for o in delta.resolved]
+    kv += [("added", diag_line(svc, o)) for o in delta.added]
+    kv += [("resolved", diag_line(svc, o)) for o in delta.resolved]
 
     return ToolOutput(
         records=records,

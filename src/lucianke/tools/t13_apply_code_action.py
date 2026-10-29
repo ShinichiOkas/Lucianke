@@ -68,7 +68,8 @@ from lucianke.edit.workspace_edit import plan_from_workspace_edit
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle, LspState
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._services import ToolServices, estimate_tokens, services_of
+from lucianke.tools._edit_output import diag_records, diff_record, short_sha
+from lucianke.tools._services import ToolServices, services_of
 from lucianke.workspace.languages import HEAD_BYTES, detect
 from lucianke.workspace.paths import confine, to_abs
 from lucianke.workspace.types import Workspace
@@ -85,8 +86,6 @@ CONTEXT_DIAGNOSTICS_WAIT_MS = 2000
 _ROLE_RANK = {"lint": 0, "types": 1}
 _REQUIRED_SERVICES = ("locks", "writer_index", "journal_dir")
 _OPTIONAL_SERVICES = ("indexer", "watcher", "reader_pool", "trees", "has_ctags", "lock_wait_ms")
-_SEVERITY_LETTER = {"error": "E", "warning": "W", "information": "I", "info": "I", "hint": "H"}
-_SHA_SHOWN = 12
 
 
 class ApplyCodeActionArgs(CommonArgs):
@@ -99,16 +98,12 @@ class ApplyCodeActionArgs(CommonArgs):
         ge=1,
         description="Default: first non-blank.",
     )
-    end_line: int | None = Field(
-        default=None, ge=1, description="Default: line."
-    )
+    end_line: int | None = Field(default=None, ge=1, description="Default: line.")
     action_kind_or_id: str = Field(
         min_length=1,
         description="code_action_id (qf_...) from get_diagnostics, or an LSP CodeActionKind.",
     )
-    dry_run: bool = Field(
-        default=False
-    )
+    dry_run: bool = Field(default=False)
     allow_heuristic_mutation: bool = Field(
         default=False, description="No effect (accepted for compatibility)."
     )
@@ -664,75 +659,6 @@ def _diff_counts_by_path(diff: str) -> dict[str, tuple[int, int]]:
     return {p: (v[0], v[1]) for p, v in out.items()}
 
 
-def _diag_line(svc: ToolServices, obj: Mapping[str, Any]) -> str:
-    sev = _SEVERITY_LETTER.get(str(obj.get("severity", "")).lower(), "I")
-    source, code = obj.get("source"), obj.get("code")
-    pair: dict[str, Any] = {}
-    if source:
-        pair = {"source": str(source), "code": str(code) if code else "-"}
-    return svc.lines.diag_line(  # type: ignore[no-any-return,attr-defined]
-        sev,
-        str(obj["path"]),
-        int(obj["start_line"]),
-        int(obj["start_col"]),
-        message=str(obj["message"]),
-        **pair,
-    )
-
-
-def _diff_record(svc: ToolServices, diff: str, confidence: Confidence) -> Record:
-    rows = diff.rstrip("\n").split("\n")
-    hunk_starts = [i for i, row in enumerate(rows) if row.startswith("@@")]
-
-    def make(count: int | None) -> Record:
-        shown = rows if count is None or count >= len(hunk_starts) else rows[: hunk_starts[count]]
-        lines = svc.lines.code_block(shown, lang="diff", with_line_numbers=False)  # type: ignore[attr-defined]
-        omitted = 0 if count is None else max(0, len(hunk_starts) - count)
-        if omitted:
-            lines.append(svc.lines.note(f"diff truncated: {omitted} of {len(hunk_starts)} hunks omitted"))  # type: ignore[attr-defined]
-        data: dict[str, Any] = {"section": "diff", "hunks": len(hunk_starts), "omitted_hunks": omitted}
-        return Record(
-            kind="code", key="diff", priority=0, lines=tuple(lines), data=data, confidence=confidence, group="diff",
-            shrink=shrink if count is None and len(hunk_starts) > 1 else None,
-        )  # fmt: skip
-
-    def shrink(budget: int) -> Record | None:
-        for count in range(len(hunk_starts) - 1, 0, -1):
-            rec = make(count)
-            if estimate_tokens("\n".join(rec.lines)) <= budget:
-                return rec
-        return None
-
-    return make(None)
-
-
-def _diag_records(
-    svc: ToolServices, name: str, items: Sequence[Mapping[str, Any]], priority: int, confidence: Confidence
-) -> list[Record]:
-    if not items:
-        return []
-    objs = [dict(o) for o in items]
-    lines = (
-        f"{name}:",
-        *(_diag_line(svc, o) for o in objs),
-    )  # 値のない kv 行（"resolved:"）の後ろに診断行が続く
-    return [
-        Record(
-            kind="diag",
-            key=name,
-            priority=priority,
-            lines=lines,
-            data={"section": name, "count": len(objs)},
-            confidence=confidence,
-            group=name,
-        )  # fmt: skip
-    ]
-
-
-def _short(sha: str) -> str:
-    return sha[:_SHA_SHOWN] + "…"
-
-
 @dataclass(slots=True)
 class _Seen:
     language_id: str = "n/a"
@@ -762,7 +688,7 @@ def _build_output(
         kv.append(
             (
                 "files_changed",
-                f"{c.path} (+{plus} -{minus})  sha256 {_short(c.sha256_before)}→{_short(c.sha256_after)}",
+                f"{c.path} (+{plus} -{minus})  sha256 {short_sha(c.sha256_before)}→{short_sha(c.sha256_after)}",
             )
         )
     if not result.files_changed:
@@ -779,9 +705,9 @@ def _build_output(
 
     records: list[Record] = []
     if result.diff:
-        records.append(_diff_record(svc, result.diff, conf))
-    records += _diag_records(svc, "added", delta.added, 1, conf)
-    records += _diag_records(svc, "resolved", delta.resolved, 2, conf)
+        records.append(diff_record(svc, result.diff, conf))
+    records += diag_records(svc, "added", delta.added, 1, conf)
+    records += diag_records(svc, "resolved", delta.resolved, 2, conf)
 
     return ToolOutput(
         records=records,
