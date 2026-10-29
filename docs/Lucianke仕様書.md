@@ -272,7 +272,7 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 | Query Engine | `query_project_db` の文の検証（読み取り専用）、バインド、タイムアウト、行数制限、結果の直列化 | スキーマ変更 |
 | Verification Core | CFG / Def-Use の抽出、経路探索、契約抽出、SSA 変換、SMT 検証 | LLM の呼び出し（禁止） |
 | Workspace Context | ルートと環境の検出・設定、除外規則、ファイル監視、`revision` 指定時の仮想ツリー | |
-| Git Temporal Layer | コミット・ツリーの直読、シンボル別変更の算出、共変更結合の集計 | シェルの `git` 呼び出し（SHOULD NOT） |
+| Git Temporal Layer | コミット・ツリーの直読、シンボル別変更の算出、共変更結合の集計 | シェルの `git` 呼び出し（SHOULD NOT）。例外は M2 の履歴専用の読み取り専用 `git` 子プロセスだけ（§17 OD-20） |
 
 ## 4.3 主要な流れ
 
@@ -336,7 +336,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | 構文パターン | `ast-grep-py` | `ast-grep-core` |
 | LSP クライアント | 自前の JSON-RPC クライアント（`asyncio`）または既存ライブラリ | 自前または `lsp-types` + 自前 |
 | DB | 標準ライブラリ `sqlite3` | `rusqlite` |
-| Git | `dulwich`（Apache-2.0 側を選択）。`pygit2` は GPL-2.0-only + リンク例外のため第一候補にしない（第 16 章、§17 OD-20） | `gix`（gitoxide、MIT OR Apache-2.0） |
+| Git | `dulwich`（Apache-2.0 側を選択。M1 の全用途）。M2 の履歴だけ、利用者の環境の `git` を読み取り専用の子プロセスとして併用する（同梱しない。無ければ dulwich で走査）。`pygit2` は採らない（GPL-2.0-only + リンク例外。第 16 章、§17 OD-20） | `gix`（gitoxide、MIT OR Apache-2.0） |
 | ファイル監視 | `watchfiles` | `notify` |
 | 経路探索 | SQLite 再帰 CTE（Datalog は未決事項） | 再帰 CTE または組み込み Datalog |
 | SMT | `z3-solver` | `z3` crate |
@@ -2693,7 +2693,7 @@ json の `data`:
 
 ## 11.7 カテゴリ F: Git 時系列・セマンティック差分
 
-カテゴリ F は `.git` のオブジェクトを直接読み（シェルの `git` コマンド起動に依存しない実装を想定。候補: libgit2 系バインディング、gitoxide）、Tree-sitter の AST と突き合わせて「シンボル単位」の履歴と差分を返す。応答時間の目標は NFR-PERF-2。ワークスペースが Git リポジトリでないとき、本カテゴリの全ツールは `E_UNSUPPORTED`（`details.reason: "not_a_git_repository"`）を返す。
+カテゴリ F は `.git` のオブジェクトを `dulwich` で直接読み（シェルの `git` 起動に依存しない。例外は履歴〔T-17 の `git log --follow` 相当〕だけで、読み取り専用の `git` 子プロセスを使い、`git` が無ければ dulwich の走査に戻る。§17 OD-20、設計書 §7.9.2）、Tree-sitter の AST と突き合わせて「シンボル単位」の履歴と差分を返す。応答時間の目標は NFR-PERF-2。ワークスペースが Git リポジトリでないとき、本カテゴリの全ツールは `E_UNSUPPORTED`（`details.reason: "not_a_git_repository"`）を返す。
 
 ### T-17 `get_symbol_history`
 
@@ -3349,7 +3349,7 @@ Lucianke は **できるだけ自由なライセンス** で公開する。本�
 | rmcp（Rust MCP SDK） | MIT から Apache-2.0 へ移行中（貢献者の同意状況で混在） | どちらも寛容。Apache-2.0 の NOTICE 義務 | 採用可（Rust を選んだ場合）。L-7 で表示 |
 | jq（PyPI バインディング） | BSD-2-Clause。wheel に jq 本体（MIT）と鬼車（BSD）を同梱 | 同梱物の表示が要る | 条件付き採用。`jq:` セレクタは M2 とし、採用時に同梱物を `THIRD_PARTY_NOTICES.md` に載せる。JSONPath（jsonpath-ng、Apache-2.0）を M1 の必須経路にする |
 | lxml | BSD-3-Clause。wheel に libxml2 / libxslt（MIT 系）を同梱 | 同梱物の表示 | 採用可。L-7 で表示。標準ライブラリの `xml.etree` で足りる範囲はそちらを使う |
-| git 本体（GitPython 経由） | GPL-2.0 | サブプロセスなので本体に影響しない | GitPython（BSD-3-Clause）は候補に残すが、§4.2 の「シェルの git を呼ばない（SHOULD NOT）」と相反するため第一候補にしない |
+| git 本体（GitPython 経由） | GPL-2.0 | サブプロセスなので本体に影響しない | GitPython（BSD-3-Clause）は候補に残すが、§4.2 の「シェルの git を呼ばない（SHOULD NOT）」と相反するため第一候補にしない。履歴専用の読み取りだけ `git` を子プロセスで起動する例外は OD-20 で決定済みで、GitPython は介さず直接起動する（L-4: 利用者の環境のものを起動するだけで同梱しない） |
 
 ### 16.2.2 問題の無いもの（要約）
 
@@ -3408,7 +3408,7 @@ Lucianke は **できるだけ自由なライセンス** で公開する。本�
 | OD-17 | T-16 の対象外 | `async` 関数とジェネレータを M3 の範囲外（`E_UNSUPPORTED`）とする | **範囲外のまま M3 を閉じ、需要があれば M4 で扱う** | M3 着手前 |
 | OD-18 | LSP 不在時の Code Action | (a) 提供しない（T-13 は `E_LSP_UNAVAILABLE`）、(b) Tree-sitter だけで安全に行える数種（未使用 import の除去など）を内蔵する | **(a) で M1 を閉じる。** 需要が見えたら (b) を M2 以降で | M2 着手前 |
 | OD-19 | 本体のライセンス | (a) MIT、(b) Apache-2.0、(c) MIT OR Apache-2.0 のデュアル | **決定済み: (a) MIT**（師匠 2026-10-29「ライセンスは MIT に確定」）。リポジトリ直下に `LICENSE` を置いた。依存側の確認は第 16 章 | 決定済み |
-| OD-20 | Git 層のライブラリ（Python を選んだ場合） | (a) dulwich（Apache-2.0 側を選択）、(b) pygit2（GPL-2.0-only + リンク例外。GPL 文面の同梱が要る）、(c) GitPython（BSD-3。シェルの git を起動） | **(a) を第一候補。** 純 Python で寛容。M2 のベンチマーク（NFR-PERF-2）で足りなければ (b) を第 16 章 L-3 の手続きで検討する。(c) は §4.2 の方針と相反。アーキテクチャ設計書 §11.1 は dulwich を M1 の必須依存に置いた（T-02 / T-05 の revision 解決に要る）。**S-8 の結果**（2026-10-29）: M1 の用途（参照解決・blob・`STAGED`・`.gitignore`・不変性）は dulwich で合格（1〜5 ms）。M2 の履歴だけ、dulwich の `Walker` が F-PY 規模で 13 秒超（`git log --follow` は 106 ms）で不合格。M2 の履歴は「(a) ＋ 履歴専用の `git` 子プロセス（読み取り専用。`git` が無い環境では (a) の `Walker` に戻る）」に**決定**（師匠 2026-10-29「推奨: 読み取り専用で使うことを認る」）。`git` は別プロセスとして起動するだけで同梱しない（第 16 章の GPL 同梱禁止に触れない）。(b) pygit2 は採らない | **決定**（M1 は (a)、M2 の履歴は (a) ＋ `git` 子プロセス〔読み取り専用〕） |
+| OD-20 | Git 層のライブラリ（Python を選んだ場合） | (a) dulwich（Apache-2.0 側を選択）、(b) pygit2（GPL-2.0-only + リンク例外。GPL 文面の同梱が要る）、(c) GitPython（BSD-3。シェルの git を起動） | **(a) を第一候補。** 純 Python で寛容。M2 のベンチマーク（NFR-PERF-2）で足りなければ (b) を第 16 章 L-3 の手続きで検討する。(c) は §4.2 の方針と相反。アーキテクチャ設計書 §11.1 は dulwich を M1 の必須依存に置いた（T-02 / T-05 の revision 解決に要る）。**S-8 の結果**（2026-10-29）: M1 の用途（参照解決・blob・`STAGED`・`.gitignore`・不変性）は dulwich で合格（1〜5 ms）。M2 の履歴だけ、dulwich の `Walker` が F-PY 規模で 13 秒超（`git log --follow` は 106 ms）で不合格。M2 の履歴は「(a) ＋ 履歴専用の `git` 子プロセス（読み取り専用。`git` が無い環境では (a) の dulwich で走査する〔`Walker` そのものではなく、自前の path 限定 walk を `max_commits` で区切る。設計書 §7.9.2〕）」に**決定**（師匠 2026-10-29「推奨: 読み取り専用で使うことを認る」）。`git` は別プロセスとして起動するだけで同梱しない（第 16 章の GPL 同梱禁止に触れない）。(b) pygit2 は採らない | **決定**（M1 は (a)、M2 の履歴は (a) ＋ `git` 子プロセス〔読み取り専用〕） |
 | OD-22 | HTTP 系トランスポート | (a) 提供しない（stdio のみ）、(b) Streamable HTTP を任意で提供 | **決定済み: (a)**（師匠 2026-10-29「stdio のコマンド実行型でできるよね？ HTTP 型はあまり望ましくない」）。配布物に HTTP サーバーの起動経路を持たない | 決定済み |
 | OD-21 | Cython と Jinja2 の Tree-sitter 文法 | Cython: 専用文法が未特定。Jinja2: 公式系に無く、参考の cathaysia/tree-sitter-jinja は Apache-2.0 | **着手前に一次情報で確認して決める。** 見つからなければ Cython は Python 文法で寛容に解析、Jinja2 は自前の字句解析で `{{ }}` / `{% %}` だけを拾う | B1b / B7 着手前（M2） |
 
