@@ -1,174 +1,41 @@
-"""T-11 ``rename_symbol`` の契約テスト（仕様書 §11.5 T-11 の事後条件 1〜4、§10.10 の EP-2・EP-3・EP-9）。
+"""T-11 ``rename_symbol`` の契約テスト、偽 LSP の側（仕様書 §11.5 T-11 の事後条件、§10.10 の EP-3・EP-4・EP-9）。
 
-* 実機: ``.venv`` の basedpyright に ``tests/fixtures/poly``（``tmp_path`` に複製）を読ませ、``Pipeline`` 経由でツールを呼ぶ。
-  見つからなければ skip。位置の単位は UTF-16（絵文字・日本語の行で確かめる）。
 * 偽 LSP: Python の偽のハンドル（台本どおりに答えるクライアント）。prepareRename の拒否、作成・改名・ワークスペース外を含む
   ``WorkspaceEdit``、構文を壊す編集、タイムアウト、計算中の外部書き換えで、どのファイルも書かれないことを確かめる。
   実機の LSP プロセスを起こさないので速い。
+* 実機（basedpyright）の側は ``test_T11_rename_real.py``。土台（``Rig`` など）は ``_t11_harness.py`` が両方に提供する。
 * ``documents`` / ``diagnostics_hub`` は LSP ハンドル自身のもの（``edit_transaction`` ファクトリ経由）。診断は
   ``diagnostics_wait_ms=0``（``pending``）で見る（診断差分そのものはトランザクションのテストの担当）。
 """
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import shutil
 import time
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _t11_harness import (
+    PAY,
+    PROCESS_CHARGE,
+    ROUTES,
+    WS,
+    Rig,
+    U,
+    build_rig,
+    copy_poly,
+    index_writer_fixture,  # noqa: F401  (フィクスチャ index_writer)
+    snapshot,
+)
 
-from lucianke.app import build_services
-from lucianke.core.model import LspStatus, Position, RelPath
-from lucianke.core.procs import ProcessRegistry
+from lucianke.core.model import LspStatus, Position
 from lucianke.core.textpos import Unit
-from lucianke.core.urn import CodeSel, Urn
-from lucianke.edit.lock import WorkspaceLocks
-from lucianke.edit.transaction import EditTransaction
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.client import to_lsp_position
 from lucianke.lsp.documents import DocumentSync
 from lucianke.lsp.pool import LspState, PoolStatus
-from lucianke.lsp.servers import default_server, find_command
-from lucianke.mcp.pipeline import Pipeline
-from lucianke.mcp.registry import ToolRegistry
-from lucianke.tools import t11_rename_symbol as t11
-from lucianke.tools._services import ToolServices
 from lucianke.workspace.types import Workspace
-
-REPO = Path(__file__).resolve().parents[2]
-POLY = REPO / "tests" / "fixtures" / "poly"
-WS = "poly"
-PAY = "src/shop/services/payment.py"
-ROUTES = "src/shop/api/routes.py"
-TESTS = "tests/test_payment.py"
-RST = "docs/api.rst"
-PROCESS_CHARGE = "PaymentProcessor.process_charge"
-
-_BASEDPYRIGHT = default_server("python", "types")
-_BASEDPYRIGHT_CMD = (
-    find_command(_BASEDPYRIGHT, workspace_root=REPO, venv=REPO / ".venv") if _BASEDPYRIGHT else None
-)
-needs_basedpyright = pytest.mark.skipif(_BASEDPYRIGHT_CMD is None, reason="basedpyright is not installed")
-
-
-def U(path: str, qualified: str) -> str:
-    return str(Urn(WS, path, CodeSel(qualified)))
-
-
-def sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def snapshot(root: Path) -> dict[str, str]:
-    """ワークスペースの全ファイルの SHA-256（相対パス → sha）。"""
-    return {
-        p.relative_to(root).as_posix(): sha(p.read_bytes())
-        for p in sorted(root.rglob("*"))
-        if p.is_file() and "__pycache__" not in p.parts
-    }
-
-
-# --- 土台 -----------------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class Services(ToolServices):
-    """``ToolServices`` に、T-11 が求める ``lsp_pool`` と ``edit_transaction(ws, **overrides)`` を足したもの。"""
-
-    ws: Workspace | None = None
-    lsp_pool: Any = None
-    tx_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def workspace(self, workspace_id: str | None = None) -> Workspace:
-        assert self.ws is not None
-        return self.ws
-
-    def resolve_workspace_id(self, workspace_id: str | None) -> str | None:
-        return WS
-
-    def edit_transaction(self, ws: Workspace, **overrides: Any) -> EditTransaction:
-        return EditTransaction(ws, **self.tx_kwargs, **overrides)
-
-
-@dataclass
-class Rig:
-    pipeline: Pipeline
-    svc: Services
-    ws: Workspace
-    pool: Any
-    handle: Any
-    root: Path
-
-    async def rename(self, target: dict[str, Any], new_name: str, fmt: str = "json", **args: Any):
-        args.setdefault("diagnostics_wait_ms", 0)
-        return await self.pipeline.call_tool(
-            "rename_symbol", {"target": target, "new_name": new_name, "format": fmt, **args}
-        )
-
-    def read(self, rel: str) -> str:
-        return (self.root / rel).read_text(encoding="utf-8")
-
-    def write(self, rel: str, text: str) -> None:
-        """新しいファイルを作り、LSP に開かせる（LSP は作業ツリーの新規ファイルを自分では見つけない。
-        本番では監視が ``workspace/didChangeWatchedFiles`` で知らせる）。"""
-        path = self.root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(text.encode("utf-8"))
-        if self.handle is not None:
-            self.handle.documents.sync(RelPath(rel), text, "python")
-
-    def pos(self, rel: str, needle: str, nth_line: int = 0) -> Position:
-        """``needle`` を含む行（``nth_line`` 番目）の、その位置（0 始まり・コードポイント）。"""
-        hits = [(i, t) for i, t in enumerate(self.read(rel).split("\n")) if needle in t]
-        line, text = hits[nth_line]
-        return Position(line, text.index(needle))
-
-
-def build_rig(tmp_path: Path, pool: Any, handle: Any, ws: Workspace, writer: IndexWriter) -> Rig:
-    registry = ToolRegistry()
-    registry.register(t11.TOOL_SPEC)
-    b = build_services(lambda: [str(ws.root)])
-    svc = Services(
-        roots=b.roots,
-        trees=b.trees,
-        lines=b.lines,
-        ws=ws,
-        lsp_pool=pool,
-        tx_kwargs={
-            "locks": WorkspaceLocks(),
-            "writer_index": writer,
-            "journal_dir": tmp_path / "cache" / "journal",
-        },
-    )
-    return Rig(Pipeline(registry, services=svc), svc, ws, pool, handle, ws.root)
-
-
-@pytest.fixture
-async def index_writer(tmp_path: Path) -> AsyncIterator[IndexWriter]:
-    w = IndexWriter(tmp_path / "cache" / "paad.sqlite")
-    try:
-        yield w
-    finally:
-        await asyncio.to_thread(w.close)
-
-
-@pytest.fixture
-async def procs():
-    reg = ProcessRegistry()
-    yield reg
-    await reg.terminate_all(200, close=True)
-
-
-def copy_poly(tmp_path: Path) -> Path:
-    dst = tmp_path / "poly"
-    shutil.copytree(POLY, dst, ignore=shutil.ignore_patterns("__pycache__"))
-    return dst.resolve()
-
 
 # --- 偽 LSP -----------------------------------------------------------------------------------
 
