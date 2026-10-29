@@ -1,4 +1,6 @@
-"""縦切り（T-02・T-05）の実機確認: ``.mcp.json`` と同じコマンドで ``lucianke`` を子プロセスとして起動し、SDK のクライアントで話す。
+"""縦切り（T-02・T-05）の実機確認: ``lucianke`` を子プロセスとして起動し、SDK のクライアントで話す。
+
+起動は ``tests/_server_cmd.py``（``python -m lucianke``。``uv run`` / ``lucianke.exe`` を握らない。BUG-0030）。
 
 ``tools/list`` に 2 ツールが載ること、リポジトリ自身のファイルの骨格と関数 1 つの本体が返ることを確かめる。
 応答の compact テキストは ``-s`` で見える。
@@ -6,7 +8,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 import warnings
@@ -20,15 +21,16 @@ warnings.filterwarnings("ignore", category=MCPDeprecationWarning)
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests" / "contract"))  # 文法検査器 compact_grammar を共有する
+sys.path.insert(0, str(REPO / "tests"))  # 共通の起動コマンド _server_cmd
 import compact_grammar as g  # noqa: E402
+
+from _server_cmd import server_argv  # noqa: E402
 
 
 def _server_params() -> StdioServerParameters:
-    """``.mcp.json`` の ``lucianke`` と同じコマンド（``--directory`` だけ、このチェックアウトの場所に置き換える）。"""
-    spec = json.loads((REPO / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["lucianke"]
-    args = list(spec["args"])
-    args[args.index("--directory") + 1] = str(REPO)
-    return StdioServerParameters(command=spec["command"], args=args, env={"PYTHONUTF8": "1"})
+    """リポジトリを cwd にしてサーバーを起こす（``.mcp.json`` の ``--directory`` と同じ cwd）。"""
+    argv = server_argv()
+    return StdioServerParameters(command=argv[0], args=argv[1:], env={"PYTHONUTF8": "1"}, cwd=str(REPO))
 
 
 @pytest.fixture(scope="module")
@@ -67,7 +69,8 @@ async def test_stdio_vertical_slice() -> None:
 
         # 一部失敗: 全体は ok、失敗項目の件数が warnings[] に出る（§5.4.4、BUG-0004）
         part = await c.call_tool(
-            "get_file_skeleton", {"paths": ["src/lucianke/core/urn.py", "no/such/file.py"], "format": "json"}
+            "get_file_skeleton",
+            {"paths": ["src/lucianke/core/urn.py", "no/such/file.py"], "format": "json", "max_tokens": 20000},  # 予算の警告を混ぜない
         )
         assert not part.is_error and part.structured_content["ok"] is True
         assert len(part.structured_content["warnings"]) == 1 and "1 of 2 items failed" in part.structured_content["warnings"][0]

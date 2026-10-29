@@ -23,6 +23,9 @@ from mcp import Client, StdioServerParameters
 warnings.filterwarnings("ignore")
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "bench" / "dogfood" / "out"
+sys.path.insert(0, str(REPO / "bench"))  # 共通の起動コマンド _stdio.server_argv
+from _stdio import server_argv  # noqa: E402
+
 sys.path.insert(0, str(REPO / "tests" / "contract"))
 import compact_grammar as g  # noqa: E402
 
@@ -33,9 +36,8 @@ BIG = 1_000_000
 
 
 def params() -> StdioServerParameters:
-    return StdioServerParameters(
-        command="uv", args=["run", "--quiet", "--directory", str(REPO), "lucianke"], env={"PYTHONUTF8": "1"}
-    )
+    argv = server_argv()  # python -m lucianke（uv run を挟まない。BUG-0030）
+    return StdioServerParameters(command=argv[0], args=argv[1:], env={"PYTHONUTF8": "1"}, cwd=str(REPO))
 
 
 def save(n: int, obj: Any) -> None:

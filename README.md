@@ -13,5 +13,8 @@ Project Luciankeは、コーディングエージェントにおけるトーク�
 - **決定論的編集プロトコル**: 編集時の整合性を厳格に担保し、エージェントによる不確定な破壊的変更を排除する。
 - **高効率トークン戦略**: 転送データを最小限に抑制し、推論リソースを本質的な問題解決に集中させる。
 
+## 開発メモ
+- Lucianke を MCP でつないだまま（`.mcp.json` の `uv run ... lucianke` が `.venv\Scripts\lucianke.exe` を握っている間）`pyproject.toml` を変えたら、`uv run` / `uv sync` の前にホストのサーバーを止める（Windows では動いている exe を消せず、同期が `os error 32` で失敗する。BUG-0030）。テスト・ベンチは `python -m lucianke`（`tests/_server_cmd.py`、`bench/_stdio.py` の `server_argv`）で起こすので exe を握らない。
+
 ---
 *論理的整合性と構造的なエレガンスの追求。*

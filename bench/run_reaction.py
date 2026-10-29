@@ -116,7 +116,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         copy_workspace(spec.root, ws)
         rel = pick_target(ws, f"{args.seed}:{spec.name}")
         out["target_file"] = rel
-        argv = S.uv_argv(REPO) if not args.server_argv else args.server_argv.split()
+        argv = S.server_argv() if not args.server_argv else args.server_argv.split()
         client = S.McpStdioClient(argv, cwd=ws, env=S.server_env(tmp / "cache"), roots=[ws],
                                   stderr_path=tmp / "server.stderr.log")  # fmt: skip
         meter = R.CpuLoadMeter()

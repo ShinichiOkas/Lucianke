@@ -1,6 +1,6 @@
 """レイテンシの計測台本（仕様書 §14.4、NFR-PERF-1・NFR-PERF-2、M1-3）。
 
-実プロセスのサーバー（``uv run --project <repo> lucianke``。``.mcp.json`` と同じ起動）に stdio でつなぎ、ツールごとに
+実プロセスのサーバー（``python -m lucianke``。``_stdio.server_argv``。BUG-0030）に stdio でつなぎ、ツールごとに
 Tier 1 のファイルからシード固定でランダムに選んだ対象で 200 回呼ぶ。サーバー内の ``timing_ms``（json エンベロープ）と
 クライアント往復の両方を記録し、判定はサーバー内時間で行う。
 
@@ -433,7 +433,7 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
         out["reason"] = "no Tier 1 files or symbols found"
         return out
     tmp = Path(tempfile.mkdtemp(prefix="lucianke-bench-lat-"))
-    client = S.McpStdioClient(S.uv_argv(REPO), cwd=spec.root, env=S.server_env(tmp / "cache"), roots=[spec.root],
+    client = S.McpStdioClient(S.server_argv(), cwd=spec.root, env=S.server_env(tmp / "cache"), roots=[spec.root],
                               stderr_path=tmp / "server.stderr.log")  # fmt: skip
     meter = R.CpuLoadMeter()
     t_spawn = time.perf_counter()

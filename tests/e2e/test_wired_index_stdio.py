@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import time
 import warnings
 from collections.abc import Awaitable, Callable
@@ -29,8 +30,11 @@ from mcp.shared.exceptions import MCPDeprecationWarning
 warnings.filterwarnings("ignore", category=MCPDeprecationWarning)
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "tests"))  # 共通の起動コマンド _server_cmd
+from _server_cmd import server_argv  # noqa: E402
+
 POLY = REPO / "tests" / "fixtures" / "poly"
-WAIT_S = 60.0  # 条件待ちの上限（初回は uv の起動と SDK の import を含む）
+WAIT_S = 60.0  # 条件待ちの上限（初回は Python の起動と SDK の import を含む）
 POLL_S = 0.2
 PROBE = "wired_probe_fn_7f3a"
 
@@ -40,11 +44,12 @@ def _env(cache: Path) -> dict[str, str]:
 
 
 def _argv() -> list[str]:
-    return ["run", "--project", str(REPO), "lucianke"]  # cwd は変えない（ワークスペースは cwd で決まる）
+    return server_argv()  # python -m lucianke（BUG-0030）。cwd はワークスペース（ワークスペースは cwd で決まる）
 
 
 def _params(ws: Path, cache: Path) -> StdioServerParameters:
-    return StdioServerParameters(command="uv", args=_argv(), env=_env(cache), cwd=str(ws))
+    argv = _argv()
+    return StdioServerParameters(command=argv[0], args=argv[1:], env=_env(cache), cwd=str(ws))
 
 
 @pytest.fixture
@@ -115,7 +120,7 @@ async def test_stdin_eof_exits_zero_after_orderly_shutdown(ws: Path, tmp_path: P
     cache = tmp_path / "cache"
     env = {**os.environ, **_env(cache)}
     proc = await asyncio.create_subprocess_exec(
-        "uv", *_argv(), cwd=str(ws), env=env,
+        *_argv(), cwd=str(ws), env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )  # fmt: skip
     assert proc.stdin and proc.stdout and proc.stderr

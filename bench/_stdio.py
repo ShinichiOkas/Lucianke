@@ -1,4 +1,4 @@
-"""実プロセスの MCP サーバー（``uv run lucianke``）を stdio でつなぐ最小クライアントと、測定中の監視（仕様書 §14.2「共通の前提」）。
+"""実プロセスの MCP サーバー（``python -m lucianke``。``server_argv``）を stdio でつなぐ最小クライアントと、測定中の監視（仕様書 §14.2「共通の前提」）。
 
 SDK のクライアントを使わない理由: ``stdout`` の純度（§12.1: 各行が JSON として解析でき、JSON-RPC 2.0 のメッセージであること）を
 **バイト単位で** 検査し、往復時間を ``perf_counter`` で最小のオーバーヘッドで測るため。プロトコルは ``initialize`` →
@@ -7,7 +7,7 @@ SDK のクライアントを使わない理由: ``stdout`` の純度（§12.1: �
 監視するもの:
 
 * ``stdout``: 空行・JSON でない行・JSON-RPC でない行・CRLF・改行で終わらない末尾を数える（1 件でも違反ならその実行全体が不合格）。
-* 子プロセス: 起動した ``uv`` の子孫を 1 秒間隔で数える（参考値。LSP は正当な子）。終了時の合否は NFR-OPS-2:
+* 子プロセス: 起動したサーバープロセスの子孫を 1 秒間隔で数える（参考値。LSP は正当な子）。終了時の合否は NFR-OPS-2:
   ``stdin`` を閉じて親が終わった後 1 秒以内に、観測した子孫がすべて消えること。
 
 標準ライブラリだけ（``ctypes`` で Windows のプロセス表を引く。``psutil`` は使わない）。
@@ -19,7 +19,6 @@ import asyncio
 import contextlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -440,10 +439,15 @@ class McpStdioClient:
         }
 
 
-def uv_argv(repo: Path) -> list[str]:
-    """``.mcp.json`` と同じ起動（``uv run ... lucianke``）。作業ディレクトリは呼び出し側の ``cwd`` にするので ``--project`` を使う。"""
-    uv = shutil.which("uv") or "uv"
-    return [uv, "run", "--quiet", "--project", str(repo), "lucianke"]
+def server_argv() -> list[str]:
+    """サーバーの起動コマンド: ``python -m lucianke``（BUG-0030。``tests/_server_cmd.py`` の ``server_argv`` と同じ形）。
+
+    ``uv run ... lucianke``（``.mcp.json`` の起動）にしないのは、``pyproject.toml`` が変わった状態で誰かがサーバー
+    （``.venv/Scripts/lucianke.exe``）を動かしていると、全員の ``uv run`` が exe を消せず（Windows の os error 32）
+    落ちるため。呼び出し側は ``uv run python bench/...`` で環境を同期済みなので、子は同じ環境（``sys.executable``）で動かす。
+    ``-P`` は cwd（ワークスペース）を ``sys.path`` に足さない。
+    """
+    return [sys.executable, "-P", "-m", "lucianke"]
 
 
 def server_env(cache_dir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
