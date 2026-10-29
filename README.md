@@ -1,17 +1,17 @@
 # Project Lucianke
-**Lucid + Ananke: The Aesthetics of Transparent Domination**
+**Lucid + Ananke: 透明な支配の美学**
 
-## Concept
-Project Lucianke is a high-efficiency LSP-MCP server designed to eliminate token wastage and operational latency in coding agents. By integrating Tree-sitter for AST-based skeletal extraction and LSP for precise symbol resolution, Lucianke transforms chaotic codebases into a strictly defined, deterministic structure.
+## コンセプト
+Project Luciankeは、コーディングエージェントにおけるトークン消費の浪費と作業時間の損失を根本的に解消するために設計された、高効率LSP-MCPサーバーである。Tree-sitterによるASTベースの骨格抽出とLSPによる精密なシンボル解決を統合することで、カオスなコードベースを厳格な構造へと閉じ込め、決定論的な解析と編集を実現する。
 
-## Core Philosophy: "Transparent Domination"
-- **Lucid (Transparency):** Piercing through the noise of huge codebases to visualize the essential structure.
-- **Ananke (Necessity):** Establishing a deterministic control plane where the correct answer is an inevitable result of structural analysis.
+## 核心的価値：「透明な支配（Transparent Domination）」
+- **Lucid（透明性）**: 巨大なコードの森に潜むノイズを排し、システムの真の構造を透視する知的な快楽。
+- **Ananke（必然性）**: 解析結果を偶然に委ねず、構造的整合性に基づいた「逃れられない正解」を導き出す決定論的な支配力。
 
-## Key Technical Pillars
-- **AST-Based Skeletal Extraction:** Avoiding full-file reads by extracting only the structural backbone.
-- **Deterministic Edit Protocol:** Ensuring structural integrity during modifications to prevent agent-induced regressions.
-- **Token-Efficient Analysis:** Minimalist data transfer to maximize the context window for actual problem solving.
+## 技術的柱
+- **ASTベースの骨格抽出**: ファイル全体の読み込みを避け、構造的なバックボーンのみを抽出することでコンテキスト窓を最適化する。
+- **決定論的編集プロトコル**: 編集時の整合性を厳格に担保し、エージェントによる不確定な破壊的変更を排除する。
+- **高効率トークン戦略**: 転送データを最小限に抑制し、推論リソースを本質的な問題解決に集中させる。
 
 ---
-*Defined by the pursuit of logical consistency and structural elegance.*
+*論理的整合性と構造的なエレガンスの追求。*
