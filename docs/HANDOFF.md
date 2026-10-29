@@ -11,10 +11,13 @@
 
 ```powershell
 git pull
+uv sync --extra langs                # 新 .venv では必須。無いと tree_sitter_rust の import で収集エラー（BUG-0062）
+uv run --no-project python bench/fetch_fixtures.py   # F-PY(httpx)・F-TS(ky) を取得。無いと契約テストが skip=未検査（BUG-0062）
 uv run pytest -q                     # 期待: 2 failed, 3781 passed, 22 skipped
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 落ちる 2 件の正体
 ```
 
+- ⚠ 新しい `.venv` で上の `uv sync --extra langs` と `fetch_fixtures.py` を飛ばすと、期待状態に**到達できない**（収集エラーで止まるか、契約テストが skip に化けて赤が隠れる）。詳細は **BUG-0062**。
 - 落ちるのは **BUG-0061（`test_t19_postcondition_1_2_3_4_5_schema[F-PY]`・`[F-TS]`）だけ**。これは直前のコミットの時点で既に落ちる（下記 §5 で確認済み）。**新しく赤が出たら、それは引き継いだ変更のせい**なので先に直す。
 - `uv run ruff check src tests` は clean。`ruff format --check` は 56 ファイルが未整形になるが、**これはインストール済み ruff とリポジトリの版のずれ**。全体整形はしない（差分が膨らむだけ）。触ったファイルだけ手で揃える。
 
