@@ -13,7 +13,9 @@
 * 表示する ``@path:line`` は **呼び出し箇所**（incoming は呼び出し元の中、outgoing は親の中）。``when:`` は
   ``relations.guard_condition``（その呼び出し箇所を直接囲む条件）。
 * 循環: 根（起点）からそのノードまでの経路に既に現れた URN は ``(cycle)`` を付けて 1 回だけ表示し、展開しない。
-* 外部（``lk://_ext/``）は葉として ``(external)`` を付けて表示する。
+* 外部（``lk://_ext/``）は葉として ``(external)`` を付けて表示する。ただし言語の組み込み名（``lk://_ext/builtins#print``・
+  ``lk://_ext/globals#Error`` など。``syntax/builtin_names.py``）は ``exclude_external=true``（既定）では出さない
+  （``print``・``ValueError`` の葉が outgoing を埋めるため。``false`` なら出す）。標準ライブラリ・外部パッケージの呼び先は葉のまま。
 * 1 レコード = 1 ノード（1 tree-line）。レコードは深さ優先の前順（インデントが親子と合う順）で並べる。予算が尽きたら前順の
   途中で止め、残りを ``# summary:`` に要約して ``next_cursor`` で続きを返す。
 * ``Class`` / ``Struct`` を渡したときはコンストラクタ（``__init__`` / ``constructor``）の呼び出しを起点にする。
@@ -40,6 +42,7 @@ from lucianke.core.records import Record, ToolOutput
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME
 from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
+from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
 from lucianke.tools import _lsp_exact as lx
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._nav import (
@@ -60,6 +63,7 @@ CALLABLE_KINDS = frozenset({Kind.FUNCTION, Kind.METHOD, Kind.CONSTRUCTOR})
 CONSTRUCTIBLE_KINDS = frozenset({Kind.CLASS, Kind.STRUCT})
 CONSTRUCTOR_NAMES = ("__init__", "constructor", "new")
 _EXTERNAL_PREFIX = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
+_BUILTIN_PREFIXES = tuple(f"{_EXTERNAL_PREFIX}{pkg}#" for pkg in (BUILTINS_PACKAGE, GLOBALS_PACKAGE))
 _ARROW = {"incoming": "<-", "outgoing": "->"}
 
 ACCURACY_NOTE = "relations の名前解決済みエッジを使うため、動的ディスパッチ（実装の取り違え・見落とし）と同名メソッドの区別が落ちます。"
@@ -82,7 +86,8 @@ class QueryCallHierarchyArgs(CommonArgs):
         default=True, description="Add 'when:' (the condition around each call)."
     )
     exclude_external: bool = Field(
-        default=True, description="Show stdlib/package functions as leaves '(external)'."
+        default=True,
+        description="Hide language builtins (print, ValueError...); other stdlib/package callees stay '(external)' leaves.",
     )
     include_tests: bool = Field(default=True, description="Include callers/callees in test files.")
     max_children: int = Field(
@@ -177,6 +182,11 @@ def _start_urns(conn: sqlite3.Connection, ws_id: str, sym: SymbolRecord, directi
     )
 
 
+def _is_builtin(urn: str) -> bool:
+    """言語の組み込み名の外部シンボル（``lk://_ext/builtins#print``・``lk://_ext/globals#Error``）。"""
+    return urn.startswith(_BUILTIN_PREFIXES)
+
+
 def _call_edges(
     syms: _Symbols, urns: Sequence[str], direction: str, include_tests: bool
 ) -> dict[str, list[_Site]]:
@@ -243,6 +253,8 @@ def _expand(
     edges = _call_edges(syms, urns, direction, args.include_tests)
     nodes: list[_Node] = []
     for child_urn, sites in edges.items():
+        if args.exclude_external and _is_builtin(child_urn):
+            continue  # print・ValueError などの組み込み名は既定で出さない（exclude_external=False で出す）
         node = _make_node(syms, child_urn, sites, direction, depth, parent_urn)
         if not args.include_tests and node.is_test:
             continue

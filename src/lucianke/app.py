@@ -125,7 +125,7 @@ def run_stdio() -> int:
         shutdown_guard=make_shutdown_guard(lifecycle),
         ready_gate=hub.wait_started,
     )
-    server = build_server(registry, pipeline, roots, version=__version__)
+    server = build_server(registry, pipeline, roots, version=__version__, list_planned=settings.list_planned_tools)
     log.info("lucianke %s starting (tools=%d)", __version__, len(registry), extra={"event": "startup"})
 
     async def serve() -> None:

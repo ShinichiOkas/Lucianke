@@ -106,8 +106,14 @@ def _internal_failure(tool: str) -> types.CallToolResult:
 
 
 def build_server(
-    registry: ToolRegistry, pipeline: Pipeline, roots: RootsState, *, version: str
+    registry: ToolRegistry, pipeline: Pipeline, roots: RootsState, *, version: str, list_planned: bool = False
 ) -> Server[Any]:
+    """``list_planned`` が偽（既定）なら、``tools/list`` にパイプラインの現在のマイルストーンより先のツールを載せない。
+
+    ホストはセッションごとに ``tools/list`` を丸ごと読むので、M1 では呼べない M2・M3 の入口（約 4,000 トークン）は固定費になる。
+    載せないだけで、呼ばれれば従来どおり ``E_UNSUPPORTED``（``not_in_milestone``）。
+    """
+
     async def on_list_tools(
         ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
@@ -119,7 +125,9 @@ def build_server(
                     input_schema=d.input_schema,
                     annotations=types.ToolAnnotations(read_only_hint=d.read_only),
                 )
-                for d in registry.descriptors()
+                for d in registry.descriptors(
+                    include_planned=list_planned, current_milestone=pipeline.current_milestone
+                )
             ]
         )
 
