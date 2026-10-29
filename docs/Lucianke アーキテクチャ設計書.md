@@ -719,6 +719,8 @@ T-00 手順 3 の順で候補を試し、最初に実行できたものを採る
 class Watcher:
     async def run(self, ws: Workspace, sink: IngestSink, stop: asyncio.Event) -> None
     mode: Literal["native", "polling"]
+    async def drain(self, paths: Sequence[RelPath] | None = None) -> None   # 未処理イベントを同期で処理し切る（EditTransaction 段 3、§7.7.1）
+    def expect(self, path: RelPath, sha256_after: str) -> None             # 自分の書き込みイベントを 1 回だけ無視する（§7.7.1 Reindexed）
 ```
 
 1. `watchfiles.awatch(ws.root, debounce=WATCH_DEBOUNCE_MS, watch_filter=…)` を用いる想定（S-6 で Windows の挙動を確認）。フィルタは `.gitignore`（`dulwich.ignore` を用いる想定。S-8 で確認。使えなければ fnmatch の自前サブセット）と `exclude_globs`、`.git/` 配下。
@@ -728,6 +730,7 @@ class Watcher:
 5. `IndexWriter` の取り込みが完了したら、`LspPool.notify_watched(changes)`（`workspace/didChangeWatchedFiles`）と、開いている文書には `documents.on_external_change(path)`（全文 `didChange`）を送る。`TreeCache` の該当エントリは新しい `sha256` で自然に置き換わる。
 6. 監視が開始できない（ネットワークドライブなど）ときは `mode="polling"` にし、背景のポーリングは行わず、要求時に対象ファイルの `sha256` を照合する遅延検証（`ToolContext.resolve_target` と `EditTransaction` 段 3）に切り替える。T-00 `status` に `watcher: "polling"` を出す。
 7. NFR-PERF-3 の測定のため、イベント受信・DB コミット・LSP 通知の各時刻を `debug` ログに残す。
+8. `drain(paths)` はデバウンス窓に溜まっているイベントのうち指定パス（省略時は全部）を即座に処理し、取り込みの完了まで待つ。`EditTransaction` が前提検証の直前に呼ぶ。`expect(path, sha256_after)` は、直後に届く自分の書き込みイベントを `sha256` が一致する場合に 1 回だけ捨てる（二重取り込みの抑止）。
 
 受入で確かめる点:
 
@@ -942,6 +945,9 @@ M1 の定義（起動コマンド・初期化オプション・位置単位は *
 class LspPool:
     def get(self, language_id: str, ws: Workspace, *, start_if_needed: bool = True) -> LspHandle | None   # ブロックしない
     def status(self, language_id, ws) -> LspStatus          # (state, progress, server_name, pid, reason)
+    async def ensure_started(self, language_id, ws) -> None # standby なら起動を投げて即戻る（待たない。§8.3）
+    async def notify_watched(self, changes) -> None          # workspace/didChangeWatchedFiles を稼働中の全 LSP へ
+    async def shutdown_all(self, grace_ms: int = 500) -> None # 終了手順（§6.5）: shutdown → exit → terminate → kill
     def reset(self, language_id | None, ws) -> None          # reindex_scope: "lsp"
     async def shutdown_all(self) -> None
 ```
@@ -1522,7 +1528,7 @@ host ─tools/call(get_file_skeleton, {paths:[a.py, b.py]})─► mcp.server
   │ 2. tools.t02         各 path:
   │      2a. workspace.paths   封じ込め → ルート相対
   │      2b. index.queries     files 行（language, tier, sha256）。無ければ項目エラー E_TARGET_NOT_FOUND
-  │      2c. syntax.parsers    TreeCache.get(ws, path, sha)。ヒットなら解析なし。ミスなら to_thread で読込 + 解析
+  │      2c. syntax.parsers    TreeCache.get_or_parse(ws, path, sha, load)。ヒットなら解析なし。ミスなら to_thread で読込 + 解析
   │      2d. engine.selector   select(file, SKELETON, NO_WAIT) → EngineChoice
   │      2e. syntax.skeleton   構文木 → Record 列（優先順位: 最上位 > doc > urn > 非公開 > 入れ子）
   │ 3. mcp.budget        Packer.pack（予算、next_cursor、summary、精度集計）
