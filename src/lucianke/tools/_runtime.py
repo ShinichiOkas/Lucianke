@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,13 +27,14 @@ from lucianke.core.model import LspStatus, RelPath
 from lucianke.edit.lock import WorkspaceLocks
 from lucianke.edit.transaction import EditTransaction
 from lucianke.engine.indexer import Indexer
-from lucianke.index.connection import ReaderPool, db_path_for, open_reader
+from lucianke.index.connection import ReaderPool, db_path_for
 from lucianke.index.ingest import DiagnosticFact, replace_lsp_diagnostics
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.action_store import CodeActionStore
 from lucianke.lsp.pool import FileChangeType, LspPool
 from lucianke.syntax.parsers import TreeCache
 from lucianke.tools._services import ToolServices
+from lucianke.tools.t00_configure_workspace import load_known_roots, restore_settings
 from lucianke.workspace.context import WorkspaceContext
 from lucianke.workspace.types import Workspace
 from lucianke.workspace.watcher import Watcher
@@ -54,6 +55,10 @@ class IndexerSink:
         self._indexer = indexer
         self._readers = readers
         self._lsp = lsp_pool
+
+    def rebind(self, ws: Workspace) -> None:
+        """設定を変えた ``Workspace`` に差し替える（``known_paths_under`` と LSP への通知の宛先）。"""
+        self._ws = ws
 
     async def changed(self, rel: RelPath) -> None:
         stats = await self._indexer.index_file(rel)
@@ -97,6 +102,7 @@ class WorkspaceRuntime:
     indexer: Indexer
     watcher: Watcher
     journal_dir: Path
+    sink: IndexerSink | None = None
     scan_job_id: str | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _watch_task: asyncio.Task[None] | None = None
@@ -109,12 +115,13 @@ class WorkspaceRuntime:
         writer = await asyncio.to_thread(IndexWriter, db_path)  # スレッド起動とスキーマの作成・移行
         readers = ReaderPool(db_path)
         indexer = Indexer(ws, writer, readers, trees)
-        watcher = Watcher(ws, IndexerSink(ws, indexer, readers, lsp_pool))
+        sink = IndexerSink(ws, indexer, readers, lsp_pool)
+        watcher = Watcher(ws, sink)
         _log.info(
             "index opened: ws=%s db=%s schema=%s", ws.workspace_id, db_path, writer.schema_action,
             extra={"event": "index_open"},
         )  # fmt: skip
-        return cls(ws, db_path, writer, readers, indexer, watcher, db_path.parent / "journal")
+        return cls(ws, db_path, writer, readers, indexer, watcher, db_path.parent / "journal", sink)
 
     async def begin(self) -> str:
         """監視を始め、始まったのを見てから差分索引を背景ジョブで投入する（始まる前の変更の取りこぼしを防ぐ）。すぐ戻る。"""
@@ -129,6 +136,14 @@ class WorkspaceRuntime:
             extra={"event": "index_begin"},
         )  # fmt: skip
         return self.scan_job_id
+
+    def rebind(self, ws: Workspace) -> None:
+        """設定（除外規則・Python 環境・基準リビジョン）を変えた ``Workspace`` を束の全員に渡す（監視・索引器・LSP への通知）。"""
+        self.indexer.rebind(ws)
+        self.watcher.rebind(ws)
+        if self.sink is not None:
+            self.sink.rebind(ws)
+        self.ws = ws
 
     async def stop_watcher(self) -> None:
         self._stop.set()
@@ -158,27 +173,6 @@ class WorkspaceRuntime:
 
     def data_version(self) -> int:
         return self.writer.data_version()
-
-
-def _known_roots(cache_root: Path, roots: Iterable[str]) -> dict[str, str]:
-    """前回までに割り当てた ``{ルートのパス: workspace_id}``（各 DB の ``workspaces`` 表。ID を再起動をまたいで安定させる。§7.3.1 手順 2）。"""
-    known: dict[str, str] = {}
-    for raw in roots:
-        path = db_path_for(cache_root, os.path.realpath(raw))
-        if not path.is_file():
-            continue
-        try:
-            conn = open_reader(path)
-        except Exception:  # noqa: BLE001
-            continue
-        try:
-            for root_path, ws_id in conn.execute("SELECT root_path, workspace_id FROM workspaces"):
-                known[str(root_path)] = str(ws_id)
-        except Exception:  # noqa: BLE001  古い・壊れた DB は無視（作り直される）
-            _log.debug("could not read workspaces from %s", path, exc_info=True)
-        finally:
-            conn.close()
-    return known
 
 
 def _diagnostic_facts(diags: Sequence[dict[str, Any]], source: str) -> list[DiagnosticFact]:
@@ -243,7 +237,9 @@ class RuntimeHub:
     @property
     def context(self) -> WorkspaceContext:
         if self._context is None:
-            self._context = WorkspaceContext(cwd=self._cwd, env=self._env)
+            # 全キャッシュの ``workspaces`` 行から、前回までに割り当てた ID を引き継ぐ（URN を再起動をまたいで安定させる。§7.3.1 手順 2）
+            known = load_known_roots(self.cache_root)
+            self._context = WorkspaceContext(cwd=self._cwd, env=self._env, known_roots=known)
         return self._context
 
     @property
@@ -289,15 +285,17 @@ class RuntimeHub:
             key = tuple(os.path.realpath(p) for p in paths)
             if key == self._applied:
                 return self.context.list()
-            if self._context is None:
-                known = _known_roots(self.cache_root, paths)
-                self._context = WorkspaceContext(cwd=self._cwd, env=self._env, known_roots=known)
+            context = self.context
+            before = {ws.workspace_id for ws in context.list()}
             try:
-                registered = self.context.register_roots(list(paths), replace=True)
+                registered = context.register_roots(list(paths), replace=True)
             except LuciankeError as exc:
                 _log.warning("roots not registered: %s", exc.message)
-                return self.context.list()
+                return context.list()
             self._applied = key
+            new = [ws for ws in registered if ws.workspace_id not in before]
+            if new:  # 新しく登録した分だけ、保存済みの設定（除外・Python 環境・基準リビジョン）を初期値として戻す（束を起こす前に）
+                registered = self._restore(new, registered)
             wanted = {ws.workspace_id for ws in registered}
             for ws_id in [i for i in self._runtimes if i not in wanted]:
                 await self._runtimes.pop(ws_id).aclose()
@@ -319,6 +317,35 @@ class RuntimeHub:
             for rt in started:
                 await rt.begin()
             return registered
+
+    def _restore(self, new: Sequence[Workspace], registered: list[Workspace]) -> list[Workspace]:
+        try:
+            for message in restore_settings(self.context, new, self.cache_root):
+                _log.warning("saved settings: %s", message)
+        except Exception:  # noqa: BLE001  保存済みの設定が読めなくても、既定の設定で動き続ける
+            _log.warning("could not restore the saved settings", exc_info=True)
+        return [self.context.get(ws.workspace_id) for ws in registered]
+
+    async def workspace_changed(self, ws: Workspace) -> None:
+        """設定を変えた ``Workspace``（T-00 の ``set_excludes`` / ``set_python_env`` / ``default_base_ref``）を束と LSP に渡し直す。
+
+        束（``Indexer``・``Watcher``・通知の宛先）は新しい規則に差し替える。LSP のハンドルは ``LspHandle.rebind`` があればそれを呼ぶ。
+        """
+        rt = self._runtimes.get(ws.workspace_id)
+        if rt is not None:
+            rt.rebind(ws)
+        pool = self.lsp_pool
+        if pool is None:
+            return
+        for handle in pool.handles(ws):
+            rebind = getattr(handle, "rebind", None)
+            if rebind is None:
+                _log.debug("LspHandle.rebind is not available; %s keeps its Workspace", handle.language_id)
+                continue
+            try:
+                rebind(ws)
+            except Exception:  # noqa: BLE001  LSP 側の差し替えの失敗で設定の変更を止めない
+                _log.warning("could not rebind the LSP handle %s", handle.language_id, exc_info=True)
 
     # --- LSP の診断 → PaaD ---
 
@@ -365,6 +392,16 @@ class WiredServices(ToolServices):
         if hub is not None and hub.has_workspaces():
             return hub.workspace(workspace_id)
         return ToolServices.workspace(self, workspace_id)  # slots の dataclass では引数なしの super() が使えない
+
+    def resolve_workspace_id(self, workspace_id: str | None) -> str | None:
+        """省略を実在の ID にする。ルートが 1 つも無い間は ``None`` を素通しする（T-00 ``set_roots`` の最初の呼び出しを通すため）。
+
+        他のツールはこの後、``workspace()`` / ``db_path`` で ``E_WORKSPACE_NOT_CONFIGURED`` になる。明示した ID は従来どおり検査する。
+        """
+        hub = self.hub
+        if workspace_id is None and (hub is None or not hub.has_workspaces()) and not list(self.roots()):
+            return None
+        return self.workspace(workspace_id).workspace_id
 
     def runtime(self, workspace_id: str | None = None) -> WorkspaceRuntime | None:
         return None if self.hub is None else self.hub.runtime(workspace_id)

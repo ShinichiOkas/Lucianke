@@ -52,7 +52,7 @@ from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
-from lucianke.index import queries
+from lucianke.index import queries, rank
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
     FileFacts,
@@ -242,6 +242,16 @@ class Indexer:
     def workspace(self) -> Workspace:
         return self._ws
 
+    def rebind(self, ws: Workspace) -> None:
+        """設定（除外規則・Python 環境など）を変えた同じワークスペースに差し替える。以降の走査・取り込みは新しい規則で判定する。
+
+        ``workspace_id`` と ``root`` は変えられない（束はこの 2 つで結ばれている）。走っているジョブは止めない
+        （次の走査から新しい規則。除外の変更で ``files`` から外す再走査は呼び出し側が始める）。
+        """
+        if ws.workspace_id != self._ws.workspace_id or ws.root != self._ws.root:
+            raise ValueError("rebind needs the same workspace_id and root")
+        self._ws = ws
+
     # --- 公開 API ---------------------------------------------------------------------
 
     async def index_file(self, rel: str | RelPath) -> IngestStats | None:
@@ -358,9 +368,45 @@ class Indexer:
                 bumps_version=False,
                 label="settle_relations",
             )
+        if report.indexed or report.removed or not await asyncio.to_thread(self._ranks_ready):
+            await self.refresh_ranks_quietly()  # 全体の取り込みの後に 1 回（index/rank.py。T-01 の順位）
         progress(100)
         report.duration_s = time.monotonic() - t0
         return report
+
+    async def refresh_ranks(self) -> int:
+        """参照グラフの重要度（PageRank・fan_in）を計算し直して書く（``index/rank.py``）。書いたシンボルの行数を返す。
+
+        計算は読み取り接続でスレッドに逃がし（書き手を止めない）、書き込みは短いジョブ 1 つ。``data_version`` は進めない。
+        ``scan`` が全体の取り込みの後に 1 回呼ぶ。1 ファイルの再取り込み（``index_file``）では呼ばない（編集のたびに全体を
+        計算し直さないため。次の ``scan`` で揃う）。
+        """
+        await self._ensure_workspace()
+        ws_id = self._ws.workspace_id
+
+        def compute() -> rank.RankResult:
+            with self._readers.reader() as conn:
+                return rank.compute_ranks(conn, ws_id)
+
+        result = await asyncio.to_thread(compute)
+        return await self._writer.asubmit(
+            lambda conn: rank.store_ranks(conn, ws_id, result),  # type: ignore[arg-type]
+            bumps_version=False,
+            label="pagerank",
+        )
+
+    async def refresh_ranks_quietly(self) -> None:
+        """``refresh_ranks`` の失敗を握って記録する（順位は付加情報で、取り込みの成否に影響させない）。"""
+        try:
+            await self.refresh_ranks()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning("pagerank refresh failed", exc_info=True)
+
+    def _ranks_ready(self) -> bool:
+        with self._readers.reader() as conn:
+            return rank.ranked_symbol_count(conn, self._ws.workspace_id) > 0
 
     def start_scan_job(self) -> str:
         """``scan`` を背景タスクとして始め、``job_id`` を返す（すぐ戻る。仕様書 §11 T-00 処理規約 6）。

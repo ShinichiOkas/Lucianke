@@ -128,6 +128,15 @@ class Watcher:
 
     # --- 公開 API ----------------------------------------------------------------------
 
+    def rebind(self, ws: Workspace) -> None:
+        """設定（``exclude_globs`` など）を変えた同じワークスペースに差し替える。以降のイベントは新しい除外規則で落とす。
+
+        ``workspace_id`` と ``root`` は変えられない。監視の対象ディレクトリ（ルート）は変わらないので、走っている監視は止めない。
+        """
+        if ws.workspace_id != self._ws.workspace_id or ws.root != self._ws.root:
+            raise ValueError("rebind needs the same workspace_id and root")
+        self._ws = ws
+
     async def run(self, stop: asyncio.Event) -> None:
         """``stop`` が立つまで監視する。開始できなければ ``mode = "polling"`` にして返る（何もしない）。"""
         if self._queue is not None:
