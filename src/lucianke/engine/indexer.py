@@ -41,7 +41,7 @@ import logging
 import os
 import stat
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -53,6 +53,7 @@ from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
 from lucianke.engine import reresolve
+from lucianke.engine.rank_scheduler import RANK_DEBOUNCE_S, RankScheduler
 from lucianke.index import queries, rank
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
@@ -222,6 +223,8 @@ class Indexer:
         tree_cache: TreeCache,
         *,
         max_file_bytes: int = MAX_FILE_BYTES,
+        rank_delay_s: float = RANK_DEBOUNCE_S,
+        rank_sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
         self._ws = ws
         self._writer = writer
@@ -238,10 +241,16 @@ class Indexer:
         self._ctags_probed = False
         self._ctags_lock = asyncio.Lock()
         self.ingest_calls = 0  # ``ingest_file`` に渡したファイル数（受入検査のカウンタ。設計書 §7.6.5）
+        self._rank_scheduler = RankScheduler(self._scheduled_refresh, delay=rank_delay_s, sleep=rank_sleep)
 
     @property
     def workspace(self) -> Workspace:
         return self._ws
+
+    @property
+    def rank_scheduler(self) -> RankScheduler:
+        """1 ファイルの更新（``index_file`` / ``remove``）の後の PageRank の再計算の予約（テストの待ち合わせ用）。"""
+        return self._rank_scheduler
 
     def rebind(self, ws: Workspace) -> None:
         """設定（除外規則・Python 環境など）を変えた同じワークスペースに差し替える。以降の走査・取り込みは新しい規則で判定する。
@@ -288,7 +297,9 @@ class Indexer:
             _settle_relations(conn, [stats.file_id, *reresolve.ingest_importers(conn, importers)])  # type: ignore[arg-type]
             return stats
 
-        return await self._writer.asubmit(job, bumps_version=True, label=f"ingest:{path}")
+        stats = await self._writer.asubmit(job, bumps_version=True, label=f"ingest:{path}")
+        self._rank_scheduler.touch()  # 順位は約 1 秒おとなしくなってから 1 回だけ計算し直す（engine/rank_scheduler.py）
+        return stats
 
     async def remove(self, rel: str | RelPath) -> bool:
         """``rel`` を PaaD から消す。消したら ``True``、元から無ければ ``False``。"""
@@ -308,7 +319,10 @@ class Indexer:
             _settle_relations(conn, reresolve.ingest_importers(conn, importers))  # type: ignore[arg-type]
             return removed
 
-        return await self._writer.asubmit(job, bumps_version=True, label=f"remove:{path}")
+        removed = await self._writer.asubmit(job, bumps_version=True, label=f"remove:{path}")
+        if removed:
+            self._rank_scheduler.touch()
+        return removed
 
     async def scan(self, *, progress_cb: Callable[[int], None] | None = None) -> ScanReport:
         """差分索引。進捗 0〜100 を ``progress_cb`` に渡す（単調増加。最後は必ず 100）。"""
@@ -390,8 +404,8 @@ class Indexer:
         """参照グラフの重要度（PageRank・fan_in）を計算し直して書く（``index/rank.py``）。書いたシンボルの行数を返す。
 
         計算は読み取り接続でスレッドに逃がし（書き手を止めない）、書き込みは短いジョブ 1 つ。``data_version`` は進めない。
-        ``scan`` が全体の取り込みの後に 1 回呼ぶ。1 ファイルの再取り込み（``index_file``）では呼ばない（編集のたびに全体を
-        計算し直さないため。次の ``scan`` で揃う）。
+        ``scan`` が全体の取り込みの後に 1 回呼ぶ。1 ファイルの再取り込み（``index_file`` / ``remove``）は直接は呼ばず、
+        ``rank_scheduler`` のデバウンスで最後の更新の約 1 秒後に 1 回だけ呼ぶ（編集のたびに全体を計算し直さないため）。
         """
         await self._ensure_workspace()
         ws_id = self._ws.workspace_id
@@ -415,6 +429,11 @@ class Indexer:
             raise
         except Exception:
             _log.warning("pagerank refresh failed", exc_info=True)
+
+    async def _scheduled_refresh(self) -> None:
+        """デバウンスの後の再計算。走査のジョブが走っていれば終わるのを待つ（走査の最後の計算より古い結果で上書きしない）。"""
+        async with self._scan_lock:
+            await self.refresh_ranks_quietly()
 
     def _ranks_ready(self) -> bool:
         with self._readers.reader() as conn:
@@ -448,7 +467,8 @@ class Indexer:
         return self.job_status(job_id)
 
     async def aclose(self) -> None:
-        """走っているジョブを取り消して待つ。"""
+        """走っているジョブと、PageRank の再計算の予約を取り消して待つ。"""
+        await self._rank_scheduler.aclose()
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
