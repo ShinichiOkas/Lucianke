@@ -12,3 +12,5 @@ export const u2byte = ["é", v2byte];
 export const uMix = ["é😀あ", vMix];
 export const uIdent = ["😀日本語", 名前];
 export const bad = "😀日本語" + undefinedNameZz;
+export const aa = 0, bb = 0, cc = 0, dd = 0, ee = 0, ff = 0, gg = 0;
+export const row = ["😀😀😀", aa, bb, cc, dd, ee, ff, gg];

@@ -12,3 +12,5 @@ pub const U_2BYTE: (&str, i32) = ("é", V_2BYTE);
 pub const U_MIX: (&str, i32) = ("é😀あ", V_MIX);
 pub const U_IDENT: (&str, i32) = ("😀日本語", 名前);
 pub const BAD: (&str, i32) = ("😀日本語", UNDEFINED_NAME_ZZ);
+pub const AA: i32 = 0; pub const BB: i32 = 0; pub const CC: i32 = 0; pub const DD: i32 = 0; pub const EE: i32 = 0; pub const FF: i32 = 0; pub const GG: i32 = 0;
+pub const ROW: (&str, [i32; 7]) = ("😀😀😀", [AA, BB, CC, DD, EE, FF, GG]);

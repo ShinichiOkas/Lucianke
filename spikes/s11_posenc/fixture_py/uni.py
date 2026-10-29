@@ -13,3 +13,5 @@ u_mix = ("é😀あ", v_mix)
 u_ident = ("😀日本語", 名前)
 bad = "😀日本語" + undefined_name_zz
 t_f = ("😀", f"あ")
+aa = bb = cc = dd = ee = ff = gg = 0
+row = ("😀😀😀", aa, bb, cc, dd, ee, ff, gg)

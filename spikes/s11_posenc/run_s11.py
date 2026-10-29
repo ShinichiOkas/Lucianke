@@ -1,6 +1,6 @@
 """S-11: LSP ごとの位置の単位（UTF-8 / UTF-16）と LineIndex の一致。使い捨て。
 
-使い方: uv run python spikes/s11_posenc/run_s11.py [basedpyright ruff vtsls tsls ...]   # 既定は全部。結果は out/s11.json と表
+使い方: uv run python spikes/s11_posenc/run_s11.py [basedpyright ruff vtsls tsls] [--offer=utf-8]   # 既定は全部。結果は out/s11_<サーバー名>.json と表
         uv run python spikes/s11_posenc/run_s11.py --lineindex                        # LineIndex 単体の網羅検査だけ（サーバー不要）
 前提: .venv に basedpyright・ruff、spikes/s05_ts/.cache に vtsls 等（npm install --prefix spikes/s05_ts/.cache @vtsls/language-server typescript）
 """
@@ -57,6 +57,8 @@ PY_TEXT = "\n".join([
     f'u_ident = ("{EMO}日本語", 名前)',
     f'bad = "{EMO}日本語" + undefined_name_zz',
     f't_f = ("{EMO}", f"あ")',
+    "aa = bb = cc = dd = ee = ff = gg = 0",
+    f'row = ("{EMO}{EMO}{EMO}", aa, bb, cc, dd, ee, ff, gg)',
     "",
 ])
 TS_TEXT = "\n".join([
@@ -74,6 +76,8 @@ TS_TEXT = "\n".join([
     f'export const uMix = ["{MIX}", vMix];',
     f'export const uIdent = ["{EMO}日本語", 名前];',
     f'export const bad = "{EMO}日本語" + undefinedNameZz;',
+    "export const aa = 0, bb = 0, cc = 0, dd = 0, ee = 0, ff = 0, gg = 0;",
+    f'export const row = ["{EMO}{EMO}{EMO}", aa, bb, cc, dd, ee, ff, gg];',
     "",
 ])
 RS_TEXT = "\n".join([
@@ -91,11 +95,15 @@ RS_TEXT = "\n".join([
     f'pub const U_MIX: (&str, i32) = ("{MIX}", V_MIX);',
     f'pub const U_IDENT: (&str, i32) = ("{EMO}日本語", 名前);',
     f'pub const BAD: (&str, i32) = ("{EMO}日本語", UNDEFINED_NAME_ZZ);',
+    "pub const AA: i32 = 0; pub const BB: i32 = 0; pub const CC: i32 = 0; pub const DD: i32 = 0; pub const EE: i32 = 0; pub const FF: i32 = 0; pub const GG: i32 = 0;",
+    f'pub const ROW: (&str, [i32; 7]) = ("{EMO}{EMO}{EMO}", [AA, BB, CC, DD, EE, FF, GG]);',
     "",
 ])
 CASES = {"py": ["v_bmp", "v_astral", "v_2byte", "v_mix", "名前"],
          "ts": ["vBmp", "vAstral", "v2byte", "vMix", "名前"],
          "rs": ["V_BMP", "V_ASTRAL", "V_2BYTE", "V_MIX", "名前"]}
+ADJ = {"py": ["aa", "bb", "cc", "dd", "ee", "ff", "gg"], "ts": ["aa", "bb", "cc", "dd", "ee", "ff", "gg"],
+       "rs": ["AA", "BB", "CC", "DD", "EE", "FF", "GG"]}
 BAD_TOKEN = {"py": "undefined_name_zz", "ts": "undefinedNameZz", "rs": "UNDEFINED_NAME_ZZ"}
 TEXTS = {"py": PY_TEXT, "ts": TS_TEXT, "rs": RS_TEXT}
 
@@ -190,7 +198,7 @@ def servers() -> dict[str, Srv]:
     ra = shutil.which("rust-analyzer")
     if ra:
         out["rust-analyzer"] = Srv("rust-analyzer", [ra], HERE / "fixture_rs", "rs", "src/lib.rs", "rust", lambda it: {},
-                                   ready_timeout_s=120.0)
+                                   ready_timeout_s=120.0, extra={"diag_timeout": 30.0})
     return out
 
 
@@ -267,7 +275,7 @@ async def run_one(srv: Srv, offer_label: str, offer: list[str] | None) -> dict[s
         n = await c.wait_for("textDocument/publishDiagnostics",
                              lambda p: norm_uri(p["uri"]) == norm_uri(uri) and any(
                                  d["range"]["start"]["line"] == bad_line for d in p["diagnostics"]),
-                             timeout=srv.ready_timeout_s)
+                             timeout=srv.extra.get("diag_timeout", srv.ready_timeout_s))
         await asyncio.sleep(1.0)
         rec["diag_arrived"] = n is not None
         tdi = {"uri": uri}
@@ -339,11 +347,23 @@ async def run_one(srv: Srv, offer_label: str, offer: list[str] | None) -> dict[s
             if have("definitionProvider"):
                 d = await req(c, "textDocument/definition", pos(ul, sent_use[1]))
                 lr = loc_ranges(d)
+                dd_units: list[str] | None = None
+                dd_li = None
+                dd_text = None
+                if lr:
+                    rg0 = lr[0][1]
+                    # 識別子そのもの、または宣言文全体（vtsls）を指す範囲なら、その単位で読めたとする
+                    ok = lambda t: t is not None and (t == ident or (t.startswith("export ") and ident in t))  # noqa: E731
+                    dd_units = [u for u in UNITS if ok(decode_range(lines, rg0, u))]
+                    dd_text = decode_range(lines, rg0, unit)
+                    if ok(dd_text):
+                        want0 = lines[dl].index(dd_text)
+                        dd_li = lineindex_check(idx, dl, rg0["start"]["character"], unit, want0)
                 cs["definition"] = {"n": len(lr), "err": d.get("__error__") if is_err(d) else None,
                                     "start_char": lr[0][1]["start"]["character"] if lr else None,
+                                    "range_text": dd_text,
                                     "line_ok": bool(lr) and lr[0][1]["start"]["line"] == dl,
-                                    "units": units_decoding(lines, lr[0][1], ident) if lr else None,
-                                    "li": lineindex_check(idx, dl, lr[0][1]["start"]["character"], unit, dc) if lr else None}
+                                    "units": dd_units, "li": dd_li}
             if have("referencesProvider"):
                 r = await req(c, "textDocument/references",
                               {**pos(dl, sent_def[1]), "context": {"includeDeclaration": True}})
@@ -429,6 +449,57 @@ async def run_one(srv: Srv, offer_label: str, offer: list[str] | None) -> dict[s
                               "range": h.get("range") if isinstance(h, dict) and not is_err(h) else None}
         rec["mid_char"] = mid
 
+        # ---- 隣り合う短い識別子への hover: 単位違いの列が「別のシンボル」に当たるか ----
+        if have("hoverProvider"):
+            row_ln = next(i for i, ln in enumerate(lines) if ln.startswith(("row =", "export const row", "pub const ROW")))
+            adj: dict[str, Any] = {}
+            for su in UNITS:
+                tally = {"hit": 0, "wrong_symbol": 0, "null": 0, "error": 0}
+                wrong = []
+                for nm in ADJ[srv.lang]:
+                    cp_nm = next(cp for (ln, cp) in find_occurrences(lines, nm) if ln == row_ln)
+                    h = await req(c, "textDocument/hover", {"textDocument": tdi, "position": {"line": row_ln, "character": col_in(lines[row_ln], cp_nm, su)}})
+                    if is_err(h):
+                        tally["error"] += 1
+                    elif not h or not h.get("range"):
+                        tally["null"] += 1
+                    else:
+                        dec = decode_range(lines, h["range"], unit)
+                        if dec == nm:
+                            tally["hit"] += 1
+                        else:
+                            tally["wrong_symbol"] += 1
+                            wrong.append(f"{nm}->{dec}")
+                adj[su] = {**tally, "wrong": wrong[:4]}
+            rec["adjacent_hover_by_sent_unit"] = adj
+
+        # ---- 増分 didChange（クライアント → サーバーの位置）: 不正な識別子の先頭に X を挿入し、診断メッセージの名前で判定 ----
+        sync = caps.get("textDocumentSync")
+        sync_kind = sync if isinstance(sync, int) else (sync or {}).get("change")
+        rec["sync_kind"] = sync_kind
+        if sync_kind == 2:
+            inc: dict[str, Any] = {}
+            ver = 10
+            tok = BAD_TOKEN[srv.lang]
+            for su in UNITS:
+                ver += 1
+                c.did_change(path, ver, text)  # 全文で巻き戻す
+                await asyncio.sleep(2.0)
+                ver += 1
+                p0 = {"line": bad_line, "character": col_in(lines[bad_line], bad_cp, su)}
+                t_change = c.now()
+                c.notify("textDocument/didChange", {"textDocument": {"uri": uri, "version": ver},
+                                                    "contentChanges": [{"range": {"start": p0, "end": p0}, "text": "X"}]})
+                nn = await c.wait_for("textDocument/publishDiagnostics",
+                                      lambda p: norm_uri(p["uri"]) == norm_uri(uri), timeout=8.0, after=t_change + 0.001)
+                await asyncio.sleep(1.0)
+                last = [x for x in c.diag_for(path) if x.t > t_change][-1:] or []
+                msgs = [str(d.get("message")).replace(chr(10), " ")[:60] for x in last for d in x.params["diagnostics"]
+                        if d["range"]["start"]["line"] == bad_line]
+                inc[su] = {"sent_col": p0["character"], "new_diag": nn is not None, "messages": msgs,
+                           "correct": any(("X" + tok) in m for m in msgs)}
+            rec["incremental_didChange_by_sent_unit"] = inc
+
         # ---- 終了前にプロセス木を記録 → shutdown → exit → 孤児確認 ----
         if c.proc is not None:
             tree_before = descendants(c.proc.pid, process_table())
@@ -442,16 +513,20 @@ async def run_one(srv: Srv, offer_label: str, offer: list[str] | None) -> dict[s
         for p in list(rec["orphans_after_shutdown"]):  # 自分が起動した子孫だけを片付ける
             subprocess.run(["taskkill", "/F", "/T", "/PID", p], capture_output=True)
     rec["stderr_tail"] = [s for _, s in c.stderr_lines[-3:]]
+    if (rec.get("shutdown") or {}).get("exit_code") not in (0, None):  # 異常終了: パニックなどの stderr を残す
+        rec["stderr_crash"] = [s for _, s in c.stderr_lines[-40:]]
     return rec
 
 
 async def run_server(srv: Srv) -> list[dict[str, Any]]:
     out = []
     for label, offer in OFFERS:
+        t0 = asyncio.get_running_loop().time()
         try:
-            out.append(await run_one(srv, label, offer))
-        except Exception as e:  # noqa: BLE001
+            out.append(await asyncio.wait_for(run_one(srv, label, offer), timeout=240))
+        except BaseException as e:  # noqa: BLE001
             out.append({"server": srv.name, "offer": label, "fatal": repr(e)})
+        print(f"[{srv.name}] {label} done in {asyncio.get_running_loop().time() - t0:.1f}s", file=sys.stderr, flush=True)
     return out
 
 
@@ -525,13 +600,15 @@ def summarize(rec: dict[str, Any]) -> dict[str, Any]:
     li_send += [d["li"]["send_ok"] for d in rec.get("diagnostics", [])]
     return {
         "server": rec["server"], "offer": rec["offer"], "negotiated": rec["positionEncoding"],
-        "hover": inter([c["hover"]["units"] or [] for c in cs if c.get("hover")]) if any(c.get("hover") for c in cs) else "-",
+        "hover": inter([c["hover"]["units"] or [] for c in cs if c.get("hover") and not c["hover"]["null"]]) if any(c.get("hover") and not c["hover"]["null"] for c in cs) else "-",
         "definition": inter([c["definition"]["units"] or [] for c in cs if c.get("definition")]) if any(c.get("definition") for c in cs) else "-",
         "references": inter([i["units"] for c in cs for i in (c.get("references") or {}).get("items", [])]) if any(c.get("references") for c in cs) else "-",
         "rename": inter([c["rename"]["units_reproducing_expected_text"] for c in cs if c.get("rename")]) if any(c.get("rename") for c in cs) else "-",
         "diag": inter([d["units"] for d in rec.get("diagnostics", [])]),
         "li_recv": f"{sum(li_recv)}/{len(li_recv)}", "li_send": f"{sum(li_send)}/{len(li_send)}",
         "li_apply": f"{sum(1 for c in cs if (c.get('rename') or {}).get('li_apply_ok'))}/{sum(1 for c in cs if c.get('rename'))}",
+        "adj": {k: f'{v["hit"]}/{v["wrong_symbol"]}/{v["null"]}' for k, v in rec.get("adjacent_hover_by_sent_unit", {}).items()},
+        "inc": {k: v["correct"] for k, v in rec.get("incremental_didChange_by_sent_unit", {}).items()},
         "orphans": list((rec.get("orphans_after_shutdown") or {}).values()),
         "exit": (rec.get("shutdown") or {}).get("exit_code"),
     }
@@ -547,13 +624,16 @@ async def main(argv: list[str]) -> None:
         return
     all_srv = servers()
     names = [a for a in argv if not a.startswith("--")] or list(all_srv)
+    only = next((a.split("=", 1)[1] for a in argv if a.startswith("--offer=")), None)  # 例: --offer=utf-8
+    if only:
+        OFFERS[:] = [o for o in OFFERS if o[0] == only]
     results = await asyncio.gather(*(run_server(all_srv[n]) for n in names))
     flat = [r for rs in results for r in rs]
     (HERE / "out").mkdir(exist_ok=True)
-    (HERE / "out" / "s11.json").write_text(json.dumps(flat, ensure_ascii=False, indent=1), encoding="utf-8")
+    (HERE / "out" / ("s11_" + "_".join(names) + ".json")).write_text(json.dumps(flat, ensure_ascii=False, indent=1), encoding="utf-8")
     li = lineindex_selftest()
     (HERE / "out" / "lineindex.json").write_text(json.dumps(li, ensure_ascii=False, indent=1), encoding="utf-8")
-    cols = ["server", "offer", "negotiated", "hover", "definition", "references", "rename", "diag", "li_recv", "li_send", "li_apply", "orphans", "exit"]
+    cols = ["server", "offer", "negotiated", "hover", "definition", "references", "rename", "diag", "li_recv", "li_send", "li_apply", "orphans", "exit", "adj", "inc"]
     print(" | ".join(cols))
     for r in flat:
         s = summarize(r)
