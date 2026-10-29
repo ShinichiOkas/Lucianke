@@ -979,7 +979,9 @@ async def run_stdio_sample(ops: list[Op], results: dict[int, dict[str, Any]], en
                         if code == "E_PRECONDITION_FAILED" and attempt < 2:
                             _restore(path, pristine)
                             continue
-                        got = {"error": code or r.text[:200]}
+                        e = env_.get("error") or {}
+                        got = {"error": code or r.text[:200], "message": str(e.get("message", ""))[:300],
+                               "details": e.get("details")}  # fmt: skip
                     else:
                         d = env_.get("data") or {}
                         fc = d.get("files_changed") or [{}]
