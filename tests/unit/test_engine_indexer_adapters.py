@@ -100,7 +100,8 @@ async def test_data_files_index_top_level_sections(
     assert [s[0] for s in syms] == names
     assert {s[1] for s in syms} == {kind}
     for (_, _, urn), tail in zip(syms, urn_tails, strict=True):
-        parsed = parse_urn(urn)  # セレクタの式は URN の中で百分率符号化される（``/`` は ``%2F``）。解いた形で比べる
+        # セレクタの式は URN の中で百分率符号化される（``/`` は ``%2F``）ので、解いた形で比べる
+        parsed = parse_urn(urn)
         assert (parsed.workspace_id, parsed.path) == (WS_ID, path), urn
         assert f"{parsed.selector.kind}:{parsed.selector.expr}" == tail, urn
     # files 行はアダプタのシンボルがあれば structural
