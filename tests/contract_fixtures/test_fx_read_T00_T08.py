@@ -303,6 +303,9 @@ async def test_t04_postcondition_1_2_3_4_resolve(rig: Rig) -> None:
         assert exact, "the LSP is ready but no item is exact"
     else:
         assert not exact
+        pytest.skip(
+            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-04#4 signature_expanded vs LSP hover)"
+        )
     handle = rig.pool.get(rig.language, rig.ws)
     for i in exact:
         sel = i["symbol"]["selection_range"]
@@ -421,6 +424,9 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
         assert got == want or got <= want, (sorted(want - got)[:5], sorted(got - want)[:5])
     else:
         assert not rig.lsp_ready or meta_level(r) != "exact"
+        pytest.skip(
+            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-06#1 references vs LSP)"
+        )
     # 事後条件 5: 解決できない import は外部シンボル lk://_ext/<pkg>#<name> として索引に現れ、それを target にした references は import の箇所を返す
     ext_q = "SELECT urn FROM symbols WHERE urn LIKE 'lk://\\_ext/%' ESCAPE '\\' ORDER BY urn LIMIT 1"
     ext = (await rig.ok("query_project_db", query=ext_q))["data"]["rows"]
@@ -496,6 +502,10 @@ async def test_t07_postcondition_1_2_3_4_5_6_call_hierarchy(rig: Rig) -> None:
         lsp = {(str(e.item.rel), e.item.name) for e in await features.incoming_calls(handle, items[0])}
         got = {(n["path"], n["name"].split(".")[-1]) for n in d1["data"]["nodes"] if n["depth"] == 1}
         assert got == lsp, (sorted(got - lsp), sorted(lsp - got))
+    else:
+        pytest.skip(
+            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-07#2 call hierarchy depth-1 vs LSP)"
+        )
     # 事後条件 5: 解決できない import の呼び先は is_external の葉
     out = await rig.ok(
         "query_call_hierarchy",

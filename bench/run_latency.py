@@ -68,7 +68,8 @@ class Sym:
     path: str
     name: str
     qualified: str
-    kind: str  # "function" | "class" | "method"
+    kind: str  # "function" | "class" | "method" | "property"
+    line: int = 0  # 1-origin line number (0 = unknown)
 
 
 _TS_DECL = re.compile(
@@ -91,16 +92,36 @@ def extract_symbols(root: Path, rel: str) -> list[Sym]:
             return []
         for node in tree.body:
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                out.append(Sym(rel, node.name, node.name, "function"))
+                out.append(Sym(rel, node.name, node.name, "function", node.lineno))
             elif isinstance(node, ast.ClassDef):
-                out.append(Sym(rel, node.name, node.name, "class"))
+                out.append(Sym(rel, node.name, node.name, "class", node.lineno))
                 for sub in node.body:
                     if isinstance(sub, ast.FunctionDef | ast.AsyncFunctionDef):
-                        out.append(Sym(rel, sub.name, f"{node.name}.{sub.name}", "method"))
+                        # method か property かを decorator で判定する
+                        is_prop = any(
+                            (isinstance(d, ast.Name) and d.id == "property")
+                            or (isinstance(d, ast.Attribute) and d.attr == "property")
+                            for d in sub.decorator_list
+                        )
+                        kind = "property" if is_prop else "method"
+                        out.append(Sym(rel, sub.name, f"{node.name}.{sub.name}", kind, sub.lineno))
     else:
+        lines = text.splitlines(keepends=True)
+        offsets = [0]
+        for ln in lines:
+            offsets.append(offsets[-1] + len(ln))
         for m in _TS_DECL.finditer(text):
             kind = "function" if m["kw"] == "function" else "class"
-            out.append(Sym(rel, m["name"], m["name"], kind))
+            # バイナリサーチで行番号を求める
+            pos = m.start()
+            lo, hi = 0, len(offsets) - 1
+            while lo < hi - 1:
+                mid = (lo + hi) // 2
+                if offsets[mid] <= pos:
+                    lo = mid
+                else:
+                    hi = mid
+            out.append(Sym(rel, m["name"], m["name"], kind, lo + 1))
     return out
 
 
@@ -111,6 +132,7 @@ class Pool:
 
     @property
     def callables(self) -> list[Sym]:
+        # property は「呼び出せるシンボル」ではない (E_UNSUPPORTED: not_callable を避ける)
         return [s for s in self.symbols if s.kind in ("function", "method")]
 
 
@@ -128,7 +150,10 @@ ArgsFn = Callable[[random.Random, Pool], tuple[dict[str, Any], str]]  # (引数,
 
 
 def _target(s: Sym) -> dict[str, Any]:
-    return {"path": s.path, "symbol_name": s.qualified}
+    d: dict[str, Any] = {"path": s.path, "symbol_name": s.qualified}
+    if s.line:
+        d["line"] = s.line
+    return d
 
 
 def _a_skeleton(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
@@ -177,6 +202,68 @@ def _a_sql(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
     return {"query": _SQL_SYMBOLS, "params": {"n": s.name}}, s.name
 
 
+# --- BUG-0059: 追加する 5 ツールの args 関数 ---
+
+
+def _a_configure(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
+    """T-00 configure_workspace: status 照会（状態変更なし）。"""
+    return {"action": "status"}, "status"
+
+
+def _a_repo_map(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
+    """T-01 get_repo_map: 最上位ディレクトリのマップ（読み取り専用）。"""
+    # get_repo_map の有効パラメータ: scope_paths, include_signatures, max_symbols_per_file, ranking, include_tests
+    # depth は存在しない（E_INVALID_ARGUMENT になる）
+    return {"max_symbols_per_file": 3, "include_tests": False}, "map:top"
+
+
+def _a_edit_body(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
+    """T-10 edit_symbol_body: dry_run=True の delete_symbol で計測する（書き込みなし）。
+
+    operation=delete_symbol は new_code 不要（シグネチャ不明でも E_SYNTAX_INVALID にならない）。
+    dry_run=True でファイルを書かない（フィクスチャを破壊しない）。
+    diagnostics_wait_ms=0 で診断待ちを除外（仕様書 §14.4 の 5）。
+    """
+    s = rng.choice(pool.callables or pool.symbols)
+    args = {
+        "target": _target(s),
+        "operation": "delete_symbol",
+        "dry_run": True,
+        "diagnostics_wait_ms": 0,
+    }
+    return args, f"{s.path}#{s.qualified}"
+
+
+def _a_rename(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
+    """T-11 rename_symbol: dry_run=True で書き込みなし（diagnostics_wait_ms=0）。
+
+    new_name に "_benchX" サフィックスを付けて same_name エラーを回避。
+    dry_run=True で実際の書き込みは行わない。
+    """
+    s = rng.choice(pool.callables or pool.symbols)
+    # same_name エラーを避けるため"_benchX"サフィックスを付ける（dry_run なので実際には書かれない）
+    new_name = f"{s.name}_benchX"
+    args = {"target": _target(s), "new_name": new_name, "dry_run": True, "diagnostics_wait_ms": 0}
+    return args, f"{s.path}#{s.qualified}"
+
+
+def _a_code_action(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
+    """T-13 apply_code_action: ファイルの先頭行で source.organizeImports を試みる。dry_run=True。
+
+    action_kind_or_id パラメータ（必須）に「source.organizeImports」を渡す。
+    LSP が unavailable な場合は skip/degraded になるが、計測は通る。
+    """
+    f = rng.choice(pool.files)
+    args = {
+        "path": f,
+        "line": 1,
+        "action_kind_or_id": "source.organizeImports",
+        "dry_run": True,
+        "diagnostics_wait_ms": 0,
+    }
+    return args, f
+
+
 @dataclass(frozen=True, slots=True)
 class Plan:
     tool: str
@@ -185,6 +272,8 @@ class Plan:
 
 
 PLANS: tuple[Plan, ...] = (
+    Plan("configure_workspace", "fast", _a_configure),  # T-00 (BUG-0059)
+    Plan("get_repo_map", "fast", _a_repo_map),  # T-01 (BUG-0059)
     Plan("get_file_skeleton", "fast", _a_skeleton),
     Plan("search_workspace_symbols", "fast", _a_search),
     Plan("resolve_symbols", "fast", _a_resolve),
@@ -192,6 +281,9 @@ PLANS: tuple[Plan, ...] = (
     Plan("find_references_and_implementations", "fast", _a_refs),
     Plan("query_call_hierarchy", "fast", _a_calls),
     Plan("get_diagnostics", "fast", _a_diag),
+    Plan("edit_symbol_body", "fast", _a_edit_body),  # T-10 (BUG-0059)
+    Plan("rename_symbol", "fast", _a_rename),  # T-11 (BUG-0059)
+    Plan("apply_code_action", "fast", _a_code_action),  # T-13 (BUG-0059)
     Plan("get_project_db_schema", "fast", _a_schema),
     Plan("query_project_db", "fast", _a_sql),
 )
@@ -269,7 +361,9 @@ async def call_once(
 # --- ウォームアップ -------------------------------------------------------------------------
 
 
-async def warm_up(client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn: float, timeout_s: float) -> dict[str, Any]:
+async def warm_up(
+    client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn: float, timeout_s: float
+) -> dict[str, Any]:
     """LSP が ``ready``（または適用外）で、索引の件数が安定するまで待つ。所要を記録する（合否には使わない）。"""
     info: dict[str, Any] = {"initialize_ms": round(client.init_ms, 1), "ready_ms": None, "timed_out": False,
                             "polls": 0, "lsp_status": None, "index": {"state": "unknown"}}  # fmt: skip
@@ -283,7 +377,9 @@ async def warm_up(client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn
         index_state = "unknown"
         n: int | None = None
         if "query_project_db" in tools:
-            r = await call_once(client, "query_project_db", {"query": "SELECT count(*) AS n FROM files"}, "files-count")
+            r = await call_once(
+                client, "query_project_db", {"query": "SELECT count(*) AS n FROM files"}, "files-count"
+            )
             lsp = r["lsp"]
             if r["ok"]:
                 n = r["scalar"]
@@ -417,7 +513,9 @@ def resolve_fixtures(names: list[str]) -> tuple[list[FixtureSpec], list[dict[str
             if root.is_dir():
                 specs.append(FixtureSpec(key, root, sha=str(fx.get("sha") or "") or None))
             else:
-                skipped.append({"fixture": key, "reason": f"not fetched: {root} (run bench/fetch_fixtures.py)"})
+                skipped.append(
+                    {"fixture": key, "reason": f"not fetched: {root} (run bench/fetch_fixtures.py)"}
+                )
         else:
             skipped.append({"fixture": key, "reason": "unknown fixture name"})
     return specs, skipped
@@ -464,7 +562,11 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
             if args.tools and plan.tool not in args.tools:
                 continue
             if plan.tool not in names:
-                out["tools"][plan.tool] = {"verdict": "skip", "reason": "not_in_tools_list", "path": plan.path}
+                out["tools"][plan.tool] = {
+                    "verdict": "skip",
+                    "reason": "not_in_tools_list",
+                    "path": plan.path,
+                }
                 continue
             if hung:
                 out["tools"][plan.tool] = {"verdict": "skip", "path": plan.path,
@@ -473,7 +575,10 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
                 continue
             out["tools"][plan.tool] = await run_tool(client, plan, pool, spec.name, args)
             t = out["tools"][plan.tool]
-            if "CLIENT_TIMEOUT" in str(t.get("reason", "")) or t.get("errors", {}).get("CLIENT_TIMEOUT", 0) >= 3:
+            if (
+                "CLIENT_TIMEOUT" in str(t.get("reason", ""))
+                or t.get("errors", {}).get("CLIENT_TIMEOUT", 0) >= 3
+            ):
                 hung = plan.tool
             print(f"  [{spec.name}] {plan.tool}: {t['verdict']} {t.get('reason', '')}", flush=True)
     finally:
@@ -485,7 +590,9 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
         with contextlib.suppress(OSError):
             lines = (tmp / "server.stderr.log").read_text(encoding="utf-8", errors="replace").splitlines()
             bad = [ln for ln in lines if " ERROR " in ln or "Traceback" in ln]
-            out["server_stderr_errors"] = bad[:20]  # サーバーのログに出たエラー行（E_INTERNAL の原因の手がかり）
+            out["server_stderr_errors"] = bad[
+                :20
+            ]  # サーバーのログに出たエラー行（E_INTERNAL の原因の手がかり）
             out["server_stderr_tail"] = lines[-15:] if (bad or not out["watch"]["ok"]) else []
         shutil.rmtree(tmp, ignore_errors=True)
     ran = [t["verdict"] for t in out["tools"].values()]
@@ -500,7 +607,9 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
     return out
 
 
-async def run_tool(client: S.McpStdioClient, plan: Plan, pool: Pool, fixture: str, args: argparse.Namespace) -> dict[str, Any]:
+async def run_tool(
+    client: S.McpStdioClient, plan: Plan, pool: Pool, fixture: str, args: argparse.Namespace
+) -> dict[str, Any]:
     rng = random.Random(f"{args.seed}:{fixture}:{plan.tool}")  # 文字列の種は決定的
     # 1) 探り: 最初の呼び出し（コールド）。全部失敗するならスキップとして記録する
     first_ms: float | None = None
@@ -513,7 +622,12 @@ async def run_tool(client: S.McpStdioClient, plan: Plan, pool: Pool, fixture: st
         if rec["ok"]:
             break
         probe_errors.append({"target": tgt, "error": rec["error"], "message": rec.get("error_message")})
-        if rec["error"] in ("E_WORKSPACE_NOT_CONFIGURED", "E_UNSUPPORTED", "CONNECTION_CLOSED", "CLIENT_TIMEOUT"):
+        if rec["error"] in (
+            "E_WORKSPACE_NOT_CONFIGURED",
+            "E_UNSUPPORTED",
+            "CONNECTION_CLOSED",
+            "CLIENT_TIMEOUT",
+        ):
             break
     if not rec["ok"]:
         return {"verdict": "skip", "reason": f"probe failed: {probe_errors[-1]['error']}", "path": plan.path,
@@ -545,7 +659,11 @@ async def run_tool(client: S.McpStdioClient, plan: Plan, pool: Pool, fixture: st
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--fixtures", default=None, help="カンマ区切り: poly, self, F-PY, F-TS（既定: poly と fixtures.toml の全件）")
+    ap.add_argument(
+        "--fixtures",
+        default=None,
+        help="カンマ区切り: poly, self, F-PY, F-TS（既定: poly と fixtures.toml の全件）",
+    )
     ap.add_argument("--calls", type=int, default=DEFAULT_CALLS, help="ツールごとの計測回数（既定 200）")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
     ap.add_argument("--tools", default="", help="カンマ区切りで対象ツールを絞る")
@@ -566,13 +684,26 @@ def main() -> int:
         for tool in M1_TOOLS:
             states = [r["tools"][tool]["verdict"] for r in runs if tool in r.get("tools", {})]
             m1[tool] = (
-                "not_implemented" if not states else "fail" if "fail" in states else "pass" if "pass" in states else states[0]
+                "not_implemented"
+                if not states
+                else "fail"
+                if "fail" in states
+                else "pass"
+                if "pass" in states
+                else states[0]
             )
         return {
-            "spec": {"section": "14.4", "nfr": ["NFR-PERF-1", "NFR-PERF-2"], "exit_condition": "M1-3",
-                     "population_rule": "ok && !is_degraded (at the tool's ceiling, §5.5); exact-only and degraded reported separately",
-                     "judged_on": "server timing_ms (integer ms); client round trip is reported alongside",
-                     "thresholds_ms": THRESHOLD_MS, "calls_per_tool": args.calls, "seed": args.seed, "prime_calls": PRIME_CALLS},  # fmt: skip
+            "spec": {
+                "section": "14.4",
+                "nfr": ["NFR-PERF-1", "NFR-PERF-2"],
+                "exit_condition": "M1-3",
+                "population_rule": "ok && !is_degraded (at the tool's ceiling, §5.5); exact-only and degraded reported separately",
+                "judged_on": "server timing_ms (integer ms); client round trip is reported alongside",
+                "thresholds_ms": THRESHOLD_MS,
+                "calls_per_tool": args.calls,
+                "seed": args.seed,
+                "prime_calls": PRIME_CALLS,
+            },  # fmt: skip
             "note": args.note,
             "complete": complete,
             "verdict": overall,

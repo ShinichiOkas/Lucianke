@@ -510,7 +510,14 @@ def check_lsp(root: Path, env: Mapping[str, str]) -> tuple[list[Check], bool]:
                 )
             else:
                 where = f"; try: {hint}" if hint else ""
-                checks.append(Check("lsp", label, "warn", f"not found (falls back to Tree-sitter{where})"))
+                note = (
+                    " — F-TS exact postconditions unverifiable; contract tests skip exact checks"
+                    if name in ("typescript-language-server", "vtsls")
+                    else ""
+                )
+                checks.append(
+                    Check("lsp", label, "warn", f"not found (falls back to Tree-sitter{where}){note}")
+                )
     return checks, ts_found
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import pytest
 import tree_sitter_python
 import tree_sitter_typescript
 from _rig import Rig, warm_up
@@ -199,7 +200,9 @@ async def test_t11_postcondition_1_2_3_rename(rig: Rig) -> None:
                 p: s for p, s in before.items() if p not in changed
             }
             assert r.structured["_resolution_meta"]["is_degraded"] is True
-        return
+        pytest.skip(
+            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-11#2 urn_map, T-11#3 edits_count)"
+        )
     uses = await _lsp_reference_count(rig, t.rename_path, t.rename_sym)
     urns_before = await symbol_urns(rig, sorted({t.rename_path, *_files_with(rig, t.rename_sym)}))
     r = await rig.ok("rename_symbol", target=target, new_name=t.rename_to, diagnostics_wait_ms=0)
@@ -304,7 +307,9 @@ async def test_t13_postcondition_1_2_3_4_code_action(rig: Rig) -> None:
         r = await rig.call("apply_code_action", path=path, line=1, action_kind_or_id="quickfix")
         assert r.is_error or r.structured["data"]["applied"] is False
         assert rig.snapshot() == before
-        return
+        pytest.skip(
+            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-13#1 applied, T-13#2 diff, T-13#3 diagnostic resolved)"
+        )
     f401 = [(d, i) for d, i in fixes if d["code"] == "F401"] or fixes
     assert f401, diag["data"]["diagnostics"]
     await apply_and_check(rig, path, *f401[0])
