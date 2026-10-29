@@ -4,7 +4,8 @@
 
 * 範囲は ``syntax.boundaries.definition_range``（デコレータ・属性・直前の Doc コメント・末尾の同一行コメントを含む）。
 * 本文は ``normalize_new_code``（インデント・改行の正規化）。範囲は行末までなので、末尾の改行 1 つを落として 1 hunk にする。
-* ``replace_body`` は **シグネチャを含む定義全体** を渡す（仕様書 §10.9-4）。本体の文だけを渡したときは ``E_SYNTAX_INVALID``。
+* ``replace_body`` は **シグネチャを含む定義全体** を渡す（仕様書 §10.9-4）。メンバー（Method / Constructor / Property /
+  Field）の断片はクラス本体の容器で包んで検証する（TypeScript のメソッドはモジュール直下では構文エラーになる）。本体の文だけを渡したときは ``E_SYNTAX_INVALID``。
   Python と Rust は定義が必ず開始語（``def`` / ``class`` / ``fn`` など）で始まるので、開始語が無ければ構文検証を待たずに拒否する。
   それ以外の言語は ``new_code`` 単体の構文検証（``check_fragment``）で判定し、失敗したときに ``details.hint`` を添える。
 * 文法の無いファイル（Tier 4）の範囲決定は ctags とブロック推定（``syntax/heuristic``）の仕事で、ここでは未対応（``E_UNSUPPORTED``）。
@@ -14,11 +15,11 @@ from __future__ import annotations
 
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import NEW_CODE_MAX_BYTES
-from lucianke.core.model import TargetRef
+from lucianke.core.model import Kind, TargetRef
 from lucianke.core.textpos import detect_newline
 from lucianke.edit.normalize import normalize_new_code
 from lucianke.edit.plan import Hunk, Plan
-from lucianke.edit.syntax_check import check_fragment, to_error_details
+from lucianke.edit.syntax_check import Wrap, check_fragment, to_error_details
 from lucianke.edit.transaction import PlanBuilder, PlanContext
 from lucianke.syntax.boundaries import definition_range
 
@@ -46,6 +47,10 @@ _DEFINITION_STARTS: dict[str, tuple[str, ...]] = {
     ),
 }
 _SKIPPED_LINE_STARTS = ("@", "#", "//", "/*", "*", '"""')
+
+# クラス・構造体・impl の本体に置かれる種別。これらの ``new_code`` は単体ではモジュール直下で構文エラーになりうる
+# （TypeScript の ``charge(req: X): Y { ... }`` など）ので、断片の検証は容器で包んで行う。
+_MEMBER_KINDS = frozenset({Kind.METHOD, Kind.CONSTRUCTOR, Kind.PROPERTY, Kind.FIELD})
 
 
 def _starts_definition(new_code: str, language_id: str) -> bool | None:
@@ -95,7 +100,8 @@ def replace_body_builder(target: TargetRef, new_code: str) -> PlanBuilder:
                 "new_code does not start with a definition (pass the whole definition, signature included)",
                 path=str(ctx.path),
             )
-        fragment = check_fragment(ctx.language_id, new_code)
+        wrap: Wrap = "class_body" if ctx.symbol.kind in _MEMBER_KINDS else "none"
+        fragment = check_fragment(ctx.language_id, new_code, wrap=wrap)
         if fragment.status == "failed":
             raise _syntax_error(
                 "new_code is not valid syntax", path=str(ctx.path), **to_error_details(fragment)
