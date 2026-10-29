@@ -559,8 +559,8 @@ class _Ctx:
         if not text.startswith("/**") or text.startswith("/**/"):
             return None
         # 定義との間に空行を挟まないものだけを Doc コメントとみなす
-        first_row = min([outer.start_point.row] + [d.start_point.row for d in _leading_decorators(outer)])
-        if prev.end_point.row + 1 < first_row:
+        first_row = min([outer.start_point[0]] + [d.start_point[0] for d in _leading_decorators(outer)])
+        if prev.end_point[0] + 1 < first_row:
             return None
         body = text[3:]
         if body.endswith("*/"):

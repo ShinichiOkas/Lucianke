@@ -64,6 +64,11 @@ default_estimate: Callable[[str], int] = TokenEstimator().count
 # --- 構文木から取るもの（import ・デコレータ・raise ・シグネチャ行数） ------------------------------------
 
 
+# 注意: ``Node.start_point`` / ``end_point`` の行・列は **``point[0]`` / ``point[1]``** で読む。属性 ``.row`` / ``.column`` は
+# py-tree-sitter 0.26.0 で int の参照を余計に手放し（256 を超える値でヒープが壊れ）、あとの木の走査でアクセス違反になる
+# （BUG-0003。``tests/unit/test_syntax_skeleton_realfiles.py`` が ``src/`` の属性読みを禁じる）。
+
+
 def _text(parsed: ParsedFile, node: Any) -> str:
     return parsed.source[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
@@ -255,7 +260,7 @@ def _read_info(parsed: ParsedFile, sym: SymbolRecord, span: tuple[int, int]) -> 
     first, last = span[0], span[1]
     for d in decorator_nodes:
         info.decorators.append(one_line(_text(parsed, d)))
-        a, b = d.start_point.row + 1, d.end_point.row + 1
+        a, b = d.start_point[0] + 1, d.end_point[0] + 1
         info.decorator_lines += max(0, min(b, last) - max(a, first) + 1)
     target = node
     if node.type == "variable_declarator":
@@ -263,12 +268,12 @@ def _read_info(parsed: ParsedFile, sym: SymbolRecord, span: tuple[int, int]) -> 
         if value is not None and value.type in _JS_FUNCTION_VALUES:
             target = value
     body = target.child_by_field_name("body")
-    name_row = name.start_point.row
+    name_row = name.start_point[0]
     if body is not None:
         if parsed.language_id == "python":
-            info.header_lines = max(1, body.start_point.row - name_row)  # block は colon の次の行から
+            info.header_lines = max(1, body.start_point[0] - name_row)  # block は colon の次の行から
         else:
-            info.header_lines = body.start_point.row - name_row + 1  # ``{`` が見出しの最後の行にある
+            info.header_lines = body.start_point[0] - name_row + 1  # ``{`` が見出しの最後の行にある
         if sym.kind in _CALLABLE_KINDS:
             info.raises = _collect_raises(parsed, body)
     return info
