@@ -72,7 +72,9 @@ class ToolOutput:
     summarize: Callable[[Sequence[Record]], str] | None = None
     tier: Tier = Tier.T1  # _resolution_meta.tier（混在時は最も大きい数）
     detected_language: str = "n/a"  # _resolution_meta.detected_language
-    total_estimate: int | None = None  # 範囲内の総数をツールが知っているとき（遅延列のとき）
+    # 並び全体の件数（ツールが知っているとき）。``len(records)`` より大きければ、``records`` は先頭の接頭辞で、差は具体化して
+    # いない続き（遅延列。パッカーは全部入ってもカーソルを出す。設計書 §7.2.2）。``None`` または以下なら ``records`` が全体
+    total_estimate: int | None = None
     warnings: Sequence[str] = ()
 
 

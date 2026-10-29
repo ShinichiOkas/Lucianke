@@ -49,19 +49,21 @@ def trailer_lines(summary: str | None, cursor: str | None, remaining: int) -> tu
     return tuple(lines)
 
 
-def default_summary(rest: Sequence[Record]) -> str:
+def default_summary(rest: Sequence[Record], unseen: int = 0) -> str:
     """入らなかったレコードの既定の要約。``group`` ごとの件数（出現順、最大 ``SUMMARY_MAX_GROUPS`` 個）。
 
     例 ``38 more (src/a.py: 20, src/b.py: 18)``。``group`` を持つレコードが無ければ ``38 more``。
+    ``unseen`` はツールが具体化せずに残した件数（``ToolOutput.total_estimate`` が ``len(records)`` を超える分）。
+    どの ``group`` かは分からないので ``others`` に数える。
     """
     counts: dict[str, int] = {}
-    ungrouped = 0
+    ungrouped = unseen
     for r in rest:
         if r.group is None:
             ungrouped += 1
         else:
             counts[r.group] = counts.get(r.group, 0) + 1
-    total = len(rest)
+    total = len(rest) + unseen
     if not counts:
         return f"{total} more"
     items = list(counts.items())
@@ -213,7 +215,15 @@ class Packer:
         records = out.records
         n = len(records)
         start = max(offset, 0)
-        total = out.total_estimate if out.total_estimate is not None else start + max(0, n - start)
+        # ``total_estimate`` が ``len(records)`` を超えるとき、ツールは先頭の ``n`` 件だけを渡し（``limit`` で打ち切った遅延列）、
+        # 残り ``unseen`` 件を具体化していない。それも「続き」なので、渡された分が全部入ってもカーソルとトレーラが要る
+        # （BUG-0008）。``total_estimate`` が ``len(records)`` 以下なら無視する。
+        if out.total_estimate is None:
+            unseen = 0
+            total = max(start, n)
+        else:
+            unseen = max(0, out.total_estimate - n)
+            total = n + unseen
         avail = max_tokens - reserved_tokens
 
         if start >= n:  # 詰めるものが無い（続きも無い）
@@ -226,17 +236,19 @@ class Packer:
                 tok[i] = est(_record_text(records[i]))
             return tok[i]
 
-        # 1. トレーラ無しで全部入るか（入るなら縮退もトレーラも不要）
-        running = 0
-        for i in range(start, n):
-            running += cost_of(i)
-            if running > avail:
-                break
-        else:
-            kept = tuple(records[i].with_tokens(tok[i]) for i in range(start, n))
-            return self._page(kept, reserved_tokens + running, max_tokens, total, 0, None, None, ())
+        # 1. トレーラ無しで全部入るか（入るなら縮退もトレーラも不要）。具体化していない続きがあるときはトレーラが要る
+        if not unseen:
+            running = 0
+            for i in range(start, n):
+                running += cost_of(i)
+                if running > avail:
+                    break
+            else:
+                kept = tuple(records[i].with_tokens(tok[i]) for i in range(start, n))
+                return self._page(kept, reserved_tokens + running, max_tokens, total, 0, None, None, ())
 
         # 2. 先頭から詰める。後ろに続きが残る間はトレーラの見込み分を差し引く。最後の 1 件はトレーラが要らない
+        #    （具体化していない続きがあれば、最後の 1 件にも要る）
         shrunk: dict[int, Record | None] = {}  # 縮退は 1 レコードにつき一度だけ呼ぶ（2 周目は結果を使い回す）
 
         def greedy(reserve: int) -> tuple[list[Record], list[int]]:
@@ -245,7 +257,7 @@ class Packer:
             left = avail
             for i in range(start, n):
                 rec = records[i]
-                budget = left - (reserve if i < n - 1 else 0)
+                budget = left - (reserve if i < n - 1 or unseen else 0)
                 t = cost_of(i)
                 if t > budget and rec.shrink is not None:
                     if budget > 1 and i not in shrunk:
@@ -262,8 +274,8 @@ class Packer:
                 left -= t
             return included, costs
 
-        included, costs = greedy(self._trailer_reserve(out, start, n, cursor_factory))
-        if start + len(included) >= n:  # 縮退で全部入った
+        included, costs = greedy(self._trailer_reserve(out, start, n, unseen, cursor_factory))
+        if start + len(included) >= n and not unseen:  # 縮退で全部入った
             return self._page(
                 tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
             )
@@ -280,13 +292,16 @@ class Packer:
             reserved_tokens,
             max_tokens,
             cursor_factory,
+            unseen=unseen,
             with_summary=True,
             need_first=need_first,
         )
         if fit.m == 0:
             # 要約（SHOULD）を省けばレコードが入るかもしれない。要約の見込みを引かずに詰め直す
-            included, costs = greedy(self._trailer_reserve(out, start, n, cursor_factory, with_summary=False))
-            if start + len(included) >= n:
+            included, costs = greedy(
+                self._trailer_reserve(out, start, n, unseen, cursor_factory, with_summary=False)
+            )
+            if start + len(included) >= n and not unseen:
                 return self._page(
                     tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
                 )
@@ -300,6 +315,7 @@ class Packer:
                 reserved_tokens,
                 max_tokens,
                 cursor_factory,
+                unseen=unseen,
                 with_summary=False,
                 need_first=need_first,
             )
@@ -307,7 +323,14 @@ class Packer:
                 fit = alt
         kept = tuple(included[: fit.m])
         return self._page(
-            kept, fit.used, max_tokens, total, n - (start + fit.m), fit.cursor, fit.summary, fit.warnings
+            kept,
+            fit.used,
+            max_tokens,
+            total,
+            n - (start + fit.m) + unseen,
+            fit.cursor,
+            fit.summary,
+            fit.warnings,
         )
 
     # -- 内部 -----------------------------------------------------------------------------
@@ -336,23 +359,26 @@ class Packer:
         )
 
     @staticmethod
-    def _summary(out: ToolOutput, rest: Sequence[Record]) -> str:
-        text = out.summarize(rest) if out.summarize is not None else ""
-        return _one_line(text or default_summary(rest))
+    def _summary(out: ToolOutput, rest: Sequence[Record], unseen: int = 0) -> str:
+        """``rest`` は具体化した残り、``unseen`` は具体化していない残りの件数。ツールの ``summarize`` は ``rest`` だけを見る
+        （``rest`` が空で ``unseen`` だけあるときは既定の要約）。"""
+        text = out.summarize(rest) if out.summarize is not None and (rest or not unseen) else ""
+        return _one_line(text or default_summary(rest, unseen))
 
     def _trailer_reserve(
         self,
         out: ToolOutput,
         start: int,
         n: int,
+        unseen: int,
         cursor_factory: Callable[[int], str] | None,
         *,
         with_summary: bool = True,
     ) -> int:
         """詰める前のトレーラの見込み。実際の値は ``_fit`` が確かめるので、ここは大きめの近似でよい。"""
-        summary = self._summary(out, out.records[start + 1 :]) if with_summary else None
+        summary = self._summary(out, out.records[start + 1 :], unseen) if with_summary else None
         cursor = cursor_factory(n - 1) if cursor_factory is not None else None
-        return self.estimator.count(_trailer_text(summary, cursor, n - start))
+        return self.estimator.count(_trailer_text(summary, cursor, n - start + unseen))
 
     def _fit(
         self,
@@ -366,6 +392,7 @@ class Packer:
         max_tokens: int,
         cursor_factory: Callable[[int], str] | None,
         *,
+        unseen: int,
         with_summary: bool,
         need_first: int,
     ) -> _Fit:
@@ -374,9 +401,9 @@ class Packer:
         while True:
             next_off = start + m
             rest = records[next_off:]
-            summary = self._summary(out, rest) if with_summary else None
+            summary = self._summary(out, rest, unseen) if with_summary else None
             cursor = cursor_factory(next_off) if cursor_factory is not None else None
-            used = reserved + sum(costs[:m]) + est(_trailer_text(summary, cursor, len(rest)))
+            used = reserved + sum(costs[:m]) + est(_trailer_text(summary, cursor, len(rest) + unseen))
             warnings: tuple[str, ...] = ()
             if m == 0:
                 warnings = (

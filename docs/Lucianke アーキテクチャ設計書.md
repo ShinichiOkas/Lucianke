@@ -662,6 +662,8 @@ pack(out, budget, offset):
 
 - 1 件も入らないときは `included = []`、`next_cursor` あり、`warnings` に理由（仕様書 §5.6 の 4）。
 - `records` は遅延列でもよい（巨大な参照一覧をすべて具体化しないため、ツールは生成器を渡してよい。`total_estimate` は別途 `COUNT` で与える）。
+  - **`total_estimate` の意味（BUG-0008 で確定）**: 並び全体の件数。`records` は全体の先頭 `len(records)` 件（具体化した接頭辞）で、`total_estimate > len(records)` なら差（`unseen`）は具体化していない続きである。パッカーは `unseen` も「続き」に数える: 渡された分が全部入っても `next_cursor`（オフセットは `len(records)` 以降の入らなかった先頭）と `# more: … remaining≈N`（N = 入らなかった分 + `unseen`）を出し、トレーラの分も予算に入れる（最後の 1 件にも要る）。`total_estimate` が `None` または `len(records)` 以下なら従来どおり（`records` が全体）。
+  - 次のページ: ツールはカーソルのオフセット `o` を `ctx.cursor_offset` で受け取り、`o + limit` 件までを渡し直す（T-03 の方式。`limit` はその 1 ページの最大件数）。パッカーは `o` から詰める。ツールは `o` 以降を具体化しなければならない（`o ≥ len(records)` はツールの誤りで、パッカーは進まないカーソルを出さず空のページを返す）。要約は `summarize(rest)` が具体化した残りだけを受け取る（`rest` が空で `unseen` だけのときは既定の `N more`、`unseen` は group 不明として `others` に数える）。
 
 ### 7.2.3 `CursorCodec`
 

@@ -298,7 +298,8 @@ def test_pack_total_estimate_from_tool_wins() -> None:
     recs = [rec(f"r{i}", 30) for i in range(10)]
     page = Packer().pack(make_out(recs, total_estimate=5000), max_tokens=200, cursor_factory=cursor_factory())
     assert page.total_estimate == 5000
-    assert page.remaining == 10 - len(page.records)
+    # 渡した 10 件を超える分（4990 件）は具体化していない続き。入らなかった分と合わせて残りに数える（BUG-0008）
+    assert page.remaining == 5000 - len(page.records)
 
 
 def test_pack_total_estimate_default_counts_from_offset() -> None:

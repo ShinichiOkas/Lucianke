@@ -579,3 +579,32 @@ async def test_t04_without_index_is_workspace_not_configured() -> None:
 async def test_t04_revision_other_than_working_tree(pipeline: Pipeline) -> None:
     r = await resolve(pipeline, targets=[METHOD], revision="HEAD")
     assert r.is_error and r.structured["error"]["code"] == "E_UNSUPPORTED"
+
+
+async def test_t03_over_limit_issues_next_cursor_and_pages_do_not_overlap(pipeline: Pipeline) -> None:
+    """BUG-0008: 一致が limit を超えるなら next_cursor を出す。カーソルで続きを辿ると重複も欠落も無い。"""
+    full = await search(pipeline, query="pay", limit=200)
+    all_urns = urns(full)
+    total = full.structured["data"]["hits_total"]
+    assert len(all_urns) == total > 2 and full.structured["page"]["next_cursor"] is None
+
+    first = await search(pipeline, query="pay", limit=2)
+    assert first.structured["page"]["returned"] == 2 and first.structured["page"]["total_estimate"] == total
+    cursor = first.structured["page"]["next_cursor"]
+    assert cursor, first.text
+    seen = urns(first)
+    pages = 1
+    while cursor:
+        nxt = await search(pipeline, query="pay", limit=2, cursor=cursor)
+        assert not nxt.is_error, nxt.text
+        assert nxt.structured["page"]["returned"] <= 2
+        assert not set(seen) & set(urns(nxt))  # ページが重ならない
+        seen += urns(nxt)
+        cursor = nxt.structured["page"]["next_cursor"]
+        pages += 1
+        assert pages <= total, "did not terminate"
+    assert seen == all_urns and pages == -(-total // 2)
+
+    compact_first = await search(pipeline, "compact", query="pay", limit=2)
+    assert g.validate(compact_first.text) == [], compact_first.text
+    assert f"remaining≈{total - 2}" in compact_first.text and "# more: cursor=" in compact_first.text
