@@ -1,8 +1,13 @@
 """T-04 ``resolve_symbols``（仕様書 §11.3）。最大 20 件の TargetRef の定義位置・シグネチャ・Doc 全文・型の定義 URN を一括で返す。
 
-``structural`` 版（処理規約 3）: PaaD の宣言（``index.queries``）と、import 文のモジュールパス → ワークスペース内ファイルの対応
-（``syntax.imports``）で定義を引く。LSP は使わない（``exact`` の hover・``scip_symbol`` は後で別の役が足す）。型の展開はせず、
-``signature_expanded`` は ``signature`` と同じ。
+``structural``（処理規約 3）: PaaD の宣言（``index.queries``）と、import 文のモジュールパス → ワークスペース内ファイルの対応
+（``syntax.imports``）で定義を引く。型の展開はせず、``signature_expanded`` は ``signature`` と同じ。
+
+``exact``（処理規約 2、``tools/_t04_exact.py``）: 解決したシンボルを、``_hover_cache`` に行があればそこから（LSP を呼ばない。
+設計書 R-11）、無ければ LSP が ``ready`` のときだけ ``definition`` と ``hover`` で上げる（``signature_expanded`` は hover の型文字列。
+結果は ``_hover_cache`` に書き戻す）。LSP が ``ready`` でなければ **待たずに** ``structural``（``standby`` は起動を促すだけ）。
+タイムアウト・``position_clamped`` など ``E_LSP_UNAVAILABLE`` は ``engine.selector.on_lsp_failure`` で ``structural`` に降格する。
+``scip_symbol`` は後で別の役が足す。
 
 * TargetRef（§5.3）は索引で解く。``urn`` > ``line`` > ``symbol_name``。``symbol_name`` がそのファイルに無く、import された名前なら、
   import 表から定義元ファイルのシンボルへ（``follow_aliases`` が真なら再エクスポートの連鎖も、上限 ``MAX_HOPS`` 段まで）。
@@ -16,7 +21,8 @@
   ものを、出現順に 10 件まで。索引から引くので、その URN は ``resolve_symbols`` に渡して必ず解決できる（事後条件 2）。
 * 項目単位の失敗（``E_TARGET_NOT_FOUND`` / ``E_TARGET_AMBIGUOUS``。曖昧なら候補 10 件）。全件失敗のときだけ全体のエラー。
 
-サービスの要求は T-03 と同じ（``reader_pool`` または ``db_path``）。
+サービスの要求は T-03 と同じ（``reader_pool`` または ``db_path``）。LSP 経路は ``lsp_pool`` と書き込み手（``runtime(ws).writer`` か
+``writer``）を duck typing で求める（無ければ ``structural`` のまま。詳細は ``_t04_exact``）。
 """
 
 from __future__ import annotations
@@ -35,10 +41,12 @@ from lucianke.core.limits import BATCH_MAX_ITEMS, CANDIDATES_MAX
 from lucianke.core.model import Confidence, EngineChoice, FileInfo, Kind, RelPath, SymbolRecord, Tier
 from lucianke.core.records import Record, ToolOutput
 from lucianke.core.urn import CodeSel, Urn, parse
+from lucianke.engine import selector
 from lucianke.index import queries
 from lucianke.syntax.imports import ImportFact, extract_imports, imported_name_map, make_resolver
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._services import FileAnalysis, ToolServices, analyze_file, services_of
+from lucianke.tools._t04_exact import ExactLifter
 from lucianke.tools.t02_get_file_skeleton import failure_record
 from lucianke.tools.t03_search_workspace_symbols import index_reader, require_working_tree
 from lucianke.tools.t05_get_symbol_bodies import TargetRefArg, body_lines
@@ -106,6 +114,8 @@ class _Env:
     analyses: dict[str, FileAnalysis | None] = field(default_factory=dict)
     imports: dict[str, _Imports | None] = field(default_factory=dict)
     files: dict[str, FileInfo | None] = field(default_factory=dict)
+    lifter: ExactLifter | None = None
+    choices: list[EngineChoice] = field(default_factory=list)  # 項目ごとのエンジン選択（応答の代表を決める）
 
     @property
     def ws_id(self) -> str:
@@ -512,6 +522,17 @@ async def _symbol_record(
         doc_full = sym.doc_summary
     type_defs = await _type_definitions(env, sym) if env.args.resolve_type_definitions else []
 
+    info = env.file_info(path)
+    sha = an.sha256 if an is not None else (info.sha256 if info is not None else None)
+    lift = None
+    if env.lifter is not None and info is not None and sha is not None:
+        lift = await env.lifter.lift(sym, info, sha)  # exact に上げる（cache → LSP。降格は lift の中）
+        env.choices.append(lift.choice)
+    exact = lift is not None and lift.exact
+    confidence = Confidence.EXACT if exact else sym.confidence
+    if lift is not None and lift.warnings:
+        warnings = [*warnings, *lift.warnings]
+
     symbol_json = sym.to_json()
     item: dict[str, Any] = {
         "ok": True,
@@ -523,10 +544,10 @@ async def _symbol_record(
             "selection_range": symbol_json.get("selection_range"),
             "declared_in": sym.declared_in,
         },
-        "signature_expanded": sym.signature,
+        "signature_expanded": lift.text if lift is not None and lift.text is not None else sym.signature,
         "decorators": decorators,
         "type_definitions": type_defs,
-        "confidence_level": sym.confidence.value,
+        "confidence_level": confidence.value,
     }
     if env.args.include_doc_full:
         item["doc_full"] = doc_full
@@ -550,15 +571,15 @@ async def _symbol_record(
         lines.append(L.attr_line("doc", f"{first_line}{suffix}", indent=0))
     if decorators:
         lines.append(L.attr_line("decorators", ", ".join(decorators), indent=0))
-    if sym.confidence < Confidence.STRUCTURAL:
-        lines.append(L.attr_line("conf", sym.confidence.value, indent=0))
+    if confidence < Confidence.STRUCTURAL:
+        lines.append(L.attr_line("conf", confidence.value, indent=0))
     record = Record(
         kind="symbol",
         key=str(sym.urn),
         priority=priority,
         lines=tuple(lines),
         data=item,
-        confidence=sym.confidence,
+        confidence=confidence,
         group=path,
     )
     return record, env.file_info(path)
@@ -633,6 +654,16 @@ def _failure(env: _Env, label: str, err: LuciankeError, request: dict[str, Any],
 # --- ハンドラ -------------------------------------------------------------------------------
 
 
+def _response_engine(choices: list[EngineChoice]) -> EngineChoice:
+    """応答の代表のエンジン選択: 最も低い水準の項目（``accuracy_warning`` に本当の理由を載せる）。同じ水準なら LSP の答えを先に。
+
+    シンボルの項目が無い（モジュール・外部パッケージ・失敗だけ）ときは、構文木と import 表で答えた ``structural``。
+    """
+    if not choices:
+        return EngineChoice(engine="tree-sitter+imports", confidence=Confidence.STRUCTURAL)
+    return min(choices, key=lambda c: (c.confidence, c.engine == selector.ENGINE_LSP_CACHE))
+
+
 async def handler(ctx: ToolContext, args: ResolveSymbolsArgs) -> ToolOutput:
     require_working_tree(args.revision)
     svc = services_of(ctx.services)
@@ -642,7 +673,7 @@ async def handler(ctx: ToolContext, args: ResolveSymbolsArgs) -> ToolOutput:
     languages: list[str] = []
     tier = Tier.T1
     with index_reader(svc) as conn:
-        env = _Env(svc=svc, ws=ws, conn=conn, args=args)
+        env = _Env(svc=svc, ws=ws, conn=conn, args=args, lifter=ExactLifter(svc, ws, conn))
         for i, ref in enumerate(args.targets):
             request = ref.model_dump(exclude_none=True)
             label = _ref_label(ref)
@@ -679,8 +710,8 @@ async def handler(ctx: ToolContext, args: ResolveSymbolsArgs) -> ToolOutput:
         )
     return ToolOutput(
         records=records,
-        max_confidence=Confidence.STRUCTURAL,
-        engine=EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL),
+        max_confidence=Confidence.EXACT,
+        engine=_response_engine(env.choices),
         page_unit="target",
         tier=tier,
         detected_language=",".join(languages) if languages else "n/a",
@@ -697,10 +728,12 @@ TOOL_SPEC = ToolSpec(
         "Resolve 1-20 TargetRefs (urn, or path + symbol_name, or path + line) to their definition: path and line range, "
         "signature, doc comment, decorators, and URNs of the user-defined types in the signature. Follows imports, "
         "aliases and re-exports to the original definition inside the workspace; a name imported from an external "
-        "package returns definition null with a warning. Python/TypeScript/JavaScript (syntax tree and index only). "
+        "package returns definition null with a warning. Python/TypeScript/JavaScript. When the language server is "
+        "ready (or a previous exact answer is cached) the item is exact and signature_expanded is the hover type; "
+        "otherwise it falls back to the syntax tree and index (structural) without waiting for the server. "
         "A failed or ambiguous item is reported on its own (ambiguous items list up to 10 candidates)."
     ),
-    max_confidence=Confidence.STRUCTURAL,
+    max_confidence=Confidence.EXACT,
     milestone="M1",
     page_unit="target",
     records_key="items",
