@@ -257,6 +257,53 @@ async def test_ready_fallback_when_no_signal(env: Env, ws: Workspace):
     assert await pool.wait_ready("fake", ws, 20_000)  # wait_ready は standby なら起動する
 
 
+INIT_READY = LspServerDef(
+    language_id="fake", name="fakels", argv_candidates=(("fakels",),), ready_signal="initialized"
+)
+
+
+async def test_initialized_ready_signal_is_ready_without_progress_or_diagnostics(env: Env, ws: Workspace):
+    """ruff のように ``$/progress`` を出さず、診断も文書を開くまで出さないサーバーは、``initialize`` の応答で ready になる。
+    ``ready_fallback_s`` は 60 秒のまま（フォールバックに頼らない）。BUG-0050。"""
+    pool = env.pool("--silent", servers=(INIT_READY,))
+    assert await pool.wait_ready("fake", ws, 20_000)
+    h = pool.handles(ws)[0]
+    assert list(h.history) == [LspState.STANDBY, LspState.STARTING, LspState.INDEXING, LspState.READY]
+    assert pool.get("fake", ws) is h
+    assert not [e for e in read_log(env.log) if e["m"].startswith("textDocument/")]  # 文書は何も開いていない
+    assert h._fallback is None  # フォールバックの時計は掛けない
+
+
+async def test_initialized_ready_signal_is_ready_again_after_restart(env: Env, ws: Workspace):
+    """再起動した後も、``initialize`` の応答で ready に戻る（BUG-0050）。"""
+    pool = env.pool("--silent", servers=(INIT_READY,))
+    h = await ready_handle(pool, ws)
+    first_pid = pool.status("fake", ws).pid
+    assert h.client is not None
+    await pool.reset_handle(h)
+    assert pool.status("fake", ws).status is LspStatus.STANDBY
+    assert await pool.wait_ready("fake", ws, 20_000)
+    assert pool.status("fake", ws).pid not in (None, first_pid)
+
+
+async def test_progress_ready_signal_is_the_default_and_waits_for_a_signal(env: Env, ws: Workspace):
+    """既定（``progress``）は ``initialize`` の応答だけでは ready にしない（信号かフォールバックを待つ）。"""
+    assert FAKE.ready_signal == "progress"
+    pool = env.pool("--silent")  # ready_fallback_s = 60 秒
+    await pool.ensure_started("fake", ws)
+    await wait_until(lambda: pool.handles(ws) and pool.handles(ws)[0].state is LspState.INDEXING)
+    assert not await pool.wait_ready("fake", ws, 500)
+
+
+def test_only_ruff_declares_the_initialized_ready_signal():
+    """ready の合図の表: 解析に時間がかかるサーバー（basedpyright・pyright・tsls・vtsls・best effort）は ``progress``、ruff だけ ``initialized``。"""
+    from lucianke.lsp.servers import SERVERS
+
+    signals = {(d.language_id, d.name): d.ready_signal for d in SERVERS}
+    assert signals[("python", "ruff")] == "initialized"
+    assert {k for k, v in signals.items() if v == "initialized"} == {("python", "ruff")}
+
+
 async def test_ensure_started_twice_spawns_one_process(env: Env, ws: Workspace):
     pool = env.pool("--silent", ready_fallback_s=0.3)
     await asyncio.gather(*(pool.ensure_started("fake", ws) for _ in range(3)))

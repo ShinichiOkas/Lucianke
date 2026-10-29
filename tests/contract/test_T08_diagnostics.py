@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -946,6 +947,42 @@ async def test_real_ruff_ready_with_types_lsp_unavailable(indexed: tuple[Path, P
         default = diags_of(await call(pipe, paths=[LINTY]))  # 既定の min_severity（warning）でも見える
         assert "F401" in {d["code"] for d in default}
         assert snapshot(root) == before
+    finally:
+        await pool.shutdown_all(500)
+        await registry.terminate_all(500, close=True)
+
+
+@pytest.mark.skipif(not _HAVE_RUFF, reason="ruff is not installed in this environment")
+async def test_real_ruff_answers_within_one_second_of_start_with_types_lsp_down(
+    indexed: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """型の LSP が起動に失敗しても、最初の ``get_diagnostics`` から 1 秒以内に ruff の診断が返る。BUG-0050。
+
+    ruff は ``$/progress`` を出さず、診断も文書を開くまで出さない。``ready`` の合図が「最初の ``publishDiagnostics`` か
+    ``ready_fallback_s``」だった間は、``ready`` でないハンドルに文書を開かせない T-08 が約 15 秒（既定の
+    ``ready_fallback_s``。ここでも既定のまま）ruff の診断を返せなかった。``initialize`` の応答を合図にして、それが無くなった。"""
+    root, _ = indexed
+    for var in ("LUCIANKE_LSP_BASEDPYRIGHT_CMD", "LUCIANKE_LSP_PYRIGHT_CMD"):
+        monkeypatch.setenv(var, str(root / "no-such-language-server"))  # 型の LSP は init_failed
+    registry = ProcessRegistry()
+    pool = LspPool(registry, grace_ms=500)  # ready_fallback_s は既定（15 秒）のまま
+    try:
+        pipe = make_pipeline(indexed, pool=pool, store=CodeActionStore(), diagnostics_wait_ms=10_000)
+        t0 = time.perf_counter()
+        await call(pipe, paths=[LINTY], min_severity="hint")  # 起動の契機（この呼び出し自体は降格でよい）
+        got: list[dict[str, Any]] = []
+        r: Any = None
+        while time.perf_counter() - t0 < 1.0:
+            r = await call(pipe, paths=[LINTY], min_severity="hint")
+            got = diags_of(r)
+            if any(d["source"] == "ruff" for d in got):
+                break
+            await asyncio.sleep(0.05)
+        elapsed = time.perf_counter() - t0
+        assert any(d["source"] == "ruff" and d["code"] == "F401" for d in got), (elapsed, got)
+        assert elapsed < 1.0, elapsed
+        servers = {(s["language"], s["role"]): s["status"] for s in r.structured["data"]["lsp_sources"]}
+        assert servers == {("python", "types"): "unavailable", ("python", "lint"): "ready"}
     finally:
         await pool.shutdown_all(500)
         await registry.terminate_all(500, close=True)

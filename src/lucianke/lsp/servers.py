@@ -50,6 +50,7 @@ _log = logging.getLogger("lucianke.lsp.servers")
 
 Role = Literal["types", "lint"]
 TsserverVia = Literal["initialization_options", "settings"]
+ReadySignal = Literal["progress", "initialized"]
 
 _WIN_EXTS = (".exe", ".cmd", ".bat", ".com")
 _IS_WINDOWS = sys.platform == "win32"
@@ -87,6 +88,9 @@ class LspServerDef:
         requests_m1: このサーバーに送ってよい LSP の method（ADR-15）。
         tsserver_via: ``tsserver`` の場所の渡し方。``None`` は不要（TypeScript 系以外）。
         needs_workspace_tsserver: ワークスペースに ``tsserver.js`` が無いと ``initialize`` が失敗する（tsls）。
+        ready_signal: ``ready`` とみなす合図。``"progress"``（既定）は ``$/progress`` の ``end`` が揃う・最初の
+            ``publishDiagnostics``・``ready_fallback_s`` 経過のいちばん早いもの（解析に時間がかかるサーバー用）。
+            ``"initialized"`` は ``initialize`` の応答が返った時点（索引を持たず、起動の直後から要求に答えるサーバー用。ruff。BUG-0050）。
     """
 
     language_id: str
@@ -101,6 +105,7 @@ class LspServerDef:
     requests_m1: frozenset[str] = frozenset()
     tsserver_via: TsserverVia | None = None
     needs_workspace_tsserver: bool = False
+    ready_signal: ReadySignal = "progress"
 
     @property
     def document_language_id(self) -> str:
@@ -205,6 +210,9 @@ SERVERS: tuple[LspServerDef, ...] = (
         argv_candidates=(("ruff", "server"),),
         role="lint",
         requests_m1=_CODE_ACTION,
+        # ruff は $/progress を出さず、診断も文書を開くまで出さない（起動は 12 ms）。progress の合図のままだと、最初の
+        # publishDiagnostics は ready を待たれた文書からしか来ないので ready_fallback_s（15 秒）まで ready にならない（BUG-0050）。
+        ready_signal="initialized",
     ),
     # TypeScript / JavaScript: typescript-language-server が既定（診断が常に最新）、vtsls が代替（TypeScript を同梱するので
     # ワークスペースに tsserver.js が無いときの逃げ先）。どちらも Node が要る。

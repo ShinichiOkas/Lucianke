@@ -12,6 +12,8 @@
   (1) ``$/progress`` の ``begin`` を見たサーバーは、**すべての ``end`` が揃ったとき**。
   (2) 進捗中でなければ、**最初の ``publishDiagnostics``**。
   (3) どちらも来なければ ``ready_fallback_s`` 後（進捗が続いていなければ。続いていても ``indexing_max_s`` で打ち切り）。
+  ただし ``LspServerDef.ready_signal == "initialized"`` のサーバー（ruff。``$/progress`` を出さず、診断も文書を開くまで出さない）は、
+  上の合図を待たず **``initialize`` の応答で ``ready``**（``indexing`` を通って直ちに ``ready``。BUG-0050）。
 * クラッシュ（切断）・``initialize`` の失敗は ``LSP_RESTART_BACKOFF_S`` = 1/2/4 秒のバックオフで最大 ``LSP_RESTART_MAX`` 回
   再起動し、超えたら ``unavailable``（``crashed_3x`` / ``init_failed``）。起動後 ``stable_after_s`` 以上動いていたクラッシュは
   数え直す。コマンドが見つからなければ即 ``unavailable``（``not_found``）。
@@ -671,7 +673,10 @@ class LspPool:
             h._indexing_since = h._up_since
             h.progress = None
             h._set_state(LspState.INDEXING)
-            h._arm_fallback()
+            if defn.ready_signal == "initialized":
+                h._become_ready()  # 索引を持たないサーバー（ruff）: initialize の応答がそのまま ready の合図（BUG-0050）
+            else:
+                h._arm_fallback()
             await client.wait_closed()
             if h._stopping:
                 return None
