@@ -17,13 +17,15 @@
 - 調査はしていない（直す役の仕事）。
 
 ## HEAD での再確認（dogfood-2、2026-10-29 15:21、42640ac の使い捨て作業ツリー）
+
+（この節は修正前の観察。73d39d4〔15:28〕より前の 15:21 の記録で、以後の HEAD では下の「確認」のとおり ready になる。）
 - HEAD でも再現する: pyright が init_failed のまま 3 回再起動して unavailable（log: ERROR lucianke.lsp.pool: LSP python/pyright: giving up after 3 restarts (init_failed)。ro・edit の両セッション）。
 
 ## 原因
 使い捨て作業ツリーに限らず、**ワークスペースに `.venv` が無く、サーバーを起こした venv を有効化していない**ときに起きる（本体の作業ツリーでも、`.venv` の無い F-POLY のコピーを `set_roots` すれば同じに再現した）。重なった 3 つ。
 1. 探索が Lucianke 自身の Python 環境を見ない（主因）。`find_command` の順は 環境変数 → 指定の venv → `<ワークスペース>/.venv` → `node_modules/.bin` → `PATH` だった。F-POLY のコピーには `.venv` が無く（`detect_python_env` は PATH の python に落ちるので `venv_root_of` も `None`）、`<temp>/.venv/Scripts` は PATH に無い（`python.exe -m lucianke` で起こしただけで有効化していない）。このため既定の `basedpyright-langserver` は見つからず、代替の `pyright-langserver` を PATH から掴んだ（この機は `C:\Users\shini\AppData\Roaming\Python\Python313\Scripts\pyright-langserver.exe`、`pip install --user` の pyright で、claude.exe 配下の IDE 用ではない）。再現: 空のディレクトリで `find_command` を引くと `basedpyright None` / `pyright [...Roaming\Python\Python313\Scripts\pyright-langserver.exe]` / `ruff [...Python310\Scripts\ruff.exe]`。
 2. 掴んだ PATH 上の pyright が、Lucianke が渡す環境では起動できない。`minimal_env` が `APPDATA`・`LOCALAPPDATA` を子に渡していなかったため、pip の Python 製ランチャーがユーザーの site-packages を見つけられず落ちた。`LspClient` で直接起こして stderr を見ると `ModuleNotFoundError: No module named 'pyright'`（`pyright-langserver.exe\__main__.py` の `from pyright.langserver import entrypoint`）。`APPDATA` を足すと `initialize` が通る。これが `server closed stdout (exit code None)` → `init_failed` の中身。
-3. 理由が見えない・名前が揃わない。再起動と諦めのログに `last_error`（stderr の末尾）が出ず、`not_found` の理由が候補名を並べるだけだった。起こす前の `status`（T-00 の standby、T-08 の `lsp_sources`）は `defs[0]`（basedpyright）の名前を返し、起こした後は実際に起こした定義（代替の pyright）の名前になる。票の「T-00 は basedpyright、T-08 は pyright」はこの食い違い。
+3. 理由が見えない・名前が揃わない。再起動と諦めのログに `last_error`（stderr の末尾）が出ず、`not_found` の理由が候補名を並べるだけだった。さらに、起こす前の `status`（standby）は `defs[0]`（basedpyright）の名前を返すが、起こした後は実際に起こした定義（代替の pyright）の名前になる、という食い違いがあった（再現して確かめた。直した）。ただし票の「T-00 の `lsp_daemons` が `basedpyright` + `unavailable` + `init_failed`」という組は再現できていない（`unavailable` になった後の名前は起こした定義のものなので、修正前の再現では T-00 も `pyright` だった）。basedpyright 自身が `init_failed` になった可能性は、`set_python_env` で明示した venv を使った別の経路で起きた観察かもしれず、未確認のまま残す（次のドッグフーディングで再発したら新しい票にする）。
 
 ## 直し方
 - `lsp/servers.py`: `find_command(host_venv=)` と `host_venv()`（`sys.prefix`）を足し、探索順を 環境変数 → 指定の venv → `<ワークスペース>/.venv` → `node_modules/.bin` → **Lucianke 自身の環境の `Scripts|bin`** → `PATH` にした（ワークスペースの venv が先。プロジェクトが固定した版が勝つ）。`find_command` の既定は `host_venv=None`（探索の単体テストが実行環境に依らないように）で、`pool.default_resolver` が渡す。
@@ -38,3 +40,4 @@
 - 修正後（f1c0f59 の使い捨て作業ツリー + `uv sync --frozen`）: `status` 直後は `basedpyright standby` / `ruff standby`、約 19 秒で `lsp_sources` が `basedpyright: ready` / `ruff: ready`、最後の `lsp_daemons` は `{types, basedpyright, ready, pid: 87020}` / `{lint, ruff, ready, pid: 81160}`。T-00 と T-08 の名前は最初から最後まで一致。使い捨ての作業ツリーと LSP は片付け済み。
 - `tests/unit/test_lsp_pool.py`・`test_lsp_client.py`・`test_core_procs.py`・`test_lsp_features.py`・`test_lsp_documents_router.py` 190 件 green、`tests/contract/test_T00_configure.py`・`test_T08_diagnostics.py` 67 件 green、`ruff check` green。
 - 切り分け: PATH の pyright は `APPDATA` を足すと `initialize` を通る（`LspClient` を直接）ところまで確かめた。basedpyright が無い環境で代替の pyright が最後まで ready になるところまでは通していない（この機の PATH の pyright は 1.1.409）。
+- 未実施: 明示した venv 経由の探索（`set_python_env` → `venv_root_of`）の実起動（dogfood2 の `.venv` が既に無く、`set_python_env` が `ok: false` だった）と、`not_found` の実起動（この機では basedpyright が必ず見つかる）。どちらも単体テストだけで確かめた。
