@@ -1,0 +1,427 @@
+"""S-12 トークン推定器の較正（TokenEstimator と o200k_base の比較、係数の改善案、速度）。
+使い方: uv run --no-project --with tiktoken --with numpy --with scipy python bench/tokens/calibrate.py
+出力: bench/tokens/result.json と coefficients_proposal.json（budget.py と pyproject は変えない。tiktoken はベンチ専用）
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import platform
+import re
+import sys
+import time
+from collections import defaultdict
+from fractions import Fraction
+from pathlib import Path
+
+import numpy as np
+import tiktoken
+from scipy.optimize import nnls
+
+ROOT = Path(__file__).resolve().parents[2]
+OUT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src"))
+from lucianke.mcp.budget import TOKENS_PER_CHAR, TokenEstimator  # noqa: E402
+
+ENC = tiktoken.get_encoding("o200k_base")
+MIN_REF = 50  # これ未満のファイルは平均・最大の誤差から外す（切り上げと端数で相対誤差が暴れる）
+CHUNK_CHARS = 600  # 当てはめの標本の大きさ（パッカーが数えるレコード程度）
+LIMIT = 0.10
+
+
+def ref_tokens(text: str) -> int:
+    return len(ENC.encode(text, disallowed_special=()))
+
+
+# --- コーパス ----------------------------------------------------------------------------------
+
+
+def read(p: Path) -> str:
+    return p.read_bytes().decode("utf-8", errors="replace")
+
+
+def poly_kind(p: Path) -> str:
+    n, s = p.name, p.suffix
+    if s in {".py", ".ts", ".cob", ".sql", ".proto"}:
+        return "poly_code"
+    if s == ".ipynb":
+        return "poly_ipynb"
+    if s in {".json", ".yaml", ".toml", ".xml", ".custom"} or n == ".env":
+        return "poly_data"
+    return "poly_doc"  # .md .rst .mmd .dot .j2
+
+
+def load_corpus() -> list[tuple[str, str, str]]:
+    """(種類, 名前, 本文) の列。"""
+    out: list[tuple[str, str, str]] = []
+    rel = lambda p: p.relative_to(ROOT).as_posix()  # noqa: E731
+    for p in sorted((ROOT / "src").rglob("*.py")):
+        out.append(("py_src", rel(p), read(p)))
+    for p in sorted((ROOT / "tests").rglob("*.py")):
+        if "fixtures/poly" not in rel(p):
+            out.append(("py_tests", rel(p), read(p)))
+    for p in sorted((ROOT / "docs").glob("*.md")):
+        out.append(("md_ja", rel(p), read(p)))
+    for p in sorted((ROOT / "docs" / "spikes").glob("*.md")):
+        if p.name != "S-12.md":  # 自分の成果物は入れない（再現のたびに結果が変わるため）
+            out.append(("md_spikes", rel(p), read(p)))
+    for p in sorted((ROOT / "tests" / "fixtures" / "poly").rglob("*")):
+        if p.is_file() and p.stat().st_size > 0:
+            out.append((poly_kind(p), rel(p), read(p)))
+    spec = read(ROOT / "docs" / "Lucianke仕様書.md")
+    for i, m in enumerate(re.finditer(r"^```([^\n]*)\n(.*?)^```", spec, re.S | re.M)):
+        lang, body = m.group(1), m.group(2)
+        if lang == "" and re.match(r"# \w+ (ok|partial|error)", body):
+            out.append(("compact", f"spec#block{i}:{body.splitlines()[0][:40]}", body))
+        elif lang in {"json", "sql"}:
+            out.append(("spec_json_sql", f"spec#block{i}:{lang}", body))
+    return out
+
+
+# --- 素性（文字種と連の数） --------------------------------------------------------------------
+
+_P = {
+    "letters": re.compile(r"[A-Za-z]+"),
+    "digits": re.compile(r"[0-9]+"),
+    "space": re.compile(r"[ \t]+"),
+    "nl": re.compile(r"[\r\n]+"),
+    "symbol": re.compile(r"[!-/:-@\[-`{-~]+"),
+    "kana": re.compile("[぀-ヿㇰ-ㇿ]+"),
+    "kanji": re.compile("[㐀-䶿一-鿿豈-﫿\U00020000-\U0002fa1f]+"),
+    "cjkpunct": re.compile("[　-〿＀-￯]+"),
+    "hangul": re.compile("[가-힯]+"),
+}
+FEATURES = [
+    "letters_chars", "letters_runs", "digits_chars", "digits_runs", "space_chars", "space_runs", "space_runs_multi",
+    "nl_chars", "nl_runs", "symbol_chars", "symbol_runs", "kana", "kanji", "cjkpunct", "hangul", "other",
+]
+
+
+def features(text: str) -> dict[str, int]:
+    f: dict[str, int] = {}
+    total_known = 0
+    for name, rx in _P.items():
+        runs = rx.findall(text)
+        chars = sum(map(len, runs))
+        total_known += chars
+        if name in {"kana", "kanji", "cjkpunct", "hangul"}:
+            f[name] = chars
+        else:
+            f[f"{name}_chars"] = chars
+            f[f"{name}_runs"] = len(runs)
+            if name == "space":
+                f["space_runs_multi"] = sum(1 for r in runs if len(r) >= 2)
+    f["other"] = len(text) - total_known
+    return f
+
+
+def vec(f: dict[str, int], cols: list[str]) -> np.ndarray:
+    return np.array([f[c] for c in cols], dtype=float)
+
+
+# --- 候補の推定式 ------------------------------------------------------------------------------
+
+#: 係数を当てはめる素性の組。budget.py と同じ 4 分割（再当てはめ）から、文字種を細かく分ける順に並べる
+CANDIDATES: dict[str, list[str]] = {
+    "base4_refit": ["@word", "symbol_chars", "@wide", "other"],
+    "split_chars": ["letters_chars", "digits_chars", "space_chars", "nl_chars", "symbol_chars", "kana", "kanji",
+                    "cjkpunct", "hangul", "other"],
+    "runs": ["letters_runs", "letters_chars", "digits_runs", "digits_chars", "space_runs_multi", "nl_chars",
+             "symbol_runs", "symbol_chars", "kana", "kanji", "cjkpunct", "hangul", "other"],
+    "runs_lean": ["letters_runs", "letters_chars", "digits_chars", "space_runs_multi", "nl_chars", "symbol_runs",
+                  "symbol_chars", "kana", "kanji", "cjkpunct", "other"],
+}
+
+
+def expand(f: dict[str, int]) -> dict[str, float]:
+    g: dict[str, float] = dict(f)
+    g["@word"] = f["letters_chars"] + f["digits_chars"] + f["space_chars"] + f["nl_chars"]
+    g["@wide"] = f["kana"] + f["kanji"] + f["cjkpunct"] + f["hangul"]
+    return g
+
+
+def est_from(f: dict[str, float], cols: list[str], coef: list[Fraction]) -> int:
+    units = sum(coef_i * f[c] for c, coef_i in zip(cols, coef, strict=True))
+    return -((-units.numerator) // units.denominator) if isinstance(units, Fraction) else int(-(-units // 1))
+
+
+def chunks(text: str) -> list[str]:
+    out: list[str] = []
+    cur: list[str] = []
+    n = 0
+    for line in text.splitlines(keepends=True):
+        cur.append(line)
+        n += len(line)
+        if n >= CHUNK_CHARS:
+            out.append("".join(cur))
+            cur, n = [], 0
+    if cur:
+        if out and n < CHUNK_CHARS // 3:
+            out[-1] += "".join(cur)
+        else:
+            out.append("".join(cur))
+    return out or [text]
+
+
+# --- 集計 -----------------------------------------------------------------------------------
+
+
+def summarize(rows: list[dict]) -> dict:
+    """rows: {name, ref, est}。種類の集計（合計の誤差、ファイルごとの平均・最大の絶対誤差）。"""
+    ref = sum(r["ref"] for r in rows)
+    est = sum(r["est"] for r in rows)
+    big = [r for r in rows if r["ref"] >= MIN_REF]
+    errs = [abs(r["est"] / r["ref"] - 1) for r in big]
+    worst = max(big, key=lambda r: abs(r["est"] / r["ref"] - 1)) if big else None
+    return {
+        "files": len(rows),
+        "files_ref_ge_min": len(big),
+        "ref_tokens": ref,
+        "est_tokens": est,
+        "agg_err": est / ref - 1 if ref else None,
+        "mean_abs_err": sum(errs) / len(errs) if errs else None,
+        "max_abs_err": max(errs) if errs else None,
+        "worst": {"name": worst["name"], "ref": worst["ref"], "est": worst["est"]} if worst else None,
+    }
+
+
+def by_kind(rows: list[dict]) -> dict[str, dict]:
+    g: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        g[r["kind"]].append(r)
+    res = {k: summarize(v) for k, v in g.items()}
+    res["ALL"] = summarize(rows)
+    return res
+
+
+def passes(s: dict) -> bool:
+    return all(
+        v["agg_err"] is not None and abs(v["agg_err"]) <= LIMIT and (v["max_abs_err"] or 0) <= LIMIT
+        for k, v in s.items()
+        if k != "ALL"
+    )
+
+
+def fmt_pct(x: float | None) -> str:
+    return "-" if x is None else f"{x * 100:+.1f}%"
+
+
+def print_table(title: str, s: dict) -> None:
+    print(f"\n## {title}")
+    print(f"{'kind':14s} {'n':>4s} {'ref':>8s} {'est':>8s} {'agg':>8s} {'mean|e|':>8s} {'max|e|':>8s}  worst")
+    for k, v in s.items():
+        w = v["worst"]["name"][-34:] if v["worst"] else ""
+        print(f"{k:14s} {v['files']:4d} {v['ref_tokens']:8d} {v['est_tokens']:8d} {fmt_pct(v['agg_err']):>8s} "
+              f"{fmt_pct(v['mean_abs_err']):>8s} {fmt_pct(v['max_abs_err']):>8s}  {w}")
+
+
+# --- 当てはめ ---------------------------------------------------------------------------------
+
+
+def fit(samples: list[dict], cols: list[str]) -> np.ndarray:
+    """相対誤差の二乗和を最小化する非負の係数。種類ごとの重みの合計をそろえる。"""
+    cnt: dict[str, int] = defaultdict(int)
+    for s in samples:
+        cnt[s["kind"]] += 1
+    A = np.array([[s["f"][c] for c in cols] for s in samples], dtype=float)
+    y = np.array([s["ref"] for s in samples], dtype=float)
+    w = np.array([1.0 / np.sqrt(cnt[s["kind"]]) for s in samples])
+    A = A / y[:, None] * w[:, None]
+    coef, _ = nnls(A, w)
+    return coef
+
+
+def rationalize(coef: np.ndarray, den: int = 100) -> list[Fraction]:
+    return [Fraction(int(round(c * den)), den) for c in coef]
+
+
+# --- 速度 -------------------------------------------------------------------------------------
+
+
+def make_blob(texts: list[str], size: int) -> str:
+    parts: list[str] = []
+    n = 0
+    while n < size:
+        for t in texts:
+            parts.append(t)
+            n += len(t)
+            if n >= size:
+                break
+    return "".join(parts)[:size]
+
+
+def bench_speed(fn, text: str, repeat: int = 7) -> float:
+    best = float("inf")
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        fn(text)
+        best = min(best, time.perf_counter() - t0)
+    return best * 1000
+
+
+def proposal_estimator(cols: list[str], coef: list[Fraction]):
+    """提案の式をそのまま実装した推定器（budget.py 担当が移す形。速度の測定にも使う）。"""
+    den = 1
+    for c in coef:
+        den = max(den, c.denominator)
+    w = {c: int(k * den) for c, k in zip(cols, coef, strict=True)}
+    rx = {k: v for k, v in _P.items()}
+    need = set(cols)
+
+    def count(text: str) -> int:
+        if not text:
+            return 0
+        units = 0
+        known = 0
+        for name, pat in rx.items():
+            runs = pat.findall(text)
+            chars = sum(map(len, runs))
+            known += chars
+            if name in {"kana", "kanji", "cjkpunct", "hangul"}:
+                units += w.get(name, 0) * chars
+            else:
+                units += w.get(f"{name}_chars", 0) * chars + w.get(f"{name}_runs", 0) * len(runs)
+                if name == "space" and "space_runs_multi" in need:
+                    units += w["space_runs_multi"] * sum(1 for r in runs if len(r) >= 2)
+        units += w.get("other", 0) * (len(text) - known)
+        return -(-units // den)
+
+    return count
+
+
+def main() -> None:
+    est = TokenEstimator()
+    corpus = load_corpus()
+    corpus_fp = hashlib.sha1("".join(f"{k}|{n}|{len(t)}" for k, n, t in corpus).encode()).hexdigest()[:12]
+    print(f"corpus: {len(corpus)} files, {sum(len(t) for _, _, t in corpus)} chars, fp={corpus_fp}")
+
+    # 1. 現行の TokenEstimator と o200k_base の比（ファイル・ブロックごと）
+    files = []
+    for kind, name, text in corpus:
+        r = ref_tokens(text)
+        if r == 0:
+            continue
+        f = expand(features(text))
+        files.append({"kind": kind, "name": name, "ref": r, "est": est.count(text), "f": f, "chars": len(text)})
+    base_stats = by_kind(files)
+    print_table("現行 TokenEstimator（ファイル単位）", base_stats)
+
+    # 1b. コンパクト出力はレコード（行）ごとに数えて足す（パッカーの数え方）。切り上げの偏りを見る
+    perline = []
+    for kind, name, text in corpus:
+        if kind == "compact":
+            perline.append({"kind": kind, "name": name, "ref": ref_tokens(text),
+                            "est": sum(est.count(ln) for ln in text.splitlines())})
+    perline_stats = summarize(perline)
+    print(f"\n## compact を 1 行ずつ数えて足した場合: agg={fmt_pct(perline_stats['agg_err'])} "
+          f"mean|e|={fmt_pct(perline_stats['mean_abs_err'])} max|e|={fmt_pct(perline_stats['max_abs_err'])}")
+
+    # 2. 当てはめ（チャンク標本）。ファイル単位の交差検証（偶数番／奇数番のファイル）
+    samples = []
+    idx_in_kind: dict[str, int] = defaultdict(int)
+    for kind, name, text in corpus:
+        fold = idx_in_kind[kind] % 2
+        idx_in_kind[kind] += 1
+        pieces = [text] if kind in {"compact", "spec_json_sql"} else chunks(text)
+        for piece in pieces:
+            r = ref_tokens(piece)
+            if r >= 10:
+                samples.append({"kind": kind, "fold": fold, "ref": r, "f": expand(features(piece))})
+    print(f"\nfit samples: {len(samples)}")
+
+    candidates_out: dict[str, dict] = {}
+    for cname, cols in CANDIDATES.items():
+        # 交差検証
+        cv_rows = []
+        for hold in (0, 1):
+            tr = [s for s in samples if s["fold"] != hold]
+            coef = rationalize(fit(tr, cols))
+            idx = defaultdict(int)
+            for kind, name, text in corpus:
+                fold = idx[kind] % 2
+                idx[kind] += 1
+                if fold != hold:
+                    continue
+                fr = next((x for x in files if x["name"] == name), None)
+                if fr:
+                    cv_rows.append({"kind": kind, "name": name, "ref": fr["ref"], "est": est_from(fr["f"], cols, coef)})
+        cv = by_kind(cv_rows)
+        # 全体で当てはめ
+        coef = rationalize(fit(samples, cols))
+        rows = [{"kind": x["kind"], "name": x["name"], "ref": x["ref"], "est": est_from(x["f"], cols, coef)}
+                for x in files]
+        st = by_kind(rows)
+        candidates_out[cname] = {
+            "cols": cols, "coef": {c: str(k) for c, k in zip(cols, coef, strict=True)}, "stats": st, "cv": cv,
+            "pass_fit": passes(st), "pass_cv": passes(cv),
+        }
+        print_table(f"候補 {cname}（全体で当てはめ）pass={passes(st)}", st)
+        print_table(f"候補 {cname}（交差検証の保持側）pass={passes(cv)}", cv)
+        print("  coef:", {c: str(k) for c, k in zip(cols, coef, strict=True)})
+
+    # 3. 速度（1 MB）
+    ascii_blob = make_blob([t for k, _, t in corpus if k == "py_src"], 1_000_000)
+    ja_blob = make_blob([t for k, _, t in corpus if k == "md_ja"], 1_000_000)
+    compact_blob = make_blob([t for k, _, t in corpus if k == "compact"], 1_000_000)
+    speed = {}
+    for label, blob in (("py_src_1MB", ascii_blob), ("md_ja_1MB", ja_blob), ("compact_1MB", compact_blob)):
+        speed[label] = {"current_ms": round(bench_speed(est.count, blob), 2), "chars": len(blob)}
+    # 提案式の速度は、合格した最小の候補で測る
+    chosen = next((n for n in CANDIDATES if candidates_out[n]["pass_cv"]), None)
+    if chosen is None:
+        chosen = max(candidates_out, key=lambda n: -(candidates_out[n]["cv"]["ALL"]["max_abs_err"] or 9))
+    cols = CANDIDATES[chosen]
+    coef = [Fraction(candidates_out[chosen]["coef"][c]) for c in cols]
+    pe = proposal_estimator(cols, coef)
+    for label, blob in (("py_src_1MB", ascii_blob), ("md_ja_1MB", ja_blob), ("compact_1MB", compact_blob)):
+        speed[label]["proposal_ms"] = round(bench_speed(pe, blob), 2)
+        speed[label]["tiktoken_ms"] = round(bench_speed(ref_tokens, blob, repeat=2), 1)
+    # 提案式の実装が素性の式と一致するか
+    mism = sum(1 for kind, name, text in corpus if text and pe(text) != est_from(expand(features(text)), cols, coef))
+    print("\n## 速度(ms/1MB)", json.dumps(speed, ensure_ascii=False), "| 実装と式の不一致:", mism)
+
+    result = {
+        "spike": "S-12",
+        "date": time.strftime("%Y-%m-%d"),
+        "env": {"python": platform.python_version(), "platform": platform.platform(),
+                "tiktoken": tiktoken.__version__ if hasattr(tiktoken, "__version__") else "?",
+                "numpy": np.__version__},
+        "encoding": "o200k_base",
+        "corpus": {"files": len(corpus), "chars": sum(len(t) for _, _, t in corpus), "fingerprint": corpus_fp,
+                   "note": "src/ と tests/ は他の役が並行して書き換えるため、実行のたびに少し変わる"},
+        "limit": LIMIT, "min_ref_tokens_for_file_stats": MIN_REF, "chunk_chars": CHUNK_CHARS,
+        "current_coefficients_tokens_per_char": {k: str(v) for k, v in TOKENS_PER_CHAR.items()},
+        "current": {"by_kind": base_stats, "compact_per_line_sum": perline_stats,
+                    "files": [{k: x[k] for k in ("kind", "name", "ref", "est", "chars")} for x in files]},
+        "candidates": candidates_out,
+        "chosen_for_proposal": chosen,
+        "speed_1MB": speed,
+        "impl_mismatch": mism,
+    }
+    (OUT / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    proposal = {
+        "spike": "S-12",
+        "status": "proposal (budget.py は未変更)",
+        "basis": "o200k_base",
+        "model": chosen,
+        "rounding": "ceil（整数演算: units = sum(係数 × 数) / DEN の切り上げ）",
+        "den": 100,
+        "terms": [
+            {"name": c, "tokens_per_unit": str(k),
+             "unit": {"_chars": "文字数", "_runs": "連の数", "_multi": "2 文字以上の連の数"}.get(
+                 next((s for s in ("_chars", "_runs", "_multi") if c.endswith(s)), ""), "文字数"),
+             "regex": _P[c.split("_")[0]].pattern if c.split("_")[0] in _P else "(合計 - 上記の文字の和)"}
+            for c, k in zip(cols, coef, strict=True)
+        ],
+        "expected_error_cv": candidates_out[chosen]["cv"],
+        "expected_error_fit": candidates_out[chosen]["stats"],
+    }
+    (OUT / "coefficients_proposal.json").write_text(json.dumps(proposal, ensure_ascii=False, indent=1),
+                                                    encoding="utf-8")
+    print("\nwrote result.json, coefficients_proposal.json; chosen =", chosen)
+
+
+if __name__ == "__main__":
+    main()

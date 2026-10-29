@@ -1,0 +1,2588 @@
+{
+ "spike": "S-12",
+ "date": "2026-10-29",
+ "env": {
+  "python": "3.12.11",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "tiktoken": "0.14.0",
+  "numpy": "2.5.4"
+ },
+ "encoding": "o200k_base",
+ "corpus": {
+  "files": 158,
+  "chars": 1311002,
+  "fingerprint": "70293ec9380a",
+  "note": "src/ と tests/ は他の役が並行して書き換えるため、実行のたびに少し変わる"
+ },
+ "limit": 0.1,
+ "min_ref_tokens_for_file_stats": 50,
+ "chunk_chars": 600,
+ "current_coefficients_tokens_per_char": {
+  "ascii_word": "1/4",
+  "ascii_symbol": "1/2",
+  "wide": "2/3",
+  "other": "1/2"
+ },
+ "current": {
+  "by_kind": {
+   "py_src": {
+    "files": 43,
+    "files_ref_ge_min": 42,
+    "ref_tokens": 125704,
+    "est_tokens": 134237,
+    "agg_err": 0.06788169032011715,
+    "mean_abs_err": 0.07169686266233466,
+    "max_abs_err": 0.1928651059085842,
+    "worst": {
+     "name": "src/lucianke/syntax/guards.py",
+     "ref": 2691,
+     "est": 3210
+    }
+   },
+   "py_tests": {
+    "files": 30,
+    "files_ref_ge_min": 30,
+    "ref_tokens": 117967,
+    "est_tokens": 126092,
+    "agg_err": 0.06887519391016128,
+    "mean_abs_err": 0.07878894532517626,
+    "max_abs_err": 0.19227161883323962,
+    "worst": {
+     "name": "tests/unit/test_mcp_pipeline.py",
+     "ref": 5331,
+     "est": 6356
+    }
+   },
+   "md_ja": {
+    "files": 3,
+    "files_ref_ge_min": 3,
+    "ref_tokens": 183502,
+    "est_tokens": 154605,
+    "agg_err": -0.15747512288694399,
+    "mean_abs_err": 0.14903348474386743,
+    "max_abs_err": 0.16577376708561653,
+    "worst": {
+     "name": "docs/Lucianke仕様書.md",
+     "ref": 98182,
+     "est": 81906
+    }
+   },
+   "md_spikes": {
+    "files": 6,
+    "files_ref_ge_min": 6,
+    "ref_tokens": 22380,
+    "est_tokens": 18689,
+    "agg_err": -0.1649240393208221,
+    "mean_abs_err": 0.1716084490130119,
+    "max_abs_err": 0.24625187406296856,
+    "worst": {
+     "name": "docs/spikes/S-09.md",
+     "ref": 2668,
+     "est": 2011
+    }
+   },
+   "poly_data": {
+    "files": 7,
+    "files_ref_ge_min": 3,
+    "ref_tokens": 1327,
+    "est_tokens": 1316,
+    "agg_err": -0.008289374529012794,
+    "mean_abs_err": 0.1074563384996281,
+    "max_abs_err": 0.1724137931034483,
+    "worst": {
+     "name": "tests/fixtures/poly/pyproject.toml",
+     "ref": 58,
+     "est": 48
+    }
+   },
+   "poly_code": {
+    "files": 12,
+    "files_ref_ge_min": 11,
+    "ref_tokens": 1624,
+    "est_tokens": 1810,
+    "agg_err": 0.1145320197044335,
+    "mean_abs_err": 0.12278101091163428,
+    "max_abs_err": 0.26249999999999996,
+    "worst": {
+     "name": "tests/fixtures/poly/tests/test_payment.py",
+     "ref": 80,
+     "est": 101
+    }
+   },
+   "poly_doc": {
+    "files": 5,
+    "files_ref_ge_min": 4,
+    "ref_tokens": 714,
+    "est_tokens": 667,
+    "agg_err": -0.06582633053221287,
+    "mean_abs_err": 0.12479600308367436,
+    "max_abs_err": 0.16666666666666674,
+    "worst": {
+     "name": "tests/fixtures/poly/docs/flow.dot",
+     "ref": 60,
+     "est": 70
+    }
+   },
+   "poly_ipynb": {
+    "files": 1,
+    "files_ref_ge_min": 1,
+    "ref_tokens": 13336,
+    "est_tokens": 7591,
+    "agg_err": -0.43078884223155367,
+    "mean_abs_err": 0.43078884223155367,
+    "max_abs_err": 0.43078884223155367,
+    "worst": {
+     "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+     "ref": 13336,
+     "est": 7591
+    }
+   },
+   "spec_json_sql": {
+    "files": 11,
+    "files_ref_ge_min": 9,
+    "ref_tokens": 3359,
+    "est_tokens": 3819,
+    "agg_err": 0.13694551949985123,
+    "mean_abs_err": 0.08333123491270006,
+    "max_abs_err": 0.2013681060282171,
+    "worst": {
+     "name": "spec#block12:sql",
+     "ref": 2339,
+     "est": 2810
+    }
+   },
+   "compact": {
+    "files": 26,
+    "files_ref_ge_min": 26,
+    "ref_tokens": 4607,
+    "est_tokens": 4086,
+    "agg_err": -0.11308877794660299,
+    "mean_abs_err": 0.11753220054480787,
+    "max_abs_err": 0.3204633204633205,
+    "worst": {
+     "name": "spec#block34:# get_symbol_history ok conf=exact lsp=n",
+     "ref": 259,
+     "est": 176
+    }
+   },
+   "ALL": {
+    "files": 144,
+    "files_ref_ge_min": 135,
+    "ref_tokens": 474520,
+    "est_tokens": 452912,
+    "agg_err": -0.04553654219000258,
+    "mean_abs_err": 0.09822547450633655,
+    "max_abs_err": 0.43078884223155367,
+    "worst": {
+     "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+     "ref": 13336,
+     "est": 7591
+    }
+   }
+  },
+  "compact_per_line_sum": {
+   "files": 26,
+   "files_ref_ge_min": 26,
+   "ref_tokens": 4607,
+   "est_tokens": 4106,
+   "agg_err": -0.10874755806381597,
+   "mean_abs_err": 0.11580310160608949,
+   "max_abs_err": 0.31660231660231664,
+   "worst": {
+    "name": "spec#block34:# get_symbol_history ok conf=exact lsp=n",
+    "ref": 259,
+    "est": 177
+   }
+  },
+  "files": [
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/__init__.py",
+    "ref": 26,
+    "est": 29,
+    "chars": 98
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/__main__.py",
+    "ref": 233,
+    "est": 231,
+    "chars": 706
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/app.py",
+    "ref": 822,
+    "est": 849,
+    "chars": 2591
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/bootstrap_io.py",
+    "ref": 835,
+    "est": 725,
+    "chars": 1955
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/config.py",
+    "ref": 770,
+    "est": 768,
+    "chars": 2429
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/errors.py",
+    "ref": 819,
+    "est": 856,
+    "chars": 2636
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/limits.py",
+    "ref": 1866,
+    "est": 1593,
+    "chars": 4078
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/model.py",
+    "ref": 4895,
+    "est": 5268,
+    "chars": 16242
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/procs.py",
+    "ref": 4185,
+    "est": 4486,
+    "chars": 13704
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/records.py",
+    "ref": 1746,
+    "est": 1769,
+    "chars": 5165
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/textpos.py",
+    "ref": 4411,
+    "est": 4380,
+    "chars": 12780
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/core/urn.py",
+    "ref": 4499,
+    "est": 4528,
+    "chars": 13600
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/edit/lock.py",
+    "ref": 712,
+    "est": 759,
+    "chars": 2216
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/edit/writer.py",
+    "ref": 5497,
+    "est": 5961,
+    "chars": 18578
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/index/connection.py",
+    "ref": 2744,
+    "est": 2974,
+    "chars": 8793
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/index/ingest.py",
+    "ref": 6939,
+    "est": 7628,
+    "chars": 23980
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/index/migrate.py",
+    "ref": 2016,
+    "est": 2140,
+    "chars": 6432
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/index/public.py",
+    "ref": 9839,
+    "est": 10440,
+    "chars": 32973
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/index/writer.py",
+    "ref": 3287,
+    "est": 3782,
+    "chars": 11663
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/logging_setup.py",
+    "ref": 1728,
+    "est": 1912,
+    "chars": 6122
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/budget.py",
+    "ref": 4732,
+    "est": 5074,
+    "chars": 15491
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/envelope.py",
+    "ref": 1274,
+    "est": 1271,
+    "chars": 3651
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/pipeline.py",
+    "ref": 3520,
+    "est": 4120,
+    "chars": 13504
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/registry.py",
+    "ref": 1485,
+    "est": 1675,
+    "chars": 5333
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/render/compact.py",
+    "ref": 6126,
+    "est": 6069,
+    "chars": 18175
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/render/graph.py",
+    "ref": 4917,
+    "est": 5435,
+    "chars": 17107
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/render/json_out.py",
+    "ref": 740,
+    "est": 757,
+    "chars": 2305
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/server.py",
+    "ref": 1641,
+    "est": 1811,
+    "chars": 5732
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/mcp/types.py",
+    "ref": 656,
+    "est": 631,
+    "chars": 1849
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/boundaries.py",
+    "ref": 3458,
+    "est": 3757,
+    "chars": 11112
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/guards.py",
+    "ref": 2691,
+    "est": 3210,
+    "chars": 10109
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/parsers.py",
+    "ref": 4478,
+    "est": 4680,
+    "chars": 14123
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/skeleton.py",
+    "ref": 6532,
+    "est": 7199,
+    "chars": 23228
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/support.py",
+    "ref": 3273,
+    "est": 3435,
+    "chars": 10211
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/symbols.py",
+    "ref": 7183,
+    "est": 8416,
+    "chars": 27837
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/types.py",
+    "ref": 560,
+    "est": 534,
+    "chars": 1647
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/tools/_base.py",
+    "ref": 1383,
+    "est": 1375,
+    "chars": 3998
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/tools/dev_ping.py",
+    "ref": 501,
+    "est": 539,
+    "chars": 1717
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/workspace/languages.py",
+    "ref": 4600,
+    "est": 4476,
+    "chars": 12770
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/workspace/paths.py",
+    "ref": 3976,
+    "est": 4187,
+    "chars": 12178
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/workspace/pyenv.py",
+    "ref": 1351,
+    "est": 1401,
+    "chars": 4338
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/workspace/settings_file.py",
+    "ref": 2413,
+    "est": 2782,
+    "chars": 8644
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/workspace/types.py",
+    "ref": 345,
+    "est": 325,
+    "chars": 973
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/contract/compact_grammar.py",
+    "ref": 4071,
+    "est": 3926,
+    "chars": 11542
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/contract/test_compact_grammar.py",
+    "ref": 2259,
+    "est": 2125,
+    "chars": 6748
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/fixtures/make_fpoly.py",
+    "ref": 3787,
+    "est": 4007,
+    "chars": 12747
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/invariants/test_public_db_readonly.py",
+    "ref": 3837,
+    "est": 4153,
+    "chars": 13205
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/invariants/test_stdout_purity.py",
+    "ref": 3142,
+    "est": 3360,
+    "chars": 10754
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_check_licenses.py",
+    "ref": 415,
+    "est": 405,
+    "chars": 1306
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_config_logging.py",
+    "ref": 1429,
+    "est": 1520,
+    "chars": 4989
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_errors.py",
+    "ref": 1014,
+    "est": 1117,
+    "chars": 3727
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_limits.py",
+    "ref": 795,
+    "est": 724,
+    "chars": 2412
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_model.py",
+    "ref": 4395,
+    "est": 4861,
+    "chars": 15882
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_procs.py",
+    "ref": 2225,
+    "est": 2416,
+    "chars": 8158
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_records.py",
+    "ref": 1887,
+    "est": 2074,
+    "chars": 7047
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_textpos.py",
+    "ref": 4677,
+    "est": 4262,
+    "chars": 13675
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_core_urn.py",
+    "ref": 3856,
+    "est": 4013,
+    "chars": 12642
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_import_graph.py",
+    "ref": 780,
+    "est": 868,
+    "chars": 2761
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_index_core.py",
+    "ref": 6741,
+    "est": 7753,
+    "chars": 25845
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_index_public.py",
+    "ref": 6109,
+    "est": 6632,
+    "chars": 21774
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_index_schema.py",
+    "ref": 1663,
+    "est": 1668,
+    "chars": 4971
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_mcp_budget.py",
+    "ref": 7374,
+    "est": 7838,
+    "chars": 25632
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_mcp_graph.py",
+    "ref": 5885,
+    "est": 6245,
+    "chars": 19704
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_mcp_pipeline.py",
+    "ref": 5331,
+    "est": 6356,
+    "chars": 20899
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_mcp_render.py",
+    "ref": 8659,
+    "est": 9212,
+    "chars": 29744
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_smoke.py",
+    "ref": 138,
+    "est": 149,
+    "chars": 509
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_syntax_boundaries.py",
+    "ref": 5726,
+    "est": 6460,
+    "chars": 20965
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_syntax_guards.py",
+    "ref": 3289,
+    "est": 3250,
+    "chars": 10278
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_syntax_parsers.py",
+    "ref": 6395,
+    "est": 6686,
+    "chars": 21385
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_syntax_symbols.py",
+    "ref": 7230,
+    "est": 7690,
+    "chars": 24644
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_workspace_context.py",
+    "ref": 4183,
+    "est": 4662,
+    "chars": 15119
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_workspace_languages.py",
+    "ref": 4747,
+    "est": 5187,
+    "chars": 16269
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_workspace_paths.py",
+    "ref": 5928,
+    "est": 6473,
+    "chars": 20265
+   },
+   {
+    "kind": "md_ja",
+    "name": "docs/Lucianke アーキテクチャ設計書.md",
+    "ref": 56139,
+    "est": 46952,
+    "chars": 118496
+   },
+   {
+    "kind": "md_ja",
+    "name": "docs/Lucianke仕様書.md",
+    "ref": 98182,
+    "est": 81906,
+    "chars": 200637
+   },
+   {
+    "kind": "md_ja",
+    "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
+    "ref": 29181,
+    "est": 25747,
+    "chars": 58446
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/S-01.md",
+    "ref": 4284,
+    "est": 3699,
+    "chars": 9727
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/S-02.md",
+    "ref": 5271,
+    "est": 4439,
+    "chars": 11799
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/S-03.md",
+    "ref": 3489,
+    "est": 3020,
+    "chars": 7661
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/S-07.md",
+    "ref": 4193,
+    "est": 3533,
+    "chars": 9168
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/S-09.md",
+    "ref": 2668,
+    "est": 2011,
+    "chars": 4973
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/S-10.md",
+    "ref": 2475,
+    "est": 1987,
+    "chars": 4815
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/conf/.env",
+    "ref": 11,
+    "est": 12,
+    "chars": 39
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/conf/app.yaml",
+    "ref": 37,
+    "est": 26,
+    "chars": 90
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/conf/rules.custom",
+    "ref": 37,
+    "est": 32,
+    "chars": 104
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/conf/settings.json",
+    "ref": 118,
+    "est": 104,
+    "chars": 338
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/db/schema.sql",
+    "ref": 64,
+    "est": 76,
+    "chars": 281
+   },
+   {
+    "kind": "poly_doc",
+    "name": "tests/fixtures/poly/docs/api.rst",
+    "ref": 50,
+    "est": 54,
+    "chars": 160
+   },
+   {
+    "kind": "poly_doc",
+    "name": "tests/fixtures/poly/docs/flow.dot",
+    "ref": 60,
+    "est": 70,
+    "chars": 239
+   },
+   {
+    "kind": "poly_doc",
+    "name": "tests/fixtures/poly/docs/flow.mmd",
+    "ref": 55,
+    "est": 48,
+    "chars": 156
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/legacy/calc.cob",
+    "ref": 122,
+    "est": 117,
+    "chars": 430
+   },
+   {
+    "kind": "poly_ipynb",
+    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+    "ref": 13336,
+    "est": 7591,
+    "chars": 27716
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/proto/order.proto",
+    "ref": 67,
+    "est": 71,
+    "chars": 254
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/pyproject.toml",
+    "ref": 58,
+    "est": 48,
+    "chars": 153
+   },
+   {
+    "kind": "poly_doc",
+    "name": "tests/fixtures/poly/README.md",
+    "ref": 511,
+    "est": 447,
+    "chars": 1147
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/reports/junit.xml",
+    "ref": 1022,
+    "est": 1054,
+    "chars": 3469
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/src/shop/api/routes.py",
+    "ref": 198,
+    "est": 247,
+    "chars": 868
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/src/shop/models/crlf_bom.py",
+    "ref": 54,
+    "est": 54,
+    "chars": 184
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/src/shop/models/no_final_newline.py",
+    "ref": 19,
+    "est": 18,
+    "chars": 62
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/src/shop/models/receipt.py",
+    "ref": 190,
+    "est": 193,
+    "chars": 624
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/src/shop/services/limits.py",
+    "ref": 173,
+    "est": 189,
+    "chars": 612
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/src/shop/services/payment.py",
+    "ref": 436,
+    "est": 492,
+    "chars": 1581
+   },
+   {
+    "kind": "poly_doc",
+    "name": "tests/fixtures/poly/templates/receipt.j2",
+    "ref": 38,
+    "est": 48,
+    "chars": 139
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/tests/test_payment.py",
+    "ref": 80,
+    "est": 101,
+    "chars": 360
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/web/src/app.ts",
+    "ref": 72,
+    "est": 87,
+    "chars": 287
+   },
+   {
+    "kind": "poly_code",
+    "name": "tests/fixtures/poly/web/src/payment.ts",
+    "ref": 149,
+    "est": 165,
+    "chars": 549
+   },
+   {
+    "kind": "poly_data",
+    "name": "tests/fixtures/poly/web/tsconfig.json",
+    "ref": 44,
+    "est": 40,
+    "chars": 124
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block1:json",
+    "ref": 60,
+    "est": 62,
+    "chars": 195
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block2:json",
+    "ref": 130,
+    "est": 114,
+    "chars": 337
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 57,
+    "chars": 197
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block4:json",
+    "ref": 90,
+    "est": 87,
+    "chars": 282
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block5:json",
+    "ref": 39,
+    "est": 39,
+    "chars": 112
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block7:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 256,
+    "est": 245,
+    "chars": 819
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block8:# find_references_and_implementations ok",
+    "ref": 138,
+    "est": 147,
+    "chars": 519
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block9:# get_diagnostics ok conf=exact lsp=read",
+    "ref": 97,
+    "est": 79,
+    "chars": 262
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block10:json",
+    "ref": 175,
+    "est": 180,
+    "chars": 552
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block12:sql",
+    "ref": 2339,
+    "est": 2810,
+    "chars": 9681
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block13:# configure_workspace ok conf=exact lsp=",
+    "ref": 157,
+    "est": 123,
+    "chars": 421
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block14:# get_repo_map ok conf=exact lsp=ready r",
+    "ref": 201,
+    "est": 168,
+    "chars": 574
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block15:# get_file_skeleton ok conf=structural l",
+    "ref": 347,
+    "est": 246,
+    "chars": 827
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block16:# get_file_skeleton ok conf=heuristic ls",
+    "ref": 137,
+    "est": 119,
+    "chars": 421
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block17:# search_workspace_symbols ok conf=exact",
+    "ref": 164,
+    "est": 169,
+    "chars": 580
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block18:# resolve_symbols ok conf=exact lsp=read",
+    "ref": 187,
+    "est": 183,
+    "chars": 604
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block19:# get_symbol_bodies ok conf=exact lsp=re",
+    "ref": 67,
+    "est": 53,
+    "chars": 188
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block21:# find_references_and_implementations ok",
+    "ref": 175,
+    "est": 175,
+    "chars": 611
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block22:# query_call_hierarchy ok conf=exact lsp",
+    "ref": 152,
+    "est": 152,
+    "chars": 516
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block23:# get_diagnostics ok conf=exact lsp=read",
+    "ref": 150,
+    "est": 122,
+    "chars": 399
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block24:# analyze_change_impact ok conf=exact ls",
+    "ref": 217,
+    "est": 218,
+    "chars": 758
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block25:# edit_symbol_body ok conf=exact lsp=rea",
+    "ref": 145,
+    "est": 131,
+    "chars": 440
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block26:# rename_symbol ok conf=exact lsp=ready ",
+    "ref": 199,
+    "est": 202,
+    "chars": 707
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block27:# structural_search_replace ok conf=stru",
+    "ref": 120,
+    "est": 103,
+    "chars": 357
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block29:# apply_code_action ok conf=exact lsp=re",
+    "ref": 130,
+    "est": 122,
+    "chars": 415
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block30:# find_code_paths ok conf=exact lsp=read",
+    "ref": 179,
+    "est": 159,
+    "chars": 554
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+    "ref": 196,
+    "est": 159,
+    "chars": 535
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block33:# verify_contract ok conf=exact lsp=read",
+    "ref": 179,
+    "est": 150,
+    "chars": 518
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block34:# get_symbol_history ok conf=exact lsp=n",
+    "ref": 259,
+    "est": 176,
+    "chars": 617
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block35:# analyze_git_diff_symbols ok conf=exact",
+    "ref": 234,
+    "est": 212,
+    "chars": 726
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block36:# get_project_db_schema ok conf=exact ls",
+    "ref": 331,
+    "est": 302,
+    "chars": 958
+   },
+   {
+    "kind": "compact",
+    "name": "spec#block37:# query_project_db ok conf=exact lsp=n/a",
+    "ref": 122,
+    "est": 114,
+    "chars": 372
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block38:sql",
+    "ref": 236,
+    "est": 238,
+    "chars": 865
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block39:sql",
+    "ref": 71,
+    "est": 74,
+    "chars": 260
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block40:sql",
+    "ref": 62,
+    "est": 69,
+    "chars": 239
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block41:sql",
+    "ref": 120,
+    "est": 100,
+    "chars": 358
+   },
+   {
+    "kind": "spec_json_sql",
+    "name": "spec#block42:sql",
+    "ref": 37,
+    "est": 46,
+    "chars": 167
+   }
+  ]
+ },
+ "candidates": {
+  "base4_refit": {
+   "cols": [
+    "@word",
+    "symbol_chars",
+    "@wide",
+    "other"
+   ],
+   "coef": {
+    "@word": "23/100",
+    "symbol_chars": "49/100",
+    "@wide": "23/25",
+    "other": "17/50"
+   },
+   "stats": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 135621,
+     "agg_err": 0.07889168204671293,
+     "mean_abs_err": 0.07689430793173778,
+     "max_abs_err": 0.17800074321813453,
+     "worst": {
+      "name": "src/lucianke/syntax/guards.py",
+      "ref": 2691,
+      "est": 3170
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 121573,
+     "agg_err": 0.03056787067569755,
+     "mean_abs_err": 0.0521767503743432,
+     "max_abs_err": 0.14162446070155688,
+     "worst": {
+      "name": "tests/unit/test_mcp_pipeline.py",
+      "ref": 5331,
+      "est": 6086
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 177248,
+     "agg_err": -0.03408137241011,
+     "mean_abs_err": 0.048725682110970094,
+     "max_abs_err": 0.05505976237553212,
+     "worst": {
+      "name": "docs/Lucianke アーキテクチャ設計書.md",
+      "ref": 56139,
+      "est": 53048
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 20940,
+     "agg_err": -0.06434316353887404,
+     "mean_abs_err": 0.0677034747571576,
+     "max_abs_err": 0.1356821589205397,
+     "worst": {
+      "name": "docs/spikes/S-09.md",
+      "ref": 2668,
+      "est": 2306
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1240,
+     "agg_err": -0.06556141672946492,
+     "mean_abs_err": 0.14099455463153696,
+     "max_abs_err": 0.22413793103448276,
+     "worst": {
+      "name": "tests/fixtures/poly/pyproject.toml",
+      "ref": 58,
+      "est": 45
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1760,
+     "agg_err": 0.08374384236453203,
+     "mean_abs_err": 0.0992937833885581,
+     "max_abs_err": 0.18686868686868685,
+     "worst": {
+      "name": "tests/fixtures/poly/src/shop/api/routes.py",
+      "ref": 198,
+      "est": 235
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 719,
+     "agg_err": 0.007002801120448154,
+     "mean_abs_err": 0.09838996619818541,
+     "max_abs_err": 0.18181818181818177,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 45
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 7069,
+     "agg_err": -0.46993101379724056,
+     "mean_abs_err": 0.46993101379724056,
+     "max_abs_err": 0.46993101379724056,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 7069
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3670,
+     "agg_err": 0.09258707948794287,
+     "mean_abs_err": 0.08457945841143073,
+     "max_abs_err": 0.22499999999999998,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 93
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 3890,
+     "agg_err": -0.15563273279791623,
+     "mean_abs_err": 0.15315903911135897,
+     "max_abs_err": 0.36679536679536684,
+     "worst": {
+      "name": "spec#block34:# get_symbol_history ok conf=exact lsp=n",
+      "ref": 259,
+      "est": 164
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 473730,
+     "agg_err": -0.001664840259630762,
+     "mean_abs_err": 0.09236531586367468,
+     "max_abs_err": 0.46993101379724056,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 7069
+     }
+    }
+   },
+   "cv": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 135470,
+     "agg_err": 0.07769044740024178,
+     "mean_abs_err": 0.07463152517981404,
+     "max_abs_err": 0.17725752508361214,
+     "worst": {
+      "name": "src/lucianke/syntax/guards.py",
+      "ref": 2691,
+      "est": 3168
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 121365,
+     "agg_err": 0.028804665711597233,
+     "mean_abs_err": 0.050285154101562174,
+     "max_abs_err": 0.14591194968553456,
+     "worst": {
+      "name": "tests/unit/test_core_limits.py",
+      "ref": 795,
+      "est": 679
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 177402,
+     "agg_err": -0.03324214449978746,
+     "mean_abs_err": 0.05940472733414459,
+     "max_abs_err": 0.07792741852575302,
+     "worst": {
+      "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
+      "ref": 29181,
+      "est": 31455
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 20944,
+     "agg_err": -0.0641644325290438,
+     "mean_abs_err": 0.0666619276159816,
+     "max_abs_err": 0.11506746626686659,
+     "worst": {
+      "name": "docs/spikes/S-09.md",
+      "ref": 2668,
+      "est": 2361
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1249,
+     "agg_err": -0.058779201205727216,
+     "mean_abs_err": 0.13556043299123932,
+     "max_abs_err": 0.22413793103448276,
+     "worst": {
+      "name": "tests/fixtures/poly/pyproject.toml",
+      "ref": 58,
+      "est": 45
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1750,
+     "agg_err": 0.07758620689655182,
+     "mean_abs_err": 0.0991737139732245,
+     "max_abs_err": 0.18686868686868685,
+     "worst": {
+      "name": "tests/fixtures/poly/src/shop/api/routes.py",
+      "ref": 198,
+      "est": 235
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 710,
+     "agg_err": -0.0056022408963585235,
+     "mean_abs_err": 0.1074490007709186,
+     "max_abs_err": 0.18181818181818177,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 45
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 6871,
+     "agg_err": -0.4847780443911218,
+     "mean_abs_err": 0.4847780443911218,
+     "max_abs_err": 0.4847780443911218,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 6871
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3659,
+     "agg_err": 0.08931229532598994,
+     "mean_abs_err": 0.08618806744762071,
+     "max_abs_err": 0.21666666666666667,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 94
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 3861,
+     "agg_err": -0.16192750162795744,
+     "mean_abs_err": 0.15974355895154274,
+     "max_abs_err": 0.3783783783783784,
+     "worst": {
+      "name": "spec#block34:# get_symbol_history ok conf=exact lsp=n",
+      "ref": 259,
+      "est": 161
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 473281,
+     "agg_err": -0.002611059597066534,
+     "mean_abs_err": 0.09305522791274118,
+     "max_abs_err": 0.4847780443911218,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 6871
+     }
+    }
+   },
+   "pass_fit": false,
+   "pass_cv": false
+  },
+  "split_chars": {
+   "cols": [
+    "letters_chars",
+    "digits_chars",
+    "space_chars",
+    "nl_chars",
+    "symbol_chars",
+    "kana",
+    "kanji",
+    "cjkpunct",
+    "hangul",
+    "other"
+   ],
+   "coef": {
+    "letters_chars": "21/100",
+    "digits_chars": "121/100",
+    "space_chars": "7/50",
+    "nl_chars": "47/100",
+    "symbol_chars": "9/20",
+    "kana": "93/100",
+    "kanji": "16/25",
+    "cjkpunct": "177/100",
+    "hangul": "2689/100",
+    "other": "37/100"
+   },
+   "stats": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 129059,
+     "agg_err": 0.026689683701393685,
+     "mean_abs_err": 0.03978663426908467,
+     "max_abs_err": 0.12260419835716463,
+     "worst": {
+      "name": "src/lucianke/index/writer.py",
+      "ref": 3287,
+      "est": 3690
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 116343,
+     "agg_err": -0.013766561835089508,
+     "mean_abs_err": 0.03596138272480944,
+     "max_abs_err": 0.13317117664943756,
+     "worst": {
+      "name": "tests/unit/test_syntax_guards.py",
+      "ref": 3289,
+      "est": 2851
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 177442,
+     "agg_err": -0.033024163224379066,
+     "mean_abs_err": 0.0362222990296582,
+     "max_abs_err": 0.04451936200118145,
+     "worst": {
+      "name": "docs/Lucianke仕様書.md",
+      "ref": 98182,
+      "est": 93811
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 22095,
+     "agg_err": -0.012734584450402098,
+     "mean_abs_err": 0.019701151087650876,
+     "max_abs_err": 0.037259959873889414,
+     "worst": {
+      "name": "docs/spikes/S-03.md",
+      "ref": 3489,
+      "est": 3359
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1394,
+     "agg_err": 0.05048982667671442,
+     "mean_abs_err": 0.06149038320403303,
+     "max_abs_err": 0.08219178082191791,
+     "worst": {
+      "name": "tests/fixtures/poly/reports/junit.xml",
+      "ref": 1022,
+      "est": 1106
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1684,
+     "agg_err": 0.03694581280788167,
+     "mean_abs_err": 0.07281221931358471,
+     "max_abs_err": 0.1499999999999999,
+     "worst": {
+      "name": "tests/fixtures/poly/tests/test_payment.py",
+      "ref": 80,
+      "est": 92
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 693,
+     "agg_err": -0.02941176470588236,
+     "mean_abs_err": 0.08059612761667556,
+     "max_abs_err": 0.23636363636363633,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 42
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 9305,
+     "agg_err": -0.3022645470905819,
+     "mean_abs_err": 0.3022645470905819,
+     "max_abs_err": 0.3022645470905819,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 9305
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3317,
+     "agg_err": -0.012503721345638596,
+     "mean_abs_err": 0.0909104747878818,
+     "max_abs_err": 0.2666666666666667,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 88
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4443,
+     "agg_err": -0.035598003038853965,
+     "mean_abs_err": 0.047867529150606006,
+     "max_abs_err": 0.14795918367346939,
+     "worst": {
+      "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+      "ref": 196,
+      "est": 167
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 465775,
+     "agg_err": -0.018429149456292704,
+     "mean_abs_err": 0.04925598944656464,
+     "max_abs_err": 0.3022645470905819,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 9305
+     }
+    }
+   },
+   "cv": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 129058,
+     "agg_err": 0.026681728505059565,
+     "mean_abs_err": 0.039003526023480825,
+     "max_abs_err": 0.12325830653804926,
+     "worst": {
+      "name": "src/lucianke/core/limits.py",
+      "ref": 1866,
+      "est": 2096
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 117632,
+     "agg_err": -0.0028397772258343945,
+     "mean_abs_err": 0.034370696476918434,
+     "max_abs_err": 0.12891456369717236,
+     "worst": {
+      "name": "tests/unit/test_syntax_guards.py",
+      "ref": 3289,
+      "est": 2865
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 176878,
+     "agg_err": -0.036097699207638057,
+     "mean_abs_err": 0.04680881109739191,
+     "max_abs_err": 0.06378969668574686,
+     "worst": {
+      "name": "docs/Lucianke仕様書.md",
+      "ref": 98182,
+      "est": 91919
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 22147,
+     "agg_err": -0.010411081322609483,
+     "mean_abs_err": 0.023542064778771427,
+     "max_abs_err": 0.03748125937031488,
+     "worst": {
+      "name": "docs/spikes/S-09.md",
+      "ref": 2668,
+      "est": 2768
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1436,
+     "agg_err": 0.0821401657874905,
+     "mean_abs_err": 0.08441331425567193,
+     "max_abs_err": 0.12524461839530332,
+     "worst": {
+      "name": "tests/fixtures/poly/reports/junit.xml",
+      "ref": 1022,
+      "est": 1150
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1704,
+     "agg_err": 0.049261083743842304,
+     "mean_abs_err": 0.08941988569723582,
+     "max_abs_err": 0.1875,
+     "worst": {
+      "name": "tests/fixtures/poly/tests/test_payment.py",
+      "ref": 80,
+      "est": 95
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 690,
+     "agg_err": -0.03361344537815125,
+     "mean_abs_err": 0.0973888098203167,
+     "max_abs_err": 0.2545454545454545,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 41
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 9598,
+     "agg_err": -0.28029394121175766,
+     "mean_abs_err": 0.28029394121175766,
+     "max_abs_err": 0.28029394121175766,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 9598
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3302,
+     "agg_err": -0.01696933611193807,
+     "mean_abs_err": 0.08701276858260022,
+     "max_abs_err": 0.25,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 90
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4527,
+     "agg_err": -0.017364879531148292,
+     "mean_abs_err": 0.0391846381743126,
+     "max_abs_err": 0.12244897959183676,
+     "worst": {
+      "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+      "ref": 196,
+      "est": 172
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 466972,
+     "agg_err": -0.01590660035404201,
+     "mean_abs_err": 0.049330156925657155,
+     "max_abs_err": 0.28029394121175766,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 9598
+     }
+    }
+   },
+   "pass_fit": false,
+   "pass_cv": false
+  },
+  "runs": {
+   "cols": [
+    "letters_runs",
+    "letters_chars",
+    "digits_runs",
+    "digits_chars",
+    "space_runs_multi",
+    "nl_chars",
+    "symbol_runs",
+    "symbol_chars",
+    "kana",
+    "kanji",
+    "cjkpunct",
+    "hangul",
+    "other"
+   ],
+   "coef": {
+    "letters_runs": "77/100",
+    "letters_chars": "3/100",
+    "digits_runs": "37/25",
+    "digits_chars": "6/25",
+    "space_runs_multi": "107/100",
+    "nl_chars": "51/100",
+    "symbol_runs": "18/25",
+    "symbol_chars": "3/50",
+    "kana": "39/50",
+    "kanji": "87/100",
+    "cjkpunct": "9/5",
+    "hangul": "1191/100",
+    "other": "41/100"
+   },
+   "stats": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 127891,
+     "agg_err": 0.017398014382995042,
+     "mean_abs_err": 0.024229235786755926,
+     "max_abs_err": 0.07877023831180652,
+     "worst": {
+      "name": "src/lucianke/edit/writer.py",
+      "ref": 5497,
+      "est": 5930
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 120588,
+     "agg_err": 0.022218077937050218,
+     "mean_abs_err": 0.026796570474517653,
+     "max_abs_err": 0.10132027889037243,
+     "worst": {
+      "name": "tests/unit/test_index_core.py",
+      "ref": 6741,
+      "est": 7424
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 181081,
+     "agg_err": -0.013193316694095958,
+     "mean_abs_err": 0.01788518842217605,
+     "max_abs_err": 0.019667556171192313,
+     "worst": {
+      "name": "docs/Lucianke仕様書.md",
+      "ref": 98182,
+      "est": 96251
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 22428,
+     "agg_err": 0.002144772117962379,
+     "mean_abs_err": 0.016635089260340113,
+     "max_abs_err": 0.034482758620689724,
+     "worst": {
+      "name": "docs/spikes/S-09.md",
+      "ref": 2668,
+      "est": 2760
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1399,
+     "agg_err": 0.054257724189902046,
+     "mean_abs_err": 0.05463344317094828,
+     "max_abs_err": 0.07827788649706457,
+     "worst": {
+      "name": "tests/fixtures/poly/reports/junit.xml",
+      "ref": 1022,
+      "est": 1102
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1636,
+     "agg_err": 0.00738916256157629,
+     "mean_abs_err": 0.034004623748783776,
+     "max_abs_err": 0.07377049180327866,
+     "worst": {
+      "name": "tests/fixtures/poly/legacy/calc.cob",
+      "ref": 122,
+      "est": 113
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 725,
+     "agg_err": 0.01540616246498594,
+     "mean_abs_err": 0.05196613888394713,
+     "max_abs_err": 0.10909090909090913,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 49
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 10033,
+     "agg_err": -0.24767546490701864,
+     "mean_abs_err": 0.24767546490701864,
+     "max_abs_err": 0.24767546490701864,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 10033
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3319,
+     "agg_err": -0.011908306043465267,
+     "mean_abs_err": 0.044557935010536925,
+     "max_abs_err": 0.12903225806451624,
+     "worst": {
+      "name": "spec#block40:sql",
+      "ref": 62,
+      "est": 70
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4627,
+     "agg_err": 0.004341219882787017,
+     "mean_abs_err": 0.04942773045579319,
+     "max_abs_err": 0.19117647058823528,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 55
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 473727,
+     "agg_err": -0.0016711624378319412,
+     "mean_abs_err": 0.034478701749967235,
+     "max_abs_err": 0.24767546490701864,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 10033
+     }
+    }
+   },
+   "cv": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 126964,
+     "agg_err": 0.010023547381149411,
+     "mean_abs_err": 0.02542110058752029,
+     "max_abs_err": 0.07021739130434779,
+     "worst": {
+      "name": "src/lucianke/workspace/languages.py",
+      "ref": 4600,
+      "est": 4277
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 120172,
+     "agg_err": 0.018691668008850026,
+     "mean_abs_err": 0.02754197243419868,
+     "max_abs_err": 0.1159420289855072,
+     "worst": {
+      "name": "tests/unit/test_smoke.py",
+      "ref": 138,
+      "est": 122
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 178827,
+     "agg_err": -0.025476561563361755,
+     "mean_abs_err": 0.029440558164158175,
+     "max_abs_err": 0.03749159723778295,
+     "worst": {
+      "name": "docs/Lucianke仕様書.md",
+      "ref": 98182,
+      "est": 94501
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 22281,
+     "agg_err": -0.004423592493297601,
+     "mean_abs_err": 0.018197881376783204,
+     "max_abs_err": 0.02579535683576961,
+     "worst": {
+      "name": "docs/spikes/S-03.md",
+      "ref": 3489,
+      "est": 3399
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1422,
+     "agg_err": 0.07159005275056529,
+     "mean_abs_err": 0.04554601037071434,
+     "max_abs_err": 0.10273972602739723,
+     "worst": {
+      "name": "tests/fixtures/poly/reports/junit.xml",
+      "ref": 1022,
+      "est": 1127
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1625,
+     "agg_err": 0.0006157635467980427,
+     "mean_abs_err": 0.04060367213732689,
+     "max_abs_err": 0.08196721311475408,
+     "worst": {
+      "name": "tests/fixtures/poly/legacy/calc.cob",
+      "ref": 122,
+      "est": 112
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 716,
+     "agg_err": 0.0028011204481792618,
+     "mean_abs_err": 0.05207377097788063,
+     "max_abs_err": 0.10909090909090913,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 49
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 8937,
+     "agg_err": -0.3298590281943611,
+     "mean_abs_err": 0.3298590281943611,
+     "max_abs_err": 0.3298590281943611,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 8937
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3341,
+     "agg_err": -0.005358737719559414,
+     "mean_abs_err": 0.047407957964703575,
+     "max_abs_err": 0.125,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 105
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4600,
+     "agg_err": -0.001519426958975445,
+     "mean_abs_err": 0.04792274217440004,
+     "max_abs_err": 0.17647058823529416,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 56
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 468885,
+     "agg_err": -0.011875158054455048,
+     "mean_abs_err": 0.036189257891854384,
+     "max_abs_err": 0.3298590281943611,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 8937
+     }
+    }
+   },
+   "pass_fit": false,
+   "pass_cv": false
+  },
+  "runs_lean": {
+   "cols": [
+    "letters_runs",
+    "letters_chars",
+    "digits_chars",
+    "space_runs_multi",
+    "nl_chars",
+    "symbol_runs",
+    "symbol_chars",
+    "kana",
+    "kanji",
+    "cjkpunct",
+    "other"
+   ],
+   "coef": {
+    "letters_runs": "79/100",
+    "letters_chars": "3/100",
+    "digits_chars": "24/25",
+    "space_runs_multi": "9/10",
+    "nl_chars": "27/50",
+    "symbol_runs": "73/100",
+    "symbol_chars": "3/50",
+    "kana": "4/5",
+    "kanji": "41/50",
+    "cjkpunct": "201/100",
+    "other": "11/25"
+   },
+   "stats": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 127538,
+     "agg_err": 0.014589830077006205,
+     "mean_abs_err": 0.02446309230703638,
+     "max_abs_err": 0.08586501728215401,
+     "worst": {
+      "name": "src/lucianke/edit/writer.py",
+      "ref": 5497,
+      "est": 5969
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 119459,
+     "agg_err": 0.012647604838641247,
+     "mean_abs_err": 0.028188190460100213,
+     "max_abs_err": 0.08871087375760278,
+     "worst": {
+      "name": "tests/unit/test_index_core.py",
+      "ref": 6741,
+      "est": 7339
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 180339,
+     "agg_err": -0.017236869352922568,
+     "mean_abs_err": 0.021920081810298326,
+     "max_abs_err": 0.024457151000195965,
+     "worst": {
+      "name": "docs/Lucianke アーキテクチャ設計書.md",
+      "ref": 56139,
+      "est": 54766
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 22251,
+     "agg_err": -0.005764075067024144,
+     "mean_abs_err": 0.011998885670847318,
+     "max_abs_err": 0.022418316241354597,
+     "worst": {
+      "name": "docs/spikes/S-07.md",
+      "ref": 4193,
+      "est": 4099
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1362,
+     "agg_err": 0.026375282592313587,
+     "mean_abs_err": 0.020965983889212336,
+     "max_abs_err": 0.03718199608610573,
+     "worst": {
+      "name": "tests/fixtures/poly/reports/junit.xml",
+      "ref": 1022,
+      "est": 1060
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1630,
+     "agg_err": 0.003694581280788256,
+     "mean_abs_err": 0.040411957045993804,
+     "max_abs_err": 0.11475409836065575,
+     "worst": {
+      "name": "tests/fixtures/poly/legacy/calc.cob",
+      "ref": 122,
+      "est": 108
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 726,
+     "agg_err": 0.01680672268907557,
+     "mean_abs_err": 0.04696613888394713,
+     "max_abs_err": 0.10909090909090913,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 49
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 8695,
+     "agg_err": -0.348005398920216,
+     "mean_abs_err": 0.348005398920216,
+     "max_abs_err": 0.348005398920216,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 8695
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3295,
+     "agg_err": -0.01905328966954456,
+     "mean_abs_err": 0.04824248606919669,
+     "max_abs_err": 0.125,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 105
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4604,
+     "agg_err": -0.0006511829824180637,
+     "mean_abs_err": 0.05073288836769923,
+     "max_abs_err": 0.13265306122448983,
+     "worst": {
+      "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+      "ref": 196,
+      "est": 170
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 469899,
+     "agg_err": -0.009738261822473282,
+     "mean_abs_err": 0.035610267081237316,
+     "max_abs_err": 0.348005398920216,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 8695
+     }
+    }
+   },
+   "cv": {
+    "py_src": {
+     "files": 43,
+     "files_ref_ge_min": 42,
+     "ref_tokens": 125704,
+     "est_tokens": 127110,
+     "agg_err": 0.011185006045949297,
+     "mean_abs_err": 0.023663752886229898,
+     "max_abs_err": 0.07367655084591584,
+     "worst": {
+      "name": "src/lucianke/edit/writer.py",
+      "ref": 5497,
+      "est": 5902
+     }
+    },
+    "py_tests": {
+     "files": 30,
+     "files_ref_ge_min": 30,
+     "ref_tokens": 117967,
+     "est_tokens": 119717,
+     "agg_err": 0.01483465714988097,
+     "mean_abs_err": 0.027391442540552712,
+     "max_abs_err": 0.10144927536231885,
+     "worst": {
+      "name": "tests/unit/test_smoke.py",
+      "ref": 138,
+      "est": 124
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 183502,
+     "est_tokens": 178954,
+     "agg_err": -0.02478447101393988,
+     "mean_abs_err": 0.0305238286881833,
+     "max_abs_err": 0.039172149681204305,
+     "worst": {
+      "name": "docs/Lucianke仕様書.md",
+      "ref": 98182,
+      "est": 94336
+     }
+    },
+    "md_spikes": {
+     "files": 6,
+     "files_ref_ge_min": 6,
+     "ref_tokens": 22380,
+     "est_tokens": 22172,
+     "agg_err": -0.00929401251117068,
+     "mean_abs_err": 0.012632058884263239,
+     "max_abs_err": 0.02551872167898883,
+     "worst": {
+      "name": "docs/spikes/S-07.md",
+      "ref": 4193,
+      "est": 4086
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1368,
+     "agg_err": 0.030896759608138646,
+     "mean_abs_err": 0.02792033284495432,
+     "max_abs_err": 0.041095890410958846,
+     "worst": {
+      "name": "tests/fixtures/poly/reports/junit.xml",
+      "ref": 1022,
+      "est": 1064
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1627,
+     "agg_err": 0.001847290640394128,
+     "mean_abs_err": 0.045963194146134596,
+     "max_abs_err": 0.12295081967213117,
+     "worst": {
+      "name": "tests/fixtures/poly/legacy/calc.cob",
+      "ref": 122,
+      "est": 107
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 720,
+     "agg_err": 0.008403361344537785,
+     "mean_abs_err": 0.04301755322303272,
+     "max_abs_err": 0.09090909090909094,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 50
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 8624,
+     "agg_err": -0.35332933413317336,
+     "mean_abs_err": 0.35332933413317336,
+     "max_abs_err": 0.35332933413317336,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 8624
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3296,
+     "agg_err": -0.01875558201845784,
+     "mean_abs_err": 0.05571586305887399,
+     "max_abs_err": 0.14166666666666672,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 103
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4610,
+     "agg_err": 0.0006511829824180637,
+     "mean_abs_err": 0.05425141560111361,
+     "max_abs_err": 0.13235294117647056,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 59
+     }
+    },
+    "ALL": {
+     "files": 144,
+     "files_ref_ge_min": 135,
+     "ref_tokens": 474520,
+     "est_tokens": 468198,
+     "agg_err": -0.013322936862513735,
+     "mean_abs_err": 0.037109036971369136,
+     "max_abs_err": 0.35332933413317336,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 8624
+     }
+    }
+   },
+   "pass_fit": false,
+   "pass_cv": false
+  }
+ },
+ "chosen_for_proposal": "split_chars",
+ "speed_1MB": {
+  "py_src_1MB": {
+   "current_ms": 80.27,
+   "chars": 1000000,
+   "proposal_ms": 193.2,
+   "tiktoken_ms": 138.6
+  },
+  "md_ja_1MB": {
+   "current_ms": 94.26,
+   "chars": 1000000,
+   "proposal_ms": 227.59,
+   "tiktoken_ms": 213.2
+  },
+  "compact_1MB": {
+   "current_ms": 87.33,
+   "chars": 1000000,
+   "proposal_ms": 229.6,
+   "tiktoken_ms": 122.0
+  }
+ },
+ "impl_mismatch": 0
+}

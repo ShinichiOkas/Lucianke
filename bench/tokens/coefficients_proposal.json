@@ -1,0 +1,382 @@
+{
+ "spike": "S-12",
+ "status": "proposal (budget.py は未変更)",
+ "basis": "o200k_base",
+ "model": "split_chars",
+ "rounding": "ceil（整数演算: units = sum(係数 × 数) / DEN の切り上げ）",
+ "den": 100,
+ "terms": [
+  {
+   "name": "letters_chars",
+   "tokens_per_unit": "21/100",
+   "unit": "文字数",
+   "regex": "[A-Za-z]+"
+  },
+  {
+   "name": "digits_chars",
+   "tokens_per_unit": "121/100",
+   "unit": "文字数",
+   "regex": "[0-9]+"
+  },
+  {
+   "name": "space_chars",
+   "tokens_per_unit": "7/50",
+   "unit": "文字数",
+   "regex": "[ \\t]+"
+  },
+  {
+   "name": "nl_chars",
+   "tokens_per_unit": "47/100",
+   "unit": "文字数",
+   "regex": "[\\r\\n]+"
+  },
+  {
+   "name": "symbol_chars",
+   "tokens_per_unit": "9/20",
+   "unit": "文字数",
+   "regex": "[!-/:-@\\[-`{-~]+"
+  },
+  {
+   "name": "kana",
+   "tokens_per_unit": "93/100",
+   "unit": "文字数",
+   "regex": "[぀-ヿㇰ-ㇿ]+"
+  },
+  {
+   "name": "kanji",
+   "tokens_per_unit": "16/25",
+   "unit": "文字数",
+   "regex": "[㐀-䶿一-鿿豈-﫿𠀀-𯨟]+"
+  },
+  {
+   "name": "cjkpunct",
+   "tokens_per_unit": "177/100",
+   "unit": "文字数",
+   "regex": "[　-〿＀-￯]+"
+  },
+  {
+   "name": "hangul",
+   "tokens_per_unit": "2689/100",
+   "unit": "文字数",
+   "regex": "[가-힯]+"
+  },
+  {
+   "name": "other",
+   "tokens_per_unit": "37/100",
+   "unit": "文字数",
+   "regex": "(合計 - 上記の文字の和)"
+  }
+ ],
+ "expected_error_cv": {
+  "py_src": {
+   "files": 43,
+   "files_ref_ge_min": 42,
+   "ref_tokens": 125704,
+   "est_tokens": 129058,
+   "agg_err": 0.026681728505059565,
+   "mean_abs_err": 0.039003526023480825,
+   "max_abs_err": 0.12325830653804926,
+   "worst": {
+    "name": "src/lucianke/core/limits.py",
+    "ref": 1866,
+    "est": 2096
+   }
+  },
+  "py_tests": {
+   "files": 30,
+   "files_ref_ge_min": 30,
+   "ref_tokens": 117967,
+   "est_tokens": 117632,
+   "agg_err": -0.0028397772258343945,
+   "mean_abs_err": 0.034370696476918434,
+   "max_abs_err": 0.12891456369717236,
+   "worst": {
+    "name": "tests/unit/test_syntax_guards.py",
+    "ref": 3289,
+    "est": 2865
+   }
+  },
+  "md_ja": {
+   "files": 3,
+   "files_ref_ge_min": 3,
+   "ref_tokens": 183502,
+   "est_tokens": 176878,
+   "agg_err": -0.036097699207638057,
+   "mean_abs_err": 0.04680881109739191,
+   "max_abs_err": 0.06378969668574686,
+   "worst": {
+    "name": "docs/Lucianke仕様書.md",
+    "ref": 98182,
+    "est": 91919
+   }
+  },
+  "md_spikes": {
+   "files": 6,
+   "files_ref_ge_min": 6,
+   "ref_tokens": 22380,
+   "est_tokens": 22147,
+   "agg_err": -0.010411081322609483,
+   "mean_abs_err": 0.023542064778771427,
+   "max_abs_err": 0.03748125937031488,
+   "worst": {
+    "name": "docs/spikes/S-09.md",
+    "ref": 2668,
+    "est": 2768
+   }
+  },
+  "poly_data": {
+   "files": 7,
+   "files_ref_ge_min": 3,
+   "ref_tokens": 1327,
+   "est_tokens": 1436,
+   "agg_err": 0.0821401657874905,
+   "mean_abs_err": 0.08441331425567193,
+   "max_abs_err": 0.12524461839530332,
+   "worst": {
+    "name": "tests/fixtures/poly/reports/junit.xml",
+    "ref": 1022,
+    "est": 1150
+   }
+  },
+  "poly_code": {
+   "files": 12,
+   "files_ref_ge_min": 11,
+   "ref_tokens": 1624,
+   "est_tokens": 1704,
+   "agg_err": 0.049261083743842304,
+   "mean_abs_err": 0.08941988569723582,
+   "max_abs_err": 0.1875,
+   "worst": {
+    "name": "tests/fixtures/poly/tests/test_payment.py",
+    "ref": 80,
+    "est": 95
+   }
+  },
+  "poly_doc": {
+   "files": 5,
+   "files_ref_ge_min": 4,
+   "ref_tokens": 714,
+   "est_tokens": 690,
+   "agg_err": -0.03361344537815125,
+   "mean_abs_err": 0.0973888098203167,
+   "max_abs_err": 0.2545454545454545,
+   "worst": {
+    "name": "tests/fixtures/poly/docs/flow.mmd",
+    "ref": 55,
+    "est": 41
+   }
+  },
+  "poly_ipynb": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 13336,
+   "est_tokens": 9598,
+   "agg_err": -0.28029394121175766,
+   "mean_abs_err": 0.28029394121175766,
+   "max_abs_err": 0.28029394121175766,
+   "worst": {
+    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+    "ref": 13336,
+    "est": 9598
+   }
+  },
+  "spec_json_sql": {
+   "files": 11,
+   "files_ref_ge_min": 9,
+   "ref_tokens": 3359,
+   "est_tokens": 3302,
+   "agg_err": -0.01696933611193807,
+   "mean_abs_err": 0.08701276858260022,
+   "max_abs_err": 0.25,
+   "worst": {
+    "name": "spec#block41:sql",
+    "ref": 120,
+    "est": 90
+   }
+  },
+  "compact": {
+   "files": 26,
+   "files_ref_ge_min": 26,
+   "ref_tokens": 4607,
+   "est_tokens": 4527,
+   "agg_err": -0.017364879531148292,
+   "mean_abs_err": 0.0391846381743126,
+   "max_abs_err": 0.12244897959183676,
+   "worst": {
+    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+    "ref": 196,
+    "est": 172
+   }
+  },
+  "ALL": {
+   "files": 144,
+   "files_ref_ge_min": 135,
+   "ref_tokens": 474520,
+   "est_tokens": 466972,
+   "agg_err": -0.01590660035404201,
+   "mean_abs_err": 0.049330156925657155,
+   "max_abs_err": 0.28029394121175766,
+   "worst": {
+    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+    "ref": 13336,
+    "est": 9598
+   }
+  }
+ },
+ "expected_error_fit": {
+  "py_src": {
+   "files": 43,
+   "files_ref_ge_min": 42,
+   "ref_tokens": 125704,
+   "est_tokens": 129059,
+   "agg_err": 0.026689683701393685,
+   "mean_abs_err": 0.03978663426908467,
+   "max_abs_err": 0.12260419835716463,
+   "worst": {
+    "name": "src/lucianke/index/writer.py",
+    "ref": 3287,
+    "est": 3690
+   }
+  },
+  "py_tests": {
+   "files": 30,
+   "files_ref_ge_min": 30,
+   "ref_tokens": 117967,
+   "est_tokens": 116343,
+   "agg_err": -0.013766561835089508,
+   "mean_abs_err": 0.03596138272480944,
+   "max_abs_err": 0.13317117664943756,
+   "worst": {
+    "name": "tests/unit/test_syntax_guards.py",
+    "ref": 3289,
+    "est": 2851
+   }
+  },
+  "md_ja": {
+   "files": 3,
+   "files_ref_ge_min": 3,
+   "ref_tokens": 183502,
+   "est_tokens": 177442,
+   "agg_err": -0.033024163224379066,
+   "mean_abs_err": 0.0362222990296582,
+   "max_abs_err": 0.04451936200118145,
+   "worst": {
+    "name": "docs/Lucianke仕様書.md",
+    "ref": 98182,
+    "est": 93811
+   }
+  },
+  "md_spikes": {
+   "files": 6,
+   "files_ref_ge_min": 6,
+   "ref_tokens": 22380,
+   "est_tokens": 22095,
+   "agg_err": -0.012734584450402098,
+   "mean_abs_err": 0.019701151087650876,
+   "max_abs_err": 0.037259959873889414,
+   "worst": {
+    "name": "docs/spikes/S-03.md",
+    "ref": 3489,
+    "est": 3359
+   }
+  },
+  "poly_data": {
+   "files": 7,
+   "files_ref_ge_min": 3,
+   "ref_tokens": 1327,
+   "est_tokens": 1394,
+   "agg_err": 0.05048982667671442,
+   "mean_abs_err": 0.06149038320403303,
+   "max_abs_err": 0.08219178082191791,
+   "worst": {
+    "name": "tests/fixtures/poly/reports/junit.xml",
+    "ref": 1022,
+    "est": 1106
+   }
+  },
+  "poly_code": {
+   "files": 12,
+   "files_ref_ge_min": 11,
+   "ref_tokens": 1624,
+   "est_tokens": 1684,
+   "agg_err": 0.03694581280788167,
+   "mean_abs_err": 0.07281221931358471,
+   "max_abs_err": 0.1499999999999999,
+   "worst": {
+    "name": "tests/fixtures/poly/tests/test_payment.py",
+    "ref": 80,
+    "est": 92
+   }
+  },
+  "poly_doc": {
+   "files": 5,
+   "files_ref_ge_min": 4,
+   "ref_tokens": 714,
+   "est_tokens": 693,
+   "agg_err": -0.02941176470588236,
+   "mean_abs_err": 0.08059612761667556,
+   "max_abs_err": 0.23636363636363633,
+   "worst": {
+    "name": "tests/fixtures/poly/docs/flow.mmd",
+    "ref": 55,
+    "est": 42
+   }
+  },
+  "poly_ipynb": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 13336,
+   "est_tokens": 9305,
+   "agg_err": -0.3022645470905819,
+   "mean_abs_err": 0.3022645470905819,
+   "max_abs_err": 0.3022645470905819,
+   "worst": {
+    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+    "ref": 13336,
+    "est": 9305
+   }
+  },
+  "spec_json_sql": {
+   "files": 11,
+   "files_ref_ge_min": 9,
+   "ref_tokens": 3359,
+   "est_tokens": 3317,
+   "agg_err": -0.012503721345638596,
+   "mean_abs_err": 0.0909104747878818,
+   "max_abs_err": 0.2666666666666667,
+   "worst": {
+    "name": "spec#block41:sql",
+    "ref": 120,
+    "est": 88
+   }
+  },
+  "compact": {
+   "files": 26,
+   "files_ref_ge_min": 26,
+   "ref_tokens": 4607,
+   "est_tokens": 4443,
+   "agg_err": -0.035598003038853965,
+   "mean_abs_err": 0.047867529150606006,
+   "max_abs_err": 0.14795918367346939,
+   "worst": {
+    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+    "ref": 196,
+    "est": 167
+   }
+  },
+  "ALL": {
+   "files": 144,
+   "files_ref_ge_min": 135,
+   "ref_tokens": 474520,
+   "est_tokens": 465775,
+   "agg_err": -0.018429149456292704,
+   "mean_abs_err": 0.04925598944656464,
+   "max_abs_err": 0.3022645470905819,
+   "worst": {
+    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+    "ref": 13336,
+    "est": 9305
+   }
+  }
+ }
+}
