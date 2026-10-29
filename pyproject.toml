@@ -5,7 +5,7 @@ description = "Deterministic code-knowledge MCP server for coding agents (Tree-s
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Shinichi Oka" }]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -64,6 +64,21 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lucianke"]
+
+# sdist は明示の許可リスト（.claude・.pair-agent・.mcp.json などの作業用ファイルを配布しない）。
+# LICENSE と THIRD_PARTY_NOTICES.md は license-files と合わせて必ず入る。検査は tools/check_dist.py（CI の license ジョブ）。
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/tools",
+  "/docs",
+  "/LICENSE",
+  "/THIRD_PARTY_NOTICES.md",
+  "/README.md",
+  "/pyproject.toml",
+  "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

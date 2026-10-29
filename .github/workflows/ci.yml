@@ -25,4 +25,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-extras
+      # 仕様書 L-8: 依存木のライセンスを許可リストと照合
       - run: uv run python tools/check_licenses.py
+      # 仕様書 L-7: THIRD_PARTY_NOTICES.md は生成物。uv.lock と導入済みの配布情報から作り直して差分が無いこと
+      - run: uv run python tools/gen_notices.py --check
+      # 仕様書 M1-8: 配布物（wheel と sdist）に LICENSE と THIRD_PARTY_NOTICES.md が入ること
+      - run: uv build --out-dir dist
+      - run: uv run python tools/check_dist.py dist
