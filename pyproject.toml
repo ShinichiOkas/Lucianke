@@ -85,3 +85,12 @@ ignore = ["E501"]
 include = ["src"]
 typeCheckingMode = "standard"
 pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+extraPaths = ["src"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+extraPaths = ["src"]
+pythonVersion = "3.12"
