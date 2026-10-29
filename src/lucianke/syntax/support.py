@@ -37,6 +37,7 @@ __all__ = [
     "LanguageSpec",
     "LanguageSupport",
     "build_registry",
+    "get_adapter",
     "get_support",
     "language_for_extension",
     "register_adapter",
@@ -266,7 +267,7 @@ SUPPORT: dict[str, LanguageSpec]
 _UNAVAILABLE: dict[str, str]
 SUPPORT, _UNAVAILABLE = build_registry(_SPECS)
 
-ADAPTERS: dict[str, FormatAdapter] = {}  # Tier 3〜4 のアダプタ（adapters/ の役が register_adapter で足す）
+ADAPTERS: dict[str, FormatAdapter] = {}  # language_id -> アダプタ（Tier 3 のデータファイルと .ipynb。末尾で ``register_adapter`` する）
 
 _EXT_TO_LANG: dict[str, str] = {}
 _lock = threading.Lock()
@@ -293,8 +294,17 @@ def register_adapter(adapter: FormatAdapter) -> None:
 
 
 def get_support(language_id: str) -> LanguageSpec | FormatAdapter | None:
-    """言語 ID から登録を引く。文法つきの ``SUPPORT`` を先に、無ければ ``ADAPTERS``。どちらにも無ければ ``None``。"""
+    """言語 ID から登録を引く。文法つきの ``SUPPORT`` を先に、無ければ ``ADAPTERS``。どちらにも無ければ ``None``。
+
+    json / yaml / toml / xml は文法（``LanguageSpec``）もアダプタも持つので、ここではアダプタを引けない。
+    アダプタ（骨格・シンボル）が欲しいときは ``get_adapter`` を使う。
+    """
     return SUPPORT.get(language_id) or ADAPTERS.get(language_id)
+
+
+def get_adapter(language_id: str) -> FormatAdapter | None:
+    """言語 ID のデータ形式アダプタ（``ADAPTERS`` だけを見る。文法の有無に関わらない）。無ければ ``None``。"""
+    return ADAPTERS.get(language_id)
 
 
 def language_for_extension(ext: str) -> str | None:
@@ -308,3 +318,18 @@ def language_for_extension(ext: str) -> str | None:
 def unavailable_languages() -> Mapping[str, str]:
     """起動時に読み込めず登録から外した言語と、その理由。"""
     return dict(_UNAVAILABLE)
+
+
+def _register_builtin_adapters() -> None:
+    """Tier 3 のデータ形式アダプタ（JSON / JSONL / YAML / TOML / XML）と ``.ipynb`` を、import の末尾で 1 回だけ登録する。
+
+    登録の向きは ``support`` → ``adapters`` の一方向。``syntax.adapters`` は ``support`` を import しない（循環しない）ので、
+    ``support`` を import すれば必ず登録済みになる（``language_for_extension(".ipynb")`` も ``get_adapter("jsonl")`` も使える）。
+    """
+    from lucianke.syntax.adapters import REGISTERED
+
+    for adapter in REGISTERED:
+        register_adapter(adapter)  # type: ignore[arg-type]  # DataAdapter.select は式の文字列を受ける（Protocol は Selector）
+
+
+_register_builtin_adapters()
