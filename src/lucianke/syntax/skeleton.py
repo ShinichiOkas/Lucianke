@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,6 +37,7 @@ from lucianke.core.compact_lines import (
 )
 from lucianke.core.model import Confidence, Kind, SymbolRecord
 from lucianke.core.records import Record
+from lucianke.core.tokens import TokenEstimator
 from lucianke.syntax.support import SUPPORT
 from lucianke.syntax.types import ParsedFile, SkeletonOptions
 
@@ -55,24 +55,10 @@ __all__ = [
 _CALLABLE_KINDS = frozenset({Kind.FUNCTION, Kind.METHOD, Kind.CONSTRUCTOR})
 
 
-# --- トークンの見積もり（mcp.budget.TokenEstimator と同じ係数。syntax から mcp は import できないので近似を持つ） ----
+# --- トークンの見積もり（パッカーと同じ core の推定器） ----------------------------------------------------
 
-
-def default_estimate(text: str) -> int:
-    """仕様書 §5.7 の係数（ASCII 英数字・空白 1/4、ASCII 記号 1/2、全角 1/1.5、その他 1/2）の合計を切り上げる。
-
-    ``shrink`` の判定用の既定。パッカーの見積もり（``mcp.budget.TokenEstimator``）と 1〜2% ずれうるので、
-    ツール側は ``build_file_record(..., estimate=TokenEstimator().count)`` で差し替えるのが確実。
-    """
-    units = 0  # 12 分の 1 トークン単位（1/4 = 3、1/2 = 6、1/1.5 = 8）
-    for ch in text:
-        if ch.isascii():
-            units += 3 if (ch.isalnum() or ch.isspace()) else 6
-        elif unicodedata.east_asian_width(ch) in "WF":
-            units += 8
-        else:
-            units += 6
-    return -(-units // 12)
+#: ``shrink`` の判定用の既定のトークン見積もり。MCP のパッカー（``mcp.budget.Packer``）と同じ ``core.tokens.TokenEstimator``。
+default_estimate: Callable[[str], int] = TokenEstimator().count
 
 
 # --- 構文木から取るもの（import ・デコレータ・raise ・シグネチャ行数） ------------------------------------
@@ -446,7 +432,7 @@ def build_file_record(
 
     ``symbols`` は ``symbols.extract`` の結果（順不同でよい）。入れ子は範囲の包含で決める。``opts.include_private`` が
     偽なら非公開シンボル（とその子）は最初から含めない（予算による省略ではないので ``truncated`` には数えない）。
-    ``estimate`` は ``shrink`` が使うトークン見積もり（既定は ``default_estimate``。パッカーのものを渡すと確実）。
+    ``estimate`` は ``shrink`` が使うトークン見積もり（既定は ``default_estimate`` = ``core`` の ``TokenEstimator``。パッカーと同じ）。
     """
     est = estimate or default_estimate
     entries = _build_tree(parsed, symbols, include_private=opts.include_private)

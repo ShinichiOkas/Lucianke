@@ -1,6 +1,7 @@
 """予算・ページネーション・カーソル（設計書 ADR-4・ADR-8、§7.2.1〜7.2.3、仕様書 §5.6・§5.7）。
 
-* ``TokenEstimator``: 文字種別の係数による ``o200k_base`` 互換の近似。
+* ``TokenEstimator``: 文字種別の係数による ``o200k_base`` 互換の近似。実体は ``core/tokens.py``（``syntax`` の骨格と
+  共有するため ``core`` に置いた）。ここから同じ名前で再公開する（``TokenEstimator`` ・``TOKENS_PER_CHAR``）。
 * ``Packer``: 優先順位つきのレコード列を ``max_tokens`` の中に詰める。レコードは途中で切らない。
   ``used_tokens_est <= max_tokens`` を保証するのはここである（ADR-4 の帰結）。
 * ``CursorCodec``: ``next_cursor`` の符号化と復号（ADR-8）。署名は付けない（不透明だが改ざん防止ではない）。
@@ -14,65 +15,21 @@ import base64
 import binascii
 import hashlib
 import json
-import math
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Any, Final
 
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.records import Record, ToolOutput
+from lucianke.core.tokens import TOKENS_PER_CHAR as TOKENS_PER_CHAR  # 再公開（bench/tokens が使う）
+from lucianke.core.tokens import TokenEstimator
 from lucianke.mcp.types import Page
-
-# --- トークン推定 ---------------------------------------------------------------------------
-
-#: 1 文字あたりのトークン数（仕様書 §5.7、設計書 §7.2.1）。ベンチで ``o200k_base`` と比べて ±10% に調整する値。
-#: 有理数で持ち、切り上げは整数演算で行う（浮動小数の誤差で ``ceil`` がずれるのを避ける）。
-TOKENS_PER_CHAR: Final[Mapping[str, Fraction]] = {
-    "ascii_word": Fraction(1, 4),  # ASCII 英数字と空白
-    "ascii_symbol": Fraction(1, 2),  # ASCII 記号（句読点・演算子など）
-    "wide": Fraction(1) / Fraction(3, 2),  # 漢字・かな・全角（1 トークン = 1.5 文字）
-    "other": Fraction(1, 2),  # 上記以外（制御文字、ギリシャ・キリル文字、絵文字など）
-}
-
-_DEN: Final = math.lcm(*(w.denominator for w in TOKENS_PER_CHAR.values()))
-_W_WORD: Final = int(TOKENS_PER_CHAR["ascii_word"] * _DEN)
-_W_SYMBOL: Final = int(TOKENS_PER_CHAR["ascii_symbol"] * _DEN)
-_W_WIDE: Final = int(TOKENS_PER_CHAR["wide"] * _DEN)
-_W_OTHER: Final = int(TOKENS_PER_CHAR["other"] * _DEN)
-
-# 連続した同種の文字を 1 マッチにまとめる（``+``）。findall の要素数が少なく、1 万文字でも 1 ms を大きく下回る。
-_RE_ASCII_WORD: Final = re.compile(r"[0-9A-Za-z \t\n\r\f\v]+")
-_RE_ASCII_SYMBOL: Final = re.compile(r"[!-/:-@\[-`{-~]+")
-_RE_WIDE: Final = re.compile(
-    "[　-ヿ"  # CJK の記号・句読点、ひらがな、カタカナ
-    "ㇰ-ㇿ"  # カタカナ拡張
-    "㐀-䶿一-鿿"  # CJK 統合漢字（拡張 A を含む）
-    "가-힯"  # ハングル音節
-    "豈-﫿"  # CJK 互換漢字
-    "＀-￯"  # 半角・全角形
-    "\U00020000-\U0002fa1f]+"  # CJK 統合漢字拡張 B 以降
-)
-
-
-class TokenEstimator:
-    """``o200k_base`` 互換の近似（仕様書 §5.7）。文字種別の係数の合計を切り上げる。"""
-
-    def count(self, text: str) -> int:
-        if not text:
-            return 0
-        word = sum(map(len, _RE_ASCII_WORD.findall(text)))
-        symbol = sum(map(len, _RE_ASCII_SYMBOL.findall(text)))
-        wide = 0 if text.isascii() else sum(map(len, _RE_WIDE.findall(text)))
-        other = len(text) - word - symbol - wide
-        units = word * _W_WORD + symbol * _W_SYMBOL + wide * _W_WIDE + other * _W_OTHER
-        return -(-units // _DEN)
-
 
 # --- トレーラ ---------------------------------------------------------------------------------
 
-SUMMARY_MAX_CHARS: Final = 400  # ``# summary:`` 本文の最大文字数（超過は「…」）。予算の保証のため、ツールの要約にも適用する
+SUMMARY_MAX_CHARS: Final = (
+    400  # ``# summary:`` 本文の最大文字数（超過は「…」）。予算の保証のため、ツールの要約にも適用する
+)
 SUMMARY_MAX_GROUPS: Final = 5  # 既定の要約に載せる group の最大数。残りは ``others`` にまとめる
 
 
@@ -298,30 +255,65 @@ class Packer:
 
         included, costs = greedy(self._trailer_reserve(out, start, n, cursor_factory))
         if start + len(included) >= n:  # 縮退で全部入った
-            return self._page(tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ())
+            return self._page(
+                tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
+            )
 
         # 3. 実際のトレーラ（カーソル・要約）を作って数え、収まらなければ末尾から外す
         need_first = cost_of(start)
-        fit = self._fit(out, records, start, n, len(included), costs, reserved_tokens, max_tokens, cursor_factory,
-                        with_summary=True, need_first=need_first)
+        fit = self._fit(
+            out,
+            records,
+            start,
+            n,
+            len(included),
+            costs,
+            reserved_tokens,
+            max_tokens,
+            cursor_factory,
+            with_summary=True,
+            need_first=need_first,
+        )
         if fit.m == 0:
             # 要約（SHOULD）を省けばレコードが入るかもしれない。要約の見込みを引かずに詰め直す
             included, costs = greedy(self._trailer_reserve(out, start, n, cursor_factory, with_summary=False))
             if start + len(included) >= n:
-                return self._page(tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ())
-            alt = self._fit(out, records, start, n, len(included), costs, reserved_tokens, max_tokens,
-                            cursor_factory, with_summary=False, need_first=need_first)
+                return self._page(
+                    tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
+                )
+            alt = self._fit(
+                out,
+                records,
+                start,
+                n,
+                len(included),
+                costs,
+                reserved_tokens,
+                max_tokens,
+                cursor_factory,
+                with_summary=False,
+                need_first=need_first,
+            )
             if alt.m > fit.m or fit.over:
                 fit = alt
         kept = tuple(included[: fit.m])
-        return self._page(kept, fit.used, max_tokens, total, n - (start + fit.m), fit.cursor, fit.summary,
-                          fit.warnings)
+        return self._page(
+            kept, fit.used, max_tokens, total, n - (start + fit.m), fit.cursor, fit.summary, fit.warnings
+        )
 
     # -- 内部 -----------------------------------------------------------------------------
 
     @staticmethod
-    def _page(kept: tuple[Record, ...], used: int, max_tokens: int, total: int, remaining: int,
-              cursor: str | None, summary: str | None, warnings: tuple[str, ...]) -> Page:
+    def _page(
+        kept: tuple[Record, ...],
+        used: int,
+        max_tokens: int,
+        total: int,
+        remaining: int,
+        cursor: str | None,
+        summary: str | None,
+        warnings: tuple[str, ...],
+    ) -> Page:
         return Page(
             records=kept,
             next_cursor=cursor,
@@ -384,8 +376,9 @@ class Packer:
                 )
                 used += est("! " + warnings[0])
             if used <= max_tokens or m == 0:
-                return _Fit(m=m, summary=summary, cursor=cursor, warnings=warnings, used=used,
-                            over=used > max_tokens)
+                return _Fit(
+                    m=m, summary=summary, cursor=cursor, warnings=warnings, used=used, over=used > max_tokens
+                )
             deficit = used - max_tokens
             freed = 0
             while m > 0 and freed < deficit:  # 少なくとも 1 件は外れる（deficit > 0）
