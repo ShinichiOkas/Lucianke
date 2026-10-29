@@ -6,6 +6,8 @@ JSONL と、根が配列・スカラーのファイルはシンボルを持た�
 
 URN は ``lk://<ws>/<path>#jsonpath:$.service`` / ``#yaml:retry`` / ``#toml:project`` / ``#xpath:/testsuites/testsuite``。
 セレクタの式は同じアダプタの ``select`` が解釈できる形で作る（式にできない名前 = 引用符を含むキーなど は落とす）。
+TOML は、骨格のノードの名前が暗黙の表の連なり（``tool.ruff``）か 1 つの引用符つきキー（``"a.b"``）かを区別できないので、アダプタが
+ノードの「素性」（キーの部品 ``parts``。``SkelNode.parts``）を持ち、式はその部品から作る（``tool.ruff`` と ``"a.b"``）。
 同じ URN になるノードは先頭の 1 つだけ残す（``symbols.urn`` は主キー）。1 ファイルあたりの上限は ``MAX_INDEX_SYMBOLS``、
 対象のファイルの大きさの上限は ``MAX_SYMBOL_SOURCE_BYTES``。
 """
@@ -20,7 +22,7 @@ from lucianke.core.model import Confidence, Kind, Range, RelPath, SymbolRecord
 from lucianke.core.records import Record
 from lucianke.core.urn import DATA_KINDS, DataKind, DataSel, Urn
 
-__all__ = ["MAX_INDEX_SYMBOLS", "MAX_SYMBOL_SOURCE_BYTES", "data_symbols", "selector_expr"]
+__all__ = ["MAX_INDEX_SYMBOLS", "MAX_SYMBOL_SOURCE_BYTES", "data_symbols", "items_symbols", "selector_expr"]
 
 MAX_INDEX_SYMBOLS = (
     500  # 1 ファイルが索引に出すシンボルの上限（巨大な i18n ファイルなどで symbols を膨らませない）
@@ -37,7 +39,7 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def selector_expr(scheme: str, path: Sequence[str]) -> str | None:
-    """経路 ``path``（最上位から）を ``scheme`` のセレクタの式にする。式にできない名前を含むときは ``None``。"""
+    """経路 ``path``（最上位から。キー 1 つが 1 要素）を ``scheme`` のセレクタの式にする。式にできない名前を含むときは ``None``。"""
     if not path or any(not p or _CONTROL.search(p) for p in path):
         return None
     if scheme == "jsonpath":
@@ -50,13 +52,8 @@ def selector_expr(scheme: str, path: Sequence[str]) -> str | None:
             else:
                 out += f'."{p}"'
         return out
-    if scheme == "toml":
-        # TOML の骨格は、暗黙の表の連なり（``[tool.ruff]`` の ``tool``）を 1 ノード ``tool.ruff`` にまとめる。名前は経路そのものなので、
-        # そのまま式にする（引用符つきの ``"a.b" = 1`` のようなキーは、この形では区別できず式が合わない。まれなので許す）。
-        if len(path) != 1 or re.search(r"[\[\]\"']", path[0]) or path[0] != path[0].strip():
-            return None
-        return path[0]
-    if scheme == "yaml":
+    if scheme in ("yaml", "toml"):
+        # どちらも ``parse_key_path`` の経路。名前に ``.`` などを含むとき（TOML の ``"a.b" = 1`` を含む）は引用符で囲み、暗黙の表 ``a.b`` と区別する
         parts: list[str] = []
         for p in path:
             if _BARE_KEY.fullmatch(p):
@@ -86,21 +83,49 @@ def data_symbols(
     limit: int = MAX_INDEX_SYMBOLS,
 ) -> list[SymbolRecord]:
     """骨格のレコード ``record`` の ``data["symbols"]`` から、``depth`` 階層までのシンボルを作る。"""
+    return items_symbols(
+        record.data["symbols"],
+        scheme=scheme,
+        kind=kind,
+        rel=rel,
+        workspace_id=workspace_id,
+        depth=depth,
+        limit=limit,
+    )
+
+
+def items_symbols(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    scheme: str,
+    kind: Kind,
+    rel: str,
+    workspace_id: str,
+    depth: int = 1,
+    limit: int = MAX_INDEX_SYMBOLS,
+) -> list[SymbolRecord]:
+    """骨格の項目（``name`` / ``start_line`` / ``end_line`` / ``children``、あれば ``parts``）から、``depth`` 階層までのシンボルを作る。
+
+    ``parts`` はその項目の名前を作るキーの部品（無ければ ``[name]``）。式は祖先の部品と合わせた経路から作る。
+    """
     if scheme not in DATA_KINDS:
         return []
     data_kind: DataKind = scheme  # type: ignore[assignment]  # 上で DATA_KINDS に含まれることを確かめた
     out: list[SymbolRecord] = []
     seen: set[str] = set()
 
-    def visit(items: Sequence[Mapping[str, Any]], path: tuple[str, ...]) -> None:
-        for it in items:
+    def visit(
+        level_items: Sequence[Mapping[str, Any]], names: tuple[str, ...], keys: tuple[str, ...]
+    ) -> None:
+        for it in level_items:
             if len(out) >= limit:
                 return
             name = str(it["name"])
-            here = (*path, name)
-            if not path and name == "$":  # 根が配列・スカラー（JSONL の全レコードも）。キーではない
+            here = (*names, name)
+            if not names and name == "$":  # 根が配列・スカラー（JSONL の全レコードも）。キーではない
                 continue
-            expr = selector_expr(scheme, here)
+            here_keys = (*keys, *(it.get("parts") or (name,)))
+            expr = selector_expr(scheme, here_keys)
             if expr is None:
                 continue
             urn = Urn(workspace_id, rel, DataSel(data_kind, expr))
@@ -119,7 +144,7 @@ def data_symbols(
                 )
             )
             if len(here) < depth:
-                visit(it.get("children", ()), here)
+                visit(it.get("children", ()), here, here_keys)
 
-    visit(record.data["symbols"], ())
+    visit(items, (), ())
     return out

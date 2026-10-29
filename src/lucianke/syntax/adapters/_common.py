@@ -24,7 +24,7 @@ from lucianke.core.compact_lines import file_block_header, note
 from lucianke.core.model import Confidence, Kind, Position, Range, SymbolRecord, Tier
 from lucianke.core.records import Record
 from lucianke.core.textpos import LineIndex
-from lucianke.syntax.adapters._symbols import MAX_SYMBOL_SOURCE_BYTES, data_symbols
+from lucianke.syntax.adapters._symbols import MAX_SYMBOL_SOURCE_BYTES, data_symbols, items_symbols
 from lucianke.syntax.types import Match, SkeletonOptions
 
 STREAM_BYTES = (
@@ -373,7 +373,9 @@ class SkelNode:
     """骨格の 1 ノード。``start`` / ``end`` は 0 始まりの行（両端を含む）。
 
     ``count`` は ``×N`` に出す数（配列の要素数、XML の同名兄弟の数）。``type`` は配列の推論型、``attrs`` は XML の属性名。
-    ``omitted`` は ``max_depth`` で畳んだ子孫ノードの数。
+    ``omitted`` は ``max_depth`` で畳んだ子孫ノードの数。``parts`` はノードの名前の素性（TOML だけ。``None`` なら ``[name]``）:
+    名前を作ったキーの部品で、暗黙の表の連なり ``tool.ruff`` は ``("tool", "ruff")``、引用符つきキー ``"a.b"`` は ``("a.b",)``。
+    骨格の表示（``name``）は両方 ``a.b`` だが、セレクタの式は部品から作らないと一方が解けない。
     """
 
     kind: str
@@ -385,6 +387,21 @@ class SkelNode:
     attrs: tuple[str, ...] = ()
     children: list[SkelNode] = field(default_factory=list)
     omitted: int = 0
+    parts: tuple[str, ...] | None = None
+
+
+def symbol_items(nodes: Sequence[SkelNode]) -> list[dict[str, Any]]:
+    """索引用のシンボルの項目（``items_symbols`` の入力）。T-02 の出力（``build_record`` の ``data["symbols"]``）と違い、``parts`` を持つ。"""
+    return [
+        {
+            "name": n.name,
+            "start_line": n.start + 1,
+            "end_line": max(n.start, n.end) + 1,
+            "parts": n.parts,
+            "children": symbol_items(n.children),
+        }
+        for n in nodes
+    ]
 
 
 def count_nodes(nodes: Sequence[SkelNode]) -> int:
@@ -523,6 +540,7 @@ class DataAdapter:
 
     ``symbols`` は索引（``engine.indexer``）が拾うシンボル（骨格の最上位の節。``_symbols`` の docstring を参照）。
     ``symbol_kind`` が ``None`` のアダプタ（JSONL）はシンボルを持たない。``symbol_depth`` は拾う階層（XML だけ 2）。
+    ``symbol_nodes_fn`` は骨格のノード（``SkelNode``。``parts`` つき）を直接返す関数で、渡すとシンボルはそこから作る（T-02 の出力は変えない）。
     """
 
     tier = Tier.T3
@@ -537,6 +555,7 @@ class DataAdapter:
         *,
         symbol_kind: Kind | None = None,
         symbol_depth: int = 1,
+        symbol_nodes_fn: Callable[[bytes], list[SkelNode]] | None = None,
     ) -> None:
         self.language_id = language_id
         self.extensions = extensions
@@ -545,6 +564,7 @@ class DataAdapter:
         self.symbol_depth = symbol_depth
         self._skeleton = skeleton_fn
         self._select = select_fn
+        self._symbol_nodes = symbol_nodes_fn  # 名前の素性（``SkelNode.parts``）が要る形式（TOML）だけ。骨格の Record を経由しない
 
     def skeleton(self, source: bytes, opts: SkeletonOptions) -> list[Record]:
         return [self._skeleton(source, opts, rel="", sha256=hashlib.sha256(source).hexdigest())]
@@ -567,6 +587,16 @@ class DataAdapter:
         if self.symbol_kind is None or len(source) > MAX_SYMBOL_SOURCE_BYTES:
             return []
         try:
+            if self._symbol_nodes is not None:
+                items = symbol_items(limit_depth(self._symbol_nodes(source), self.symbol_depth))
+                return items_symbols(
+                    items,
+                    scheme=self.selectors[0],
+                    kind=self.symbol_kind,
+                    rel=rel,
+                    workspace_id=workspace_id,
+                    depth=self.symbol_depth,
+                )
             record = self._skeleton(
                 source,
                 SkeletonOptions(max_depth=self.symbol_depth),

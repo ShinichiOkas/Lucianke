@@ -238,11 +238,18 @@ def _node(name: str, v: Any, path: _Path, lay: _Layout, sample: int | None) -> S
         if path not in lay.declared and len(node.children) == 1:  # 暗黙の表: tool + ruff → tool.ruff
             c = node.children[0]
             node.name = f"{name}.{c.name}"
+            node.parts = (name, *(c.parts or (c.name,)))  # 引用符つきキー "a.b" と区別する名前の素性
             node.count, node.type, node.children, node.omitted = c.count, c.type, c.children, c.omitted
     elif isinstance(v, list):
         node.count = len(v)
         node.type = shape_of(v, sample=sample)
     return node
+
+
+def symbol_nodes(source: bytes) -> list[SkelNode]:
+    """索引用: 最上位のノード（``parts`` つき）。構文の誤りは ``ValueError``。"""
+    _, data, _, lay = _load(source)
+    return [_node(k, v, (k,), lay, None) for k, v in data.items()]
 
 
 def skeleton(
@@ -297,4 +304,6 @@ def select(source: bytes, selector: str) -> list[Match]:
     return out
 
 
-ADAPTER = DataAdapter("toml", (".toml",), skeleton, select, ("toml",), symbol_kind=Kind.KEY)
+ADAPTER = DataAdapter(
+    "toml", (".toml",), skeleton, select, ("toml",), symbol_kind=Kind.KEY, symbol_nodes_fn=symbol_nodes
+)

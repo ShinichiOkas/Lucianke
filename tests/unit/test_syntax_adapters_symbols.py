@@ -176,9 +176,40 @@ def test_selector_expr_shapes() -> None:
     assert selector_expr("jsonpath", ['a"b']) is None
     assert selector_expr("yaml", ["a.b"]) == '"a.b"'
     assert selector_expr("yaml", ["a", "b"]) == "a.b"
-    assert selector_expr("toml", ["tool.ruff"]) == "tool.ruff"
-    assert selector_expr("toml", ['a"b']) is None
+    assert selector_expr("toml", ["tool", "ruff"]) == "tool.ruff"  # 暗黙の表の連なり
+    assert selector_expr("toml", ["tool.ruff"]) == '"tool.ruff"'  # 引用符つきキー（名前に . を含む）
+    assert selector_expr("toml", ["with space"]) == '"with space"'
+    assert selector_expr("toml", ["*"]) == '"*"'  # 引用符なしの * は全要素になる
+    assert selector_expr("toml", ['a"b']) == "'a\"b'"
+    assert selector_expr("toml", ["a\"'b"]) is None
     assert selector_expr("xpath", ["a", "b"]) == "/a/b"
     assert selector_expr("xpath", ["p:a"]) is None
     assert selector_expr("jq", ["a"]) is None
     assert selector_expr("yaml", []) is None
+
+
+def test_toml_quoted_key_is_told_apart_from_an_implicit_table_of_the_same_name() -> None:
+    """``"a.b" = 1`` と ``[a.b]``（``a`` は暗黙の表）は骨格の名前がどちらも ``a.b``。URN の式は名前の素性から作るので、それぞれ自分の行に解ける。"""
+    src = b'"a.b" = 1\n\n[a.b]\nx = 1\n'
+    syms = symbols("q.toml", src)
+    assert [s.name for s in syms] == ["a.b", "a.b"]
+    exprs = [s.urn.selector.expr for s in syms]
+    assert exprs == ['"a.b"', "a.b"]  # 引用符つきのキーと、表 a の下の b
+    for s, line in zip(syms, [1, 3], strict=True):
+        found = resolve("q.toml", s, src)
+        assert len(found) == 1, s.urn
+        assert found[0].range.start.line + 1 == s.range.line_span_external()[0] == line, s.urn
+    # 引用符つきのキーが単独のときも、名前に . を含むシンボルは自分に解ける。' と " の混在・* もそのまま使える
+    doc = b'"dot.ted" = 1\n\'x"y\' = 2\n"*" = 3\nplain = 4\n'
+    ds = symbols("d.toml", doc)
+    assert [s.name for s in ds] == ["dot.ted", 'x"y', "*", "plain"]
+    for s in ds:
+        found = resolve("d.toml", s, doc)
+        assert len(found) == 1 and found[0].range.start.line + 1 == s.range.line_span_external()[0], s.urn
+    # 骨格（T-02 の出力）は変えない: 名前は従来どおり、素性は出力に出さない
+    rec = adapter_of("q.toml").skeleton_record(
+        src, SkeletonOptions(), rel="q.toml", sha256=hashlib.sha256(src).hexdigest()
+    )
+    assert [n["name"] for n in rec.data["symbols"]] == ["a.b", "a.b"]
+    wire = {"kind", "name", "start_line", "end_line", "count", "inferred_type", "children"}
+    assert all(set(n) <= wire for n in rec.data["symbols"])
