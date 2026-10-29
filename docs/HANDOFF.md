@@ -3,7 +3,7 @@
 この文書は、セッションが中断した（トークンクォータ等）ときに、**別の PC・別のエージェントが続きを拾うため**の現在地。
 作業が進んだらこの文書を更新してコミットする（履歴は git に残る）。
 
-最終更新: 2026-10-29 / 対象: `main`（この文書を含むコミット） / 直前のコミット: `7aa42e2` 20e: LSP の exact 経路の残り
+最終更新: 2026-10-29 / 対象: `main`（この文書を含むコミット） / 直前のコミット: `6ade29e` BUG-0062 票 + HANDOFF §0 に 2 コマンド明記（BUG-0061 は `2a42a50` で解消済み）
 
 ---
 
@@ -13,12 +13,12 @@
 git pull
 uv sync --extra langs                # 新 .venv では必須。無いと tree_sitter_rust の import で収集エラー（BUG-0062）
 uv run --no-project python bench/fetch_fixtures.py   # F-PY(httpx)・F-TS(ky) を取得。無いと契約テストが skip=未検査（BUG-0062）
-uv run pytest -q                     # 期待: 2 failed, 3781 passed, 22 skipped
-uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 落ちる 2 件の正体
+uv run pytest -q                     # 期待: 全 green（0 failed）。BUG-0061 は 2a42a50 で解消済み
+uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
 - ⚠ 新しい `.venv` で上の `uv sync --extra langs` と `fetch_fixtures.py` を飛ばすと、期待状態に**到達できない**（収集エラーで止まるか、契約テストが skip に化けて赤が隠れる）。詳細は **BUG-0062**。
-- 落ちるのは **BUG-0061（`test_t19_postcondition_1_2_3_4_5_schema[F-PY]`・`[F-TS]`）だけ**。これは直前のコミットの時点で既に落ちる（下記 §5 で確認済み）。**新しく赤が出たら、それは引き継いだ変更のせい**なので先に直す。
+- **新しく赤が出たら、それは引き継いだ変更のせい**なので先に直す（今は全 green が基準）。
 - `uv run ruff check src tests` は clean。`ruff format --check` は 56 ファイルが未整形になるが、**これはインストール済み ruff とリポジトリの版のずれ**。全体整形はしない（差分が膨らむだけ）。触ったファイルだけ手で揃える。
 
 ## 1. 状態
@@ -27,7 +27,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 落ちる 2 �
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | 3781 passed / 22 skipped / 2 failed（BUG-0061 のみ） |
+| 全体テスト | 全 green（BUG-0061 は `2a42a50` で解消）。langs extra 同期・フィクスチャ取得が前提（BUG-0062） |
 | 索引 DB のスキーマ | v4（`_exact_marks`、`index/exact_marks.py`、ADR-16） |
 
 ## 2. このコミットで入ったもの
@@ -66,7 +66,7 @@ py-tree-sitter 0.26.0 の `Node.text` は、`read_callback` で解析した木�
 
 ## 3. 次にやること（優先順）
 
-1. **BUG-0061**（`bugs/BUG-0061-t19-returns-only-two-tables.md`）— T-19 が公開ビューのうち 2 つしか返さない。契約テスト 2 件が赤。**M1 の受入が閉じないので最優先**。票には見たことだけ書いてある（原因は未調査）
+1. ~~**BUG-0061**（T-19 が公開ビュー 2 個しか返さない）~~ — **解消済み**（`2a42a50`。既定 `max_tokens` 2500→6000。契約テスト 6 件 green）
 2. **BUG-0058**（レイテンシ）— F-PY・F-TS で T-06・T-07・T-08 のサーバー内 p95 が Fast Path の 50 ms を大きく超える。要約は `.pair-agent/acceptance/M1-3-latency-20261029-154219.md`
 3. **BUG-0059** — `bench/run_latency.py` の台本に T-00・T-01・T-10・T-11・T-13 が無く、14 ツールで判定できない
 4. **BUG-0060** — 計測対象の選び方: F-TS で `E_TARGET_AMBIGUOUS` が 20〜33/200、F-PY の T-07 で `E_UNSUPPORTED` 13/200
@@ -83,6 +83,12 @@ py-tree-sitter 0.26.0 の `Node.text` は、`read_callback` で解析した木�
 
 ## 5. この文書を書いた時点で確かめたこと
 
+### 初版（`7aa42e2` 時点）
 - `git stash` で `src/` とテストの未コミット変更を退避して HEAD（`7aa42e2`）のまま `tests/contract_fixtures/test_fx_db_T19_T20.py` を走らせ、**同じ 2 件が落ちる**ことを確認 → BUG-0061 は引き継いだ変更が原因ではない
 - 全体テスト 1 回（544 秒）と、影響範囲のテスト 4 ファイル（89 件 green）
 - `ruff check src tests` clean
+
+### 追試（2026-10-29、別 PC・新 .venv・`6ade29e` まで）
+- 新 .venv で `uv run pytest -q` が `tree_sitter_rust` の収集エラーで止まることを確認 → `uv sync --extra langs` で解消（BUG-0062）
+- langs 同期後・フィクスチャ未取得だと `3734 passed / 71 skipped / 0 failed`。契約テスト単独は `6 skipped`（= 未検査）。`fetch_fixtures.py` で F-PY・F-TS を取得すると `2 failed, 4 passed`（BUG-0061 が見える）→ BUG-0062
+- BUG-0061 を直す役が `default_max_tokens` を 2500→6000 に（`2a42a50`）。`tests/contract_fixtures/test_fx_db_T19_T20.py` が **6 passed** になることを自分の環境で確認。仕様 5.19（全 10 テーブルを 1 回で返す）と照らして妥当と判断
