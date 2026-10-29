@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from lucianke.core.compact_lines import file_block_header, note
 from lucianke.core.model import Confidence, Position, Range, Tier
 from lucianke.core.records import Record
 from lucianke.core.textpos import LineIndex
@@ -440,10 +441,6 @@ def _emit(nodes: Sequence[SkelNode], indent: int, lines: list[str]) -> list[dict
     return out
 
 
-def _note(text: str) -> str:
-    return "- " + " ".join(text.split())
-
-
 def build_record(
     source: bytes,
     nodes: Sequence[SkelNode],
@@ -465,13 +462,13 @@ def build_record(
 
     def render(d: int, *, shrunk: bool) -> Record:
         shown = limit_depth(nodes, d)
-        body = [_note(n) for n in notes]
+        body = [note(n) for n in notes]
         symbols = _emit(shown, 0, body)
         truncated = 0
         if shrunk:
             truncated = max(0, total - _visible(shown))
-            body.append(_note(f"truncated: {truncated} members omitted (depth limited to {d})"))
-        header = f"=== {' '.join(rel.split())} ({line_count} lines, skeleton: {len(body)} lines, sha={sha256[:12].lower()}) ==="
+            body.append(note(f"truncated: {truncated} members omitted (depth limited to {d})"))
+        header = file_block_header(rel, lines=line_count, skeleton_lines=len(body), sha12=sha256)
         data = {
             "ok": True,
             "path": rel,
