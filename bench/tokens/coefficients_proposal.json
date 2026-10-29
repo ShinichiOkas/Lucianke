@@ -2,149 +2,138 @@
  "spike": "S-12",
  "status": "proposal (budget.py は未変更)",
  "basis": "o200k_base",
- "model": "lean_min",
+ "model": "lean_wide",
  "rounding": "ceil（整数演算: units = sum(係数 × 数) / DEN の切り上げ）",
  "den": 100,
  "terms": [
   {
    "name": "letters_runs",
-   "tokens_per_unit": "21/25",
-   "unit": "連の数",
+   "tokens_per_unit": "17/20",
+   "count": "matches",
    "regex": "[A-Za-z]+"
   },
   {
    "name": "digits_chars",
-   "tokens_per_unit": "43/50",
-   "unit": "文字数",
+   "tokens_per_unit": "9/10",
+   "count": "chars",
    "regex": "[0-9]+"
   },
   {
    "name": "space_runs_multi",
-   "tokens_per_unit": "19/20",
-   "unit": "2 文字以上の連の数",
-   "regex": "[ \\t]+"
+   "tokens_per_unit": "23/25",
+   "count": "matches",
+   "regex": "[ \t]{2,}"
   },
   {
    "name": "nl_chars",
-   "tokens_per_unit": "57/100",
-   "unit": "文字数",
+   "tokens_per_unit": "3/5",
+   "count": "chars",
    "regex": "[\\r\\n]+"
   },
   {
    "name": "symbol_runs",
-   "tokens_per_unit": "89/100",
-   "unit": "連の数",
+   "tokens_per_unit": "87/100",
+   "count": "matches",
    "regex": "[!-/:-@\\[-`{-~]+"
   },
   {
-   "name": "kana",
-   "tokens_per_unit": "39/50",
-   "unit": "文字数",
-   "regex": "[぀-ヿㇰ-ㇿ]+"
-  },
-  {
-   "name": "kanji",
-   "tokens_per_unit": "39/50",
-   "unit": "文字数",
-   "regex": "[㐀-䶿一-鿿豈-﫿𠀀-𯨟]+"
-  },
-  {
-   "name": "cjkpunct",
-   "tokens_per_unit": "231/100",
-   "unit": "文字数",
-   "regex": "[　-〿＀-￯]+"
+   "name": "@wide",
+   "tokens_per_unit": "19/20",
+   "count": "chars",
+   "regex": "kana + kanji + cjkpunct の 3 つの正規表現のどれか"
   },
   {
    "name": "other",
-   "tokens_per_unit": "11/25",
-   "unit": "文字数",
-   "regex": "(合計 - 上記の文字の和)"
+   "tokens_per_unit": "23/50",
+   "count": "chars",
+   "regex": "[^\t\r\n -~　-〿぀-ヿㇰ-ㇿ㐀-䶿一-鿿豈-﫿＀-￯𠀀-𯨟]"
   },
   {
    "name": "blob_chars",
    "tokens_per_unit": "63/100",
-   "unit": "文字数",
-   "regex": "(合計 - 上記の文字の和)"
+   "count": "chars",
+   "regex": "[A-Za-z0-9+/=]{40,}"
   }
  ],
+ "order": "blob_chars を先に数えて本文から取り除き、残りの本文に他の項を当てる。ASCII だけの文字列は kana/kanji/cjkpunct を省いてよい",
  "expected_error_cv": {
   "py_src": {
-   "files": 62,
-   "files_ref_ge_min": 61,
-   "ref_tokens": 200650,
-   "est_tokens": 203119,
-   "agg_err": 0.01230500872165452,
-   "mean_abs_err": 0.028650418710160854,
-   "max_abs_err": 0.10278333636529013,
+   "files": 71,
+   "files_ref_ge_min": 70,
+   "ref_tokens": 230230,
+   "est_tokens": 230741,
+   "agg_err": 0.0022195196108238946,
+   "mean_abs_err": 0.02826500792835957,
+   "max_abs_err": 0.102601418955794,
    "worst": {
     "name": "src/lucianke/edit/writer.py",
     "ref": 5497,
-    "est": 6062
+    "est": 6061
    }
   },
   "py_tests": {
-   "files": 42,
-   "files_ref_ge_min": 42,
-   "ref_tokens": 184249,
-   "est_tokens": 186782,
-   "agg_err": 0.013747700123202922,
-   "mean_abs_err": 0.028598863131392573,
-   "max_abs_err": 0.1159420289855072,
+   "files": 48,
+   "files_ref_ge_min": 48,
+   "ref_tokens": 206505,
+   "est_tokens": 209075,
+   "agg_err": 0.012445219244086037,
+   "mean_abs_err": 0.030428839557125432,
+   "max_abs_err": 0.12318840579710144,
    "worst": {
     "name": "tests/unit/test_smoke.py",
     "ref": 138,
-    "est": 122
+    "est": 121
    }
   },
   "md_ja": {
    "files": 3,
    "files_ref_ge_min": 3,
-   "ref_tokens": 188719,
-   "est_tokens": 185880,
-   "agg_err": -0.01504353032815986,
-   "mean_abs_err": 0.023782637480061042,
-   "max_abs_err": 0.027243754497789707,
+   "ref_tokens": 194390,
+   "est_tokens": 194099,
+   "agg_err": -0.0014969905859354427,
+   "mean_abs_err": 0.025615142710178024,
+   "max_abs_err": 0.052328569959905424,
    "worst": {
     "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
     "ref": 29181,
-    "est": 29976
+    "est": 30708
    }
   },
   "md_spikes": {
-   "files": 9,
-   "files_ref_ge_min": 9,
-   "ref_tokens": 34299,
-   "est_tokens": 33938,
-   "agg_err": -0.010525088194991095,
-   "mean_abs_err": 0.02494137243913957,
-   "max_abs_err": 0.06635944700460827,
+   "files": 10,
+   "files_ref_ge_min": 10,
+   "ref_tokens": 36789,
+   "est_tokens": 35764,
+   "agg_err": -0.02786158906194791,
+   "mean_abs_err": 0.03362837743994466,
+   "max_abs_err": 0.09188973232121456,
    "worst": {
-    "name": "docs/spikes/S-05.md",
-    "ref": 3255,
-    "est": 3039
+    "name": "docs/spikes/S-04.md",
+    "ref": 5006,
+    "est": 4546
    }
   },
   "poly_data": {
    "files": 7,
    "files_ref_ge_min": 3,
    "ref_tokens": 1327,
-   "est_tokens": 1335,
-   "agg_err": 0.006028636021100153,
-   "mean_abs_err": 0.031378826159576025,
-   "max_abs_err": 0.05084745762711873,
+   "est_tokens": 1334,
+   "agg_err": 0.005275056518462717,
+   "mean_abs_err": 0.0260552665058561,
+   "max_abs_err": 0.03448275862068961,
    "worst": {
-    "name": "tests/fixtures/poly/conf/settings.json",
-    "ref": 118,
-    "est": 124
+    "name": "tests/fixtures/poly/pyproject.toml",
+    "ref": 58,
+    "est": 56
    }
   },
   "poly_code": {
    "files": 12,
    "files_ref_ge_min": 11,
    "ref_tokens": 1624,
-   "est_tokens": 1602,
-   "agg_err": -0.013546798029556606,
-   "mean_abs_err": 0.04707572163576373,
+   "est_tokens": 1586,
+   "agg_err": -0.023399014778325178,
+   "mean_abs_err": 0.04887628325881061,
    "max_abs_err": 0.11475409836065575,
    "worst": {
     "name": "tests/fixtures/poly/legacy/calc.cob",
@@ -158,191 +147,7 @@
    "ref_tokens": 714,
    "est_tokens": 728,
    "agg_err": 0.019607843137254832,
-   "mean_abs_err": 0.043743254462432574,
-   "max_abs_err": 0.09090909090909094,
-   "worst": {
-    "name": "tests/fixtures/poly/docs/flow.mmd",
-    "ref": 55,
-    "est": 50
-   }
-  },
-  "poly_ipynb": {
-   "files": 1,
-   "files_ref_ge_min": 1,
-   "ref_tokens": 13336,
-   "est_tokens": 12862,
-   "agg_err": -0.03554289142171563,
-   "mean_abs_err": 0.03554289142171563,
-   "max_abs_err": 0.03554289142171563,
-   "worst": {
-    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
-    "ref": 13336,
-    "est": 12862
-   }
-  },
-  "spec_json_sql": {
-   "files": 11,
-   "files_ref_ge_min": 9,
-   "ref_tokens": 3359,
-   "est_tokens": 3251,
-   "agg_err": -0.032152426317356375,
-   "mean_abs_err": 0.05561634571809461,
-   "max_abs_err": 0.125,
-   "worst": {
-    "name": "spec#block41:sql",
-    "ref": 120,
-    "est": 105
-   }
-  },
-  "compact": {
-   "files": 26,
-   "files_ref_ge_min": 26,
-   "ref_tokens": 4607,
-   "est_tokens": 4528,
-   "agg_err": -0.017147818537008863,
-   "mean_abs_err": 0.05845906102994121,
-   "max_abs_err": 0.16176470588235292,
-   "worst": {
-    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
-    "ref": 68,
-    "est": 57
-   }
-  },
-  "syn_base64": {
-   "files": 1,
-   "files_ref_ge_min": 1,
-   "ref_tokens": 5559,
-   "est_tokens": 5066,
-   "agg_err": -0.08868501529051986,
-   "mean_abs_err": 0.08868501529051986,
-   "max_abs_err": 0.08868501529051986,
-   "worst": {
-    "name": "synthetic:base64 8000 chars",
-    "ref": 5559,
-    "est": 5066
-   }
-  },
-  "syn_hex": {
-   "files": 1,
-   "files_ref_ge_min": 1,
-   "ref_tokens": 2279,
-   "est_tokens": 2437,
-   "agg_err": 0.06932865291794643,
-   "mean_abs_err": 0.06932865291794643,
-   "max_abs_err": 0.06932865291794643,
-   "worst": {
-    "name": "synthetic:sha256 hex x60",
-    "ref": 2279,
-    "est": 2437
-   }
-  },
-  "ALL": {
-   "files": 180,
-   "files_ref_ge_min": 171,
-   "ref_tokens": 640722,
-   "est_tokens": 641528,
-   "agg_err": 0.0012579558685357206,
-   "mean_abs_err": 0.0365241505814275,
-   "max_abs_err": 0.16176470588235292,
-   "worst": {
-    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
-    "ref": 68,
-    "est": 57
-   }
-  }
- },
- "expected_error_fit": {
-  "py_src": {
-   "files": 62,
-   "files_ref_ge_min": 61,
-   "ref_tokens": 200650,
-   "est_tokens": 202516,
-   "agg_err": 0.009299775728881077,
-   "mean_abs_err": 0.026632050751893094,
-   "max_abs_err": 0.0882299436056031,
-   "worst": {
-    "name": "src/lucianke/edit/writer.py",
-    "ref": 5497,
-    "est": 5982
-   }
-  },
-  "py_tests": {
-   "files": 42,
-   "files_ref_ge_min": 42,
-   "ref_tokens": 184249,
-   "est_tokens": 186533,
-   "agg_err": 0.012396268093721075,
-   "mean_abs_err": 0.02939041268332453,
-   "max_abs_err": 0.10869565217391308,
-   "worst": {
-    "name": "tests/unit/test_smoke.py",
-    "ref": 138,
-    "est": 123
-   }
-  },
-  "md_ja": {
-   "files": 3,
-   "files_ref_ge_min": 3,
-   "ref_tokens": 188719,
-   "est_tokens": 186306,
-   "agg_err": -0.012786205946407114,
-   "mean_abs_err": 0.015751152770618854,
-   "max_abs_err": 0.019484223177364535,
-   "worst": {
-    "name": "docs/Lucianke仕様書.md",
-    "ref": 98182,
-    "est": 96269
-   }
-  },
-  "md_spikes": {
-   "files": 9,
-   "files_ref_ge_min": 9,
-   "ref_tokens": 34299,
-   "est_tokens": 33855,
-   "agg_err": -0.012944983818770184,
-   "mean_abs_err": 0.021253427857196663,
-   "max_abs_err": 0.05433479824210952,
-   "worst": {
-    "name": "docs/spikes/S-04.md",
-    "ref": 5006,
-    "est": 4734
-   }
-  },
-  "poly_data": {
-   "files": 7,
-   "files_ref_ge_min": 3,
-   "ref_tokens": 1327,
-   "est_tokens": 1337,
-   "agg_err": 0.007535795026375247,
-   "mean_abs_err": 0.01846175489322573,
-   "max_abs_err": 0.025423728813559254,
-   "worst": {
-    "name": "tests/fixtures/poly/conf/settings.json",
-    "ref": 118,
-    "est": 121
-   }
-  },
-  "poly_code": {
-   "files": 12,
-   "files_ref_ge_min": 11,
-   "ref_tokens": 1624,
-   "est_tokens": 1604,
-   "agg_err": -0.012315270935960632,
-   "mean_abs_err": 0.035506166839951364,
-   "max_abs_err": 0.12295081967213117,
-   "worst": {
-    "name": "tests/fixtures/poly/legacy/calc.cob",
-    "ref": 122,
-    "est": 107
-   }
-  },
-  "poly_doc": {
-   "files": 5,
-   "files_ref_ge_min": 4,
-   "ref_tokens": 714,
-   "est_tokens": 726,
-   "agg_err": 0.01680672268907557,
-   "mean_abs_err": 0.0492671825891004,
+   "mean_abs_err": 0.05107898950364709,
    "max_abs_err": 0.10909090909090913,
    "worst": {
     "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -354,23 +159,23 @@
    "files": 1,
    "files_ref_ge_min": 1,
    "ref_tokens": 13336,
-   "est_tokens": 12838,
-   "agg_err": -0.03734253149370126,
-   "mean_abs_err": 0.03734253149370126,
-   "max_abs_err": 0.03734253149370126,
+   "est_tokens": 12850,
+   "agg_err": -0.0364427114577085,
+   "mean_abs_err": 0.0364427114577085,
+   "max_abs_err": 0.0364427114577085,
    "worst": {
     "name": "tests/fixtures/poly/notebooks/eda.ipynb",
     "ref": 13336,
-    "est": 12838
+    "est": 12850
    }
   },
   "spec_json_sql": {
    "files": 11,
    "files_ref_ge_min": 9,
    "ref_tokens": 3359,
-   "est_tokens": 3248,
-   "agg_err": -0.033045549270616204,
-   "mean_abs_err": 0.05033067098289898,
+   "est_tokens": 3247,
+   "agg_err": -0.033343256921702924,
+   "mean_abs_err": 0.05815273692649381,
    "max_abs_err": 0.125,
    "worst": {
     "name": "spec#block41:sql",
@@ -382,56 +187,240 @@
    "files": 26,
    "files_ref_ge_min": 26,
    "ref_tokens": 4607,
-   "est_tokens": 4521,
-   "agg_err": -0.01866724549598442,
-   "mean_abs_err": 0.054270104407885184,
-   "max_abs_err": 0.14795918367346939,
+   "est_tokens": 4566,
+   "agg_err": -0.008899500759713463,
+   "mean_abs_err": 0.053588969995256426,
+   "max_abs_err": 0.16176470588235292,
    "worst": {
-    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
-    "ref": 196,
-    "est": 167
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 57
    }
   },
   "syn_base64": {
    "files": 1,
    "files_ref_ge_min": 1,
    "ref_tokens": 5559,
-   "est_tokens": 5095,
-   "agg_err": -0.08346824968519517,
-   "mean_abs_err": 0.08346824968519517,
-   "max_abs_err": 0.08346824968519517,
+   "est_tokens": 5067,
+   "agg_err": -0.0885051268213708,
+   "mean_abs_err": 0.0885051268213708,
+   "max_abs_err": 0.0885051268213708,
    "worst": {
     "name": "synthetic:base64 8000 chars",
     "ref": 5559,
-    "est": 5095
+    "est": 5067
    }
   },
   "syn_hex": {
    "files": 1,
    "files_ref_ge_min": 1,
    "ref_tokens": 2279,
-   "est_tokens": 2453,
-   "agg_err": 0.07634927599824493,
-   "mean_abs_err": 0.07634927599824493,
-   "max_abs_err": 0.07634927599824493,
+   "est_tokens": 2438,
+   "agg_err": 0.06976744186046502,
+   "mean_abs_err": 0.06976744186046502,
+   "max_abs_err": 0.06976744186046502,
    "worst": {
     "name": "synthetic:sha256 hex x60",
     "ref": 2279,
-    "est": 2453
+    "est": 2438
    }
   },
   "ALL": {
-   "files": 180,
-   "files_ref_ge_min": 171,
-   "ref_tokens": 640722,
-   "est_tokens": 641032,
-   "agg_err": 0.00048382918020606347,
-   "mean_abs_err": 0.03392787940640658,
-   "max_abs_err": 0.14795918367346939,
+   "files": 196,
+   "files_ref_ge_min": 187,
+   "ref_tokens": 700719,
+   "est_tokens": 701495,
+   "agg_err": 0.0011074339357146634,
+   "mean_abs_err": 0.03627694150797273,
+   "max_abs_err": 0.16176470588235292,
    "worst": {
-    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
-    "ref": 196,
-    "est": 167
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 57
+   }
+  }
+ },
+ "expected_error_fit": {
+  "py_src": {
+   "files": 71,
+   "files_ref_ge_min": 70,
+   "ref_tokens": 230230,
+   "est_tokens": 231831,
+   "agg_err": 0.006953915649567932,
+   "mean_abs_err": 0.030707363593375538,
+   "max_abs_err": 0.09223212661451696,
+   "worst": {
+    "name": "src/lucianke/edit/writer.py",
+    "ref": 5497,
+    "est": 6004
+   }
+  },
+  "py_tests": {
+   "files": 48,
+   "files_ref_ge_min": 48,
+   "ref_tokens": 206505,
+   "est_tokens": 209367,
+   "agg_err": 0.013859228590106687,
+   "mean_abs_err": 0.030970793781591965,
+   "max_abs_err": 0.10869565217391308,
+   "worst": {
+    "name": "tests/unit/test_smoke.py",
+    "ref": 138,
+    "est": 123
+   }
+  },
+  "md_ja": {
+   "files": 3,
+   "files_ref_ge_min": 3,
+   "ref_tokens": 194390,
+   "est_tokens": 194179,
+   "agg_err": -0.0010854467822418723,
+   "mean_abs_err": 0.0242041291288424,
+   "max_abs_err": 0.04979267331482817,
+   "worst": {
+    "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
+    "ref": 29181,
+    "est": 30634
+   }
+  },
+  "md_spikes": {
+   "files": 10,
+   "files_ref_ge_min": 10,
+   "ref_tokens": 36789,
+   "est_tokens": 35726,
+   "agg_err": -0.028894506510098172,
+   "mean_abs_err": 0.03233279979295813,
+   "max_abs_err": 0.08889332800639238,
+   "worst": {
+    "name": "docs/spikes/S-04.md",
+    "ref": 5006,
+    "est": 4561
+   }
+  },
+  "poly_data": {
+   "files": 7,
+   "files_ref_ge_min": 3,
+   "ref_tokens": 1327,
+   "est_tokens": 1340,
+   "agg_err": 0.009796533534287777,
+   "mean_abs_err": 0.013366944177252963,
+   "max_abs_err": 0.025423728813559254,
+   "worst": {
+    "name": "tests/fixtures/poly/conf/settings.json",
+    "ref": 118,
+    "est": 121
+   }
+  },
+  "poly_code": {
+   "files": 12,
+   "files_ref_ge_min": 11,
+   "ref_tokens": 1624,
+   "est_tokens": 1606,
+   "agg_err": -0.011083743842364546,
+   "mean_abs_err": 0.03287693929903221,
+   "max_abs_err": 0.12295081967213117,
+   "worst": {
+    "name": "tests/fixtures/poly/legacy/calc.cob",
+    "ref": 122,
+    "est": 107
+   }
+  },
+  "poly_doc": {
+   "files": 5,
+   "files_ref_ge_min": 4,
+   "ref_tokens": 714,
+   "est_tokens": 731,
+   "agg_err": 0.023809523809523725,
+   "mean_abs_err": 0.050734892960920375,
+   "max_abs_err": 0.10909090909090913,
+   "worst": {
+    "name": "tests/fixtures/poly/docs/flow.mmd",
+    "ref": 55,
+    "est": 49
+   }
+  },
+  "poly_ipynb": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 13336,
+   "est_tokens": 12852,
+   "agg_err": -0.03629274145170969,
+   "mean_abs_err": 0.03629274145170969,
+   "max_abs_err": 0.03629274145170969,
+   "worst": {
+    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+    "ref": 13336,
+    "est": 12852
+   }
+  },
+  "spec_json_sql": {
+   "files": 11,
+   "files_ref_ge_min": 9,
+   "ref_tokens": 3359,
+   "est_tokens": 3262,
+   "agg_err": -0.02887764215540345,
+   "mean_abs_err": 0.052692366102182815,
+   "max_abs_err": 0.125,
+   "worst": {
+    "name": "spec#block41:sql",
+    "ref": 120,
+    "est": 105
+   }
+  },
+  "compact": {
+   "files": 26,
+   "files_ref_ge_min": 26,
+   "ref_tokens": 4607,
+   "est_tokens": 4568,
+   "agg_err": -0.008465378771434828,
+   "mean_abs_err": 0.051129991312975326,
+   "max_abs_err": 0.1470588235294118,
+   "worst": {
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 58
+   }
+  },
+  "syn_base64": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 5559,
+   "est_tokens": 5098,
+   "agg_err": -0.08292858427774774,
+   "mean_abs_err": 0.08292858427774774,
+   "max_abs_err": 0.08292858427774774,
+   "worst": {
+    "name": "synthetic:base64 8000 chars",
+    "ref": 5559,
+    "est": 5098
+   }
+  },
+  "syn_hex": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 2279,
+   "est_tokens": 2455,
+   "agg_err": 0.0772268538832821,
+   "mean_abs_err": 0.0772268538832821,
+   "max_abs_err": 0.0772268538832821,
+   "worst": {
+    "name": "synthetic:sha256 hex x60",
+    "ref": 2279,
+    "est": 2455
+   }
+  },
+  "ALL": {
+   "files": 196,
+   "files_ref_ge_min": 187,
+   "ref_tokens": 700719,
+   "est_tokens": 703015,
+   "agg_err": 0.003276634428351466,
+   "mean_abs_err": 0.03549090868290561,
+   "max_abs_err": 0.1470588235294118,
+   "worst": {
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 58
    }
   }
  }

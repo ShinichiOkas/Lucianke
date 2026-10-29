@@ -22,7 +22,10 @@ from scipy.optimize import nnls
 ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
-from lucianke.mcp.budget import TOKENS_PER_CHAR, TokenEstimator  # noqa: E402
+try:  # 推定器は core/tokens.py に移された（budget.py は再公開）。どちらでも動くようにする
+    from lucianke.core.tokens import TOKENS_PER_CHAR, TokenEstimator  # noqa: E402
+except ImportError:
+    from lucianke.mcp.budget import TOKENS_PER_CHAR, TokenEstimator  # noqa: E402
 
 ENC = tiktoken.get_encoding("o200k_base")
 MIN_REF = 50  # これ未満のファイルは平均・最大の誤差から外す（切り上げと端数で相対誤差が暴れる）
@@ -140,6 +143,8 @@ def vec(f: dict[str, int], cols: list[str]) -> np.ndarray:
 #: 係数を当てはめる素性の組。budget.py と同じ 4 分割（再当てはめ）から、文字種を細かく分ける順に並べる
 CANDIDATES: dict[str, list[str]] = {  # 単純な順。最初に交差検証を通ったものを提案にする
     "base4_refit": ["@word", "symbol_chars", "@wide", "other"],
+    "lean_wide": ["letters_runs", "digits_chars", "space_runs_multi", "nl_chars", "symbol_runs", "@wide", "other",
+                  "blob_chars"],  # 仮名・漢字・全角記号を 1 つの係数にまとめる（全角記号の係数が不自然に大きくなるのを避ける）
     "lean_min": ["letters_runs", "digits_chars", "space_runs_multi", "nl_chars", "symbol_runs", "kana", "kanji",
                  "cjkpunct", "other", "blob_chars"],
     "split_chars": ["letters_chars", "digits_chars", "space_chars", "nl_chars", "symbol_chars", "kana", "kanji",
@@ -302,7 +307,7 @@ def proposal_estimator(cols: list[str], coef: list[Fraction]):
             chars = sum(map(len, runs))
             known += chars
             if name in {"kana", "kanji", "cjkpunct"}:
-                units += w.get(name, 0) * chars
+                units += w.get(name, w.get("@wide", 0)) * chars
             else:
                 units += w.get(f"{name}_chars", 0) * chars + w.get(f"{name}_runs", 0) * len(runs)
                 if name == "space" and "space_runs_multi" in need:
@@ -327,7 +332,7 @@ def fast_estimator(cols: list[str], coef: list[Fraction]):
     wl, wd, wsm, wnl, wsy = (w.get(k, 0) for k in ("letters_runs", "digits_chars", "space_runs_multi", "nl_chars",
                                                    "symbol_runs"))
     wo, wb = w.get("other", 0), w.get("blob_chars", 0)
-    wnon = {k: w.get(k, 0) for k in _NONASCII_CLASSES}
+    wnon = {k: w.get(k, w.get("@wide", 0)) for k in _NONASCII_CLASSES}
     rl, rd, rsm, rsy = _P["letters"], _P["digits"], re.compile("[ \t]{2,}"), _P["symbol"]
     rb, ro = _BLOB, _OTHER
 
@@ -362,6 +367,7 @@ TERM_DEFS: dict[str, dict[str, str]] = {  # 提案の各項の定義（計数の
     "kana": {"count": "chars", "regex": _P["kana"].pattern},
     "kanji": {"count": "chars", "regex": _P["kanji"].pattern},
     "cjkpunct": {"count": "chars", "regex": _P["cjkpunct"].pattern},
+    "@wide": {"count": "chars", "regex": "kana + kanji + cjkpunct の 3 つの正規表現のどれか"},
     "other": {"count": "chars", "regex": _OTHER.pattern},
     "blob_chars": {"count": "chars", "regex": _BLOB.pattern},
 }
@@ -452,7 +458,7 @@ def main() -> None:
     cols = CANDIDATES[chosen]
     coef = [Fraction(candidates_out[chosen]["coef"][c]) for c in cols]
     pe = proposal_estimator(cols, coef)
-    fast = fast_estimator(cols, coef) if chosen == "lean_min" else pe
+    fast = fast_estimator(cols, coef) if chosen in {"lean_min", "lean_wide"} else pe
     for label, blob in (("py_src_1MB", ascii_blob), ("md_ja_1MB", ja_blob), ("compact_1MB", compact_blob)):
         speed[label]["proposal_generic_ms"] = round(bench_speed(pe, blob), 2)
         speed[label]["proposal_ms"] = round(bench_speed(fast, blob), 2)

@@ -9,9 +9,9 @@
  },
  "encoding": "o200k_base",
  "corpus": {
-  "files": 192,
-  "chars": 1841692,
-  "fingerprint": "14867fa211c0",
+  "files": 208,
+  "chars": 2035390,
+  "fingerprint": "a800ff479d86",
   "note": "src/ と tests/ は他の役が並行して書き換えるため、実行のたびに少し変わる"
  },
  "limit": 0.1,
@@ -26,26 +26,26 @@
  "current": {
   "by_kind": {
    "py_src": {
-    "files": 62,
-    "files_ref_ge_min": 61,
-    "ref_tokens": 200650,
-    "est_tokens": 215226,
-    "agg_err": 0.0726439073012708,
-    "mean_abs_err": 0.07408463885475577,
-    "max_abs_err": 0.1928651059085842,
+    "files": 71,
+    "files_ref_ge_min": 70,
+    "ref_tokens": 230230,
+    "est_tokens": 247999,
+    "agg_err": 0.07717934239673374,
+    "mean_abs_err": 0.07689737863857249,
+    "max_abs_err": 0.19821760846146308,
     "worst": {
-     "name": "src/lucianke/syntax/guards.py",
-     "ref": 2691,
-     "est": 3210
+     "name": "src/lucianke/syntax/relations.py",
+     "ref": 10211,
+     "est": 12235
     }
    },
    "py_tests": {
-    "files": 42,
-    "files_ref_ge_min": 42,
-    "ref_tokens": 184249,
-    "est_tokens": 197451,
-    "agg_err": 0.07165303475188467,
-    "mean_abs_err": 0.07625219516867954,
+    "files": 48,
+    "files_ref_ge_min": 48,
+    "ref_tokens": 206505,
+    "est_tokens": 220845,
+    "agg_err": 0.06944141788334424,
+    "mean_abs_err": 0.07555290134860082,
     "max_abs_err": 0.19227161883323962,
     "worst": {
      "name": "tests/unit/test_mcp_pipeline.py",
@@ -56,29 +56,29 @@
    "md_ja": {
     "files": 3,
     "files_ref_ge_min": 3,
-    "ref_tokens": 188719,
-    "est_tokens": 158782,
-    "agg_err": -0.15863267609514675,
-    "mean_abs_err": 0.15004534798594463,
-    "max_abs_err": 0.16668296499119895,
+    "ref_tokens": 194390,
+    "est_tokens": 163193,
+    "agg_err": -0.1604866505478677,
+    "mean_abs_err": 0.1515827373031238,
+    "max_abs_err": 0.17090266349728778,
     "worst": {
      "name": "docs/Lucianke アーキテクチャ設計書.md",
-     "ref": 61356,
-     "est": 51129
+     "ref": 65628,
+     "est": 54412
     }
    },
    "md_spikes": {
-    "files": 9,
-    "files_ref_ge_min": 9,
-    "ref_tokens": 34299,
-    "est_tokens": 28699,
-    "agg_err": -0.16327006618268758,
-    "mean_abs_err": 0.16974699852875094,
-    "max_abs_err": 0.24625187406296856,
+    "files": 10,
+    "files_ref_ge_min": 10,
+    "ref_tokens": 36789,
+    "est_tokens": 30438,
+    "agg_err": -0.17263312403163988,
+    "mean_abs_err": 0.18293294124615697,
+    "max_abs_err": 0.30160642570281126,
     "worst": {
-     "name": "docs/spikes/S-09.md",
-     "ref": 2668,
-     "est": 2011
+     "name": "docs/spikes/SYNC-1.md",
+     "ref": 2490,
+     "est": 1739
     }
    },
    "poly_data": {
@@ -194,12 +194,12 @@
     }
    },
    "ALL": {
-    "files": 180,
-    "files_ref_ge_min": 171,
-    "ref_tokens": 640722,
-    "est_tokens": 622506,
-    "agg_err": -0.028430426924625607,
-    "mean_abs_err": 0.10120268261842802,
+    "files": 196,
+    "files_ref_ge_min": 187,
+    "ref_tokens": 700719,
+    "est_tokens": 684823,
+    "agg_err": -0.022685270415102154,
+    "mean_abs_err": 0.10106672686424496,
     "max_abs_err": 0.6251124302932183,
     "worst": {
      "name": "synthetic:base64 8000 chars",
@@ -260,6 +260,13 @@
    },
    {
     "kind": "py_src",
+    "name": "src/lucianke/core/compact_lines.py",
+    "ref": 5433,
+    "est": 5302,
+    "chars": 15785
+   },
+   {
+    "kind": "py_src",
     "name": "src/lucianke/core/errors.py",
     "ref": 819,
     "est": 856,
@@ -302,6 +309,13 @@
    },
    {
     "kind": "py_src",
+    "name": "src/lucianke/core/tokens.py",
+    "ref": 977,
+    "est": 821,
+    "chars": 2233
+   },
+   {
+    "kind": "py_src",
     "name": "src/lucianke/core/urn.py",
     "ref": 4499,
     "est": 4528,
@@ -317,9 +331,9 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/edit/normalize.py",
-    "ref": 1919,
-    "est": 1885,
-    "chars": 5510
+    "ref": 1946,
+    "est": 1911,
+    "chars": 5586
    },
    {
     "kind": "py_src",
@@ -393,6 +407,13 @@
    },
    {
     "kind": "py_src",
+    "name": "src/lucianke/lifecycle.py",
+    "ref": 4583,
+    "est": 5024,
+    "chars": 15183
+   },
+   {
+    "kind": "py_src",
     "name": "src/lucianke/logging_setup.py",
     "ref": 1728,
     "est": 1912,
@@ -401,23 +422,37 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/lsp/client.py",
-    "ref": 7414,
-    "est": 8766,
-    "chars": 28005
+    "ref": 7480,
+    "est": 8868,
+    "chars": 28391
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/lsp/diagnostics.py",
+    "ref": 3346,
+    "est": 3727,
+    "chars": 11376
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/lsp/documents.py",
+    "ref": 2123,
+    "est": 2343,
+    "chars": 6983
    },
    {
     "kind": "py_src",
     "name": "src/lucianke/lsp/servers.py",
-    "ref": 3560,
-    "est": 3628,
-    "chars": 10629
+    "ref": 5473,
+    "est": 5542,
+    "chars": 16365
    },
    {
     "kind": "py_src",
     "name": "src/lucianke/mcp/budget.py",
-    "ref": 4732,
-    "est": 5074,
-    "chars": 15491
+    "ref": 4083,
+    "est": 4593,
+    "chars": 14331
    },
    {
     "kind": "py_src",
@@ -429,9 +464,9 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/mcp/pipeline.py",
-    "ref": 3750,
-    "est": 4389,
-    "chars": 14298
+    "ref": 3722,
+    "est": 4316,
+    "chars": 14005
    },
    {
     "kind": "py_src",
@@ -443,9 +478,9 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/mcp/render/compact.py",
-    "ref": 6126,
-    "est": 6069,
-    "chars": 18175
+    "ref": 1315,
+    "est": 1391,
+    "chars": 4191
    },
    {
     "kind": "py_src",
@@ -485,16 +520,16 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/syntax/adapters/_common.py",
-    "ref": 5329,
-    "est": 5818,
-    "chars": 18353
+    "ref": 5409,
+    "est": 5901,
+    "chars": 18590
    },
    {
     "kind": "py_src",
     "name": "src/lucianke/syntax/adapters/ipynb.py",
-    "ref": 4587,
-    "est": 4909,
-    "chars": 15089
+    "ref": 4618,
+    "est": 4934,
+    "chars": 15150
    },
    {
     "kind": "py_src",
@@ -502,6 +537,27 @@
     "ref": 3600,
     "est": 3813,
     "chars": 12203
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/adapters/toml_.py",
+    "ref": 3030,
+    "est": 3000,
+    "chars": 9547
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/adapters/xml_.py",
+    "ref": 2184,
+    "est": 2245,
+    "chars": 6868
+   },
+   {
+    "kind": "py_src",
+    "name": "src/lucianke/syntax/adapters/yaml_.py",
+    "ref": 2347,
+    "est": 2390,
+    "chars": 7693
    },
    {
     "kind": "py_src",
@@ -520,9 +576,9 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/syntax/heuristic.py",
-    "ref": 7400,
-    "est": 7576,
-    "chars": 23476
+    "ref": 7519,
+    "est": 7697,
+    "chars": 23838
    },
    {
     "kind": "py_src",
@@ -540,10 +596,17 @@
    },
    {
     "kind": "py_src",
+    "name": "src/lucianke/syntax/relations.py",
+    "ref": 10211,
+    "est": 12235,
+    "chars": 40884
+   },
+   {
+    "kind": "py_src",
     "name": "src/lucianke/syntax/skeleton.py",
-    "ref": 6532,
-    "est": 7199,
-    "chars": 23228
+    "ref": 5144,
+    "est": 5904,
+    "chars": 19159
    },
    {
     "kind": "py_src",
@@ -590,9 +653,9 @@
    {
     "kind": "py_src",
     "name": "src/lucianke/tools/_skeleton_fallback.py",
-    "ref": 2273,
-    "est": 2645,
-    "chars": 8796
+    "ref": 2259,
+    "est": 2587,
+    "chars": 8563
    },
    {
     "kind": "py_src",
@@ -729,6 +792,13 @@
    },
    {
     "kind": "py_tests",
+    "name": "tests/unit/test_core_compact_lines.py",
+    "ref": 660,
+    "est": 689,
+    "chars": 2248
+   },
+   {
+    "kind": "py_tests",
     "name": "tests/unit/test_core_errors.py",
     "ref": 1014,
     "est": 1117,
@@ -771,6 +841,13 @@
    },
    {
     "kind": "py_tests",
+    "name": "tests/unit/test_core_tokens.py",
+    "ref": 459,
+    "est": 448,
+    "chars": 1405
+   },
+   {
+    "kind": "py_tests",
     "name": "tests/unit/test_core_urn.py",
     "ref": 3856,
     "est": 4013,
@@ -785,6 +862,13 @@
    },
    {
     "kind": "py_tests",
+    "name": "tests/unit/test_edit_plan.py",
+    "ref": 8152,
+    "est": 7993,
+    "chars": 25845
+   },
+   {
+    "kind": "py_tests",
     "name": "tests/unit/test_edit_syntax_check.py",
     "ref": 3796,
     "est": 4054,
@@ -796,6 +880,13 @@
     "ref": 7769,
     "est": 8344,
     "chars": 27224
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_engine_selector.py",
+    "ref": 6914,
+    "est": 7306,
+    "chars": 23712
    },
    {
     "kind": "py_tests",
@@ -834,10 +925,17 @@
    },
    {
     "kind": "py_tests",
+    "name": "tests/unit/test_lifecycle.py",
+    "ref": 4150,
+    "est": 4740,
+    "chars": 15783
+   },
+   {
+    "kind": "py_tests",
     "name": "tests/unit/test_lsp_client.py",
-    "ref": 9139,
-    "est": 9859,
-    "chars": 32083
+    "ref": 9239,
+    "est": 10006,
+    "chars": 32654
    },
    {
     "kind": "py_tests",
@@ -859,6 +957,13 @@
     "ref": 5331,
     "est": 6356,
     "chars": 20899
+   },
+   {
+    "kind": "py_tests",
+    "name": "tests/unit/test_mcp_pipeline_graph.py",
+    "ref": 1842,
+    "est": 2086,
+    "chars": 6787
    },
    {
     "kind": "py_tests",
@@ -891,9 +996,9 @@
    {
     "kind": "py_tests",
     "name": "tests/unit/test_syntax_heuristic.py",
-    "ref": 6359,
-    "est": 6411,
-    "chars": 20572
+    "ref": 6338,
+    "est": 6396,
+    "chars": 20528
    },
    {
     "kind": "py_tests",
@@ -954,16 +1059,16 @@
    {
     "kind": "md_ja",
     "name": "docs/Lucianke アーキテクチャ設計書.md",
-    "ref": 61356,
-    "est": 51129,
-    "chars": 127935
+    "ref": 65628,
+    "est": 54412,
+    "chars": 135273
    },
    {
     "kind": "md_ja",
     "name": "docs/Lucianke仕様書.md",
-    "ref": 98182,
-    "est": 81906,
-    "chars": 200637
+    "ref": 99581,
+    "est": 83034,
+    "chars": 203002
    },
    {
     "kind": "md_ja",
@@ -1034,6 +1139,13 @@
     "ref": 2475,
     "est": 1987,
     "chars": 4815
+   },
+   {
+    "kind": "md_spikes",
+    "name": "docs/spikes/SYNC-1.md",
+    "ref": 2490,
+    "est": 1739,
+    "chars": 4017
    },
    {
     "kind": "poly_data",
@@ -1496,64 +1608,64 @@
    "coef": {
     "@word": "7/20",
     "symbol_chars": "0",
-    "@wide": "23/25",
-    "other": "9/100"
+    "@wide": "93/100",
+    "other": "3/25"
    },
    "stats": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 222728,
-     "agg_err": 0.1100323947171693,
-     "mean_abs_err": 0.12347459307196106,
-     "max_abs_err": 0.2582902342561606,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 258301,
+     "agg_err": 0.12192590018676985,
+     "mean_abs_err": 0.1279222061788105,
+     "max_abs_err": 0.28586818137302905,
      "worst": {
-      "name": "src/lucianke/index/writer.py",
-      "ref": 3287,
-      "est": 4136
+      "name": "src/lucianke/syntax/relations.py",
+      "ref": 10211,
+      "est": 13130
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 186785,
-     "agg_err": 0.013763982436810984,
-     "mean_abs_err": 0.06995670963459,
-     "max_abs_err": 0.18928942293428275,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 209722,
+     "agg_err": 0.015578315295029066,
+     "mean_abs_err": 0.07398872226394586,
+     "max_abs_err": 0.19017949859071348,
      "worst": {
       "name": "tests/unit/test_index_core.py",
       "ref": 6741,
-      "est": 8017
+      "est": 8023
      }
     },
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 180104,
-     "agg_err": -0.0456498815699532,
-     "mean_abs_err": 0.044244574319505826,
-     "max_abs_err": 0.06401377034486977,
+     "ref_tokens": 194390,
+     "est_tokens": 186761,
+     "agg_err": -0.039245845979731464,
+     "mean_abs_err": 0.042718265837093004,
+     "max_abs_err": 0.05678794147477928,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 91897
+      "ref": 99581,
+      "est": 93926
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 32031,
-     "agg_err": -0.06612437680398842,
-     "mean_abs_err": 0.07023507442426292,
-     "max_abs_err": 0.13305847076461774,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 34185,
+     "agg_err": -0.07078202723640215,
+     "mean_abs_err": 0.07937082787182768,
+     "max_abs_err": 0.20763052208835342,
      "worst": {
-      "name": "docs/spikes/S-09.md",
-      "ref": 2668,
-      "est": 2313
+      "name": "docs/spikes/SYNC-1.md",
+      "ref": 2490,
+      "est": 1973
      }
     },
     "poly_data": {
@@ -1574,23 +1686,23 @@
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 2020,
-     "agg_err": 0.2438423645320198,
-     "mean_abs_err": 0.2326169454837858,
-     "max_abs_err": 0.4242424242424243,
+     "est_tokens": 2022,
+     "agg_err": 0.24507389162561566,
+     "mean_abs_err": 0.23328458939580002,
+     "max_abs_err": 0.4292929292929293,
      "worst": {
       "name": "tests/fixtures/poly/src/shop/api/routes.py",
       "ref": 198,
-      "est": 282
+      "est": 283
      }
     },
     "poly_doc": {
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 722,
-     "agg_err": 0.011204481792717047,
-     "mean_abs_err": 0.11670135800272788,
+     "est_tokens": 725,
+     "agg_err": 0.01540616246498594,
+     "mean_abs_err": 0.11816906837454785,
      "max_abs_err": 0.21818181818181814,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -1616,23 +1728,23 @@
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 4199,
-     "agg_err": 0.2500744269127717,
-     "mean_abs_err": 0.17470149990660194,
-     "max_abs_err": 0.367250961949551,
+     "est_tokens": 4203,
+     "agg_err": 0.25126525751711815,
+     "mean_abs_err": 0.17398931009650706,
+     "max_abs_err": 0.3685335613510048,
      "worst": {
       "name": "spec#block12:sql",
       "ref": 2339,
-      "est": 3198
+      "est": 3201
      }
     },
     "compact": {
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4283,
-     "agg_err": -0.07032776210115044,
-     "mean_abs_err": 0.09799675729572284,
+     "est_tokens": 4287,
+     "agg_err": -0.06945951812459306,
+     "mean_abs_err": 0.09779696972758194,
      "max_abs_err": 0.2939481268011528,
      "worst": {
       "name": "spec#block15:# get_file_skeleton ok conf=structural l",
@@ -1669,12 +1781,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 647222,
-     "agg_err": 0.01014480539141771,
-     "mean_abs_err": 0.1180134489794597,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 714556,
+     "agg_err": 0.01974686001093162,
+     "mean_abs_err": 0.11965136533444348,
      "max_abs_err": 0.48965641302392515,
      "worst": {
       "name": "synthetic:base64 8000 chars",
@@ -1685,26 +1797,26 @@
    },
    "cv": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 222385,
-     "agg_err": 0.1083229504111638,
-     "mean_abs_err": 0.12308811194808111,
-     "max_abs_err": 0.25853242320819114,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 254760,
+     "agg_err": 0.10654562828475878,
+     "mean_abs_err": 0.11515684991475852,
+     "max_abs_err": 0.2761727548721966,
      "worst": {
-      "name": "src/lucianke/tools/t02_get_file_skeleton.py",
-      "ref": 1172,
-      "est": 1475
+      "name": "src/lucianke/syntax/relations.py",
+      "ref": 10211,
+      "est": 13031
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 186613,
-     "agg_err": 0.012830463123273406,
-     "mean_abs_err": 0.07009688020884058,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 207016,
+     "agg_err": 0.0024745163555361938,
+     "mean_abs_err": 0.07241530496451783,
      "max_abs_err": 0.18320723928200566,
      "worst": {
       "name": "tests/unit/test_index_core.py",
@@ -1715,94 +1827,94 @@
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 179515,
-     "agg_err": -0.04877092396632032,
-     "mean_abs_err": 0.0586828153405485,
-     "max_abs_err": 0.09899981666700619,
+     "ref_tokens": 194390,
+     "est_tokens": 184633,
+     "agg_err": -0.05019291115798141,
+     "mean_abs_err": 0.05977494683677501,
+     "max_abs_err": 0.09816129582952571,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 88462
+      "ref": 99581,
+      "est": 89806
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 32000,
-     "agg_err": -0.06702819324178544,
-     "mean_abs_err": 0.0740746506077096,
-     "max_abs_err": 0.1652923538230885,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 33739,
+     "agg_err": -0.0829052162331132,
+     "mean_abs_err": 0.09331584394379756,
+     "max_abs_err": 0.24698795180722888,
      "worst": {
-      "name": "docs/spikes/S-09.md",
-      "ref": 2668,
-      "est": 2227
+      "name": "docs/spikes/SYNC-1.md",
+      "ref": 2490,
+      "est": 1875
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1197,
-     "agg_err": -0.09796533534287866,
-     "mean_abs_err": 0.19332621161640481,
-     "max_abs_err": 0.2931034482758621,
+     "est_tokens": 1194,
+     "agg_err": -0.1002260738507913,
+     "mean_abs_err": 0.1990733380531864,
+     "max_abs_err": 0.31034482758620685,
      "worst": {
       "name": "tests/fixtures/poly/pyproject.toml",
       "ref": 58,
-      "est": 41
+      "est": 40
      }
     },
     "poly_code": {
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 2024,
-     "agg_err": 0.24630541871921174,
-     "mean_abs_err": 0.2334888460824619,
-     "max_abs_err": 0.421875,
+     "est_tokens": 2001,
+     "agg_err": 0.2321428571428572,
+     "mean_abs_err": 0.22162240210119674,
+     "max_abs_err": 0.4191919191919191,
      "worst": {
-      "name": "tests/fixtures/poly/db/schema.sql",
-      "ref": 64,
-      "est": 91
+      "name": "tests/fixtures/poly/src/shop/api/routes.py",
+      "ref": 198,
+      "est": 281
      }
     },
     "poly_doc": {
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 705,
-     "agg_err": -0.012605042016806678,
-     "mean_abs_err": 0.1240399098618277,
-     "max_abs_err": 0.21818181818181814,
+     "est_tokens": 703,
+     "agg_err": -0.01540616246498594,
+     "mean_abs_err": 0.12358536440728224,
+     "max_abs_err": 0.23636363636363633,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
       "ref": 55,
-      "est": 43
+      "est": 42
      }
     },
     "poly_ipynb": {
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 8952,
-     "agg_err": -0.3287342531493701,
-     "mean_abs_err": 0.3287342531493701,
-     "max_abs_err": 0.3287342531493701,
+     "est_tokens": 8697,
+     "agg_err": -0.34785542891421717,
+     "mean_abs_err": 0.34785542891421717,
+     "max_abs_err": 0.34785542891421717,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 8952
+      "est": 8697
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 4180,
-     "agg_err": 0.24441798154212568,
-     "mean_abs_err": 0.17316400932251025,
+     "est_tokens": 4161,
+     "agg_err": 0.23876153617147966,
+     "mean_abs_err": 0.17452582363493507,
      "max_abs_err": 0.3591278324070115,
      "worst": {
       "name": "spec#block12:sql",
@@ -1814,61 +1926,453 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4283,
-     "agg_err": -0.07032776210115044,
-     "mean_abs_err": 0.09817993532210637,
-     "max_abs_err": 0.2939481268011528,
+     "est_tokens": 4225,
+     "agg_err": -0.08291729976123285,
+     "mean_abs_err": 0.0986646952286688,
+     "max_abs_err": 0.3112391930835735,
      "worst": {
       "name": "spec#block15:# get_file_skeleton ok conf=structural l",
       "ref": 347,
-      "est": 245
+      "est": 239
      }
     },
     "syn_base64": {
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 5559,
-     "est_tokens": 2837,
-     "agg_err": -0.48965641302392515,
-     "mean_abs_err": 0.48965641302392515,
-     "max_abs_err": 0.48965641302392515,
+     "est_tokens": 2756,
+     "agg_err": -0.5042273790250045,
+     "mean_abs_err": 0.5042273790250045,
+     "max_abs_err": 0.5042273790250045,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 2837
+      "est": 2756
      }
     },
     "syn_hex": {
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 2279,
-     "est_tokens": 1365,
-     "agg_err": -0.40105309346204476,
-     "mean_abs_err": 0.40105309346204476,
-     "max_abs_err": 0.40105309346204476,
+     "est_tokens": 1326,
+     "agg_err": -0.4181658622202721,
+     "mean_abs_err": 0.4181658622202721,
+     "max_abs_err": 0.4181658622202721,
      "worst": {
       "name": "synthetic:sha256 hex x60",
       "ref": 2279,
-      "est": 1365
+      "est": 1326
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 646056,
-     "agg_err": 0.008324983378126483,
-     "mean_abs_err": 0.11853963650416133,
-     "max_abs_err": 0.48965641302392515,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 705211,
+     "agg_err": 0.006410558297976765,
+     "mean_abs_err": 0.11542817361497008,
+     "max_abs_err": 0.5042273790250045,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 2837
+      "est": 2756
      }
     }
    },
    "pass_fit": false,
    "pass_cv": false
+  },
+  "lean_wide": {
+   "cols": [
+    "letters_runs",
+    "digits_chars",
+    "space_runs_multi",
+    "nl_chars",
+    "symbol_runs",
+    "@wide",
+    "other",
+    "blob_chars"
+   ],
+   "coef": {
+    "letters_runs": "17/20",
+    "digits_chars": "9/10",
+    "space_runs_multi": "23/25",
+    "nl_chars": "3/5",
+    "symbol_runs": "87/100",
+    "@wide": "19/20",
+    "other": "23/50",
+    "blob_chars": "63/100"
+   },
+   "stats": {
+    "py_src": {
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 231831,
+     "agg_err": 0.006953915649567932,
+     "mean_abs_err": 0.030707363593375538,
+     "max_abs_err": 0.09223212661451696,
+     "worst": {
+      "name": "src/lucianke/edit/writer.py",
+      "ref": 5497,
+      "est": 6004
+     }
+    },
+    "py_tests": {
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 209367,
+     "agg_err": 0.013859228590106687,
+     "mean_abs_err": 0.030970793781591965,
+     "max_abs_err": 0.10869565217391308,
+     "worst": {
+      "name": "tests/unit/test_smoke.py",
+      "ref": 138,
+      "est": 123
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 194390,
+     "est_tokens": 194179,
+     "agg_err": -0.0010854467822418723,
+     "mean_abs_err": 0.0242041291288424,
+     "max_abs_err": 0.04979267331482817,
+     "worst": {
+      "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
+      "ref": 29181,
+      "est": 30634
+     }
+    },
+    "md_spikes": {
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 35726,
+     "agg_err": -0.028894506510098172,
+     "mean_abs_err": 0.03233279979295813,
+     "max_abs_err": 0.08889332800639238,
+     "worst": {
+      "name": "docs/spikes/S-04.md",
+      "ref": 5006,
+      "est": 4561
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1340,
+     "agg_err": 0.009796533534287777,
+     "mean_abs_err": 0.013366944177252963,
+     "max_abs_err": 0.025423728813559254,
+     "worst": {
+      "name": "tests/fixtures/poly/conf/settings.json",
+      "ref": 118,
+      "est": 121
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1606,
+     "agg_err": -0.011083743842364546,
+     "mean_abs_err": 0.03287693929903221,
+     "max_abs_err": 0.12295081967213117,
+     "worst": {
+      "name": "tests/fixtures/poly/legacy/calc.cob",
+      "ref": 122,
+      "est": 107
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 731,
+     "agg_err": 0.023809523809523725,
+     "mean_abs_err": 0.050734892960920375,
+     "max_abs_err": 0.10909090909090913,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 49
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 12852,
+     "agg_err": -0.03629274145170969,
+     "mean_abs_err": 0.03629274145170969,
+     "max_abs_err": 0.03629274145170969,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 12852
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3262,
+     "agg_err": -0.02887764215540345,
+     "mean_abs_err": 0.052692366102182815,
+     "max_abs_err": 0.125,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 105
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4568,
+     "agg_err": -0.008465378771434828,
+     "mean_abs_err": 0.051129991312975326,
+     "max_abs_err": 0.1470588235294118,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 58
+     }
+    },
+    "syn_base64": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 5559,
+     "est_tokens": 5098,
+     "agg_err": -0.08292858427774774,
+     "mean_abs_err": 0.08292858427774774,
+     "max_abs_err": 0.08292858427774774,
+     "worst": {
+      "name": "synthetic:base64 8000 chars",
+      "ref": 5559,
+      "est": 5098
+     }
+    },
+    "syn_hex": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 2279,
+     "est_tokens": 2455,
+     "agg_err": 0.0772268538832821,
+     "mean_abs_err": 0.0772268538832821,
+     "max_abs_err": 0.0772268538832821,
+     "worst": {
+      "name": "synthetic:sha256 hex x60",
+      "ref": 2279,
+      "est": 2455
+     }
+    },
+    "ALL": {
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 703015,
+     "agg_err": 0.003276634428351466,
+     "mean_abs_err": 0.03549090868290561,
+     "max_abs_err": 0.1470588235294118,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 58
+     }
+    }
+   },
+   "cv": {
+    "py_src": {
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 230741,
+     "agg_err": 0.0022195196108238946,
+     "mean_abs_err": 0.02826500792835957,
+     "max_abs_err": 0.102601418955794,
+     "worst": {
+      "name": "src/lucianke/edit/writer.py",
+      "ref": 5497,
+      "est": 6061
+     }
+    },
+    "py_tests": {
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 209075,
+     "agg_err": 0.012445219244086037,
+     "mean_abs_err": 0.030428839557125432,
+     "max_abs_err": 0.12318840579710144,
+     "worst": {
+      "name": "tests/unit/test_smoke.py",
+      "ref": 138,
+      "est": 121
+     }
+    },
+    "md_ja": {
+     "files": 3,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 194390,
+     "est_tokens": 194099,
+     "agg_err": -0.0014969905859354427,
+     "mean_abs_err": 0.025615142710178024,
+     "max_abs_err": 0.052328569959905424,
+     "worst": {
+      "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
+      "ref": 29181,
+      "est": 30708
+     }
+    },
+    "md_spikes": {
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 35764,
+     "agg_err": -0.02786158906194791,
+     "mean_abs_err": 0.03362837743994466,
+     "max_abs_err": 0.09188973232121456,
+     "worst": {
+      "name": "docs/spikes/S-04.md",
+      "ref": 5006,
+      "est": 4546
+     }
+    },
+    "poly_data": {
+     "files": 7,
+     "files_ref_ge_min": 3,
+     "ref_tokens": 1327,
+     "est_tokens": 1334,
+     "agg_err": 0.005275056518462717,
+     "mean_abs_err": 0.0260552665058561,
+     "max_abs_err": 0.03448275862068961,
+     "worst": {
+      "name": "tests/fixtures/poly/pyproject.toml",
+      "ref": 58,
+      "est": 56
+     }
+    },
+    "poly_code": {
+     "files": 12,
+     "files_ref_ge_min": 11,
+     "ref_tokens": 1624,
+     "est_tokens": 1586,
+     "agg_err": -0.023399014778325178,
+     "mean_abs_err": 0.04887628325881061,
+     "max_abs_err": 0.11475409836065575,
+     "worst": {
+      "name": "tests/fixtures/poly/legacy/calc.cob",
+      "ref": 122,
+      "est": 108
+     }
+    },
+    "poly_doc": {
+     "files": 5,
+     "files_ref_ge_min": 4,
+     "ref_tokens": 714,
+     "est_tokens": 728,
+     "agg_err": 0.019607843137254832,
+     "mean_abs_err": 0.05107898950364709,
+     "max_abs_err": 0.10909090909090913,
+     "worst": {
+      "name": "tests/fixtures/poly/docs/flow.mmd",
+      "ref": 55,
+      "est": 49
+     }
+    },
+    "poly_ipynb": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 13336,
+     "est_tokens": 12850,
+     "agg_err": -0.0364427114577085,
+     "mean_abs_err": 0.0364427114577085,
+     "max_abs_err": 0.0364427114577085,
+     "worst": {
+      "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+      "ref": 13336,
+      "est": 12850
+     }
+    },
+    "spec_json_sql": {
+     "files": 11,
+     "files_ref_ge_min": 9,
+     "ref_tokens": 3359,
+     "est_tokens": 3247,
+     "agg_err": -0.033343256921702924,
+     "mean_abs_err": 0.05815273692649381,
+     "max_abs_err": 0.125,
+     "worst": {
+      "name": "spec#block41:sql",
+      "ref": 120,
+      "est": 105
+     }
+    },
+    "compact": {
+     "files": 26,
+     "files_ref_ge_min": 26,
+     "ref_tokens": 4607,
+     "est_tokens": 4566,
+     "agg_err": -0.008899500759713463,
+     "mean_abs_err": 0.053588969995256426,
+     "max_abs_err": 0.16176470588235292,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 57
+     }
+    },
+    "syn_base64": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 5559,
+     "est_tokens": 5067,
+     "agg_err": -0.0885051268213708,
+     "mean_abs_err": 0.0885051268213708,
+     "max_abs_err": 0.0885051268213708,
+     "worst": {
+      "name": "synthetic:base64 8000 chars",
+      "ref": 5559,
+      "est": 5067
+     }
+    },
+    "syn_hex": {
+     "files": 1,
+     "files_ref_ge_min": 1,
+     "ref_tokens": 2279,
+     "est_tokens": 2438,
+     "agg_err": 0.06976744186046502,
+     "mean_abs_err": 0.06976744186046502,
+     "max_abs_err": 0.06976744186046502,
+     "worst": {
+      "name": "synthetic:sha256 hex x60",
+      "ref": 2279,
+      "est": 2438
+     }
+    },
+    "ALL": {
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 701495,
+     "agg_err": 0.0011074339357146634,
+     "mean_abs_err": 0.03627694150797273,
+     "max_abs_err": 0.16176470588235292,
+     "worst": {
+      "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+      "ref": 68,
+      "est": 57
+     }
+    }
+   },
+   "pass_fit": true,
+   "pass_cv": true
   },
   "lean_min": {
    "cols": [
@@ -1887,69 +2391,69 @@
     "letters_runs": "21/25",
     "digits_chars": "43/50",
     "space_runs_multi": "19/20",
-    "nl_chars": "57/100",
+    "nl_chars": "14/25",
     "symbol_runs": "89/100",
-    "kana": "39/50",
-    "kanji": "39/50",
-    "cjkpunct": "231/100",
+    "kana": "77/100",
+    "kanji": "79/100",
+    "cjkpunct": "23/10",
     "other": "11/25",
     "blob_chars": "63/100"
    },
    "stats": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 202516,
-     "agg_err": 0.009299775728881077,
-     "mean_abs_err": 0.026632050751893094,
-     "max_abs_err": 0.0882299436056031,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 232324,
+     "agg_err": 0.009095252573513513,
+     "mean_abs_err": 0.02786781303291136,
+     "max_abs_err": 0.08593155893536131,
      "worst": {
-      "name": "src/lucianke/edit/writer.py",
-      "ref": 5497,
-      "est": 5982
+      "name": "src/lucianke/mcp/render/compact.py",
+      "ref": 1315,
+      "est": 1428
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 186533,
-     "agg_err": 0.012396268093721075,
-     "mean_abs_err": 0.02939041268332453,
-     "max_abs_err": 0.10869565217391308,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 208397,
+     "agg_err": 0.009162005762572312,
+     "mean_abs_err": 0.03012067562735442,
+     "max_abs_err": 0.1159420289855072,
      "worst": {
       "name": "tests/unit/test_smoke.py",
       "ref": 138,
-      "est": 123
+      "est": 122
      }
     },
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 186306,
-     "agg_err": -0.012786205946407114,
-     "mean_abs_err": 0.015751152770618854,
-     "max_abs_err": 0.019484223177364535,
+     "ref_tokens": 194390,
+     "est_tokens": 191811,
+     "agg_err": -0.013267143371572643,
+     "mean_abs_err": 0.014877088889546197,
+     "max_abs_err": 0.020023900141593276,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 96269
+      "ref": 99581,
+      "est": 97587
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33855,
-     "agg_err": -0.012944983818770184,
-     "mean_abs_err": 0.021253427857196663,
-     "max_abs_err": 0.05433479824210952,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36290,
+     "agg_err": -0.013563837016499547,
+     "mean_abs_err": 0.019377093217119334,
+     "max_abs_err": 0.055733120255693214,
      "worst": {
       "name": "docs/spikes/S-04.md",
       "ref": 5006,
-      "est": 4734
+      "est": 4727
      }
     },
     "poly_data": {
@@ -1970,9 +2474,9 @@
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1604,
-     "agg_err": -0.012315270935960632,
-     "mean_abs_err": 0.035506166839951364,
+     "est_tokens": 1601,
+     "agg_err": -0.014162561576354649,
+     "mean_abs_err": 0.03745963033373354,
      "max_abs_err": 0.12295081967213117,
      "worst": {
       "name": "tests/fixtures/poly/legacy/calc.cob",
@@ -1984,9 +2488,9 @@
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 726,
-     "agg_err": 0.01680672268907557,
-     "mean_abs_err": 0.0492671825891004,
+     "est_tokens": 725,
+     "agg_err": 0.01540616246498594,
+     "mean_abs_err": 0.04877794579849376,
      "max_abs_err": 0.10909090909090913,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -1998,23 +2502,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12838,
-     "agg_err": -0.03734253149370126,
-     "mean_abs_err": 0.03734253149370126,
-     "max_abs_err": 0.03734253149370126,
+     "est_tokens": 12834,
+     "agg_err": -0.03764247150569888,
+     "mean_abs_err": 0.03764247150569888,
+     "max_abs_err": 0.03764247150569888,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12838
+      "est": 12834
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3248,
-     "agg_err": -0.033045549270616204,
-     "mean_abs_err": 0.05033067098289898,
+     "est_tokens": 3245,
+     "agg_err": -0.03393867222387614,
+     "mean_abs_err": 0.05089648813881331,
      "max_abs_err": 0.125,
      "worst": {
       "name": "spec#block41:sql",
@@ -2026,9 +2530,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4521,
-     "agg_err": -0.01866724549598442,
-     "mean_abs_err": 0.054270104407885184,
+     "est_tokens": 4518,
+     "agg_err": -0.019318428478402483,
+     "mean_abs_err": 0.054449438603069014,
      "max_abs_err": 0.14795918367346939,
      "worst": {
       "name": "spec#block31:# extract_code_contracts ok conf=exact l",
@@ -2040,14 +2544,14 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 5559,
-     "est_tokens": 5095,
-     "agg_err": -0.08346824968519517,
-     "mean_abs_err": 0.08346824968519517,
-     "max_abs_err": 0.08346824968519517,
+     "est_tokens": 5093,
+     "agg_err": -0.08382802662349342,
+     "mean_abs_err": 0.08382802662349342,
+     "max_abs_err": 0.08382802662349342,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 5095
+      "est": 5093
      }
     },
     "syn_hex": {
@@ -2065,12 +2569,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 641032,
-     "agg_err": 0.00048382918020606347,
-     "mean_abs_err": 0.03392787940640658,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 700628,
+     "agg_err": -0.00012986660844072073,
+     "mean_abs_err": 0.03405918766768937,
      "max_abs_err": 0.14795918367346939,
      "worst": {
       "name": "spec#block31:# extract_code_contracts ok conf=exact l",
@@ -2081,26 +2585,26 @@
    },
    "cv": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 203119,
-     "agg_err": 0.01230500872165452,
-     "mean_abs_err": 0.028650418710160854,
-     "max_abs_err": 0.10278333636529013,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 232192,
+     "agg_err": 0.008521912869738912,
+     "mean_abs_err": 0.025985165692884043,
+     "max_abs_err": 0.10038022813688219,
      "worst": {
-      "name": "src/lucianke/edit/writer.py",
-      "ref": 5497,
-      "est": 6062
+      "name": "src/lucianke/mcp/render/compact.py",
+      "ref": 1315,
+      "est": 1447
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 186782,
-     "agg_err": 0.013747700123202922,
-     "mean_abs_err": 0.028598863131392573,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 209014,
+     "agg_err": 0.012149826880704984,
+     "mean_abs_err": 0.02889301385425669,
      "max_abs_err": 0.1159420289855072,
      "worst": {
       "name": "tests/unit/test_smoke.py",
@@ -2111,57 +2615,57 @@
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 185880,
-     "agg_err": -0.01504353032815986,
-     "mean_abs_err": 0.023782637480061042,
-     "max_abs_err": 0.027243754497789707,
+     "ref_tokens": 194390,
+     "est_tokens": 191880,
+     "agg_err": -0.012912186840886908,
+     "mean_abs_err": 0.023515439153810453,
+     "max_abs_err": 0.031561632569137466,
      "worst": {
       "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
       "ref": 29181,
-      "est": 29976
+      "est": 30102
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33938,
-     "agg_err": -0.010525088194991095,
-     "mean_abs_err": 0.02494137243913957,
-     "max_abs_err": 0.06635944700460827,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36517,
+     "agg_err": -0.007393514365707121,
+     "mean_abs_err": 0.024101368582341808,
+     "max_abs_err": 0.06451612903225812,
      "worst": {
       "name": "docs/spikes/S-05.md",
       "ref": 3255,
-      "est": 3039
+      "est": 3045
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1335,
-     "agg_err": 0.006028636021100153,
-     "mean_abs_err": 0.031378826159576025,
-     "max_abs_err": 0.05084745762711873,
+     "est_tokens": 1333,
+     "agg_err": 0.0045214770158250595,
+     "mean_abs_err": 0.025729108645451675,
+     "max_abs_err": 0.03448275862068961,
      "worst": {
-      "name": "tests/fixtures/poly/conf/settings.json",
-      "ref": 118,
-      "est": 124
+      "name": "tests/fixtures/poly/pyproject.toml",
+      "ref": 58,
+      "est": 56
      }
     },
     "poly_code": {
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1602,
-     "agg_err": -0.013546798029556606,
-     "mean_abs_err": 0.04707572163576373,
-     "max_abs_err": 0.11475409836065575,
+     "est_tokens": 1601,
+     "agg_err": -0.014162561576354649,
+     "mean_abs_err": 0.04591379527523278,
+     "max_abs_err": 0.12295081967213117,
      "worst": {
       "name": "tests/fixtures/poly/legacy/calc.cob",
       "ref": 122,
-      "est": 108
+      "est": 107
      }
     },
     "poly_doc": {
@@ -2170,7 +2674,7 @@
      "ref_tokens": 714,
      "est_tokens": 728,
      "agg_err": 0.019607843137254832,
-     "mean_abs_err": 0.043743254462432574,
+     "mean_abs_err": 0.04325401767182588,
      "max_abs_err": 0.09090909090909094,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -2182,23 +2686,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12862,
-     "agg_err": -0.03554289142171563,
-     "mean_abs_err": 0.03554289142171563,
-     "max_abs_err": 0.03554289142171563,
+     "est_tokens": 12870,
+     "agg_err": -0.03494301139772049,
+     "mean_abs_err": 0.03494301139772049,
+     "max_abs_err": 0.03494301139772049,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12862
+      "est": 12870
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3251,
-     "agg_err": -0.032152426317356375,
-     "mean_abs_err": 0.05561634571809461,
+     "est_tokens": 3236,
+     "agg_err": -0.03661804108365585,
+     "mean_abs_err": 0.055525727783282304,
      "max_abs_err": 0.125,
      "worst": {
       "name": "spec#block41:sql",
@@ -2210,9 +2714,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4528,
-     "agg_err": -0.017147818537008863,
-     "mean_abs_err": 0.05845906102994121,
+     "est_tokens": 4529,
+     "agg_err": -0.016930757542869546,
+     "mean_abs_err": 0.05826588865586692,
      "max_abs_err": 0.16176470588235292,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -2249,12 +2753,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 641528,
-     "agg_err": 0.0012579558685357206,
-     "mean_abs_err": 0.0365241505814275,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 701403,
+     "agg_err": 0.0009761402216865722,
+     "mean_abs_err": 0.0346537045248692,
      "max_abs_err": 0.16176470588235292,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -2283,77 +2787,77 @@
     "letters_chars": "21/100",
     "digits_chars": "117/100",
     "space_chars": "7/50",
-    "nl_chars": "47/100",
+    "nl_chars": "23/50",
     "symbol_chars": "47/100",
     "kana": "93/100",
     "kanji": "31/50",
-    "cjkpunct": "91/50",
-    "other": "37/100",
+    "cjkpunct": "37/20",
+    "other": "19/50",
     "blob_chars": "63/100"
    },
    "stats": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 207129,
-     "agg_err": 0.03229005731373036,
-     "mean_abs_err": 0.041582425051506174,
-     "max_abs_err": 0.13142683297839985,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 237698,
+     "agg_err": 0.0324371280893021,
+     "mean_abs_err": 0.045402455619562194,
+     "max_abs_err": 0.130514146638272,
      "worst": {
       "name": "src/lucianke/index/writer.py",
       "ref": 3287,
-      "est": 3719
+      "est": 3716
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 183845,
-     "agg_err": -0.0021926848992396275,
-     "mean_abs_err": 0.030831940371506134,
-     "max_abs_err": 0.11948920644572814,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 205396,
+     "agg_err": -0.0053703300162223355,
+     "mean_abs_err": 0.03222899777101321,
+     "max_abs_err": 0.12040133779264217,
      "worst": {
       "name": "tests/unit/test_syntax_guards.py",
       "ref": 3289,
-      "est": 2896
+      "est": 2893
      }
     },
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 183314,
-     "agg_err": -0.028640465453928843,
-     "mean_abs_err": 0.03348349225612598,
-     "max_abs_err": 0.04124992361125257,
+     "ref_tokens": 194390,
+     "est_tokens": 189363,
+     "agg_err": -0.025860383764596984,
+     "mean_abs_err": 0.03176226241057656,
+     "max_abs_err": 0.038611783372330066,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 94132
+      "ref": 99581,
+      "est": 95736
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33991,
-     "agg_err": -0.00897985364004783,
-     "mean_abs_err": 0.019338153212953624,
-     "max_abs_err": 0.03563748079877116,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36426,
+     "agg_err": -0.009867079833645875,
+     "mean_abs_err": 0.021966879956217267,
+     "max_abs_err": 0.04738955823293167,
      "worst": {
-      "name": "docs/spikes/S-05.md",
-      "ref": 3255,
-      "est": 3139
+      "name": "docs/spikes/SYNC-1.md",
+      "ref": 2490,
+      "est": 2372
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1402,
-     "agg_err": 0.056518462697814575,
+     "est_tokens": 1401,
+     "agg_err": 0.05576488319517714,
      "mean_abs_err": 0.0634473303664596,
      "max_abs_err": 0.08806262230919759,
      "worst": {
@@ -2366,14 +2870,14 @@
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1696,
-     "agg_err": 0.044334975369458185,
-     "mean_abs_err": 0.07811650339524939,
-     "max_abs_err": 0.1625000000000001,
+     "est_tokens": 1692,
+     "agg_err": 0.041871921182266014,
+     "mean_abs_err": 0.07495564374375074,
+     "max_abs_err": 0.1499999999999999,
      "worst": {
       "name": "tests/fixtures/poly/tests/test_payment.py",
       "ref": 80,
-      "est": 93
+      "est": 92
      }
     },
     "poly_doc": {
@@ -2382,7 +2886,7 @@
      "ref_tokens": 714,
      "est_tokens": 696,
      "agg_err": -0.025210084033613467,
-     "mean_abs_err": 0.0851068908260689,
+     "mean_abs_err": 0.08461765403546226,
      "max_abs_err": 0.23636363636363633,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -2394,23 +2898,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12816,
-     "agg_err": -0.03899220155968808,
-     "mean_abs_err": 0.03899220155968808,
-     "max_abs_err": 0.03899220155968808,
+     "est_tokens": 12813,
+     "agg_err": -0.039217156568686296,
+     "mean_abs_err": 0.039217156568686296,
+     "max_abs_err": 0.039217156568686296,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12816
+      "est": 12813
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3343,
-     "agg_err": -0.004763322417386084,
-     "mean_abs_err": 0.08515784345911938,
+     "est_tokens": 3342,
+     "agg_err": -0.005061030068472805,
+     "mean_abs_err": 0.08511033977758405,
      "max_abs_err": 0.2583333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -2422,9 +2926,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4443,
-     "agg_err": -0.035598003038853965,
-     "mean_abs_err": 0.049513950267576906,
+     "est_tokens": 4442,
+     "agg_err": -0.03581506403299328,
+     "mean_abs_err": 0.04936370988296152,
      "max_abs_err": 0.14795918367346939,
      "worst": {
       "name": "spec#block31:# extract_code_contracts ok conf=exact l",
@@ -2436,14 +2940,14 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 5559,
-     "est_tokens": 5085,
-     "agg_err": -0.08526713437668643,
-     "mean_abs_err": 0.08526713437668643,
-     "max_abs_err": 0.08526713437668643,
+     "est_tokens": 5084,
+     "agg_err": -0.08544702284583561,
+     "mean_abs_err": 0.08544702284583561,
+     "max_abs_err": 0.08544702284583561,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 5085
+      "est": 5084
      }
     },
     "syn_hex": {
@@ -2461,12 +2965,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 640207,
-     "agg_err": -0.0008037807348585391,
-     "mean_abs_err": 0.04530861723713494,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 700800,
+     "agg_err": 0.00011559555256823728,
+     "mean_abs_err": 0.04621002298560046,
      "max_abs_err": 0.2583333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -2477,82 +2981,82 @@
    },
    "cv": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 205732,
-     "agg_err": 0.025327685023672997,
-     "mean_abs_err": 0.03705177086425162,
-     "max_abs_err": 0.11621539397627023,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 235498,
+     "agg_err": 0.02288146635972721,
+     "mean_abs_err": 0.039116080202716216,
+     "max_abs_err": 0.11848184818481844,
      "worst": {
-      "name": "src/lucianke/index/writer.py",
-      "ref": 3287,
-      "est": 3669
+      "name": "src/lucianke/syntax/adapters/toml_.py",
+      "ref": 3030,
+      "est": 2671
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 182855,
-     "agg_err": -0.007565848389950558,
-     "mean_abs_err": 0.03141203004375892,
-     "max_abs_err": 0.1213134691395561,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 204651,
+     "agg_err": -0.008977990847679251,
+     "mean_abs_err": 0.03326942740848085,
+     "max_abs_err": 0.12861051991486772,
      "worst": {
       "name": "tests/unit/test_syntax_guards.py",
       "ref": 3289,
-      "est": 2890
+      "est": 2866
      }
     },
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 181732,
-     "agg_err": -0.03702329919086045,
-     "mean_abs_err": 0.049766741479554476,
-     "max_abs_err": 0.06887209468130617,
+     "ref_tokens": 194390,
+     "est_tokens": 187545,
+     "agg_err": -0.0352127167035341,
+     "mean_abs_err": 0.04752800386187487,
+     "max_abs_err": 0.06599652544160028,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 91420
+      "ref": 99581,
+      "est": 93009
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 34004,
-     "agg_err": -0.008600833843552258,
-     "mean_abs_err": 0.018857282652846266,
-     "max_abs_err": 0.05007680491551458,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36422,
+     "agg_err": -0.009975807986082774,
+     "mean_abs_err": 0.021510322577329377,
+     "max_abs_err": 0.05099846390168972,
      "worst": {
       "name": "docs/spikes/S-05.md",
       "ref": 3255,
-      "est": 3092
+      "est": 3089
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1409,
-     "agg_err": 0.06179351921627729,
-     "mean_abs_err": 0.0788554775648761,
-     "max_abs_err": 0.09980430528375739,
+     "est_tokens": 1418,
+     "agg_err": 0.0685757347400151,
+     "mean_abs_err": 0.08494191492598258,
+     "max_abs_err": 0.1095890410958904,
      "worst": {
       "name": "tests/fixtures/poly/reports/junit.xml",
       "ref": 1022,
-      "est": 1124
+      "est": 1134
      }
     },
     "poly_code": {
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1696,
-     "agg_err": 0.044334975369458185,
-     "mean_abs_err": 0.08434085741034121,
+     "est_tokens": 1699,
+     "agg_err": 0.04618226600985231,
+     "mean_abs_err": 0.0815090107129598,
      "max_abs_err": 0.1625000000000001,
      "worst": {
       "name": "tests/fixtures/poly/tests/test_payment.py",
@@ -2578,23 +3082,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12801,
-     "agg_err": -0.040116976604679055,
-     "mean_abs_err": 0.040116976604679055,
-     "max_abs_err": 0.040116976604679055,
+     "est_tokens": 12795,
+     "agg_err": -0.04056688662267549,
+     "mean_abs_err": 0.04056688662267549,
+     "max_abs_err": 0.04056688662267549,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12801
+      "est": 12795
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3277,
-     "agg_err": -0.024412027389103863,
-     "mean_abs_err": 0.0840507294204425,
+     "est_tokens": 3280,
+     "agg_err": -0.023518904435844035,
+     "mean_abs_err": 0.08852790169050517,
      "max_abs_err": 0.2583333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -2606,9 +3110,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4424,
-     "agg_err": -0.039722161927501665,
-     "mean_abs_err": 0.04861975010477392,
+     "est_tokens": 4434,
+     "agg_err": -0.037551551986108045,
+     "mean_abs_err": 0.04640762030544513,
      "max_abs_err": 0.13265306122448983,
      "worst": {
       "name": "spec#block31:# extract_code_contracts ok conf=exact l",
@@ -2620,37 +3124,37 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 5559,
-     "est_tokens": 5063,
-     "agg_err": -0.0892246806979673,
-     "mean_abs_err": 0.0892246806979673,
-     "max_abs_err": 0.0892246806979673,
+     "est_tokens": 5071,
+     "agg_err": -0.08778557294477429,
+     "mean_abs_err": 0.08778557294477429,
+     "max_abs_err": 0.08778557294477429,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 5063
+      "est": 5071
      }
     },
     "syn_hex": {
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 2279,
-     "est_tokens": 2435,
-     "agg_err": 0.06845107503290926,
-     "mean_abs_err": 0.06845107503290926,
-     "max_abs_err": 0.06845107503290926,
+     "est_tokens": 2439,
+     "agg_err": 0.07020623080298383,
+     "mean_abs_err": 0.07020623080298383,
+     "max_abs_err": 0.07020623080298383,
      "worst": {
       "name": "synthetic:sha256 hex x60",
       "ref": 2279,
-      "est": 2435
+      "est": 2439
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 636117,
-     "agg_err": -0.007187204434996763,
-     "mean_abs_err": 0.04491179608786798,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 695941,
+     "agg_err": -0.006818710495933411,
+     "mean_abs_err": 0.04515955923746028,
      "max_abs_err": 0.2583333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -2678,41 +3182,41 @@
     "blob_chars"
    ],
    "coef": {
-    "letters_runs": "73/100",
+    "letters_runs": "18/25",
     "letters_chars": "3/100",
     "digits_chars": "22/25",
     "space_runs_multi": "97/100",
-    "nl_chars": "13/25",
+    "nl_chars": "51/100",
     "symbol_runs": "4/5",
     "symbol_chars": "1/20",
     "kana": "79/100",
-    "kanji": "77/100",
+    "kanji": "39/50",
     "cjkpunct": "227/100",
     "other": "11/25",
     "blob_chars": "63/100"
    },
    "stats": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 202818,
-     "agg_err": 0.010804884126588643,
-     "mean_abs_err": 0.02608893543718794,
-     "max_abs_err": 0.08240858650172811,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 232148,
+     "agg_err": 0.008330799635147379,
+     "mean_abs_err": 0.027192958308126604,
+     "max_abs_err": 0.08060836501901147,
      "worst": {
-      "name": "src/lucianke/edit/writer.py",
-      "ref": 5497,
-      "est": 5950
+      "name": "src/lucianke/mcp/render/compact.py",
+      "ref": 1315,
+      "est": 1421
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 186565,
-     "agg_err": 0.012569946105541963,
-     "mean_abs_err": 0.028260147570822947,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 207638,
+     "agg_err": 0.005486549962470555,
+     "mean_abs_err": 0.028935140989334623,
      "max_abs_err": 0.10144927536231885,
      "worst": {
       "name": "tests/unit/test_smoke.py",
@@ -2723,66 +3227,66 @@
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 185988,
-     "agg_err": -0.014471250907433841,
-     "mean_abs_err": 0.018472275418467226,
-     "max_abs_err": 0.022437921411256667,
+     "ref_tokens": 194390,
+     "est_tokens": 191913,
+     "agg_err": -0.01274242502186329,
+     "mean_abs_err": 0.0173845976302965,
+     "max_abs_err": 0.020947771161165307,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 95979
+      "ref": 99581,
+      "est": 97495
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33839,
-     "agg_err": -0.01341146972214935,
-     "mean_abs_err": 0.019140994729426136,
-     "max_abs_err": 0.048540706605222694,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36306,
+     "agg_err": -0.013128924406752063,
+     "mean_abs_err": 0.018117390004296928,
+     "max_abs_err": 0.04884792626728107,
      "worst": {
       "name": "docs/spikes/S-05.md",
       "ref": 3255,
-      "est": 3097
+      "est": 3096
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1352,
-     "agg_err": 0.018839487565938118,
-     "mean_abs_err": 0.020855421902634563,
-     "max_abs_err": 0.02837573385518599,
+     "est_tokens": 1347,
+     "agg_err": 0.015071590052750494,
+     "mean_abs_err": 0.019224632600612357,
+     "max_abs_err": 0.023483365949119372,
      "worst": {
       "name": "tests/fixtures/poly/reports/junit.xml",
       "ref": 1022,
-      "est": 1051
+      "est": 1046
      }
     },
     "poly_code": {
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1617,
-     "agg_err": -0.004310344827586188,
-     "mean_abs_err": 0.03854490583451558,
-     "max_abs_err": 0.12295081967213117,
+     "est_tokens": 1610,
+     "agg_err": -0.008620689655172376,
+     "mean_abs_err": 0.041747414244272835,
+     "max_abs_err": 0.1311475409836066,
      "worst": {
       "name": "tests/fixtures/poly/legacy/calc.cob",
       "ref": 122,
-      "est": 107
+      "est": 106
      }
     },
     "poly_doc": {
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 725,
-     "agg_err": 0.01540616246498594,
-     "mean_abs_err": 0.04696613888394713,
+     "est_tokens": 724,
+     "agg_err": 0.014005602240896309,
+     "mean_abs_err": 0.04647690209334049,
      "max_abs_err": 0.10909090909090913,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -2794,23 +3298,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12850,
-     "agg_err": -0.0364427114577085,
-     "mean_abs_err": 0.0364427114577085,
-     "max_abs_err": 0.0364427114577085,
+     "est_tokens": 12830,
+     "agg_err": -0.037942411517696506,
+     "mean_abs_err": 0.037942411517696506,
+     "max_abs_err": 0.037942411517696506,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12850
+      "est": 12830
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3274,
-     "agg_err": -0.025305150342363802,
-     "mean_abs_err": 0.051813834825328656,
+     "est_tokens": 3258,
+     "agg_err": -0.030068472759749887,
+     "mean_abs_err": 0.052219768161675555,
      "max_abs_err": 0.14166666666666672,
      "worst": {
       "name": "spec#block41:sql",
@@ -2822,28 +3326,28 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4524,
-     "agg_err": -0.018016062513566355,
-     "mean_abs_err": 0.05388465045830671,
-     "max_abs_err": 0.14795918367346939,
+     "est_tokens": 4504,
+     "agg_err": -0.022357282396353373,
+     "mean_abs_err": 0.053094048767574176,
+     "max_abs_err": 0.15306122448979587,
      "worst": {
       "name": "spec#block31:# extract_code_contracts ok conf=exact l",
       "ref": 196,
-      "est": 167
+      "est": 166
      }
     },
     "syn_base64": {
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 5559,
-     "est_tokens": 5089,
-     "agg_err": -0.08454758050008992,
-     "mean_abs_err": 0.08454758050008992,
-     "max_abs_err": 0.08454758050008992,
+     "est_tokens": 5088,
+     "agg_err": -0.0847274689692391,
+     "mean_abs_err": 0.0847274689692391,
+     "max_abs_err": 0.0847274689692391,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 5089
+      "est": 5088
      }
     },
     "syn_hex": {
@@ -2861,84 +3365,84 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 641091,
-     "agg_err": 0.0005759127983744339,
-     "mean_abs_err": 0.033589534797421335,
-     "max_abs_err": 0.14795918367346939,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 699816,
+     "agg_err": -0.0012886763452967243,
+     "mean_abs_err": 0.03356497634183217,
+     "max_abs_err": 0.15306122448979587,
      "worst": {
       "name": "spec#block31:# extract_code_contracts ok conf=exact l",
       "ref": 196,
-      "est": 167
+      "est": 166
      }
     }
    },
    "cv": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 202645,
-     "agg_err": 0.00994268626962369,
-     "mean_abs_err": 0.0256333060098133,
-     "max_abs_err": 0.08331817354920856,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 231155,
+     "agg_err": 0.004017721409025787,
+     "mean_abs_err": 0.02422683314492827,
+     "max_abs_err": 0.08517110266159689,
      "worst": {
-      "name": "src/lucianke/edit/writer.py",
-      "ref": 5497,
-      "est": 5955
+      "name": "src/lucianke/mcp/render/compact.py",
+      "ref": 1315,
+      "est": 1427
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 185908,
-     "agg_err": 0.00900411942534296,
-     "mean_abs_err": 0.028236840282988077,
-     "max_abs_err": 0.10144927536231885,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 207416,
+     "agg_err": 0.004411515459673998,
+     "mean_abs_err": 0.028437931522282116,
+     "max_abs_err": 0.10869565217391308,
      "worst": {
       "name": "tests/unit/test_smoke.py",
       "ref": 138,
-      "est": 124
+      "est": 123
      }
     },
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 185110,
-     "agg_err": -0.01912367064259557,
-     "mean_abs_err": 0.029739886181201935,
-     "max_abs_err": 0.038825854026196205,
+     "ref_tokens": 194390,
+     "est_tokens": 190509,
+     "agg_err": -0.019965018776685994,
+     "mean_abs_err": 0.028845944090341247,
+     "max_abs_err": 0.038611783372330066,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 94370
+      "ref": 99581,
+      "est": 95736
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33921,
-     "agg_err": -0.011020729467331458,
-     "mean_abs_err": 0.019460176319182326,
-     "max_abs_err": 0.05837173579109067,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36356,
+     "agg_err": -0.011769822501291105,
+     "mean_abs_err": 0.01999433243210692,
+     "max_abs_err": 0.06298003072196623,
      "worst": {
       "name": "docs/spikes/S-05.md",
       "ref": 3255,
-      "est": 3065
+      "est": 3050
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1343,
-     "agg_err": 0.012057272042200529,
-     "mean_abs_err": 0.025839670632029448,
+     "est_tokens": 1342,
+     "agg_err": 0.01130369253956287,
+     "mean_abs_err": 0.023993285456180662,
      "max_abs_err": 0.03448275862068961,
      "worst": {
       "name": "tests/fixtures/poly/pyproject.toml",
@@ -2950,51 +3454,51 @@
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1615,
-     "agg_err": -0.005541871921182273,
-     "mean_abs_err": 0.04534511951642366,
-     "max_abs_err": 0.1311475409836066,
+     "est_tokens": 1605,
+     "agg_err": -0.011699507389162589,
+     "mean_abs_err": 0.04641485555191018,
+     "max_abs_err": 0.139344262295082,
      "worst": {
       "name": "tests/fixtures/poly/legacy/calc.cob",
       "ref": 122,
-      "est": 106
+      "est": 105
      }
     },
     "poly_doc": {
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 720,
-     "agg_err": 0.008403361344537785,
-     "mean_abs_err": 0.033850886556366006,
-     "max_abs_err": 0.09090909090909094,
+     "est_tokens": 717,
+     "agg_err": 0.004201680672268893,
+     "mean_abs_err": 0.03790710431121391,
+     "max_abs_err": 0.10909090909090913,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
       "ref": 55,
-      "est": 50
+      "est": 49
      }
     },
     "poly_ipynb": {
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12891,
-     "agg_err": -0.03336832633473308,
-     "mean_abs_err": 0.03336832633473308,
-     "max_abs_err": 0.03336832633473308,
+     "est_tokens": 12862,
+     "agg_err": -0.03554289142171563,
+     "mean_abs_err": 0.03554289142171563,
+     "max_abs_err": 0.03554289142171563,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12891
+      "est": 12862
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3251,
-     "agg_err": -0.032152426317356375,
-     "mean_abs_err": 0.06351957988582813,
+     "est_tokens": 3240,
+     "agg_err": -0.0354272104793093,
+     "mean_abs_err": 0.06084313680838749,
      "max_abs_err": 0.15833333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -3006,9 +3510,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4521,
-     "agg_err": -0.01866724549598442,
-     "mean_abs_err": 0.05950132299133248,
+     "est_tokens": 4501,
+     "agg_err": -0.023008465378771437,
+     "mean_abs_err": 0.05890104961048007,
      "max_abs_err": 0.1470588235294118,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -3045,12 +3549,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 639425,
-     "agg_err": -0.0020242788604105666,
-     "mean_abs_err": 0.035296331438530094,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 697203,
+     "agg_err": -0.00501770324480999,
+     "mean_abs_err": 0.03397884996398371,
      "max_abs_err": 0.15833333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -3081,7 +3585,7 @@
    "coef": {
     "letters_runs": "18/25",
     "letters_chars": "3/100",
-    "digits_runs": "89/100",
+    "digits_runs": "22/25",
     "digits_chars": "23/50",
     "space_runs_multi": "53/50",
     "nl_chars": "1/2",
@@ -3089,32 +3593,32 @@
     "symbol_chars": "1/20",
     "kana": "39/50",
     "kanji": "81/100",
-    "cjkpunct": "213/100",
+    "cjkpunct": "21/10",
     "other": "21/50",
     "blob_chars": "63/100"
    },
    "stats": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 201539,
-     "agg_err": 0.0044306005482182,
-     "mean_abs_err": 0.023977115194481848,
-     "max_abs_err": 0.07058395488448244,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 231275,
+     "agg_err": 0.00453893932154803,
+     "mean_abs_err": 0.02590246308305425,
+     "max_abs_err": 0.07832699619771866,
      "worst": {
-      "name": "src/lucianke/edit/writer.py",
-      "ref": 5497,
-      "est": 5885
+      "name": "src/lucianke/mcp/render/compact.py",
+      "ref": 1315,
+      "est": 1418
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 185781,
-     "agg_err": 0.00831483481592854,
-     "mean_abs_err": 0.02570462872782997,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 207753,
+     "agg_err": 0.006043437204910296,
+     "mean_abs_err": 0.026292695159600105,
      "max_abs_err": 0.10144927536231885,
      "worst": {
       "name": "tests/unit/test_smoke.py",
@@ -3125,43 +3629,43 @@
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 185896,
-     "agg_err": -0.014958748191756022,
-     "mean_abs_err": 0.017679185083193587,
-     "max_abs_err": 0.02317125338656778,
+     "ref_tokens": 194390,
+     "est_tokens": 191337,
+     "agg_err": -0.015705540408457175,
+     "mean_abs_err": 0.017265826053100897,
+     "max_abs_err": 0.023960394051073974,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 95907
+      "ref": 99581,
+      "est": 97195
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33878,
-     "agg_err": -0.012274410332662744,
-     "mean_abs_err": 0.021266862335360556,
-     "max_abs_err": 0.047742708749500595,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36331,
+     "agg_err": -0.012449373454021528,
+     "mean_abs_err": 0.021746095176372306,
+     "max_abs_err": 0.05053935277666799,
      "worst": {
       "name": "docs/spikes/S-04.md",
       "ref": 5006,
-      "est": 4767
+      "est": 4753
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1363,
-     "agg_err": 0.027128862094951023,
-     "mean_abs_err": 0.02574778980870107,
-     "max_abs_err": 0.04305283757338563,
+     "est_tokens": 1362,
+     "agg_err": 0.026375282592313587,
+     "mean_abs_err": 0.02542163194829657,
+     "max_abs_err": 0.042074363992172126,
      "worst": {
       "name": "tests/fixtures/poly/reports/junit.xml",
       "ref": 1022,
-      "est": 1066
+      "est": 1065
      }
     },
     "poly_code": {
@@ -3182,9 +3686,9 @@
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 720,
-     "agg_err": 0.008403361344537785,
-     "mean_abs_err": 0.05136645318152169,
+     "est_tokens": 719,
+     "agg_err": 0.007002801120448154,
+     "mean_abs_err": 0.05087721639091505,
      "max_abs_err": 0.12727272727272732,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -3196,23 +3700,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12746,
-     "agg_err": -0.04424115176964605,
-     "mean_abs_err": 0.04424115176964605,
-     "max_abs_err": 0.04424115176964605,
+     "est_tokens": 12743,
+     "agg_err": -0.044466106778644265,
+     "mean_abs_err": 0.044466106778644265,
+     "max_abs_err": 0.044466106778644265,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12746
+      "est": 12743
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3261,
-     "agg_err": -0.02917534980649006,
-     "mean_abs_err": 0.052935955134247904,
+     "est_tokens": 3260,
+     "agg_err": -0.029473057457576668,
+     "mean_abs_err": 0.05298345881578323,
      "max_abs_err": 0.1333333333333333,
      "worst": {
       "name": "spec#block41:sql",
@@ -3224,9 +3728,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4508,
-     "agg_err": -0.02148903841979599,
-     "mean_abs_err": 0.05262105327271227,
+     "est_tokens": 4504,
+     "agg_err": -0.022357282396353373,
+     "mean_abs_err": 0.051867835222126304,
      "max_abs_err": 0.19117647058823528,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -3263,12 +3767,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 638838,
-     "agg_err": -0.002940432824220185,
-     "mean_abs_err": 0.03191983962585616,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 698430,
+     "agg_err": -0.0032666446892406498,
+     "mean_abs_err": 0.03205491143210105,
      "max_abs_err": 0.19117647058823528,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -3279,26 +3783,26 @@
    },
    "cv": {
     "py_src": {
-     "files": 62,
-     "files_ref_ge_min": 61,
-     "ref_tokens": 200650,
-     "est_tokens": 202157,
-     "agg_err": 0.007510590580612986,
-     "mean_abs_err": 0.02402708598696503,
-     "max_abs_err": 0.07968127490039845,
+     "files": 71,
+     "files_ref_ge_min": 70,
+     "ref_tokens": 230230,
+     "est_tokens": 231575,
+     "agg_err": 0.005841984102853637,
+     "mean_abs_err": 0.023824025589642594,
+     "max_abs_err": 0.07908745247148286,
      "worst": {
-      "name": "src/lucianke/syntax/adapters/__init__.py",
-      "ref": 251,
-      "est": 231
+      "name": "src/lucianke/mcp/render/compact.py",
+      "ref": 1315,
+      "est": 1419
      }
     },
     "py_tests": {
-     "files": 42,
-     "files_ref_ge_min": 42,
-     "ref_tokens": 184249,
-     "est_tokens": 186457,
-     "agg_err": 0.01198378281564616,
-     "mean_abs_err": 0.025661292540345607,
+     "files": 48,
+     "files_ref_ge_min": 48,
+     "ref_tokens": 206505,
+     "est_tokens": 208898,
+     "agg_err": 0.011588097140505127,
+     "mean_abs_err": 0.025910133687643725,
      "max_abs_err": 0.09420289855072461,
      "worst": {
       "name": "tests/unit/test_smoke.py",
@@ -3309,52 +3813,52 @@
     "md_ja": {
      "files": 3,
      "files_ref_ge_min": 3,
-     "ref_tokens": 188719,
-     "est_tokens": 184695,
-     "agg_err": -0.02132270730557073,
-     "mean_abs_err": 0.029094887117506556,
-     "max_abs_err": 0.04093418345521582,
+     "ref_tokens": 194390,
+     "est_tokens": 190359,
+     "agg_err": -0.020736663408611578,
+     "mean_abs_err": 0.029120984548801816,
+     "max_abs_err": 0.04105200791315611,
      "worst": {
       "name": "docs/Lucianke仕様書.md",
-      "ref": 98182,
-      "est": 94163
+      "ref": 99581,
+      "est": 95493
      }
     },
     "md_spikes": {
-     "files": 9,
-     "files_ref_ge_min": 9,
-     "ref_tokens": 34299,
-     "est_tokens": 33936,
-     "agg_err": -0.01058339893291349,
-     "mean_abs_err": 0.02146512879743112,
-     "max_abs_err": 0.05990783410138245,
+     "files": 10,
+     "files_ref_ge_min": 10,
+     "ref_tokens": 36789,
+     "est_tokens": 36517,
+     "agg_err": -0.007393514365707121,
+     "mean_abs_err": 0.024181283361390648,
+     "max_abs_err": 0.06298003072196623,
      "worst": {
       "name": "docs/spikes/S-05.md",
       "ref": 3255,
-      "est": 3060
+      "est": 3050
      }
     },
     "poly_data": {
      "files": 7,
      "files_ref_ge_min": 3,
      "ref_tokens": 1327,
-     "est_tokens": 1367,
-     "agg_err": 0.03014318010550121,
-     "mean_abs_err": 0.024227562493256638,
-     "max_abs_err": 0.046966731898238745,
+     "est_tokens": 1378,
+     "agg_err": 0.038432554634513894,
+     "mean_abs_err": 0.030966315575172043,
+     "max_abs_err": 0.05870841487279854,
      "worst": {
       "name": "tests/fixtures/poly/reports/junit.xml",
       "ref": 1022,
-      "est": 1070
+      "est": 1082
      }
     },
     "poly_code": {
      "files": 12,
      "files_ref_ge_min": 11,
      "ref_tokens": 1624,
-     "est_tokens": 1621,
-     "agg_err": -0.001847290640394128,
-     "mean_abs_err": 0.03810139613699388,
+     "est_tokens": 1619,
+     "agg_err": -0.0030788177339901024,
+     "mean_abs_err": 0.03808726703818346,
      "max_abs_err": 0.11475409836065575,
      "worst": {
       "name": "tests/fixtures/poly/legacy/calc.cob",
@@ -3366,9 +3870,9 @@
      "files": 5,
      "files_ref_ge_min": 4,
      "ref_tokens": 714,
-     "est_tokens": 715,
-     "agg_err": 0.0014005602240896309,
-     "mean_abs_err": 0.04241786752060728,
+     "est_tokens": 713,
+     "agg_err": -0.0014005602240896309,
+     "mean_abs_err": 0.04143939393939394,
      "max_abs_err": 0.10909090909090913,
      "worst": {
       "name": "tests/fixtures/poly/docs/flow.mmd",
@@ -3380,23 +3884,23 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 13336,
-     "est_tokens": 12797,
-     "agg_err": -0.04041691661667668,
-     "mean_abs_err": 0.04041691661667668,
-     "max_abs_err": 0.04041691661667668,
+     "est_tokens": 12784,
+     "agg_err": -0.041391721655668845,
+     "mean_abs_err": 0.041391721655668845,
+     "max_abs_err": 0.041391721655668845,
      "worst": {
       "name": "tests/fixtures/poly/notebooks/eda.ipynb",
       "ref": 13336,
-      "est": 12797
+      "est": 12784
      }
     },
     "spec_json_sql": {
      "files": 11,
      "files_ref_ge_min": 9,
      "ref_tokens": 3359,
-     "est_tokens": 3263,
-     "agg_err": -0.02857993450431673,
-     "mean_abs_err": 0.058502264483883466,
+     "est_tokens": 3264,
+     "agg_err": -0.02828222685323012,
+     "mean_abs_err": 0.056702061156458816,
      "max_abs_err": 0.15000000000000002,
      "worst": {
       "name": "spec#block41:sql",
@@ -3408,9 +3912,9 @@
      "files": 26,
      "files_ref_ge_min": 26,
      "ref_tokens": 4607,
-     "est_tokens": 4535,
-     "agg_err": -0.015628391578033418,
-     "mean_abs_err": 0.05430269765238245,
+     "est_tokens": 4537,
+     "agg_err": -0.015194269589754672,
+     "mean_abs_err": 0.05271419163235687,
      "max_abs_err": 0.19117647058823528,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -3422,14 +3926,14 @@
      "files": 1,
      "files_ref_ge_min": 1,
      "ref_tokens": 5559,
-     "est_tokens": 5072,
-     "agg_err": -0.08760568447562511,
-     "mean_abs_err": 0.08760568447562511,
-     "max_abs_err": 0.08760568447562511,
+     "est_tokens": 5073,
+     "agg_err": -0.08742579600647593,
+     "mean_abs_err": 0.08742579600647593,
+     "max_abs_err": 0.08742579600647593,
      "worst": {
       "name": "synthetic:base64 8000 chars",
       "ref": 5559,
-      "est": 5072
+      "est": 5073
      }
     },
     "syn_hex": {
@@ -3447,12 +3951,12 @@
      }
     },
     "ALL": {
-     "files": 180,
-     "files_ref_ge_min": 171,
-     "ref_tokens": 640722,
-     "est_tokens": 639055,
-     "agg_err": -0.0026017523980759183,
-     "mean_abs_err": 0.03287967840732522,
+     "files": 196,
+     "files_ref_ge_min": 187,
+     "ref_tokens": 700719,
+     "est_tokens": 699157,
+     "agg_err": -0.0022291389273018103,
+     "mean_abs_err": 0.03207759639413025,
      "max_abs_err": 0.19117647058823528,
      "worst": {
       "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
@@ -3465,28 +3969,28 @@
    "pass_cv": true
   }
  },
- "chosen_for_proposal": "lean_min",
+ "chosen_for_proposal": "lean_wide",
  "speed_1MB": {
   "py_src_1MB": {
-   "current_ms": 86.88,
+   "current_ms": 66.0,
    "chars": 1000000,
-   "proposal_generic_ms": 224.48,
-   "proposal_ms": 211.59,
-   "tiktoken_ms": 136.0
+   "proposal_generic_ms": 180.38,
+   "proposal_ms": 148.74,
+   "tiktoken_ms": 124.5
   },
   "md_ja_1MB": {
-   "current_ms": 96.12,
+   "current_ms": 73.38,
    "chars": 1000000,
-   "proposal_generic_ms": 273.31,
-   "proposal_ms": 245.69,
-   "tiktoken_ms": 219.0
+   "proposal_generic_ms": 212.06,
+   "proposal_ms": 203.36,
+   "tiktoken_ms": 143.0
   },
   "compact_1MB": {
-   "current_ms": 88.66,
+   "current_ms": 68.96,
    "chars": 1000000,
-   "proposal_generic_ms": 255.45,
-   "proposal_ms": 211.28,
-   "tiktoken_ms": 111.1
+   "proposal_generic_ms": 180.66,
+   "proposal_ms": 173.72,
+   "tiktoken_ms": 108.5
   }
  },
  "impl_mismatch": 0,
