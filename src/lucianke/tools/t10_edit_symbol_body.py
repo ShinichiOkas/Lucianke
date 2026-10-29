@@ -1,8 +1,8 @@
 """T-10 ``edit_symbol_body``（仕様書 §11.5 T-10、第 10 章）。シンボルを単位にコードを置換し、同じ応答で構文妥当性と診断差分を返す。
 
 範囲: ``replace_body``（Python・TypeScript・JavaScript・Rust など文法のある言語。定義ノード全体を ``new_code`` で置き換える）。
-``insert_before`` / ``insert_after`` / ``insert_member`` / ``delete_symbol`` は引数としては受け付けるが、ビルダー
-（``edit/builders.py``）が未実装の間は ``E_UNSUPPORTED``（``details.reason: "operation_not_implemented"``）を返す。
+``insert_before`` / ``insert_after`` / ``insert_member``（``edit/builders_insert.py``）も実装済み。``delete_symbol`` は引数としては受け付けるが、ビルダー
+が未実装の間は ``E_UNSUPPORTED``（``details.reason: "operation_not_implemented"``）を返す。
 Tier 2・3（セレクタ）は M2。
 
 編集そのもの（ロック・前提検証・降格インターロック・構文検証・ジャーナル・書き込み・再索引・診断差分）は
@@ -36,6 +36,7 @@ from lucianke.core.textpos import detect_indent
 from lucianke.core.urn import parse
 from lucianke.edit.builders import replace_body_builder
 from lucianke.edit.builders_delete import delete_symbol_builder
+from lucianke.edit.builders_insert import INSERT_OPERATIONS, InsertOutcome, insert_builder, relocate
 from lucianke.edit.normalize import default_indent
 from lucianke.edit.transaction import EditResult, EditTransaction, PlanBuilder, PlanContext
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
@@ -133,10 +134,15 @@ def _check_arguments(args: EditSymbolBodyArgs) -> None:
         raise _invalid("new_code must not be given for delete_symbol", param="new_code", reason="unexpected")
 
 
-def _plan_builder(args: EditSymbolBodyArgs, target: TargetRef) -> PlanBuilder:
+def _plan_builder(
+    args: EditSymbolBodyArgs, target: TargetRef, outcome: InsertOutcome | None = None
+) -> PlanBuilder:
     if args.operation == "replace_body":
         assert args.new_code is not None
         return replace_body_builder(target, args.new_code)
+    if args.operation in INSERT_OPERATIONS:
+        assert args.new_code is not None
+        return insert_builder(args.operation, target, args.new_code, position=args.position, outcome=outcome)
     if args.operation == "delete_symbol":
         return delete_symbol_builder(target)
     raise LuciankeError(
@@ -384,7 +390,9 @@ async def handler(ctx: ToolContext, args: EditSymbolBodyArgs) -> ToolOutput:
     ws = svc.workspace(args.workspace_id)
     _check_arguments(args)
     target, rel = _target_of(args)
-    builder = _plan_builder(args, target)
+    # insert_* が挿入したシンボルの URN と範囲を残す入れ物（応答の target_urn / new_range）
+    outcome = InsertOutcome()
+    builder = _plan_builder(args, target, outcome)
     expected = {rel: args.expected_file_sha256} if args.expected_file_sha256 and rel else None
     seen = _Seen()
     tx = _transaction(svc, ws)
@@ -398,7 +406,7 @@ async def handler(ctx: ToolContext, args: EditSymbolBodyArgs) -> ToolOutput:
         diagnostics_wait_ms=args.diagnostics_wait_ms,
         revision=args.revision,
     )
-    return _build_output(svc, args, result, seen, target.urn)
+    return _build_output(svc, args, relocate(result, outcome), seen, target.urn)
 
 
 SPEC = ToolSpec(
@@ -413,7 +421,7 @@ SPEC = ToolSpec(
         "(signature included); indentation, newlines and BOM are normalized to the file. Target by urn, or path + "
         "symbol_name, or path + line. Pass expected_file_sha256 (the sha= from get_file_skeleton / get_symbol_bodies) "
         "to refuse a stale write; use dry_run to preview. An edit that adds a syntax error is refused and nothing is written. "
-        "Only replace_body is implemented so far."
+        "insert_before / insert_after add a sibling next to the symbol; insert_member adds a member to the class/module given as target (position start|end)."
     ),
     writes=True,
     max_confidence=Confidence.STRUCTURAL,

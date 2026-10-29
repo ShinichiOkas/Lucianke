@@ -220,18 +220,6 @@ async def test_mixed_tabs_and_spaces_in_new_code_is_an_invalid_argument(
     assert snapshot(root) == before
 
 
-@pytest.mark.parametrize("operation", ["insert_before", "insert_after", "insert_member"])
-async def test_operations_without_a_builder_are_unsupported_and_write_nothing(
-    pipeline: Pipeline, root: Path, operation: str
-) -> None:
-    before = snapshot(root)
-    args = {"new_code": "def extra(self):\n    return 1\n"}
-    r = await edit(pipeline, target=VALIDATE, operation=operation, **args)
-    err = error_of(r)
-    assert err["code"] == "E_UNSUPPORTED" and err["details"]["reason"] == "operation_not_implemented"
-    assert snapshot(root) == before
-
-
 async def test_bare_tool_services_without_edit_services_says_so(root: Path) -> None:
     """編集の依存（``locks`` / ``writer_index`` / ``journal_dir``）も ``edit_transaction`` も持たない素の ``ToolServices`` → ``edit_services_missing``。"""
     base = build_services(lambda: [str(root)])
