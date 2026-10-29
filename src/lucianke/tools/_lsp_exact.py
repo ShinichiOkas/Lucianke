@@ -51,7 +51,7 @@ from lucianke.core.model import (
     Tier,
 )
 from lucianke.core.urn import Urn
-from lucianke.engine.selector import on_lsp_timeout, select, starts_lsp
+from lucianke.engine.selector import is_lsp_degradation, on_lsp_failure, select, starts_lsp
 from lucianke.index import queries
 from lucianke.index.ingest import RelationFact, upsert_exact_relations
 from lucianke.lsp import features
@@ -90,17 +90,45 @@ __all__ = [
     "write_facts",
 ]
 
-LSP_FAILURES = (TimeoutError, LuciankeError, ConnectionError)
-"""LSP の機能呼び出しが ``exact`` を返せなかったときの例外の型。ツールは握って ``is_lsp_failure`` で確かめ、``structural`` に降格する。"""
+LSP_FAILURES = (TimeoutError, LuciankeError)
+"""LSP の機能呼び出しが ``exact`` を返せなかったときの例外の型。ツールは握って ``is_lsp_failure`` で確かめ、``structural`` に降格する。
+切断（``ConnectionError``）は ``lsp.features`` が ``E_LSP_UNAVAILABLE`` / ``disconnected`` にして上げるので、ここには出てこない。
+位置が範囲外の ``E_INVALID_ARGUMENT``（索引がディスクより古い）は ``LuciankeError`` として握り、``is_lsp_failure`` が降格と認める。"""
 
 
 def is_lsp_failure(exc: BaseException) -> bool:
-    """降格すべき失敗か。時間切れ・切断・``E_LSP_UNAVAILABLE``・位置が範囲外（索引がディスクより古い）。それ以外は呼び手の誤り。"""
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        return True
-    if isinstance(exc, LuciankeError):
-        return exc.code is ErrorCode.E_LSP_UNAVAILABLE or exc.details.get("param") == "position"
-    return False
+    """降格すべき失敗か。``engine.selector.is_lsp_degradation`` に従う（降格の規則はセレクターの 1 か所）。
+
+    時間切れ、``E_LSP_UNAVAILABLE`` の ``indexing`` / ``standby`` / ``unavailable`` / ``disconnected`` / ``position_clamped`` /
+    ``lsp_error``。索引の位置がディスクの範囲外（``E_INVALID_ARGUMENT`` / ``param=position``）は ``position_clamped`` と同じ扱い。
+    それ以外は呼び手の誤りで、握らずに上げる。
+    """
+    return is_lsp_degradation(_normalized(exc))
+
+
+def _is_stale_position(exc: BaseException) -> bool:
+    """索引の位置がディスクのファイルの範囲を越えている（索引がディスクより古い）。``lsp.features`` が ``E_INVALID_ARGUMENT`` で上げる。"""
+    return (
+        isinstance(exc, LuciankeError)
+        and exc.code is ErrorCode.E_INVALID_ARGUMENT
+        and exc.details.get("param") == "position"
+    )
+
+
+def _normalized(exc: BaseException) -> BaseException:
+    """位置が範囲外の誤りは、位置を LSP に送れなかった降格（``position_clamped``）として扱う。索引が古いだけで、利用者の誤りではない。"""
+    if _is_stale_position(exc):
+        return LuciankeError(
+            ErrorCode.E_LSP_UNAVAILABLE,
+            "the indexed position is outside the file on disk",
+            details={"reason": "position_clamped"},
+        )
+    return exc
+
+
+def _down_reason(lsp_status: str) -> str:
+    """LSP に聞けない経路の ``E_LSP_UNAVAILABLE`` の ``details.reason``（``selector.is_lsp_degradation`` が降格と認める語彙）。"""
+    return lsp_status if lsp_status in ("indexing", "standby", "unavailable") else "unavailable"
 
 
 # --- ctx.services の duck typing ---------------------------------------------------------------
@@ -182,23 +210,12 @@ def lsp_status_of(services: Any, ws: Workspace, file: FileInfo | None) -> str:
 
 
 def degraded_choice(route: LspRoute, exc: BaseException) -> EngineChoice:
-    """LSP の呼び出しが ``exact`` を返せなかったときの ``structural`` の選択（その要求に限る。LSP は ready のまま）。"""
-    if isinstance(exc, TimeoutError):
-        return on_lsp_timeout(route.choice, route.capability)
-    reason = exc.details.get("reason") if isinstance(exc, LuciankeError) else None
-    status = LspStatus.INDEXING if reason in ("indexing", "standby") else LspStatus.UNAVAILABLE
-    lower = select(
-        route.file,
-        route.capability,
-        lsp_status=status,
-        lsp_progress=None,
-        has_grammar=True,
-        has_ctags=False,
-    )
-    if reason in ("indexing", "standby"):
-        return lower
-    keep = route.choice.lsp_status if reason in ("position_clamped", "lsp_error") else lower.lsp_status
-    return replace(lower, lsp_status=keep)
+    """LSP の呼び出しが ``exact`` を返せなかったときの ``structural`` の選択（その要求に限る）。``selector.on_lsp_failure`` に任せる。
+
+    ``indexing``（LSP が 0 件と答えたが索引に参照がある、を含む）は ``lsp_status=indexing`` と ``lsp_indexing`` の警告、時間切れは
+    ``ready`` のまま ``lsp_timeout``、``standby`` / ``unavailable`` / ``disconnected`` は ``unavailable``。
+    """
+    return on_lsp_failure(route.choice, route.capability, _normalized(exc))
 
 
 # --- 参照元になりうるファイルを LSP に開かせる（BUG-0047） ------------------------------------------
@@ -610,7 +627,7 @@ class CallEdgeSource:
             raise LuciankeError(
                 ErrorCode.E_LSP_UNAVAILABLE,
                 "the LSP is not ready and the index has no fresh exact calls for this node",
-                details={"reason": self.route.choice.lsp_status},
+                details={"reason": _down_reason(self.route.choice.lsp_status)},
             )
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
