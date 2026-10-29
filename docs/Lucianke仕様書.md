@@ -321,6 +321,8 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `<cache_root>/<workspace_hash>/journal/` | 編集トランザクションの書き込み前スナップショット（§10.6） | 直近 N 件（既定 50） |
 | `<cache_root>/logs/` | ローテーション付きログ | 既定 7 日 |
 
+`<workspace_hash>` は実体パス（`normcase` 後）の `sha1` の先頭 16 桁。`reindex` と移行できない古いスキーマ版の作り直しは、DB ファイルを削除せず、書き込み接続の中で全オブジェクトを `DROP` して流し直す（Windows では開いている DB ファイルを削除できないため。`edit_seq` は引き継ぐ。実装で確定 2026-10-29）。
+
 `<cache_root>` の既定は OS の慣例に従う（Linux: `~/.cache/lucianke`、macOS: `~/Library/Caches/lucianke`、Windows: `%LOCALAPPDATA%\lucianke\cache`）。環境変数 `LUCIANKE_CACHE_DIR` で上書きできる。**リポジトリ内には何も書かない**（MUST）。
 
 ## 4.6 実装言語の中立性と候補スタック
@@ -760,18 +762,20 @@ lex-sel      = "lex:" , ident , "@L" , DIGIT , { DIGIT } ;                      
 | シンボル検索（T-03） | ○ | ○ | ○（キー・タグ名） | △（ctags 名・字句一致） |
 | 定義解決（T-04） | ○ | △ | △（セレクタの存在確認と型推論） | △（定義パターンの推定） |
 | 本体取得（T-05） | ○ | ○ | ○（セレクタ） | △（±15 行の窓） |
-| 参照・実装（T-06） | ○ | △ | △（キー参照の字句一致） | △（単語境界一致） |
-| 呼び出し階層（T-07） | ○ | △（SQL・IDL は結合関係のみ） | × | × |
-| 診断（T-08） | ○ | △（構文エラー） | △（構文・スキーマ違反） | × |
+| 参照・実装（T-06） | ○ | △ | △（キー参照の字句一致） | △（単語境界一致。実装の検索は `unavailable`） |
+| 呼び出し階層（T-07） | ○ | △（SQL・IDL は結合関係のみ） | × | △（`name(` の grep 1 段。`lexical_fallback`） |
+| 診断（T-08） | ○ | △（構文エラー） | △（構文・スキーマ違反） | △（診断源が無く 0 件を返す。エラーにしない） |
 | 変更影響（T-09） | ○ | △ | △（共変更結合のみ） | △（共変更結合のみ） |
 | シンボル編集（T-10） | ○ | ○（`.ipynb` はセル内、Cython は関数） | △（セレクタ範囲の置換。M2） | △（インターロック下で dry_run 既定） |
-| リネーム（T-11） | ○ | △（LSP があるものだけ） | × | × |
+| リネーム（T-11） | ○ | △（LSP があるものだけ） | × | △（字句置換。降格インターロック下） |
 | 構文パターン（T-12） | ○ | △（Tree-sitter 文法があるもの） | △（JSON/YAML/TOML） | × |
 | Code Action（T-13） | ○ | △ | × | × |
 | 経路（T-14） | ○ | △ | × | × |
 | 契約抽出・検証（T-15, T-16） | ○ | △（OpenAPI / Gherkin は抽出のみ） | △（JSON Schema は抽出のみ） | × |
 | 履歴・差分（T-17, T-18） | ○ | ○ | ○（ファイル単位） | ○（ファイル単位） |
 | DB クエリ（T-19, T-20） | ○ | ○ | ○ | ○ |
+
+表の Tier 4 の列（T-06 の実装検索、T-07、T-08、T-11）は、設計書 §7.8.2 の判定表（文法なしの列）に揃えた（実装で確定 2026-10-29。実装は §7.8.2 を正にしている）。Tier 3 は LSP の状態によらず常に `structural` で、ヘッダの `lsp` は `n/a`。
 
 ## 8.3 精度水準の定義
 
@@ -1433,7 +1437,7 @@ json の `data`:
 [Tag] testsuite @L2-5120
   type: attrs=[name,tests,failures,time]
   [Tag] testcase ×412 @L3-5118
-    [Tag] failure ×3
+    [Tag] failure ×3 @L61-4977
 === pyproject.toml (61 lines, skeleton: 5 lines, sha=0a1b2c3d4e5f) ===
 [Key] project @L1-20
   [Key] dependencies ×14 @L8-20
@@ -1441,8 +1445,8 @@ json の `data`:
 [Key] tool.ruff @L30-45
 === docs/flow.mmd (88 lines, skeleton: 3 lines, sha=6c7d8e9f0a1b) ===
 [Section] flowchart TD @L1-88
-  [Node] ×23
-  [Edge] ×41
+  [Node] ×23 @L2-80
+  [Edge] ×41 @L3-86
 ```
 
 ```
@@ -1658,7 +1662,7 @@ json の `data`:
 
 ```
 # get_symbol_bodies ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~520/3000tok
-[Method] src/services/payment.py#PaymentProcessor._validate_limit @L116-140 (25 lines)
+[Method] src/services/payment.py#PaymentProcessor._validate_limit @L116-140
   sha: 3f9c1a2b4c5d
 ```python
 @L116:     # 通貨ごとの上限を確認する
@@ -2100,7 +2104,7 @@ target: lk://app/src/services/payment.py#PaymentProcessor._validate_limit @L117-
 files_changed: src/services/payment.py (+4 -2)  sha256 3f9c…→a71e…
 syntax_check: ok
 new_diagnostics: complete (+0 -1) checked=2 files
-  resolved:
+resolved:
 W src/services/payment.py:120:9 [pyright:reportUnusedVariable] 変数 "tmp" は使われていません
 ```
 
@@ -2341,7 +2345,7 @@ applied: true  edit_id=ed_0009  action=qf_7a1c kind=quickfix "Add import 'Decima
 files_changed: src/services/payment.py (+1 -0)
 syntax_check: ok
 new_diagnostics: complete (+0 -1) checked=1 files  target_resolved=true
-  resolved:
+resolved:
 E src/services/payment.py:58:16 [pyright:reportUndefinedVariable] "Decimal" が定義されていません
 ```
 
@@ -2423,7 +2427,7 @@ compact の例:
 # find_code_paths ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~640/2500tok
 source: lk://app/src/api/routes.py#create_order  var=payload
 sink: lk://app/src/db/repo.py#OrderRepository.execute_raw  var=sql
-flow=data hops<=8 filter=!sanitize_sql  paths: 2
+query: flow=data hops<=8 filter=!sanitize_sql  paths: 2
 path 1 (3 hops)
   1. create_order @src/api/routes.py:84  var=payload
   2. build_query @src/services/order.py:40  var=req.note  when: req.note is not None

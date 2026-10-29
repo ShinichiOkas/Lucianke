@@ -218,7 +218,7 @@ lucianke（ホストが起動する 1 プロセス。寿命はホストのセッ
 ### ADR-12 子プロセスはシェルを介さず、台帳で一元管理する
 
 - 文脈: 仕様書 §12.5、§13.3。
-- 決定: すべての子プロセスは `ProcessRegistry` 経由で起動し（argv 配列、最小の環境変数、作業ディレクトリ = ルート）、終了手順はこの台帳を舐める。Windows では新しいプロセスグループで起動したうえで **Job Object**（`KILL_ON_JOB_CLOSE`）に入れ、子孫（`npx` や `.cmd` の中継、venv のランチャーが挟む孫）までジョブごと落とす。Lucianke が異常終了してジョブのハンドルが閉じたときも OS が全部落とす。穏やかな終了の合図は `CTRL_BREAK`、そのあと `terminate` → `kill` の順。ジョブに入れられなかった場合（権限など）はリーダーだけを `kill` する縮退になる。POSIX は `start_new_session=True` で起動し、`killpg` で落とす。台帳は `core/procs.py` に置く（core 構築で実装）。
+- 決定: すべての子プロセスは `ProcessRegistry` 経由で起動し（argv 配列、最小の環境変数、作業ディレクトリ = ルート）、終了手順はこの台帳を舐める。Windows では新しいプロセスグループで起動したうえで **Job Object**（`KILL_ON_JOB_CLOSE`）に入れ、子孫（`npx` や `.cmd` の中継、venv のランチャーが挟む孫）までジョブごと落とす。Lucianke が異常終了してジョブのハンドルが閉じたときも OS が全部落とす。穏やかな終了の合図として `CTRL_BREAK_EVENT` を送ってもよいが、**GUI ホスト配下（コンソールを持たない親）では届かない**ので当てにしない。LSP には `terminate` の前に LSP の `shutdown` → `exit` を送る（§6.5、§7.5.2）。順序は（LSP なら `shutdown` → `exit`）→ `terminate` → `kill`（実装で確定 2026-10-29）。ジョブに入れられなかった場合（権限など）はリーダーだけを `kill` する縮退になる。POSIX は `start_new_session=True` で起動し、`killpg` で落とす。台帳は `core/procs.py` に置く（core 構築で実装）。
 - 帰結: NFR-OPS-2 の検査は台帳が空であることの確認になる。台帳（`ProcessRegistry`）はスレッド安全ではなく、イベントループのスレッドからだけ使う。
 
 ### ADR-13 Tree-sitter の解析は期限つき `read_callback`、構文木はバイト列と組で LRU キャッシュ
@@ -278,14 +278,17 @@ Lucianke/
 │  │  ├─ procs.py            #   ProcessRegistry（ADR-12）: 子プロセスの起動・台帳・終了、Windows の Job Object、minimal_env
 │  │  ├─ records.py          #   Record, RecordGroup, Summary（ADR-4）
 │  │  ├─ textpos.py          #   LineIndex（ADR-14）、改行・BOM・インデントの検出
+│  │  ├─ hashing.py          #   sha256 / sha1 のヘルパ。workspace_hash は sha1 の先頭 16 桁
+│  │  ├─ tokens.py           #   TokenEstimator（§7.2.1）。mcp/budget.py が再公開する（syntax が mcp を import できないため core に置く）
+│  │  ├─ compact_lines.py    #   Compact DSL の行種ごとの組み立て関数（§7.2.4）。同じ理由で core に置く
 │  │  └─ limits.py            #   時間・件数の上限定数（§6.4）。仕様書 §12 の値をここにだけ置く
 │  │
 │  ├─ mcp/                   # MCP との境界
 │  │  ├─ server.py           #   SDK の低水準サーバーを組み立て、tools/list・tools/call・roots を接続
-│  │  ├─ registry.py         #   ToolSpec（名前・pydantic 入力・既定 max_tokens・graph 可否・writes・最高水準・M）
+│  │  ├─ registry.py         #   ToolSpec・CommonArgs・ToolContext の再公開と tools/list の組み立て。定義は tools/_base.py（tools は mcp を import しないため）
 │  │  ├─ pipeline.py         #   検証 → 文脈解決 → ハンドラ → パッカー → レンダラ → エンベロープ
 │  │  ├─ envelope.py         #   ResponseEnvelope / ResolutionMeta の組み立て（json・compact のヘッダ）
-│  │  ├─ budget.py           #   TokenEstimator、Packer、CursorCodec
+│  │  ├─ budget.py           #   Packer、CursorCodec（TokenEstimator は core/tokens.py の再公開）
 │  │  └─ render/             #   compact.py（§6.1 の文法）、json_out.py、graph.py（dot / mermaid）
 │  │
 │  ├─ workspace/
@@ -352,7 +355,7 @@ Lucianke/
 │  │  └─ solver.py            #   M3: SMT ソルバ呼び出し（タイムアウト付き）
 │  │
 │  ├─ tools/                 # 21 ツール。1 ファイル 1 ツール。薄い: 引数モデル + レコード生成
-│  │  ├─ _base.py            #   ToolContext、共通ヘルパ（TargetRef 解決の呼び出し、ファイル列挙）
+│  │  ├─ _base.py            #   ToolSpec、CommonArgs、ToolContext（mcp/registry.py が再公開）、共通ヘルパ（TargetRef 解決の呼び出し、ファイル列挙）
 │  │  ├─ t00_configure_workspace.py … t20_query_project_db.py
 │  │  └─ __init__.py         #   レジストリへの登録
 │  │
@@ -379,7 +382,7 @@ app / lifecycle ─► すべて（合成ルート）
 ```
 
 - `core` は他のどのパッケージも import しない（MUST）。
-- `tools` は `mcp` を import しない（ツールは MCP を知らない）。`mcp.render` も知らない。
+- `tools` は `mcp` を import しない（ツールは MCP を知らない）。`mcp.render` も知らない。このため `ToolSpec`・`CommonArgs`・`ToolContext` は `tools/_base.py` に置き、`mcp/registry.py` が再公開する。同じ理由（`syntax` が `mcp` を import できない）で、Compact の行組み立て（`core/compact_lines.py`）とトークン推定（`core/tokens.py`）は `core` に置く（実装で確定 2026-10-29）。
 - サービス同士の依存は次の向きに限る: `edit → syntax, index, lsp, workspace`、`lsp → index, workspace`、`syntax → workspace`、`engine → lsp, syntax, workspace`、`git → workspace`、`index → (なし。core のみ)`。逆向きが必要になったらイベント（コールバック登録）で解く。
 - 依存方向の検査は `tests/unit/test_import_graph.py` で機械的に行う（import 文の静的走査）。
 
@@ -389,7 +392,7 @@ app / lifecycle ─► すべて（合成ルート）
 |---|---|---|
 | `mcp/pipeline.py` | 全ツール共通の前後処理。`LuciankeError` の捕捉とエンベロープ化。`timing_ms` | ツール固有の判断 |
 | `mcp/registry.py` | `ToolSpec` の表。`tools/list` の JSON Schema 生成（pydantic の `model_json_schema` に共通パラメータを合成） | 実行 |
-| `mcp/budget.py` | トークン推定、予算内詰め込み、要約、カーソル | レコードの内容 |
+| `mcp/budget.py` | 予算内詰め込み、要約、カーソル（トークン推定は `core/tokens.py` の再公開） | レコードの内容 |
 | `mcp/render/compact.py` | `Record.lines` を §6.1 の文法で連結し、ヘッダ・警告・トレーラを付ける | 行の中身の生成（ツールと syntax が作る） |
 | `workspace/paths.py` | 相対化・正規化・実体解決・ルート配下検査。失敗は `E_INVALID_ARGUMENT` | ファイルの読み書き |
 | `syntax/symbols.py` | 構文木 → `SymbolRecord`。修飾名・種別・範囲・選択範囲・修飾子・doc 要約・`body_sha256` | DB 書き込み |
@@ -514,10 +517,11 @@ class LuciankeError(Exception):
 | 接続 | 開き方 | 使い手 | 備考 |
 |---|---|---|---|
 | 書き込み | 通常。`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000` | `IndexWriter` のみ | 起動時にスキーマ版を確認・移行 |
-| 読み取りプール | 同じファイルを通常モードで開くが、アプリ側で書き込み文を発行しない。`busy_timeout=1000` | ツール、`EngineSelector`、`EditTransaction` の読み | プールから借りて返す。スレッド境界を越えて保持しない |
+| 読み取りプール | 同じファイルを `mode=ro` の URI で開き、`PRAGMA query_only=ON` を設定する（読み取り側が誤って書けない構造にする。実装で確定 2026-10-29。旧版は「通常モードで開き、アプリ側で書き込み文を発行しない」）。`busy_timeout=1000` | ツール、`EngineSelector`、`EditTransaction` の読み | プールから借りて返す。スレッド境界を越えて保持しない |
 | 公開クエリ | `file:...?mode=ro` の URI、`PRAGMA query_only=ON`、`set_authorizer`、`set_progress_handler`、行数上限 | `query_project_db` | 失敗が他接続に波及しないよう独立。1 要求 1 接続で足りる（`open_public` + 1 クエリ + `close` が p50 1.3 ms、書き手が連続コミット中でも p95 約 10 ms。S-7 で確認）。`isolation_level=None`（自動コミット）で開き、読み取りトランザクションを持ち越さない（`wal_checkpoint(TRUNCATE)` を妨げる） |
 
 - WAL のチェックポイントは `IndexWriter` が暇なときと終了時に行う。
+- **作り直し**（`reindex`、移行できない古い `schema_version`）は DB ファイルを削除せず、書き込み接続の中で全オブジェクトを `DROP` して流し直す（§7.6.5。Windows では読み取り接続が開いている DB ファイルを消せない。実装で確定 2026-10-29）。
 - `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（LSP 由来の `relations` 更新を含む）。`diagnostics` だけの更新では進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
 - 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + `sha256`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。
 
@@ -565,7 +569,7 @@ Lucianke はホストが起動する子プロセスであり、寿命はホス�
 
 ## 7.1 MCP アダプタとツールパイプライン
 
-### 7.1.1 `ToolSpec`（`mcp/registry.py`）
+### 7.1.1 `ToolSpec`（`tools/_base.py`。`mcp/registry.py` が再公開）
 
 ```python
 @dataclass(frozen=True)
@@ -664,7 +668,7 @@ pack(out, budget, offset):
 | dot / mermaid | `out.data_static["edges"]` と `records` のうち `kind in {"tree", "path", "ref", "row"}` | 文字列。ヘッダはコメント |
 
 - `ToolOutput.head_kv` は常に予算内に含める（短い kv 行だけを置く）。編集ツールの `diff` のように長くなりうるものは `Record(kind="code")` として渡し、パッカーの切り詰め対象にする。
-- compact の各行種（`symbol-block`, `ref-line`, `diag-line`, `tree-line` …）を組み立てる関数は `mcp/render/compact.py` に **行種ごとに 1 つ** 置き、ツールと `syntax` はそれを呼んで `Record.lines` を作る。文法（仕様書 §6.1）に適合するかは、この関数群の単体テストで EBNF 由来のパーサに通して検査する（§10.2）。
+- compact の各行種（`symbol-block`, `ref-line`, `diag-line`, `tree-line` …）を組み立てる関数は `core/compact_lines.py`（`mcp/render/compact.py` は連結とヘッダ・トレーラだけ）に **行種ごとに 1 つ** 置き、ツールと `syntax` はそれを呼んで `Record.lines` を作る。文法（仕様書 §6.1）に適合するかは、この関数群の単体テストで EBNF 由来のパーサに通して検査する（§10.2）。
 
 ---
 ## 7.3 Workspace Context（workspace/）
@@ -678,7 +682,7 @@ pack(out, budget, offset):
 class Workspace:
     workspace_id: str            # 仕様書 §7.2 の文字集合 [A-Za-z0-9._-]+
     root: Path                   # realpath 済みの絶対パス
-    workspace_hash: str          # sha1(normcase(root))[:12]。<cache_root>/<workspace_hash>/ に使う
+    workspace_hash: str          # sha1(normcase(root)) の先頭 16 桁（core/hashing.py。実装で確定 2026-10-29）。<cache_root>/<workspace_hash>/ に使う
     sub_projects: tuple[SubProject, ...]   # (相対パス, マーカー名)
     python_env: PythonEnv | None
     exclude_globs: tuple[str, ...]
@@ -713,7 +717,7 @@ class WorkspaceContext:
 
 ```python
 def confine(ws: Workspace, user_path: str, *, for_write: bool = False) -> RelPath:
-    # 1. NUL・制御文字を拒否
+    # 1. NUL・制御文字を拒否。Windows では下記の拒否対象も（reason: invalid_chars）
     # 2. 区切りを '/' に統一。絶対パスならそのまま、相対なら ws.root と結合
     # 3. os.path.realpath でシンボリックリンクと '..' を解決
     # 4. normcase（Windows / macOS の既定は大文字小文字を区別しない）した上で、
@@ -722,7 +726,10 @@ def confine(ws: Workspace, user_path: str, *, for_write: bool = False) -> RelPat
     # 6. ws.root からの相対パス（POSIX 区切り）を返す
 ```
 
-失敗はすべて `E_INVALID_ARGUMENT`（`details.param` に引数名、`details.reason` に `outside_root` / `symlink_escape` / `git_dir` / `excluded`）。LSP から返る `file://` URI も受信時に `confine` を通し、ルート外なら外部シンボル（`lk://_ext/...`、§7.4.3）として扱う。
+失敗はすべて `E_INVALID_ARGUMENT`（`details.param` に引数名、`details.reason` に `outside_root` / `symlink_escape` / `git_dir` / `excluded` / `secret_file` / `invalid_chars`。後ろの 2 つは実装で確定 2026-10-29）。
+
+- **Windows で拒否するもの**（`invalid_chars`）: NTFS の代替データストリーム（`a.py:s`）、予約名（`CON`・`NUL`・`COM1` など。拡張子が付いていても）、末尾のドットと空白（Win32 が黙って削る名前）、ドライブ相対（`C:foo`）、UNC（`\\server\share`）。ドライブ付きの絶対パスはルート配下であれば通る。
+- **`is_excluded(ws, rel)`** は `exclude_globs` を gitignore 風に評価する: `*` は `/` を越えず、`**` は `/` を越える。`/` を含まない名前（`node_modules`、`*.min.js`）は任意の階層の名前に一致し、末尾が `/` のものはディレクトリにだけ一致する。一致するディレクトリの配下も除外される。大文字小文字を区別しないファイルシステムでは区別しない（実装で確定 2026-10-29）。LSP から返る `file://` URI も受信時に `confine` を通し、ルート外なら外部シンボル（`lk://_ext/...`、§7.4.3）として扱う。
 
 受入で確かめる点:
 
@@ -736,7 +743,7 @@ def detect(rel: RelPath, head: bytes) -> Detected:   # Detected(language_id, tie
 ```
 
 1. 先頭 8 KB に NUL があれば `language_id="binary"`, `tier=4`, `index_content=False`。
-2. 拡張子 → `syntax/support.py` の登録表（`LanguageSupport.extensions` と `FormatAdapter.extensions`）。
+2. 拡張子 → `workspace/languages.py` の拡張子表（`syntax/support.py` の登録表 〔`LanguageSupport.extensions` と `FormatAdapter.extensions`〕 と同じ内容。`workspace` は `syntax` を import しない〔§4.2〕ので、表はここが持つ。実装で確定 2026-10-29）。
 3. 拡張子で決まらなければシバン（`#!…python`, `node`, `sh`）、モードライン（`-*- mode: … -*-`, `vim: ft=`）。
 4. `.gitattributes` の `linguist-language` を読んでもよい（MAY）。
 5. いずれでも決まらなければ `unknown`、`tier=4`。
@@ -1110,7 +1117,7 @@ class WriteJob:
 
 class IndexWriter:
     def submit(self, job: WriteJob) -> concurrent.futures.Future
-    async def submit_async(self, job: WriteJob) -> Any     # 満杯（WRITE_QUEUE_MAX=10000）なら待つ
+    async def submit_async(self, job: WriteJob) -> Any     # 満杯（WRITE_QUEUE_MAX=1000。実装で確定 2026-10-29）なら待つ
 ```
 
 1. 専用スレッドがキューから取り、`BEGIN IMMEDIATE` → `fn(conn)` → `bumps_version` なら `UPDATE _meta SET data_version = data_version + 1` → `COMMIT`。例外は `ROLLBACK` し、`label` 付きでログ、`Future` に例外を載せる。半更新の状態は読み手に見えない（MUST）。
@@ -1207,7 +1214,7 @@ FTS5 の内部読み取りと利用者の `SELECT * FROM symbols_fts_data` は a
 
 ### 7.6.5 スキーマ版管理と起動時の差分索引
 
-- `_meta(schema_version INTEGER, data_version INTEGER, edit_seq INTEGER, lucianke_version TEXT, created_at TEXT)`。`schema.sql` の先頭コメントに `schema_version` を書き、`migrate.py` が前方向の移行を順に適用する。移行が用意されていない古い版は DB を作り直す（PaaD はキャッシュであり、再索引で復元できる。MUST）。
+- `_meta(schema_version INTEGER, data_version INTEGER, edit_seq INTEGER, lucianke_version TEXT, created_at TEXT)`。`schema.sql` の先頭コメントに `schema_version` を書き、`migrate.py` が前方向の移行を順に適用する。移行が用意されていない古い版は DB を作り直す（PaaD はキャッシュであり、再索引で復元できる。MUST）。**作り直しは DB ファイルの削除ではなく、書き込み接続の中で全オブジェクト（テーブル・ビュー・トリガ・仮想テーブル・索引）を `DROP` して `schema.sql` を流し直す**（Windows では読み取り接続が開いている DB ファイルを削除・改名できないため）。`_meta.edit_seq` は作り直しをまたいで引き継ぐ（`edit_id` を再利用しない。実装で確定 2026-10-29）。
 - `schema.sql` と仕様書 §9.2 の DDL の差分はテスト（`tests/unit/test_schema_matches_spec.py`）で検出する。追加したトリガと `_` 内部テーブルは許容リストに書く。
 - 起動時の差分索引: `.gitignore` と `exclude_globs` を尊重してファイルを列挙 → `files` の `(path, byte_size, mtime)` と比べ、変わったものだけ `sha256` → 違えば `ingest_file`、無くなったものは `remove_file`、新しいものは `ingest_file`。背景ジョブとして進捗を T-00 の `jobs[]` に出し、索引中もツールは答える（`warnings` に「index in progress N%」）。`files.indexed_at` は取り込み時刻。
 
@@ -1311,11 +1318,11 @@ class Plan:
 規約:
 
 - 同一ファイル内の hunk は **後ろから** 適用する（`range.start` の降順）。先に適用した hunk が前方の座標を動かさないため、すべての hunk を適用前座標のまま書ける。
-- hunk の範囲が重なっていれば計画は不正。`E_UNSUPPORTED`（`details.reason: "overlapping_edits"`）とし、ログに計画を残す。
+- hunk の範囲が重なっていれば計画は不正。`E_INVALID_ARGUMENT`（`details.reason: "overlapping_edits"`）とし、ログに計画を残す（実装で確定 2026-10-29。旧版は `E_UNSUPPORTED` と書いていた。重なりは LSP またはツールが作った計画の誤りで、機能が無いのではないため）。
 - 位置の変換は `LineIndex`（`core/textpos.py`）だけが行う。LSP の位置（UTF-16 または交渉した UTF-8 単位）→ コードポイント（`LineIndex.from_lsp`）、コードポイント → バイトオフセット（`LineIndex.to_byte`。Tree-sitter 用）。
 - `WorkspaceEdit` → `Plan` の変換（`plan.from_workspace_edit`）:
   1. `documentChanges` があればそれを、無ければ `changes` を使う。
-  2. `TextDocumentEdit` の URI を `workspace/paths.py` でルート相対に直す。ルート外なら `E_UNSUPPORTED`（`details.reason: "edit_outside_workspace"`）。
+  2. `TextDocumentEdit` の URI を `workspace/paths.py` でルート相対に直す。ルート外なら `E_INVALID_ARGUMENT`（`details.reason: "edit_outside_workspace"`。実装で確定 2026-10-29。旧版は `E_UNSUPPORTED`）。同じ文書への `TextDocumentEdit` が 2 つ以上あるときは `E_UNSUPPORTED`（`details.reason: "repeated_document_edit"`。1 文書の編集は 1 つの `TextDocumentEdit` にまとまっている前提で、分割された列の順序保証を M1 では持たない）。
   3. `textDocument.version` が付いていて `lsp/documents.py` の現在版と違えば `E_PRECONDITION_FAILED`（`details.reason: "lsp_document_version_mismatch"`）。
   4. `RenameFile` は `renames` に、`CreateFile` / `DeleteFile` は `E_UNSUPPORTED`。
   5. `TextEdit` の `range` を `LineIndex.from_lsp` で変換し `Hunk` にする。`newText` は正規化しない（LSP が返した本文をそのまま使う。改行だけ `"\n"` に揃える）。
@@ -1343,8 +1350,9 @@ class Plan:
 2. BOM を外したテキストに hunk を後ろから適用し、適用後のテキストと **適用後座標での編集範囲** を得る（`LineIndex.shift` で前方の hunk による行ずれを加算）。
 3. `syntax/parsers.py` のプールから Parser を借り、**`TreeCache` を経由せず** 一時解析する。得られた構文木と新しいバイト列は `SyntaxCheckResult` に抱え、Written 成功後に Reindexed が新しいキー `(ws, path, sha_after)` で `TreeCache` に登録する（二重解析を避ける）。
 4. エラーノードの集合を取る: 走査して `is_error` または `is_missing` のノードを `(start_line, end_line, kind, node_type)` で集める。編集前の集合は `TreeCache` にある元の木から同じ方法で取る。
-5. 判定: `had_errors_before == False` ならファイル全体で新集合が空であること。そうでなければ、編集範囲（適用後座標）の前後 1 行を含む区間に、編集前の集合に無いエラーノードが無いこと。Python は構文が壊れると位置の粗い 1 個の大きな ERROR になるので、位置による判定は参考にとどめ、ERROR / MISSING の**個数の前後比較**を主な判定にする（S-2 で確認）。
-6. 違反は `E_SYNTAX_INVALID`。`details.errors[]` は `{path, line, col, kind: "ERROR" | "MISSING", node_type, snippet}` を最大 10 件（`snippet` は該当行 200 文字）。`operation == "replace_body"` で `new_code` の先頭行が定義の開始語（`def` / `class` / `async def` / `function` / `fn` / `pub fn` / `impl` / `struct` / `enum` / `interface` / `type` / `export`）で始まらないときは `details.hint` に「`replace_body` はシグネチャを含む定義全体を渡す」を入れる。
+5. 判定: `had_errors_before == False` ならファイル全体で新集合が空であること。そうでなければ、**編集範囲（適用後座標。前後 1 行を含む窓）の中のエラーノードの個数**が編集前の同じ窓の個数を超えないこと。エラーノードの比較は位置の一致ではなく窓の中の個数で行う（Python は構文が壊れると位置の粗い 1 個の大きな ERROR になり、位置では比べられない。S-2 で確認。実装で確定 2026-10-29）。**既知の盲点**: 窓の中の既存の壊れを直しつつ、同じ窓の中に別の壊れを 1 つ足すと、個数が変わらず見逃す（`had_errors_before == False` の場合はファイル全体で検査するのでこの盲点は無い）。
+   - 解析が期限（`parse` の期限。ADR-13）を超えたときは、検証できなかったものとして結果を `failed` にする（構文が正しいとは見なさず、書き込みへ進まない。実装で確定 2026-10-29）。
+6. 違反は `E_SYNTAX_INVALID`。`details.errors[]` は `{line, message}` を最大 10 件（`line` は適用後の 1 始まりの行、`message` は種別・ノード型・該当行の抜粋を 1 文にしたもの。実装で確定 2026-10-29。旧版は `{path, line, col, kind, node_type, snippet}` の 6 項目だった）。`operation == "replace_body"` で `new_code` の先頭行が定義の開始語（`def` / `class` / `async def` / `function` / `fn` / `pub fn` / `impl` / `struct` / `enum` / `interface` / `type` / `export`）で始まらないときは `details.hint` に「`replace_body` はシグネチャを含む定義全体を渡す」を入れる。
 7. 恒等判定: 適用後のバイト列（改行・BOM を戻した形）が元と同一なら `identical: true`。
 
 ### 7.7.5 原子的書き込みとジャーナル（writer.py）
@@ -1455,7 +1463,9 @@ class EngineSelector:
 | SYMBOL_EDIT | `tree-sitter` / exact（診断差分に LSP が効く） | `tree-sitter` / structural | `tree-sitter` / structural | `ctags+block` / heuristic → grep / lexical（インターロック下） |
 
 - `indexing` の列では `EngineChoice.lsp_status = "indexing"`、`lsp_progress` に進捗を入れる。`starting` も `"indexing"` と表示し進捗は `null`。
-- Tier 2 のアダプタ（`.ipynb`、SQL、IDL）は「文法あり」として扱い、LSP の列は当該言語の LSP（`.ipynb` は Python）に従う。Tier 3 のアダプタは常に `structural`。
+- Tier 2 のアダプタ（`.ipynb`、SQL、IDL）は「文法あり」として扱い、LSP の列は当該言語の LSP（`.ipynb` は Python）に従う。Tier 3 のアダプタは **LSP の状態によらず** 常に `structural` で、`lsp_status` は `n/a`（実装で確定 2026-10-29）。
+- 表に `standby` の列は無い。LSP が `standby` のとき、遅延起動の契機になる能力（`ready` 列のエンジンが `lsp` または `lsp-cache` のもの: DEFINITION・REFERENCES・IMPLEMENTATIONS・CALL_HIERARCHY・DIAGNOSTICS・RENAME・CODE_ACTION）は **`indexing` の列** で答え、`lsp_status` は `indexing`（起動を投げる）。契機にならない能力（SKELETON・SEARCH・BODY・STRUCTURAL_EDIT・SYMBOL_EDIT）は **`unavailable` の列のエンジン** で答え、`lsp_status` は `standby` のまま（LSP を起こさない。実装で確定 2026-10-29）。
+- Tier 4 の列の IMPLEMENTATIONS は `unavailable`（提供しない）、DIAGNOSTICS は 0 件、CALL_HIERARCHY は grep 1 段、RENAME は字句置換（インターロック下）。仕様書 §8.2 の表はこれに揃えてある。
 - 判定はファイル単位。1 回の応答で複数ファイルが異なる列に落ちれば `mixed`（パッカーが集計。ADR-5）。
 
 ### 7.8.3 LSP を待つか待たないか（ADR-6 のポリシー表）
@@ -1566,7 +1576,7 @@ host ──spawn──► lucianke
  1. bootstrap_io          fd 1 を退避、fd 1 → stderr（ADR-3）
  2. logging_setup         stderr + JSON Lines ファイル
  3. config                環境変数 / .lucianke.toml / 既定
- 4. cache dir             <cache_root>/<ws_hash>/ を用意（ws_hash = sha1(実体パス)[:12]）
+ 4. cache dir             <cache_root>/<ws_hash>/ を用意（ws_hash = sha1(normcase(実体パス)) の先頭 16 桁）
  5. index.writer          IndexWriter 起動、schema 版確認・移行、_meta（data_version, edit_seq）読込
  6. mcp.server            initialize 受付 → tools/list 提供可能
  7. roots/list            WorkspaceContext.register（マーカー走査、Python 環境検出、workspace_id）
@@ -1721,7 +1731,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
  7. 終了コード 0
 ```
 
-- Windows では `loop.add_signal_handler` が使えないため、`signal.signal` でフラグを立て、ループ上の監視タスクが 1 を始める。`CTRL_BREAK_EVENT` を LSP の子プロセスに送るのは、子を新しいプロセスグループで起動している場合だけ（ADR-12）。
+- Windows では `loop.add_signal_handler` が使えないため、`signal.signal` でフラグを立て、ループ上の監視タスクが 1 を始める。`CTRL_BREAK_EVENT` を LSP の子プロセスに送れるのは、子を新しいプロセスグループで起動している場合だけで、GUI ホスト配下では届かない。当てにせず、LSP には `terminate` の前に `shutdown` → `exit` を送る（ADR-12）。
 - 受入（NFR-OPS-2）: 7 の 1 秒後に、起動した子プロセスの PID がすべて存在しない。`ProcessRegistry` は起動時刻と PID を JSON Lines ログに残し、テストはそれを読んで確かめる。
 - `stdin` EOF の検知は MCP SDK のトランスポート終了に乗る（S-1 で、EOF 後にサーバーのタスクが戻ることを確認）。
 
@@ -1776,7 +1786,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 | 改行 | ファイルの多数派を検出して保持（`core/textpos.py`）。`git` の `autocrlf` に依存しない |
 | 原子的改名 | `os.replace`。Windows で `winerror` 5・32 なら 10〜160 ms の指数間隔で再試行（合計 310 ms）。読み取り専用属性の対象は書かずに `E_MUTATION_BLOCKED`（§7.7.5。S-10 で確認） |
 | シグナル | `SIGINT` / `SIGTERM`（POSIX）、`SIGBREAK` と `stdin` EOF（Windows）。`loop.add_signal_handler` が無い環境では `signal.signal` + フラグ |
-| 子プロセス | Windows では `CREATE_NEW_PROCESS_GROUP` で起動して Job Object（`KILL_ON_JOB_CLOSE`）に入れ、孫まで落とす。終了は `CTRL_BREAK` → `terminate` → `kill`。POSIX では `start_new_session=True` で起動し、`killpg` の `SIGTERM` → `SIGKILL`（ADR-12） |
+| 子プロセス | Windows では `CREATE_NEW_PROCESS_GROUP` で起動して Job Object（`KILL_ON_JOB_CLOSE`）に入れ、孫まで落とす。終了は（LSP は `shutdown` → `exit` のあと）`terminate` → `kill`。`CTRL_BREAK_EVENT` は GUI ホスト配下で届かないので当てにしない。POSIX では `start_new_session=True` で起動し、`killpg` の `SIGTERM` → `SIGKILL`（ADR-12） |
 | ファイル監視 | `watchfiles`（Rust 製バックエンド。Windows 対応の記述あり。S-6 で挙動確認）。利用不可ならポーリング（仕様書 §12.4 の 6） |
 | 実行ビット | POSIX のみ保持。Windows では無視 |
 | Python 環境 | `.venv/Scripts/python.exe`（Windows）と `.venv/bin/python`（POSIX）の両方を探索 |
