@@ -52,7 +52,8 @@ from lucianke.core.model import (
 )
 from lucianke.core.urn import Urn
 from lucianke.engine.selector import is_lsp_degradation, on_lsp_failure, select, starts_lsp
-from lucianke.index import queries
+from lucianke.index import exact_marks, queries
+from lucianke.index.exact_marks import ExactMark
 from lucianke.index.ingest import RelationFact, upsert_exact_relations
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle
@@ -67,6 +68,8 @@ _log = logging.getLogger("lucianke.tools.lsp_exact")
 
 __all__ = [
     "EXACT_BUDGET_S",
+    "FIRST_DIAGNOSTIC_LANGUAGES",
+    "FIRST_DIAGNOSTIC_WAIT_S",
     "MEMO",
     "CallEdgeSource",
     "PRIME_LANGUAGES",
@@ -77,7 +80,10 @@ __all__ = [
     "SiteInfo",
     "cached_rows",
     "confirm_marker",
+    "needs_first_diagnostic",
     "needs_priming",
+    "await_first_diagnostic",
+    "persist_marks",
     "prime_candidates",
     "prime_documents",
     "degraded_choice",
@@ -299,6 +305,39 @@ async def prime_documents(handle: LspHandle, prime: PrimeSet) -> int:
     return await features.open_documents(handle, prime.files)
 
 
+# --- 起動直後の部分的な答えを exact として覚えない ---------------------------------------------------
+
+FIRST_DIAGNOSTIC_LANGUAGES = frozenset({"python"})
+"""LSP に聞く前に、対象の文書の最初の ``publishDiagnostics`` を待つ言語。basedpyright は ``ready`` でも、その文書の最初の診断が
+来るまで解析が済んでいない（BUG-0012）。診断の無いファイルには何も届けないサーバー（vtsls など。``lsp/diagnostics.py`` 参照）は
+待っても来ないので対象にしない。"""
+
+FIRST_DIAGNOSTIC_WAIT_S = 5.0
+"""最初の診断を待つ上限（秒）。待ちは要求の期限（``LSP_TIMEOUT_*``）とは別で、超えても答えは返す（目印だけ置かない）。"""
+
+
+def needs_first_diagnostic(language: str) -> bool:
+    return language in FIRST_DIAGNOSTIC_LANGUAGES
+
+
+async def await_first_diagnostic(handle: LspHandle, rel: RelPath, *, timeout_s: float | None = None) -> bool:
+    """``rel`` を LSP に見せ（要求は送らない）、その文書の最初の診断が届くまで待つ。届けば ``True``、待ちの上限なら ``False``。
+
+    ``True`` は「LSP がこの文書の解析を済ませた」合図。呼び手はこのときだけ、LSP の答えを ``exact`` の集合として覚える。
+    ``False`` でも答えは ``exact`` で返してよいが、目印は置かない（解析前の部分的な答えを固定しない）。
+    すでに開いていて診断を受信済みの文書は待たずに ``True``。``ready`` でない・切断は ``E_LSP_UNAVAILABLE``（呼び手が降格する）。
+    """
+    limit = FIRST_DIAGNOSTIC_WAIT_S if timeout_s is None else min(FIRST_DIAGNOSTIC_WAIT_S, timeout_s)
+    sent_at = await features.sync_document(handle, rel)
+    if sent_at is None:
+        return False
+    return bool(
+        await handle.diagnostics.wait_for(
+            rel, min_version=None, sent_at=sent_at, timeout_ms=max(limit, 0.0) * 1000
+        )
+    )
+
+
 # --- 「この集合は完全」の目印 ------------------------------------------------------------------
 
 _MEMO_MAX = 4096
@@ -364,16 +403,28 @@ def cached_rows(
     *,
     token: str | None = None,
 ) -> list[queries.ReferenceRow] | None:
-    """目印が新しければ PaaD の ``exact`` 行（``loader`` が読んだ行のうち ``exact`` だけ）。外れていれば ``None``。"""
-    mark = MEMO.get(memo_key(db_path, ws_id, kind, urn))
+    """目印が新しければ PaaD の ``exact`` 行（``loader`` が読んだ行のうち ``exact`` だけ）。外れていれば ``None``。
+
+    目印は ``MEMO``（プロセス内）、無ければ DB の ``_exact_marks``（``persist_marks`` が書いたもの。再起動しても残る）。
+    """
+    key = memo_key(db_path, ws_id, kind, urn)
+    mark = MEMO.get(key)
+    stored = False
     if mark is None:
-        return None
+        mark = exact_marks.load_mark(conn, ws_id, kind, urn)  # 再起動で MEMO が空でも、DB の目印が残っている
+        if mark is None:
+            return None
+        stored = True
     if token is None:
         token = queries.files_fingerprint(conn, ws_id)
     if mark[0] != token:
         return None
     rows = [r for r in loader(conn) if r.confidence is Confidence.EXACT]
-    return rows if mark[1] == rows_fingerprint(rows) else None
+    if mark[1] != rows_fingerprint(rows):
+        return None
+    if stored:
+        MEMO.put(key, mark[0], mark[1])
+    return rows
 
 
 def confirm_marker(
@@ -395,6 +446,34 @@ def confirm_marker(
     if fingerprint != rows_fingerprint(expected):
         return False
     MEMO.put(memo_key(db_path, ws_id, kind, urn), token, fingerprint)
+    return True
+
+
+async def persist_marks(
+    services: Any, db_path: Path | str, ws_id: str, keys: Iterable[tuple[str, str]], *, label: str
+) -> bool:
+    """``confirm_marker`` が ``MEMO`` に置いた目印（``keys`` = ``(kind, urn)``）を DB の ``_exact_marks`` にも書く。書けたら ``True``。
+
+    再起動で ``MEMO`` が消えても、ファイルが変わっていなければ LSP なしで ``exact`` に答えられるようにする（ADR-16）。
+    書き手が無い・書けない・``MEMO`` に無い（外れた）ときは何もしない（目印はプロセス内だけ）。``data_version`` は進めない。
+    """
+    writer = writer_of(services)
+    if writer is None:
+        return False
+    marks = []
+    for kind, urn in keys:
+        mark = MEMO.get(memo_key(db_path, ws_id, kind, urn))
+        if mark is not None:
+            marks.append(ExactMark(kind, urn, mark[0], mark[1]))
+    if not marks:
+        return False
+    try:
+        await writer.asubmit(
+            lambda conn: exact_marks.store_marks(conn, ws_id, marks), bumps_version=False, label=label
+        )
+    except Exception:  # noqa: BLE001  目印を書けなくても答えは止めない（プロセス内の目印は有効。次の起動でまた LSP に聞く）
+        _log.warning("could not persist the exact marks (%s)", label, exc_info=True)
+        return False
     return True
 
 
@@ -575,8 +654,13 @@ class CallEdgeSource:
         self.staged_rows: dict[tuple[str, str], list[queries.ReferenceRow]] = {}
         self.skipped = 0
         self.from_lsp = 0
+        self.warnings: list[str] = []
+        """exact 経路で足す警告（LSP に開かせるファイルの上限など）。呼び手は exact で答えたときだけ出す。"""
         self._rows: dict[tuple[str, str], list[queries.ReferenceRow]] = {}
         self._test: dict[str, bool] = {}
+        self._settled: dict[str, bool] = {}
+        """ノードの定義ファイル → LSP がそのファイルの最初の診断を出したか（解析が済んだ合図。出ていないノードの答えは目印にしない）。"""
+        self._node_path: dict[tuple[str, str], str] = {}
 
     # --- 公開 ---
 
@@ -591,7 +675,10 @@ class CallEdgeSource:
         """LSP から取った辺を書き戻し、読み戻して一致したノードに目印を置く。書けたら ``True``。"""
         if not self.staged or not await write_facts(self.services, self.staged, label="lsp:call_hierarchy"):
             return False
-        await asyncio.to_thread(self._confirm_all)
+        confirmed = await asyncio.to_thread(self._confirm_all)
+        await persist_marks(
+            self.services, self.db_path, self.ws.workspace_id, confirmed, label="lsp:call_hierarchy:marks"
+        )
         return True
 
     # --- 内部（スレッド） ---
@@ -629,10 +716,12 @@ class CallEdgeSource:
                 "the LSP is not ready and the index has no fresh exact calls for this node",
                 details={"reason": _down_reason(self.route.choice.lsp_status)},
             )
+        self._node_path[(self._kind(direction), urn)] = str(sym.path)
+        prime = self._prime_set(sym) if direction == "incoming" else None
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("the LSP call hierarchy budget was used up")
-        fut = asyncio.run_coroutine_threadsafe(self._ask(sym, direction), self.loop)
+        fut = asyncio.run_coroutine_threadsafe(self._ask(sym, direction, prime), self.loop)
         try:
             edges, infos = fut.result(timeout=remaining)
         except TimeoutError:
@@ -648,6 +737,24 @@ class CallEdgeSource:
             )
         self.from_lsp += 1
         return rows
+
+    def _prime_set(self, sym: Any) -> PrimeSet | None:
+        """incoming の呼び元になりうるファイル（tsserver 系で、対象の名前を含み、LSP がまだ開いていないもの）。ワーカースレッドで引く。
+
+        tsserver は ``tsconfig.json`` の ``include`` に入らないファイル（``test/`` など）を、開かれるまで ``callHierarchy`` の
+        呼び元に出さない（T-06 の BUG-0047 と同じ）。
+        """
+        handle = self.route.handle
+        if handle is None or not needs_priming(self.route.file.language):
+            return None
+        return prime_candidates(
+            self.conn,
+            self.ws,
+            name=sym.name,
+            exclude=str(sym.path),
+            is_open=handle.documents.is_open,
+            limit=PRIME_MAX,
+        )
 
     def _structural_count(self, urn: str, direction: str) -> int:
         return len(self._loader(urn, direction)(self.conn))
@@ -711,14 +818,18 @@ class CallEdgeSource:
         self.staged_rows[(self._kind(direction), urn)] = rows
         return rows
 
-    def _confirm_all(self) -> None:
+    def _confirm_all(self) -> list[tuple[str, str]]:
+        """読み戻して一致したノードに目印を置き、置いた ``(kind, urn)`` を返す。最初の診断が出ていないファイルのノードは置かない。"""
         from lucianke.index.connection import open_reader  # 読み取り接続はこのスレッドで開く
 
         conn = open_reader(self.db_path)
+        confirmed: list[tuple[str, str]] = []
         try:
             for (kind, urn), rows in self.staged_rows.items():
+                if not self._settled.get(self._node_path.get((kind, urn), ""), False):
+                    continue  # 解析前の部分的な答えかもしれない: exact で答えるが覚えない
                 direction = "incoming" if kind == "calls_in" else "outgoing"
-                confirm_marker(
+                if confirm_marker(
                     conn,
                     self.db_path,
                     self.ws.workspace_id,
@@ -727,17 +838,38 @@ class CallEdgeSource:
                     self._loader(urn, direction),
                     rows,
                     token=self.token,
-                )
+                ):
+                    confirmed.append((kind, urn))
         finally:
             conn.close()
+        return confirmed
 
     # --- 内部（イベントループ） ---
 
+    async def _settle(self, rel: RelPath) -> bool:
+        """``rel`` の最初の診断を待つ（ファイルごとに 1 度。待ちは ``EXACT_BUDGET_S`` の残りの内）。"""
+        key = str(rel)
+        if key not in self._settled:
+            handle = self.route.handle
+            assert handle is not None
+            if needs_first_diagnostic(self.route.file.language):
+                left = max(self.deadline - time.monotonic(), 0.0)
+                self._settled[key] = await await_first_diagnostic(handle, rel, timeout_s=left)
+            else:
+                self._settled[key] = True
+        return self._settled[key]
+
     async def _ask(
-        self, sym: Any, direction: str
+        self, sym: Any, direction: str, prime: PrimeSet | None = None
     ) -> tuple[list[features.CallEdge], dict[str, dict[tuple[int, int], SiteInfo]]]:
         handle = self.route.handle
         assert handle is not None
+        if prime is not None:
+            await prime_documents(handle, prime)
+            note = prime.warning(sym.name)
+            if note and note not in self.warnings:
+                self.warnings.append(note)
+        await self._settle(sym.path)
         start = (sym.selection or sym.range).start
         items = await features.prepare_call_hierarchy(handle, sym.path, start)
         item = next(

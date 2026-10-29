@@ -69,7 +69,21 @@ def _migrate_2_to_3(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS _import_probes_stem ON _import_probes(stem)")
 
 
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_1_to_2, 2: _migrate_2_to_3}
+def _migrate_3_to_4(conn: sqlite3.Connection) -> None:
+    """v4: LSP の exact の集合が完全だった目印の内部表 ``_exact_marks``（``index/exact_marks.py``。値は次に LSP から取ったときに入る）。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _exact_marks ("
+        " workspace_id TEXT NOT NULL, kind TEXT NOT NULL, urn TEXT NOT NULL,"
+        " files_token TEXT NOT NULL, rows_fp TEXT NOT NULL,"
+        " PRIMARY KEY (workspace_id, kind, urn)) WITHOUT ROWID"
+    )
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    1: _migrate_1_to_2,
+    2: _migrate_2_to_3,
+    3: _migrate_3_to_4,
+}
 
 
 def schema_sql() -> str:

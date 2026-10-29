@@ -1,4 +1,4 @@
--- schema_version: 3
+-- schema_version: 4
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -221,6 +221,17 @@ CREATE TABLE _import_probes (
   PRIMARY KEY (file_id, stem)
 ) WITHOUT ROWID;
 CREATE INDEX _import_probes_stem ON _import_probes(stem);
+
+-- 「LSP から取って relations に exact で書いた集合は、いまも完全」の目印（index/exact_marks.py。tools/_lsp_exact.py が読み書きする）。
+-- (ファイルの指紋, exact 行の指紋) が一致するときだけ、LSP なしで exact に答える。再起動しても残る（ADR-16）。
+CREATE TABLE _exact_marks (
+  workspace_id TEXT NOT NULL,
+  kind         TEXT NOT NULL,            -- refs / calls_in / calls_out
+  urn          TEXT NOT NULL,            -- 問い合わせの対象のシンボル
+  files_token  TEXT NOT NULL,            -- queries.files_fingerprint（ワークスペースの全ファイルの (path, sha256)）
+  rows_fp      TEXT NOT NULL,            -- 対象の exact 行の指紋
+  PRIMARY KEY (workspace_id, kind, urn)
+) WITHOUT ROWID;
 
 -- ===== symbols_fts を symbols に追従させるトリガ（外部コンテンツ FTS5） =====
 CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN

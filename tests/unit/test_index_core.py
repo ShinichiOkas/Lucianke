@@ -43,7 +43,7 @@ PUBLIC_TABLES = {
     "git_symbol_changes",
     "git_co_changes",
 }
-INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank", "_import_probes"}
+INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank", "_import_probes", "_exact_marks"}
 
 
 @pytest.fixture
@@ -157,7 +157,7 @@ def test_ensure_schema_creates_public_internal_tables_and_meta(conn: sqlite3.Con
 
 
 def test_schema_version_is_read_from_schema_sql() -> None:
-    assert current_schema_version() == 3
+    assert current_schema_version() == 4
     assert migrate.parse_schema_version("-- schema_version: 7\nCREATE TABLE t (a);") == 7
     with pytest.raises(ValueError):
         migrate.parse_schema_version("CREATE TABLE t (a);")
@@ -229,13 +229,10 @@ def test_ensure_schema_applies_forward_migrations(
     insert_workspace(conn)
     conn.execute("UPDATE _meta SET schema_version = 0")
     calls: list[int] = []
-    monkeypatch.setattr(
-        migrate,
-        "MIGRATIONS",
-        {0: lambda c: calls.append(0), 1: lambda c: calls.append(1), 2: lambda c: calls.append(2)},
-    )
+    steps = list(range(current_schema_version()))  # 0 → 1 → … → 最新（版を上げても数えなおさない）
+    monkeypatch.setattr(migrate, "MIGRATIONS", {v: (lambda c, v=v: calls.append(v)) for v in steps})
     assert ensure_schema(conn) is SchemaAction.MIGRATED
-    assert calls == [0, 1, 2]
+    assert calls == steps
     assert meta(conn)[0] == current_schema_version()
     assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 1  # 移行ではデータを残す
 
@@ -246,6 +243,7 @@ def test_ensure_schema_migrates_v1_to_v2_keeps_data(conn: sqlite3.Connection) ->
     insert_workspace(conn)
     conn.execute("DROP TABLE _symbol_rank")
     conn.execute("DROP TABLE _import_probes")
+    conn.execute("DROP TABLE _exact_marks")
     conn.execute("UPDATE _meta SET schema_version = 1")
     assert ensure_schema(conn) is SchemaAction.MIGRATED
     assert meta(conn)[0] == current_schema_version()
@@ -259,9 +257,10 @@ def test_ensure_schema_migrates_v2_to_v3_keeps_data(conn: sqlite3.Connection) ->
     ensure_schema(conn)
     insert_workspace(conn)
     conn.execute("DROP TABLE _import_probes")
+    conn.execute("DROP TABLE _exact_marks")
     conn.execute("UPDATE _meta SET schema_version = 2")
     assert ensure_schema(conn) is SchemaAction.MIGRATED
-    assert meta(conn)[0] == 3
+    assert meta(conn)[0] == current_schema_version()
     assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 1
     assert conn.execute("SELECT count(*) FROM _import_probes").fetchone()[0] == 0
     assert conn.execute(

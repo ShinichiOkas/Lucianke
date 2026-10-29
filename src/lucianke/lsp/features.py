@@ -75,6 +75,7 @@ __all__ = [
     "prepare_call_hierarchy",
     "references",
     "rename",
+    "sync_document",
     "to_exact_relations",
 ]
 
@@ -375,6 +376,16 @@ async def open_documents(handle: LspHandle, files: Iterable[tuple[RelPath, str]]
     if opened:
         handle.touch()
     return opened
+
+
+async def sync_document(handle: LspHandle, rel: RelPath) -> float | None:
+    """``rel`` を LSP に見せ（未オープンなら ``didOpen``、内容が変わっていれば ``didChange``、同じなら何も送らない）、
+    その文書を最後に送った時刻（``DocumentSync.sent_at_of``）を返す。診断を待つ呼び手（``DiagnosticsHub.wait_for(sent_at=...)``）の準備。
+
+    要求は送らない。``ready`` でなければ ``E_LSP_UNAVAILABLE``、切断なら ``E_LSP_UNAVAILABLE`` / ``disconnected``。
+    """
+    await _open(handle, rel)
+    return handle.documents.sent_at_of(rel)
 
 
 def _lsp_position(handle: LspHandle, client: LspClient, index: LineIndex, pos: Position) -> dict[str, int]:

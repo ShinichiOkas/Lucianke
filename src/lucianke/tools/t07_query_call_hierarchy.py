@@ -517,6 +517,8 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
     warnings = ["the tree was cut at the node cap; narrow depth or max_children"] if tree.capped else []
     if source is not None and source.skipped:
         warnings.append(f"{source.skipped} call edge(s) were left out: the caller/callee is not in the index")
+    if source is not None:
+        warnings.extend(source.warnings)  # exact で答えたときだけ溜まる（LSP に開かせるファイルの上限など）
     return ToolOutput(
         records=records,
         max_confidence=Confidence.EXACT,

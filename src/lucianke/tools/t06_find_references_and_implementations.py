@@ -572,6 +572,11 @@ async def _exact_references(
         note = prime.warning(sym.name)
         if note:
             pre.warnings.append(note)
+    # 起動直後の LSP は ``ready`` でも、その文書の最初の診断が来るまで解析が済んでいない（BUG-0012）。文書を開いて最初の診断を
+    # 待ってから聞く。待てなかった（上限）ときも exact で答えるが、解析前の部分的な答えかもしれないので目印は置かない。
+    settled = True
+    if lx.needs_first_diagnostic(route.file.language):
+        settled = await lx.await_first_diagnostic(route.handle, sym.path)
     sel = sym.selection or sym.range
     locs = await features.references(route.handle, sym.path, sel.start, include_declaration=False)
     target_urn = str(sym.urn)
@@ -598,8 +603,15 @@ async def _exact_references(
             details={"reason": "indexing"},
         )
     wrote = await lx.write_facts(ctx.services, facts, label=f"lsp:references:{sym.qualified_name}")
-    if wrote:  # 0 件の答えは覚えない（未完了の LSP の空振りを固定しないため）
-        await asyncio.to_thread(_confirm, db_path, ws.workspace_id, target_urn, rows, pre.token)
+    # 0 件の答え・最初の診断の前の答えは覚えない（未完了の LSP の空振りや部分的な答えを固定しないため）
+    if (
+        wrote
+        and settled
+        and await asyncio.to_thread(_confirm, db_path, ws.workspace_id, target_urn, rows, pre.token)
+    ):
+        await lx.persist_marks(
+            ctx.services, db_path, ws.workspace_id, [("refs", target_urn)], label="lsp:references:marks"
+        )
     return rows
 
 

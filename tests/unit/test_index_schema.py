@@ -22,7 +22,7 @@ CREATE_NAME = re.compile(
 )
 
 # schema.sql だけが持ってよいもの（設計書 §6.2、§7.6.5）
-ALLOWED_INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank", "_import_probes"}
+ALLOWED_INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank", "_import_probes", "_exact_marks"}
 ALLOWED_TRIGGERS = {"symbols_ai", "symbols_ad", "symbols_au"}
 ALLOWED_INTERNAL_INDEXES = {"_import_probes_stem"}
 
