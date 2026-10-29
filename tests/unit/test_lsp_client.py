@@ -31,10 +31,13 @@ from lucianke.lsp.client import (
 from lucianke.lsp.servers import (
     SERVERS,
     LspServerDef,
+    build_initialization_options,
     build_settings,
     default_server,
     env_var_name,
     find_command,
+    find_tsserver,
+    server_env_var_name,
     servers_for,
     split_command,
 )
@@ -263,6 +266,26 @@ async def test_initialize_sends_utf8_and_utf16_and_keeps_the_server_info(spawn: 
     assert params["workspaceFolders"] == [{"uri": tmp_path.as_uri(), "name": tmp_path.name}]
     assert client.server_info == {"name": "fake", "version": "1"}
     assert client.server_capabilities["textDocumentSync"] == 2
+
+
+async def test_initialize_passes_locale_and_initialization_options(spawn: Spawn, tmp_path: Path):
+    client = await spawn(initialize=False)
+    await client.initialize(
+        root_uri=tmp_path.as_uri(),
+        root_path=tmp_path,
+        initialization_options={"tsserver": {"path": "/x/tsserver.js"}},
+        locale="en",
+        timeout_ms=10_000,
+    )
+    params = (await client.request("state", None, timeout_ms=5000))["init_params"]
+    assert params["locale"] == "en"
+    assert params["initializationOptions"] == {"tsserver": {"path": "/x/tsserver.js"}}
+    # 省いたときはキーごと送らない
+    other = await spawn(initialize=False)
+    await other.initialize(root_uri=tmp_path.as_uri(), timeout_ms=10_000)
+    params = (await other.request("state", None, timeout_ms=5000))["init_params"]
+    assert "locale" not in params
+    assert "initializationOptions" not in params
 
 
 @pytest.mark.parametrize(
@@ -685,6 +708,9 @@ def test_env_var_names():
     assert env_var_name("python", "lint") == "LUCIANKE_LSP_PYTHON_LINT_CMD"
     assert env_var_name("c_sharp") == "LUCIANKE_LSP_C_SHARP_CMD"
     assert env_var_name("tsx") == "LUCIANKE_LSP_TSX_CMD"
+    assert server_env_var_name("ruff") == "LUCIANKE_LSP_RUFF_CMD"
+    assert server_env_var_name("typescript-language-server") == "LUCIANKE_LSP_TYPESCRIPT_LANGUAGE_SERVER_CMD"
+    assert default_server("python").server_env_var == "LUCIANKE_LSP_BASEDPYRIGHT_CMD"  # type: ignore[union-attr]
 
 
 def test_env_var_overrides_everything(tmp_path: Path):
@@ -721,6 +747,26 @@ def test_env_var_override_applies_per_role(tmp_path: Path):
         "my-lint",
         "server",
     ]
+
+
+def test_server_name_env_var_overrides_only_that_server(tmp_path: Path):
+    based, pyright = servers_for("python", "types")
+    ruff = default_server("python", "lint")
+    assert ruff is not None
+    env = {
+        "LUCIANKE_LSP_BASEDPYRIGHT_CMD": "my-based --stdio",
+        "LUCIANKE_LSP_RUFF_CMD": "my-ruff server",
+        "PATH": "",
+    }
+    assert find_command(based, workspace_root=tmp_path, environ=env) == ["my-based", "--stdio"]
+    assert find_command(ruff, workspace_root=tmp_path, environ=env) == ["my-ruff", "server"]
+    assert find_command(pyright, workspace_root=tmp_path, environ=env) is None  # 代替には効かない
+    # サーバー名 → 言語の順。サーバー名の値が不正なら言語単位に落ちる
+    env = {"LUCIANKE_LSP_BASEDPYRIGHT_CMD": "by-name", "LUCIANKE_LSP_PYTHON_CMD": "by-language", "PATH": ""}
+    assert find_command(based, workspace_root=tmp_path, environ=env) == ["by-name"]
+    assert find_command(pyright, workspace_root=tmp_path, environ=env) == ["by-language"]
+    env = {"LUCIANKE_LSP_BASEDPYRIGHT_CMD": '"broken', "LUCIANKE_LSP_PYTHON_CMD": "by-language", "PATH": ""}
+    assert find_command(based, workspace_root=tmp_path, environ=env) == ["by-language"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows のパスの扱い")
@@ -779,12 +825,15 @@ def venv_bin_of(venv: Path) -> Path:
     return venv / ("Scripts" if sys.platform == "win32" else "bin")
 
 
-def test_vtsls_is_found_in_node_modules_bin(tmp_path: Path):
-    vtsls = default_server("typescript")
-    assert vtsls is not None
-    assert vtsls.name == "vtsls"
-    shim_path = make_exe(tmp_path / "node_modules" / ".bin", shim("vtsls"))
-    assert find_command(vtsls, workspace_root=tmp_path, environ={"PATH": ""}) == [str(shim_path), "--stdio"]
+def test_typescript_servers_are_found_in_node_modules_bin(tmp_path: Path):
+    tsls, vtsls = servers_for("typescript")
+    assert (tsls.name, vtsls.name) == ("typescript-language-server", "vtsls")
+    env = {"PATH": ""}
+    assert find_command(tsls, workspace_root=tmp_path, environ=env) is None
+    tsls_shim = make_exe(tmp_path / "node_modules" / ".bin", shim("typescript-language-server"))
+    vtsls_shim = make_exe(tmp_path / "node_modules" / ".bin", shim("vtsls"))
+    assert find_command(tsls, workspace_root=tmp_path, environ=env) == [str(tsls_shim), "--stdio"]
+    assert find_command(vtsls, workspace_root=tmp_path, environ=env) == [str(vtsls_shim), "--stdio"]
 
 
 def test_only_absolute_path_entries_are_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -849,7 +898,10 @@ def test_server_table_shape():
         ("javascript", "javascript"),
     ):
         defs = servers_for(lang)
-        assert [d.name for d in defs] == ["vtsls", "typescript-language-server"]
+        assert [d.name for d in defs] == [
+            "typescript-language-server",
+            "vtsls",
+        ]  # S-5: 既定は tsls、代替が vtsls
         assert all(d.document_language_id == lsp_lang for d in defs)
     assert default_server("c_sharp") is not None
     assert default_server("c_sharp").document_language_id == "csharp"  # type: ignore[union-attr]
@@ -873,3 +925,57 @@ def test_build_settings_adds_the_interpreter_without_mutating_the_table():
     assert ruff is not None
     assert build_settings(ruff, python_path="/x") == {}
     assert "pythonPath" not in build_settings(based)["python"]
+
+
+def test_find_tsserver(tmp_path: Path):
+    assert find_tsserver(tmp_path) is None
+    lib = tmp_path / "node_modules" / "typescript" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "typescript.js").write_text("", encoding="utf-8")  # TypeScript 7 のように tsserver.js が無い
+    assert find_tsserver(tmp_path) is None
+    tsserver = lib / "tsserver.js"
+    tsserver.write_text("", encoding="utf-8")
+    assert find_tsserver(tmp_path) == tsserver
+    explicit = tmp_path / "elsewhere" / "tsserver.js"
+    assert find_tsserver(tmp_path, explicit=explicit) == tsserver  # 実在しない明示指定は無視して次へ
+    explicit.parent.mkdir()
+    explicit.write_text("", encoding="utf-8")
+    assert find_tsserver(tmp_path, explicit=explicit) == explicit
+
+
+def test_tsserver_location_is_passed_the_way_each_server_wants(tmp_path: Path):
+    tsls, vtsls = servers_for("typescript")
+    assert tsls.needs_workspace_tsserver
+    assert not vtsls.needs_workspace_tsserver
+    tsserver = tmp_path / "node_modules" / "typescript" / "lib" / "tsserver.js"
+    # tsls: initializationOptions.tsserver.path（settings には載せない）
+    assert build_initialization_options(tsls) is None
+    assert build_initialization_options(tsls, tsserver_path=tsserver) == {"tsserver": {"path": str(tsserver)}}
+    assert build_settings(tsls, tsserver_path=tsserver) == {}
+    # vtsls: workspace/configuration の応答（autoUseWorkspaceTsdk と tsdk = lib）。渡さなければ同梱の TypeScript
+    assert build_initialization_options(vtsls, tsserver_path=tsserver) is None
+    assert build_settings(vtsls) == {}
+    assert build_settings(vtsls, tsserver_path=tsserver) == {
+        "vtsls": {"autoUseWorkspaceTsdk": True},
+        "typescript": {"tsdk": str(tsserver.parent)},
+    }
+
+
+def test_locale_and_requests_per_server():
+    based, pyright = servers_for("python", "types")
+    ruff = default_server("python", "lint")
+    assert ruff is not None
+    # S-4: basedpyright の診断は OS のロケールで日本語になる。initialize の locale を "en" に固定する
+    assert (based.locale, pyright.locale, ruff.locale) == ("en", "en", None)
+    # Python の codeAction（quickfix・organizeImports・fixAll）の供給元は ruff だけ。resolve は ruff のためにある
+    assert ruff.supports("textDocument/codeAction")
+    assert ruff.supports("codeAction/resolve")
+    assert not ruff.supports("textDocument/definition")
+    for defn in (based, pyright):
+        assert not defn.supports("textDocument/codeAction")
+        assert defn.supports("textDocument/definition")
+        assert defn.supports("textDocument/rename")
+        assert defn.supports("callHierarchy/incomingCalls")
+    for defn in servers_for("typescript"):
+        assert defn.supports("textDocument/codeAction")
+        assert defn.supports("codeAction/resolve")  # vtsls の organizeImports は resolve で edit が付く

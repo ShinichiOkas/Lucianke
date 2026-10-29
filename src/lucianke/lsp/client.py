@@ -295,7 +295,8 @@ class LspClient:
         """``window/logMessage`` / ``window/showMessage`` をログへ。"""
         if not isinstance(params, dict):
             return
-        level = _MESSAGE_LEVELS.get(params.get("type"), logging.DEBUG)
+        kind = params.get("type")
+        level = _MESSAGE_LEVELS.get(kind, logging.DEBUG) if isinstance(kind, int) else logging.DEBUG
         _log.log(level, "[%s] %s", self.name, params.get("message"))
 
     # --- 起動 -----------------------------------------------------------------------
@@ -326,13 +327,15 @@ class LspClient:
         root_path: str | os.PathLike[str] | None = None,
         initialization_options: Mapping[str, Any] | None = None,
         capabilities: Mapping[str, Any] | None = None,
+        locale: str | None = None,
         client_name: str = "lucianke",
         client_version: str = "0",
         timeout_ms: int = 60_000,
     ) -> dict[str, Any]:
         """``initialize`` → ``initialized``。応答の ``positionEncoding`` などを保持して、応答の本体を返す。
 
-        ``capabilities`` を省くと ``default_client_capabilities()``。ワークスペースは ``root_uri`` 1 つ。
+        ``capabilities`` を省くと ``default_client_capabilities()``。ワークスペースは ``root_uri`` 1 つ。``locale`` は
+        ``LspServerDef.locale``（basedpyright は ``"en"``。渡さないと診断が OS のロケールの言語になる）。
         """
         name = os.path.basename(os.fspath(root_path or root_uri.rstrip("/"))) or "workspace"
         self._workspace_folders = [{"uri": root_uri, "name": name}]
@@ -348,6 +351,8 @@ class LspClient:
             params["rootPath"] = os.fspath(root_path)
         if initialization_options is not None:
             params["initializationOptions"] = dict(initialization_options)
+        if locale is not None:
+            params["locale"] = locale
         result = await self.request("initialize", params, timeout_ms=timeout_ms)
         self.notify("initialized", {})
         return result

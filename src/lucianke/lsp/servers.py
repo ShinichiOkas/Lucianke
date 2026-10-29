@@ -1,21 +1,35 @@
-"""LSP サーバー定義の表と、起動コマンドの探索（設計書 §7.5.1、仕様書 §12.3・§12.7）。
+"""LSP サーバー定義の表と、起動コマンドの探索（設計書 §7.5.1、仕様書 §12.3・§12.7、スパイク S-04・S-05）。
 
 ``LspServerDef`` は 1 つの LSP サーバー（言語 × 役）の静的な定義で、プロセスも状態も持たない。状態機械（``pool``）が
 ``servers_for`` で候補を引き、``find_command`` で起動コマンドを決めて ``ProcessRegistry`` に渡す。
 
 * ``language_id`` は ``workspace.languages`` の言語 ID（``python`` / ``typescript`` / ``tsx`` / ``c_sharp`` …）。
-  同じサーバーが複数の言語 ID を受け持つ（vtsls は ``typescript`` / ``tsx`` / ``javascript``）ときは、言語 ID ごとに
+  同じサーバーが複数の言語 ID を受け持つ（TypeScript 系は ``typescript`` / ``tsx`` / ``javascript``）ときは、言語 ID ごとに
   定義を並べる（``lsp_language_id`` は ``didOpen`` に載せる LSP 側の名前）。
 * ``role`` は同一言語に並列で持てる 2 役（``types`` = 型解決、``lint`` = Lint / CodeAction。仕様書 §12.3）。
   同じ言語・役の定義は ``SERVERS`` の並び順が優先順（既定 → 代替）。
 * ``initialization_options`` は ``initialize`` の ``initializationOptions``、``settings`` は
   ``workspace/configuration`` の応答の元になる設定木（``LspClient.set_settings`` に渡す。セクション名は ``.`` 区切り）。
-  実行時にしか決まらない値（Python のインタープリタなど）は ``build_settings`` で重ねる。
+  実行時にしか決まらない値（Python のインタープリタ、TypeScript の ``tsserver``）は ``build_settings`` /
+  ``build_initialization_options`` で重ねる。
+* ``locale``: ``initialize`` の ``locale``。basedpyright / pyright は OS のロケールで診断が日本語になるので ``"en"`` に固定する（S-4）。
+* ``requests_m1``: ADR-15 の範囲でこのサーバーに送ってよい LSP の method。Python の ``codeAction``（quickfix・organizeImports・
+  fixAll）の供給元は **ruff だけ**（basedpyright の quickfix は ``# pyright: ignore`` の追加だけ。S-4）。
+  ruff の organizeImports / fixAll は ``codeAction`` が ``edit`` 無しで返し、``codeAction/resolve`` で ``edit`` が付く。
 
-起動コマンドの探索順（``find_command``）: 環境変数 ``LUCIANKE_LSP_<LANG>_CMD`` → 指定された venv の ``Scripts|bin`` →
-ワークスペースの ``.venv/Scripts|bin`` → ``node_modules/.bin`` → ``PATH``。Windows は ``.exe`` / ``.cmd`` / ``.bat`` も探す。
-探索は ``shutil.which`` を使わず自前で行う（Windows の ``which`` はカレントディレクトリを先に見るため、ワークスペース直下に
-置かれた実行ファイルを掴まないようにする）。
+サーバーの位置の単位（``positionEncoding``）: basedpyright・pyright・tsls・vtsls は応答に無く UTF-16、ruff は ``utf-8`` を返す
+（S-4・S-5）。交渉の結果は ``LspClient.negotiated_encoding`` が応答から読むので、ここには持たない。
+
+TypeScript / JavaScript（S-5）: **既定は typescript-language-server（tsls）、代替は vtsls**。vtsls は編集を元に戻した後に古い診断を
+返すことがある。tsls はワークスペースに ``node_modules/typescript/lib/tsserver.js`` が無いと ``initialize`` が失敗する
+（TypeScript 7 には ``tsserver.js`` が無い）ので、``needs_workspace_tsserver`` の定義は ``find_tsserver`` が ``None`` のとき
+使わず vtsls（TypeScript を同梱）に切り替える。tsserver の場所は tsls へ ``initializationOptions.tsserver.path``、vtsls へ
+``workspace/configuration`` の応答（``vtsls.autoUseWorkspaceTsdk`` + ``typescript.tsdk``）で渡す。
+
+起動コマンドの探索順（``find_command``）: 環境変数（サーバー名 ``LUCIANKE_LSP_<NAME>_CMD`` → 言語 ``LUCIANKE_LSP_<LANG>_CMD``）→
+指定された venv の ``Scripts|bin`` → ワークスペースの ``.venv/Scripts|bin`` → ``node_modules/.bin`` → ``PATH``。
+Windows は ``.exe`` / ``.cmd`` / ``.bat`` も探す。探索は ``shutil.which`` を使わず自前で行う（Windows の ``which`` は
+カレントディレクトリを先に見るため、ワークスペース直下に置かれた実行ファイルを掴まないようにする）。
 """
 
 from __future__ import annotations
@@ -34,9 +48,25 @@ from typing import Any, Literal
 _log = logging.getLogger("lucianke.lsp.servers")
 
 Role = Literal["types", "lint"]
+TsserverVia = Literal["initialization_options", "settings"]
 
 _WIN_EXTS = (".exe", ".cmd", ".bat", ".com")
 _IS_WINDOWS = sys.platform == "win32"
+
+# ADR-15 の LSP 要求。ナビゲーション系（定義・参照・ホバー・リネーム・呼び出し階層）と、コードアクション系。
+_NAVIGATION = frozenset(
+    {
+        "textDocument/definition",
+        "textDocument/references",
+        "textDocument/hover",
+        "textDocument/prepareRename",
+        "textDocument/rename",
+        "textDocument/prepareCallHierarchy",
+        "callHierarchy/incomingCalls",
+        "callHierarchy/outgoingCalls",
+    }
+)
+_CODE_ACTION = frozenset({"textDocument/codeAction", "codeAction/resolve"})
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -49,9 +79,13 @@ class LspServerDef:
         argv_candidates: 起動コマンドの候補。各候補は ``(実行ファイル名, 引数...)``。先に見つかったものを使う。
         initialization_options: ``initialize`` に載せる ``initializationOptions``。無ければ ``None``（キーごと省く）。
         settings: ``workspace/configuration`` の応答の元になる設定木。
-        role: ``"types"``（型解決。環境変数の上書き先）または ``"lint"``。
+        role: ``"types"``（型解決。言語単位の環境変数の上書き先）または ``"lint"``。
         lsp_language_id: ``didOpen`` の ``languageId``。``None`` なら ``language_id``。
         best_effort: PATH に無ければ ``unavailable`` で済ませる（スパイクで実機確認していない）サーバー。
+        locale: ``initialize`` の ``locale``。``None`` なら送らない。
+        requests_m1: このサーバーに送ってよい LSP の method（ADR-15）。
+        tsserver_via: ``tsserver`` の場所の渡し方。``None`` は不要（TypeScript 系以外）。
+        needs_workspace_tsserver: ワークスペースに ``tsserver.js`` が無いと ``initialize`` が失敗する（tsls）。
     """
 
     language_id: str
@@ -62,6 +96,10 @@ class LspServerDef:
     role: Role = "types"
     lsp_language_id: str | None = None
     best_effort: bool = False
+    locale: str | None = None
+    requests_m1: frozenset[str] = frozenset()
+    tsserver_via: TsserverVia | None = None
+    needs_workspace_tsserver: bool = False
 
     @property
     def document_language_id(self) -> str:
@@ -70,15 +108,32 @@ class LspServerDef:
 
     @property
     def env_var(self) -> str:
-        """起動コマンドを上書きする環境変数名。``types`` は ``LUCIANKE_LSP_<LANG>_CMD``、``lint`` は ``..._<LANG>_LINT_CMD``。"""
+        """言語単位の環境変数名。``types`` は ``LUCIANKE_LSP_<LANG>_CMD``、``lint`` は ``LUCIANKE_LSP_<LANG>_LINT_CMD``。"""
         return env_var_name(self.language_id, self.role)
+
+    @property
+    def server_env_var(self) -> str:
+        """サーバー名単位の環境変数名 ``LUCIANKE_LSP_<NAME>_CMD``（例 ``LUCIANKE_LSP_RUFF_CMD``）。"""
+        return server_env_var_name(self.name)
+
+    def supports(self, method: str) -> bool:
+        """``method`` をこのサーバーに送ってよいか（``requests_m1``）。"""
+        return method in self.requests_m1
+
+
+def _screaming(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").upper()
 
 
 def env_var_name(language_id: str, role: Role = "types") -> str:
     """``LUCIANKE_LSP_<LANG>_CMD``（``role="lint"`` は ``LUCIANKE_LSP_<LANG>_LINT_CMD``）。英数字以外は ``_`` にする。"""
-    lang = re.sub(r"[^A-Za-z0-9]+", "_", language_id).strip("_").upper()
     suffix = "" if role == "types" else f"_{role.upper()}"
-    return f"LUCIANKE_LSP_{lang}{suffix}_CMD"
+    return f"LUCIANKE_LSP_{_screaming(language_id)}{suffix}_CMD"
+
+
+def server_env_var_name(server_name: str) -> str:
+    """``LUCIANKE_LSP_<NAME>_CMD``（``typescript-language-server`` → ``LUCIANKE_LSP_TYPESCRIPT_LANGUAGE_SERVER_CMD``）。"""
+    return f"LUCIANKE_LSP_{_screaming(server_name)}_CMD"
 
 
 # --- 表 ---------------------------------------------------------------------------------
@@ -94,7 +149,7 @@ def _python_settings(*, based: bool) -> dict[str, Any]:
     return settings
 
 
-def _ts_family(name: str, argv: tuple[str, ...]) -> list[LspServerDef]:
+def _ts_family(name: str, argv: tuple[str, ...], **kwargs: Any) -> list[LspServerDef]:
     """TypeScript / TSX / JavaScript を 1 つのサーバーで受け持つ定義（言語 ID ごとに 1 件）。"""
     langs = (
         ("typescript", "typescript"),
@@ -102,7 +157,14 @@ def _ts_family(name: str, argv: tuple[str, ...]) -> list[LspServerDef]:
         ("javascript", "javascript"),
     )
     return [
-        LspServerDef(language_id=lid, name=name, argv_candidates=(argv,), lsp_language_id=lsp_lid)
+        LspServerDef(
+            language_id=lid,
+            name=name,
+            argv_candidates=(argv,),
+            lsp_language_id=lsp_lid,
+            requests_m1=_NAVIGATION | _CODE_ACTION,
+            **kwargs,
+        )
         for lid, lsp_lid in langs
     ]
 
@@ -114,27 +176,44 @@ def _best_effort(language_id: str, name: str, *argv: str, lsp_language_id: str |
         argv_candidates=(argv,),
         lsp_language_id=lsp_language_id,
         best_effort=True,
+        requests_m1=_NAVIGATION | _CODE_ACTION,
     )
 
 
 SERVERS: tuple[LspServerDef, ...] = (
-    # Python: 型解決は basedpyright が既定、pyright が代替。Lint / CodeAction は ruff を並列で持つ。
+    # Python: 型解決は basedpyright が既定、pyright が代替。Lint / CodeAction は ruff を並列で持つ（ruff は utf-8 を返す）。
     LspServerDef(
         language_id="python",
         name="basedpyright",
         argv_candidates=(("basedpyright-langserver", "--stdio"),),
         settings=_python_settings(based=True),
+        locale="en",
+        requests_m1=_NAVIGATION,
     ),
     LspServerDef(
         language_id="python",
         name="pyright",
         argv_candidates=(("pyright-langserver", "--stdio"),),
         settings=_python_settings(based=False),
+        locale="en",
+        requests_m1=_NAVIGATION,
     ),
-    LspServerDef(language_id="python", name="ruff", argv_candidates=(("ruff", "server"),), role="lint"),
-    # TypeScript / JavaScript: vtsls が既定、typescript-language-server が代替（どちらも Node が要る）。
-    *_ts_family("vtsls", ("vtsls", "--stdio")),
-    *_ts_family("typescript-language-server", ("typescript-language-server", "--stdio")),
+    LspServerDef(
+        language_id="python",
+        name="ruff",
+        argv_candidates=(("ruff", "server"),),
+        role="lint",
+        requests_m1=_CODE_ACTION,
+    ),
+    # TypeScript / JavaScript: typescript-language-server が既定（診断が常に最新）、vtsls が代替（TypeScript を同梱するので
+    # ワークスペースに tsserver.js が無いときの逃げ先）。どちらも Node が要る。
+    *_ts_family(
+        "typescript-language-server",
+        ("typescript-language-server", "--stdio"),
+        tsserver_via="initialization_options",
+        needs_workspace_tsserver=True,
+    ),
+    *_ts_family("vtsls", ("vtsls", "--stdio"), tsserver_via="settings"),
     # best effort（PATH に無ければ unavailable）。
     _best_effort("rust", "rust-analyzer", "rust-analyzer"),
     _best_effort("go", "gopls", "gopls"),
@@ -157,17 +236,58 @@ def default_server(language_id: str, role: Role = "types") -> LspServerDef | Non
     return found[0] if found else None
 
 
-def build_settings(
-    defn: LspServerDef, *, python_path: str | os.PathLike[str] | None = None
-) -> dict[str, Any]:
-    """``defn.settings`` の複製に、実行時にしか決まらない値を重ねる。
+def find_tsserver(
+    workspace_root: str | os.PathLike[str], *, explicit: str | os.PathLike[str] | None = None
+) -> Path | None:
+    """tsserver（``tsserver.js``）の場所。``explicit`` が実在すればそれ、無ければ ``<root>/node_modules/typescript/lib/tsserver.js``。
 
-    ``python_path`` はワークスペースの Python インタープリタ（``python.pythonPath``）。basedpyright / pyright が
-    import を解決するのに使う（S-4: 渡さないと依存パッケージが ``reportMissingImports`` になる）。
+    見つからなければ ``None``（TypeScript 7 には ``tsserver.js`` が無い。S-5）。``needs_workspace_tsserver`` の定義
+    （typescript-language-server）は ``None`` のとき起動に失敗するので、呼び手は vtsls に切り替える。
+    """
+    if explicit is not None:
+        path = Path(explicit)
+        if path.is_file():
+            return path
+    path = Path(workspace_root) / "node_modules" / "typescript" / "lib" / "tsserver.js"
+    return path if path.is_file() else None
+
+
+def build_initialization_options(
+    defn: LspServerDef, *, tsserver_path: str | os.PathLike[str] | None = None
+) -> dict[str, Any] | None:
+    """``defn.initialization_options`` の複製に、実行時にしか決まらない値を重ねる。無ければ ``None``（キーごと省く）。
+
+    ``tsserver_path`` は typescript-language-server の ``initializationOptions.tsserver.path``（S-5）。
+    """
+    options = (
+        None if defn.initialization_options is None else copy.deepcopy(dict(defn.initialization_options))
+    )
+    if defn.tsserver_via == "initialization_options" and tsserver_path is not None:
+        options = options if options is not None else {}
+        options.setdefault("tsserver", {})["path"] = os.fspath(tsserver_path)
+    return options
+
+
+def build_settings(
+    defn: LspServerDef,
+    *,
+    python_path: str | os.PathLike[str] | None = None,
+    tsserver_path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """``defn.settings`` の複製に、実行時にしか決まらない値を重ねる（``LspClient.set_settings`` に渡す）。
+
+    * ``python_path``: ワークスペースの Python インタープリタ（``python.pythonPath``）。basedpyright / pyright が import を
+      解決するのに使う。**``workspace/configuration`` の ``python`` セクションでしか渡せない**（``initializationOptions`` は
+      効かない。渡さないと依存パッケージが ``reportMissingImports`` になる。S-4）。
+    * ``tsserver_path``: vtsls へ ``vtsls.autoUseWorkspaceTsdk`` と ``typescript.tsdk``（``tsserver.js`` のある ``lib``）を返して
+      ワークスペースの TypeScript を使わせる。返さないと同梱の TypeScript を使う（S-5）。
     """
     settings: dict[str, Any] = copy.deepcopy(dict(defn.settings))
     if python_path is not None and defn.language_id == "python" and defn.role == "types":
         settings.setdefault("python", {})["pythonPath"] = os.fspath(python_path)
+    if defn.tsserver_via == "settings" and tsserver_path is not None:
+        settings.setdefault("vtsls", {})["autoUseWorkspaceTsdk"] = True
+        settings.setdefault("typescript", {})["tsdk"] = os.fspath(Path(tsserver_path).parent)
     return settings
 
 
@@ -233,6 +353,22 @@ def _env_get(env: Mapping[str, str], name: str) -> str | None:
     return None
 
 
+def _override_argv(defn: LspServerDef, env: Mapping[str, str]) -> list[str] | None:
+    """環境変数による上書き。サーバー名単位 → 言語単位の順に見て、最初に有効なものを採る。"""
+    for var in (defn.server_env_var, defn.env_var):
+        value = (_env_get(env, var) or "").strip()
+        if not value:
+            continue
+        try:
+            argv = split_command(value)
+        except ValueError as e:
+            _log.warning("%s is not a valid command line (%s); ignoring it", var, e)
+            continue
+        if argv:
+            return argv
+    return None
+
+
 def find_command(
     defn: LspServerDef,
     *,
@@ -242,22 +378,17 @@ def find_command(
 ) -> list[str] | None:
     """``defn`` の起動 argv を探す。見つからなければ ``None``（呼び手が ``unavailable: not_found`` にする）。
 
-    探索順: ``defn.env_var`` → ``venv``（Python 環境の根。省略可）の ``Scripts|bin`` → ``<workspace_root>/.venv/Scripts|bin`` →
+    探索順: 環境変数 → ``venv``（Python 環境の根。省略可）の ``Scripts|bin`` → ``<workspace_root>/.venv/Scripts|bin`` →
     ``<workspace_root>/node_modules/.bin`` → ``PATH``。候補（``argv_candidates``）は先頭から順に、候補ごとに上の順で探す。
-    環境変数の値は **そのまま argv になる**（存在確認はしない。起動に失敗すれば呼び手が ``init_failed`` にする）。
-    環境変数の上書きは、同じ言語・役の定義すべてに効く（代替サーバーの定義でも同じ argv になる）。
-    ``environ`` を省略すると ``os.environ``。
+
+    環境変数は ``defn.server_env_var``（``LUCIANKE_LSP_<サーバー名>_CMD``。そのサーバーだけ上書き）→ ``defn.env_var``
+    （``LUCIANKE_LSP_<言語>_CMD``。同じ言語・役の定義すべてに効く）の順。値は **そのまま argv になる**
+    （存在確認はしない。起動に失敗すれば呼び手が ``init_failed`` にする）。``environ`` を省略すると ``os.environ``。
     """
     env: Mapping[str, str] = os.environ if environ is None else environ
-    override = (_env_get(env, defn.env_var) or "").strip()
-    if override:
-        try:
-            argv = split_command(override)
-        except ValueError as e:
-            _log.warning("%s is not a valid command line (%s); ignoring it", defn.env_var, e)
-        else:
-            if argv:
-                return argv
+    override = _override_argv(defn, env)
+    if override is not None:
+        return override
 
     root = Path(workspace_root)
     dirs: list[Path] = []
