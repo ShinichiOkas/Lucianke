@@ -22,8 +22,9 @@ CREATE_NAME = re.compile(
 )
 
 # schema.sql だけが持ってよいもの（設計書 §6.2、§7.6.5）
-ALLOWED_INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank"}
+ALLOWED_INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank", "_import_probes"}
 ALLOWED_TRIGGERS = {"symbols_ai", "symbols_ad", "symbols_au"}
+ALLOWED_INTERNAL_INDEXES = {"_import_probes_stem"}
 
 
 def _strip_comments(sql: str) -> str:
@@ -102,14 +103,16 @@ def test_public_ddl_matches_spec_9_2() -> None:
 
 
 def test_schema_sql_extras_are_on_the_allow_list() -> None:
-    """schema.sql が仕様書に無いものを持つなら、内部テーブル 3 つとトリガ 3 本だけ。"""
+    """schema.sql が仕様書に無いものを持つなら、内部テーブル 4 つとその索引 1 つ、トリガ 3 本だけ。"""
     statements = _statements(SCHEMA.read_text(encoding="utf-8"))
     public = set(_public(statements))
     extras = [s for s in statements if s not in public]
     tables = {_name(s) for s in extras if _name_kind(s) == "TABLE"}
     triggers = {_name(s) for s in extras if _name_kind(s) == "TRIGGER"}
-    other = [s for s in extras if _name_kind(s) not in {"TABLE", "TRIGGER"}]
+    indexes = {_name(s) for s in extras if _name_kind(s) == "INDEX"}
+    other = [s for s in extras if _name_kind(s) not in {"TABLE", "TRIGGER", "INDEX"}]
     assert tables == ALLOWED_INTERNAL_TABLES
+    assert indexes == ALLOWED_INTERNAL_INDEXES
     assert triggers == ALLOWED_TRIGGERS
     assert other == []
 

@@ -59,7 +59,17 @@ def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_1_to_2}
+def _migrate_2_to_3(conn: sqlite3.Connection) -> None:
+    """v3: import の解決先の語幹の内部表 ``_import_probes``（``engine/reresolve.py``。値は各ファイルの次の取り込みで入る）。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _import_probes ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " stem TEXT NOT NULL, PRIMARY KEY (file_id, stem)) WITHOUT ROWID"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _import_probes_stem ON _import_probes(stem)")
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_1_to_2, 2: _migrate_2_to_3}
 
 
 def schema_sql() -> str:

@@ -167,3 +167,254 @@ async def test_call_to_an_overloaded_method_points_at_the_implementation(env: En
     )[0][0]
     assert targets[0] == impl.removeprefix(f"lk://{WS_ID}/")
     assert env.rows("SELECT COUNT(*) FROM symbols WHERE urn = ?", impl) == [(1,)]
+
+
+# --- 後から作られた・消えたファイルを import している側の関係（BUG-0025。engine/reresolve.py） -------------
+
+
+@dataclass
+class Bare:
+    """空のワークスペース。ファイルを書いて ``index_file`` / ``remove`` / ``scan`` を好きな順に呼ぶ。"""
+
+    indexer: Indexer
+    readers: ReaderPool
+    root: Path
+
+    def write(self, rel: str, text: str) -> None:
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+
+    def rows(self, sql: str, *args: object) -> list[tuple[Any, ...]]:
+        with self.readers.reader() as conn:
+            return [tuple(r) for r in conn.execute(sql, args).fetchall()]
+
+    def edges(self, source: str, kind: str | None = None) -> set[tuple[str, str]]:
+        """``source``（``path`` または ``path#sym``）が出す行を ``(relation_kind, target)`` で返す（ワークスペース内は相対表記）。"""
+        out = set()
+        for k, t in self.rows(
+            "SELECT relation_kind, target_urn FROM relations WHERE source_urn = ?", f"lk://{WS_ID}/{source}"
+        ):
+            if kind is None or k == kind:
+                out.add((k, t.removeprefix(f"lk://{WS_ID}/")))
+        return out
+
+    def version(self) -> int:
+        return int(self.rows("SELECT data_version FROM _meta")[0][0])
+
+
+@pytest.fixture
+async def bare(tmp_path: Path) -> AsyncIterator[Bare]:
+    root = tmp_path / "bare"
+    root.mkdir()
+    db = tmp_path / "db" / "paad.sqlite"
+    writer = IndexWriter(db)
+    readers = ReaderPool(db, size=2)
+    indexer = Indexer(Workspace(workspace_id=WS_ID, root=root.resolve()), writer, readers, TreeCache())
+    yield Bare(indexer, readers, root)
+    await indexer.aclose()
+    readers.close()
+    writer.close()
+
+
+A_PY = "from pkg.b import helper\n\n\ndef run():\n    return helper()\n"
+B_PY = "def helper():\n    return 1\n"
+
+
+async def _seed_a_before_b(bare: Bare) -> None:
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/a.py", A_PY)
+    await bare.indexer.index_file("pkg/__init__.py")
+    await bare.indexer.index_file("pkg/a.py")
+
+
+async def test_new_file_resolves_importers_that_were_external(bare: Bare) -> None:
+    """票の再現: a.py（``from pkg.b import helper``）を先に取り込み、後から b.py を作る。a.py の行が b.py のシンボルに結ばれる。"""
+    await _seed_a_before_b(bare)
+    assert bare.edges("pkg/a.py", "IMPORTS") == {("IMPORTS", "lk://_ext/pkg#b.helper")}
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "lk://_ext/pkg#b.helper")}
+    version = bare.version()
+
+    bare.write("pkg/b.py", B_PY)
+    await bare.indexer.index_file("pkg/b.py")
+
+    assert bare.edges("pkg/a.py", "IMPORTS") == {("IMPORTS", "pkg/b.py#helper")}
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "pkg/b.py#helper")}
+    assert bare.rows(
+        "SELECT target_file_id = (SELECT file_id FROM files WHERE path = 'pkg/b.py') FROM relations"
+        " WHERE source_urn = ? AND relation_kind = 'CALLS'",
+        f"lk://{WS_ID}/pkg/a.py#run",
+    ) == [(1,)]
+    assert bare.version() == version + 1  # b.py の取り込みと a.py の解き直しは 1 つのトランザクション
+
+
+async def test_removed_file_returns_importers_to_external(bare: Bare) -> None:
+    """b.py を消すと、b.py のシンボルを指していた a.py の行は外部（``lk://_ext/pkg#b.helper``）に戻る。"""
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/b.py", B_PY)
+    bare.write("pkg/a.py", A_PY)
+    for rel in ("pkg/__init__.py", "pkg/b.py", "pkg/a.py"):
+        await bare.indexer.index_file(rel)
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "pkg/b.py#helper")}
+    version = bare.version()
+
+    (bare.root / "pkg/b.py").unlink()
+    assert await bare.indexer.remove("pkg/b.py") is True
+
+    assert bare.edges("pkg/a.py", "IMPORTS") == {("IMPORTS", "lk://_ext/pkg#b.helper")}
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "lk://_ext/pkg#b.helper")}
+    assert bare.version() == version + 1
+
+
+async def test_rename_moves_importers_between_modules(bare: Bare) -> None:
+    """b.py → c.py の改名（remove + index_file）。b を import していた a.py は外部へ、c を import していた d.py は c.py へ結ばれる。"""
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/b.py", B_PY)
+    bare.write("pkg/a.py", A_PY)
+    bare.write("pkg/d.py", "from pkg.c import helper\n\n\ndef go():\n    return helper()\n")
+    for rel in ("pkg/__init__.py", "pkg/b.py", "pkg/a.py", "pkg/d.py"):
+        await bare.indexer.index_file(rel)
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "pkg/b.py#helper")}
+    assert bare.edges("pkg/d.py#go", "CALLS") == {("CALLS", "lk://_ext/pkg#c.helper")}
+
+    (bare.root / "pkg/b.py").rename(bare.root / "pkg/c.py")
+    await bare.indexer.remove("pkg/b.py")
+    await bare.indexer.index_file("pkg/c.py")
+
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "lk://_ext/pkg#b.helper")}
+    assert bare.edges("pkg/d.py#go", "CALLS") == {("CALLS", "pkg/c.py#helper")}
+
+
+async def test_typescript_relative_import_resolves_when_the_file_appears(bare: Bare) -> None:
+    """未解決の相対 import は行そのものが無い（外部にもならない）。後からファイルができたら IMPORTS / CALLS が現れ、消えたら無くなる。"""
+    bare.write("web/app.ts", 'import { helper } from "./util";\nexport function run() { return helper(); }\n')
+    await bare.indexer.index_file("web/app.ts")
+    assert bare.edges("web/app.ts") == set()
+    assert bare.edges("web/app.ts#run") == set()
+
+    bare.write("web/util.ts", "export function helper() { return 1; }\n")
+    await bare.indexer.index_file("web/util.ts")
+
+    assert bare.edges("web/app.ts", "IMPORTS") == {("IMPORTS", "web/util.ts#helper")}
+    assert bare.edges("web/app.ts#run", "CALLS") == {("CALLS", "web/util.ts#helper")}
+
+    (bare.root / "web/util.ts").unlink()
+    await bare.indexer.remove("web/util.ts")
+    assert bare.edges("web/app.ts#run") == set()  # 相対 import は解決できなければ行を持たない
+
+
+async def test_python_relative_import_resolves_when_the_file_appears(bare: Bare) -> None:
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/a.py", "from .b import helper\n\n\ndef run():\n    return helper()\n")
+    await bare.indexer.index_file("pkg/a.py")
+    assert bare.edges("pkg/a.py#run") == set()
+
+    bare.write("pkg/b.py", B_PY)
+    await bare.indexer.index_file("pkg/b.py")
+
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "pkg/b.py#helper")}
+
+
+async def test_file_already_on_disk_but_not_indexed_yet(bare: Bare) -> None:
+    """b.py がディスクにはあるが索引にまだ無いうちに a.py を取り込むと、行は一度捨てられる。b.py を取り込んだら結ばれる。"""
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/a.py", A_PY)
+    bare.write("pkg/b.py", B_PY)
+    await bare.indexer.index_file("pkg/a.py")
+    assert bare.edges("pkg/a.py#run") == set()
+
+    await bare.indexer.index_file("pkg/b.py")
+
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "pkg/b.py#helper")}
+
+
+async def test_body_edit_does_not_reingest_importers(bare: Bare) -> None:
+    """既存ファイルの編集では、import している側を取り込み直さない（編集のたびに解析し直さないため）。"""
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/b.py", B_PY)
+    bare.write("pkg/a.py", A_PY)
+    for rel in ("pkg/__init__.py", "pkg/b.py", "pkg/a.py"):
+        await bare.indexer.index_file(rel)
+    before = bare.indexer.ingest_calls
+    importer_rows = bare.rows("SELECT relation_id FROM relations WHERE source_urn LIKE 'lk://mini/pkg/a.py%'")
+
+    bare.write("pkg/b.py", "def helper():\n    return 2\n")
+    await bare.indexer.index_file("pkg/b.py")
+
+    assert bare.indexer.ingest_calls == before + 1
+    assert (
+        bare.rows("SELECT relation_id FROM relations WHERE source_urn LIKE 'lk://mini/pkg/a.py%'")
+        == importer_rows
+    )
+
+
+async def test_excluded_file_is_not_resurrected_by_its_own_probes(bare: Bare) -> None:
+    """``__init__.py`` は自分の親ディレクトリの語幹を調べる。除外に変わって ``remove`` されたとき、自分自身を取り込み直さない。"""
+    bare.write("pkg/__init__.py", "from . import b\n")
+    bare.write("pkg/b.py", B_PY)
+    await bare.indexer.index_file("pkg/b.py")
+    await bare.indexer.index_file("pkg/__init__.py")
+
+    assert await bare.indexer.remove("pkg/__init__.py") is True  # 実体は残したまま索引から外す
+
+    assert bare.rows("SELECT COUNT(*) FROM files WHERE path = 'pkg/__init__.py'") == [(0,)]
+
+
+async def test_incremental_scan_resolves_importers_that_were_not_touched(bare: Bare) -> None:
+    """起動時の差分走査: a.py は変わっていない（取り込まれない）が、走査の間に b.py ができていたら a.py の行が結ばれる。消えたら外部へ戻る。"""
+    await _seed_a_before_b(bare)
+    bare.write("pkg/b.py", B_PY)
+
+    report = await bare.indexer.scan()
+
+    assert report.created == 1 and report.unchanged >= 2, report
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "pkg/b.py#helper")}
+
+    (bare.root / "pkg/b.py").unlink()
+    report = await bare.indexer.scan()
+    assert report.removed == 1, report
+    assert bare.edges("pkg/a.py#run", "CALLS") == {("CALLS", "lk://_ext/pkg#b.helper")}
+
+
+async def test_import_probes_are_replaced_on_reingest_and_cascade_on_remove(bare: Bare) -> None:
+    await _seed_a_before_b(bare)
+
+    def stems(path: str) -> set[str]:
+        return {
+            s
+            for (s,) in bare.rows(
+                "SELECT p.stem FROM _import_probes p JOIN files f ON f.file_id = p.file_id WHERE f.path = ?",
+                path,
+            )
+        }
+
+    assert {"pkg/b", "src/pkg/b"} <= stems("pkg/a.py")
+    bare.write("pkg/a.py", "import os\n")
+    await bare.indexer.index_file("pkg/a.py")
+    assert "pkg/b" not in stems("pkg/a.py")
+    assert "os" in stems("pkg/a.py")
+    (bare.root / "pkg/a.py").unlink()
+    await bare.indexer.remove("pkg/a.py")
+    assert bare.rows(
+        "SELECT COUNT(*) FROM _import_probes WHERE file_id NOT IN (SELECT file_id FROM files)"
+    ) == [(0,)]
+
+
+@pytest.mark.parametrize(
+    ("path", "stem"),
+    [
+        ("pkg/b.py", "pkg/b"),
+        ("pkg/b/__init__.py", "pkg/b"),
+        ("pkg/b.pyi", "pkg/b"),
+        ("web/util.ts", "web/util"),
+        ("web/util/index.tsx", "web/util"),
+        ("util.js", "util"),
+        ("__init__.py", ""),
+        ("src/pkg/__init__.py", "src/pkg"),
+        ("README", "README"),
+    ],
+)
+def test_stem_of(path: str, stem: str) -> None:
+    from lucianke.engine.reresolve import stem_of
+
+    assert stem_of(path) == stem

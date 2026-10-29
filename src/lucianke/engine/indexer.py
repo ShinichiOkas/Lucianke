@@ -52,6 +52,7 @@ from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
+from lucianke.engine import reresolve
 from lucianke.index import queries, rank
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
@@ -279,9 +280,12 @@ class Indexer:
         self.ingest_calls += 1
         facts = prepared.facts
 
+        # 新しいファイルなら、それを import している側の関係を同じトランザクションで解き直す（BUG-0025。engine/reresolve.py）
+        importers = await reresolve.prepare_importers(self, [str(path)]) if known is None else []
+
         def job(conn: object) -> IngestStats:
             stats = ingest_file(conn, facts)  # type: ignore[arg-type]
-            _settle_relations(conn, [stats.file_id])  # type: ignore[arg-type]
+            _settle_relations(conn, [stats.file_id, *reresolve.ingest_importers(conn, importers)])  # type: ignore[arg-type]
             return stats
 
         return await self._writer.asubmit(job, bumps_version=True, label=f"ingest:{path}")
@@ -293,12 +297,17 @@ class Indexer:
         self._trees.evict(self._ws.workspace_id, RelPath(path))
         ws_id = self._ws.workspace_id
 
-        def job(conn: object) -> bool:
-            return remove_file(conn, ws_id, path)  # type: ignore[arg-type]
-
         existed = await asyncio.to_thread(self._known_sha, RelPath(path)) is not None
         if not existed:
             return False
+        # 消えたファイルを import していた側の関係を同じトランザクションで解き直す（BUG-0025）
+        importers = await reresolve.prepare_importers(self, [path])
+
+        def job(conn: object) -> bool:
+            removed = remove_file(conn, ws_id, path)  # type: ignore[arg-type]
+            _settle_relations(conn, reresolve.ingest_importers(conn, importers))  # type: ignore[arg-type]
+            return removed
+
         return await self._writer.asubmit(job, bumps_version=True, label=f"remove:{path}")
 
     async def scan(self, *, progress_cb: Callable[[int], None] | None = None) -> ScanReport:
@@ -368,6 +377,9 @@ class Indexer:
                 bumps_version=False,
                 label="settle_relations",
             )
+        if known:  # 初回の全体走査は、取り込む側が最後のファイルシステムを見て解決済み。差分のときだけ、取り込まなかった側を解き直す
+            created = [r for r in listing if r not in known]
+            await reresolve.after_scan(self, created=created, removed=gone, skip_file_ids=set(file_ids))
         if report.indexed or report.removed or not await asyncio.to_thread(self._ranks_ready):
             await self.refresh_ranks_quietly()  # 全体の取り込みの後に 1 回（index/rank.py。T-01 の順位）
         progress(100)
@@ -681,6 +693,7 @@ class Indexer:
         extras: dict[str, SymbolExtra] | None = None,
         relations: Sequence[RelationFact] = (),
         syntax_errors: Sequence[SyntaxErrorFact] = (),
+        import_stems: Sequence[str] = (),
     ) -> FileFacts:
         support = get_support(detected.language_id)
         extra_globs = tuple(getattr(support, "test_path_globs", ()) or ())
@@ -698,6 +711,7 @@ class Indexer:
             relations=tuple(relations),
             syntax_errors=tuple(syntax_errors),
             symbol_extras=extras or {},
+            import_stems=tuple(import_stems),
         )
 
     def _analyze_code(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
@@ -717,7 +731,8 @@ class Indexer:
         )
         records = [e.record for e in extraction.symbols]
         extras = {str(e.record.urn): SymbolExtra(body_sha256=e.body_sha256) for e in extraction.symbols}
-        relations = self._relations(parsed, lang, support, records, rel)
+        probes: set[str] = set()
+        relations = self._relations(parsed, lang, support, records, rel, probes)
         errors: list[SyntaxErrorFact] = [
             (r.start.line, r.start.col, r.end.line, r.end.col, _SYNTAX_ERROR_MESSAGE)
             for r in parsed.error_ranges
@@ -732,17 +747,26 @@ class Indexer:
             extras=extras,
             relations=relations,
             syntax_errors=errors,
+            import_stems=sorted(probes),
         )
 
     def _relations(
-        self, parsed: object, lang: str, support: object, records: list[SymbolRecord], rel: RelPath
+        self,
+        parsed: object,
+        lang: str,
+        support: object,
+        records: list[SymbolRecord],
+        rel: RelPath,
+        probes: set[str],
     ) -> list[RelationFact]:
         """関係の候補 → ``RelationFact``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順で、解決できなければ捨てる。"""
         ws_id = self._ws.workspace_id
         external: dict[str, str] = {}
         try:
             facts = extract_imports(parsed, language_id=lang)  # type: ignore[arg-type]
-            resolver = make_resolver(from_rel=rel, language_id=lang, exists=self._exists)
+            resolver = make_resolver(
+                from_rel=rel, language_id=lang, exists=reresolve.ProbeRecorder(self._exists, probes)
+            )
             name_map = imported_name_map(facts, resolver)
             external = external_name_map(facts, language_id=lang, internal=name_map)
         except Exception:

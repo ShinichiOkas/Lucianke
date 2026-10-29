@@ -1,4 +1,4 @@
--- schema_version: 2
+-- schema_version: 3
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -213,6 +213,14 @@ CREATE TABLE _symbol_rank (
   score        REAL NOT NULL,                 -- PageRank を最大 1.0 に正規化した値
   fan_in       INTEGER NOT NULL DEFAULT 0     -- 別ファイルからの辺の本数
 );
+
+-- import の解決が当たった／外れた場所の語幹（engine/reresolve.py。後から作られた・消えたファイルを import している側を引くための内部表）
+CREATE TABLE _import_probes (
+  file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  stem    TEXT NOT NULL,                 -- 解決で調べたパスの語幹（拡張子と __init__ / index を除いたもの）
+  PRIMARY KEY (file_id, stem)
+) WITHOUT ROWID;
+CREATE INDEX _import_probes_stem ON _import_probes(stem);
 
 -- ===== symbols_fts を symbols に追従させるトリガ（外部コンテンツ FTS5） =====
 CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN

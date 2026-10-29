@@ -163,6 +163,8 @@ class FileFacts:
     relations: Sequence[RelationFact] = field(default_factory=tuple)
     syntax_errors: Sequence[SyntaxErrorFact] = field(default_factory=tuple)
     symbol_extras: Mapping[str, SymbolExtra] = field(default_factory=dict)
+    import_stems: Sequence[str] = field(default_factory=tuple)
+    """import の解決で調べたパスの語幹（``engine/reresolve.py``）。後からファイルが作られた・消えたとき、これを import している側を引く。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +690,13 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
         for sl, sc, el, ec, message in facts.syntax_errors
     ]
     diagnostics_added = _insert_diagnostics(conn, file_id, syntax, stamp)
+
+    conn.execute("DELETE FROM _import_probes WHERE file_id = ?", (file_id,))
+    if facts.import_stems:
+        conn.executemany(
+            "INSERT OR IGNORE INTO _import_probes (file_id, stem) VALUES (?, ?)",
+            [(file_id, stem) for stem in facts.import_stems],
+        )
 
     return IngestStats(
         file_id=file_id,

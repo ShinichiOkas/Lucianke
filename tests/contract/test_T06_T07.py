@@ -837,3 +837,65 @@ async def test_real_typescript_call_through_a_module_variable_reaches_the_overlo
     assert [(n["name"], n["call_site_path"]) for n in nodes] == [("checkout", TS_APP)]
     cls = await calls(real, {"urn": U(TS_CLIENT, "PaymentClient")}, "incoming", depth=1)
     assert any(n["call_site_path"] == TS_APP for n in cls.structured["data"]["nodes"])
+
+
+async def test_real_file_created_after_its_importer_is_seen_by_t06_t07(tmp_path: Path) -> None:
+    """BUG-0025: 監視（``index_file``）で後から作られたファイルの関数が、すでに索引済みの import 元の呼び出しから見える。
+
+    ``hook.py`` が ``from app.audit import record`` を先に取り込まれ、``audit.py`` は後から作られる。作られる前は
+    ``record`` が外部ノード、作られたあとは ``audit.py`` の実体になり、T-06 の参照にも ``hook.py`` の呼び出しが載る。
+    """
+    root = tmp_path / "live"
+    (root / "app").mkdir(parents=True)
+    (root / "app/__init__.py").write_text("", encoding="utf-8")
+    (root / "app/hook.py").write_text(
+        "from app.audit import record\n\n\ndef on_order():\n    return record()\n", encoding="utf-8"
+    )
+    db = tmp_path / "db" / "paad.sqlite"
+    writer = IndexWriter(db)
+    readers = ReaderPool(db, size=2)
+    indexer = Indexer(Workspace(workspace_id="live", root=root.resolve()), writer, readers, TreeCache())
+    try:
+        await indexer.index_file("app/__init__.py")
+        await indexer.index_file("app/hook.py")
+        registry = ToolRegistry()
+        registry.register(t06.TOOL_SPEC)
+        registry.register(t07.TOOL_SPEC)
+        base = build_services(lambda: [str(root)])
+
+        @dataclass(slots=True)
+        class Services(ToolServices):
+            db_path: Path | None = None
+
+        pipe = Pipeline(
+            registry, services=Services(roots=base.roots, trees=base.trees, lines=base.lines, db_path=db)
+        )
+        on_order = {"urn": str(Urn("live", "app/hook.py", CodeSel("on_order")))}
+
+        before = await calls(pipe, on_order, "outgoing", depth=1, exclude_external=False)
+        assert not before.is_error, before.text
+        assert [(n["name"], n["is_external"]) for n in before.structured["data"]["nodes"]] == [
+            ("audit.record", True)
+        ]
+
+        (root / "app/audit.py").write_text("def record():\n    return 1\n", encoding="utf-8")
+        await indexer.index_file("app/audit.py")  # ファイル監視が届ける差分の取り込み
+
+        after = await calls(pipe, on_order, "outgoing", depth=1, exclude_external=False)
+        assert not after.is_error, after.text
+        nodes = after.structured["data"]["nodes"]
+        assert [(n["name"], n["is_external"]) for n in nodes] == [("record", False)]
+        record = {"urn": str(Urn("live", "app/audit.py", CodeSel("record")))}
+        incoming = await calls(pipe, record, "incoming", depth=1)
+        assert [(n["name"], n["call_site_path"]) for n in incoming.structured["data"]["nodes"]] == [
+            ("on_order", "app/hook.py")
+        ]
+        references = await refs(pipe, record)
+        assert not references.is_error, references.text
+        assert any(r["path"] == "app/hook.py" for r in references.structured["data"]["references"]), (
+            references.text
+        )
+    finally:
+        await indexer.aclose()
+        readers.close()
+        writer.close()
