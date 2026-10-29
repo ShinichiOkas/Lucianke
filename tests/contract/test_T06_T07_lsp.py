@@ -48,7 +48,7 @@ CALL = "await processor.process_charge(req)"
 
 _BASEDPYRIGHT = default_server("python", "types")
 _BASEDPYRIGHT_CMD = (
-    find_command(_BASEDPYRIGHT, workspace_root=REPO, venv=REPO / ".venv") if _BASEDPYRIGHT else None
+    find_command(_BASEDPYRIGHT, workspace_root=REPO, venv=Path(sys.prefix)) if _BASEDPYRIGHT else None
 )
 needs_basedpyright = pytest.mark.skipif(_BASEDPYRIGHT_CMD is None, reason="basedpyright is not installed")
 

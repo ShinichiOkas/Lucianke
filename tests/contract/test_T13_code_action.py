@@ -214,7 +214,9 @@ def error_of(result: Any, code: str) -> dict[str, Any]:
 # --- 実機: ruff ---------------------------------------------------------------------------
 
 _RUFF = default_server("python", "lint")
-_RUFF_CMD = find_command(_RUFF, workspace_root=REPO, venv=REPO / ".venv") if _RUFF else None
+# 実機の ruff は、テストを走らせている Python 環境（uv.lock が固定する dev グループ）のものを使う。``REPO / ".venv"`` だと、
+# ``.venv`` の無い作業ツリー（git worktree）で PATH の古い ruff（isPreferred を付けない 0.11 など）に落ちて結果が変わる（BUG-0031）。
+_RUFF_CMD = find_command(_RUFF, workspace_root=REPO, venv=Path(sys.prefix)) if _RUFF else None
 needs_ruff = pytest.mark.skipif(_RUFF_CMD is None, reason="ruff is not installed")
 
 
@@ -256,7 +258,9 @@ async def test_real_quickfix_by_kind_is_ambiguous_and_lists_candidate_ids(real: 
     before = real.snapshot()
     err = await ambiguous_quickfix(real)
     assert [c["kind"] for c in err["candidates"]] == ["quickfix", "quickfix"]
-    assert "Remove unused import" in err["candidates"][0]["title"] and err["candidates"][0]["is_preferred"]
+    assert "Remove unused import" in err["candidates"][0]["title"] and err["candidates"][0]["is_preferred"], (
+        f"ruff={_RUFF_CMD}: {err['candidates']}"  # isPreferred を付けない版の ruff だとタイトル順（Disable が先）になる
+    )
     assert "Disable for this line" in err["candidates"][1]["title"]
     assert real.snapshot() == before
     text = (await real.call("compact", path=FIXTURE, line=1, action_kind_or_id="quickfix")).text

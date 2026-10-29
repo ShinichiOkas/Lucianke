@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+import sys
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,7 +50,7 @@ FIRST_ANALYSIS_TIMEOUT_MS = 90_000
 
 BASEDPYRIGHT = default_server("python", "types")
 BASEDPYRIGHT_CMD = (
-    find_command(BASEDPYRIGHT, workspace_root=REPO, venv=REPO / ".venv") if BASEDPYRIGHT else None
+    find_command(BASEDPYRIGHT, workspace_root=REPO, venv=Path(sys.prefix)) if BASEDPYRIGHT else None
 )
 needs_basedpyright = pytest.mark.skipif(BASEDPYRIGHT_CMD is None, reason="basedpyright is not installed")
 

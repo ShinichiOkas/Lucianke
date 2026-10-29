@@ -61,7 +61,7 @@ def pos_of(path: Path, needle: str, *, line: int | None = None, offset: int = 0)
 
 _BASEDPYRIGHT = default_server("python", "types")
 _BASEDPYRIGHT_CMD = (
-    find_command(_BASEDPYRIGHT, workspace_root=REPO, venv=REPO / ".venv") if _BASEDPYRIGHT else None
+    find_command(_BASEDPYRIGHT, workspace_root=REPO, venv=Path(sys.prefix)) if _BASEDPYRIGHT else None
 )
 
 needs_basedpyright = pytest.mark.skipif(_BASEDPYRIGHT_CMD is None, reason="basedpyright is not installed")
@@ -835,7 +835,7 @@ async def test_fake_references_drop_the_declaration_found_by_definition(fake: Fa
 # --- 実機: ruff（utf-8 を採るサーバー。codeAction の供給元） -------------------------------------
 
 _RUFF = default_server("python", "lint")
-_RUFF_CMD = find_command(_RUFF, workspace_root=REPO, venv=REPO / ".venv") if _RUFF else None
+_RUFF_CMD = find_command(_RUFF, workspace_root=REPO, venv=Path(sys.prefix)) if _RUFF else None
 
 
 @pytest.mark.skipif(_RUFF_CMD is None, reason="ruff is not installed")
