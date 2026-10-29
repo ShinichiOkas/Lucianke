@@ -90,39 +90,37 @@ _SHA_SHOWN = 12
 
 
 class ApplyCodeActionArgs(CommonArgs):
-    path: str = Field(description="Workspace-relative path of the file.")
+    path: str
     line: int = Field(
         ge=1,
-        description="1-based line. With a code_action_id it must be the line the id was issued for (the diagnostic's line).",
     )
     character: int | None = Field(
         default=None,
         ge=1,
-        description="1-based column (code points). Default: the first non-blank character of the line.",
+        description="Default: first non-blank.",
     )
     end_line: int | None = Field(
-        default=None, ge=1, description="Last line of the range (refactor.extract etc.). Default: line."
+        default=None, ge=1, description="Default: line."
     )
     action_kind_or_id: str = Field(
         min_length=1,
-        description="A code_action_id from get_diagnostics (starts with 'qf_'), or an LSP CodeActionKind "
-        "(quickfix, source.organizeImports, source.fixAll, refactor.extract, ...).",
+        description="code_action_id (qf_...) from get_diagnostics, or an LSP CodeActionKind.",
     )
     dry_run: bool = Field(
-        default=False, description="Do not write; return the diff and the syntax check only."
+        default=False
     )
     allow_heuristic_mutation: bool = Field(
-        default=False, description="Accepted for compatibility; it has no effect (code actions need an LSP)."
+        default=False, description="No effect (accepted for compatibility)."
     )
     expected_file_sha256: str | None = Field(
         default=None,
-        description="sha256 of the file as you read it (64 hex, or a prefix of 12+). Mismatch is E_PRECONDITION_FAILED.",
+        description="sha= from get_file_skeleton / get_symbol_bodies (or a 12+ prefix).",
     )
     diagnostics_wait_ms: int = Field(
         default=DIAGNOSTICS_WAIT_DEFAULT_MS,
         ge=0,
         le=DIAGNOSTICS_WAIT_MAX_MS,
-        description="How long to wait for the language server's diagnostics after the write.",
+        description="ms to wait for diagnostics after the write.",
     )
 
 
@@ -860,13 +858,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Apply ONE language-server code action (QuickFix, organize imports, fix all, refactor.extract ...) and get the diff, "
-        "the syntax check and the diagnostics that went away in the same response. action_kind_or_id is either a "
-        "code_action_id from get_diagnostics (fix=qf_...; pass the line of that diagnostic) or an LSP CodeActionKind "
-        "(quickfix, source.organizeImports, source.fixAll, refactor.extract, ...). A kind that matches several actions "
-        "returns E_TARGET_AMBIGUOUS with candidate ids; call again with one id. Needs a ready language server "
-        "(E_LSP_UNAVAILABLE otherwise). Actions that only run a server command are refused (E_UNSUPPORTED). "
-        "Pass expected_file_sha256 to refuse a stale write; use dry_run to preview."
+        "Apply ONE language-server code action and get the diff, syntax check and cleared diagnostics. action_kind_or_id: a code_action_id from get_diagnostics (fix=qf_...; pass that diagnostic's line) or an LSP CodeActionKind (quickfix, source.organizeImports, refactor.extract ...). Ambiguous kinds return E_TARGET_AMBIGUOUS with candidate ids. Needs a ready language server (E_LSP_UNAVAILABLE); command-only actions give E_UNSUPPORTED. expected_file_sha256 refuses a stale write; dry_run previews."
     ),
     writes=True,
     max_confidence=Confidence.EXACT,

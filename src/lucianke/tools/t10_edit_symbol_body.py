@@ -64,35 +64,30 @@ _SHA_SHOWN = 12
 
 
 class EditSymbolBodyArgs(CommonArgs):
-    target: TargetRefArg = Field(
-        description="The symbol to edit (urn, or path + symbol_name, or path + line)."
-    )
-    operation: Operation = Field(
-        description="replace_body | insert_before | insert_after | insert_member | delete_symbol. "
-        "replace_body takes the WHOLE definition (signature included).",
-    )
+    target: TargetRefArg
+    operation: Operation
     new_code: str | None = Field(
         default=None,
-        description="The code to put in (required unless delete_symbol). Indentation is normalized by the server.",
+        description="Required unless delete_symbol.",
     )
     position: Literal["start", "end"] = Field(
-        default="end", description="insert_member only: start or end of the body."
+        default="end", description="insert_member only."
     )
     dry_run: bool = Field(
-        default=False, description="Do not write; return the diff and the syntax check only."
+        default=False
     )
     allow_heuristic_mutation: bool = Field(
-        default=False, description="Allow writing to a degraded (heuristic / lexical_fallback) file."
+        default=False, description="Allow writing a degraded (heuristic) file."
     )
     expected_file_sha256: str | None = Field(
         default=None,
-        description="sha256 of the file as you read it (64 hex, or a prefix of 12+). Mismatch is E_PRECONDITION_FAILED.",
+        description="sha= from get_file_skeleton / get_symbol_bodies (or a 12+ prefix).",
     )
     diagnostics_wait_ms: int = Field(
         default=2000,
         ge=0,
         le=10000,
-        description="How long to wait for the language server's diagnostics after the write.",
+        description="ms to wait for diagnostics after the write.",
     )
 
 
@@ -416,12 +411,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Replace a symbol (function/method/class) with new code, cut at AST node boundaries, and get the diff, the syntax "
-        "check and the new diagnostics in the same response. operation=replace_body takes the WHOLE definition "
-        "(signature included); indentation, newlines and BOM are normalized to the file. Target by urn, or path + "
-        "symbol_name, or path + line. Pass expected_file_sha256 (the sha= from get_file_skeleton / get_symbol_bodies) "
-        "to refuse a stale write; use dry_run to preview. An edit that adds a syntax error is refused and nothing is written. "
-        "insert_before / insert_after add a sibling next to the symbol; insert_member adds a member to the class/module given as target (position start|end)."
+        "Replace, insert next to, or delete a symbol cut at AST boundaries; returns the diff, syntax check and new diagnostics. replace_body takes the WHOLE definition (signature included). insert_before / insert_after add a sibling; insert_member adds a member to the class/module given as target. expected_file_sha256 refuses a stale write; dry_run previews. A syntax error is refused and nothing is written."
     ),
     writes=True,
     max_confidence=Confidence.STRUCTURAL,

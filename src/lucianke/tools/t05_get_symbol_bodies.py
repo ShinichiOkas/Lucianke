@@ -41,11 +41,11 @@ class TargetRefArg(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    urn: str | None = Field(default=None, description='e.g. "lk://app/src/a.py#Cls.method"')
-    path: str | None = Field(default=None, description="Workspace-relative path with '/'.")
-    symbol_name: str | None = Field(default=None, description='"name", "Outer.name" (suffix match on qualified_name).')
-    line: int | None = Field(default=None, ge=1, description="1-based line; selects the innermost symbol containing it.")
-    character: int | None = Field(default=None, ge=1, description="1-based column (optional with line).")
+    urn: str | None = Field(default=None, description="From another tool's output.")
+    path: str | None = Field(default=None)
+    symbol_name: str | None = Field(default=None, description="\"name\" or \"Outer.name\".")
+    line: int | None = Field(default=None, ge=1)
+    character: int | None = Field(default=None, ge=1)
 
 
 class LineRange(BaseModel):
@@ -62,13 +62,13 @@ class LineRange(BaseModel):
 
 
 class GetSymbolBodiesArgs(CommonArgs):
-    targets: list[TargetRefArg] = Field(min_length=1, max_length=BATCH_MAX_ITEMS, description="1-20 TargetRefs.")
-    context_lines: int = Field(default=2, ge=0, le=20, description="Lines added before the body (decorators/comments).")
-    with_line_numbers: bool = Field(default=True, description="Prefix each code line with '@L<n>: '.")
+    targets: list[TargetRefArg] = Field(min_length=1, max_length=BATCH_MAX_ITEMS)
+    context_lines: int = Field(default=2, ge=0, le=20, description="Extra lines before the body.")
+    with_line_numbers: bool = Field(default=True)
     include_referenced_symbols: bool = Field(
-        default=True, description="Add '- refs:' (needs the index; not available in the syntax-only build)."
+        default=True
     )
-    line_range: LineRange | None = Field(default=None, description="Only this 1-based line range, clamped to the body.")
+    line_range: LineRange | None = Field(default=None, description="1-based range within the body.")
 
 
 # --- 解決（仕様書 §5.3） ---------------------------------------------------------------------
@@ -339,10 +339,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=3000,
     description=(
-        "Return the implementation body of 1-20 symbols (function/method/class) cut at AST node boundaries, including "
-        "decorators and the doc comment above, with @L line numbers and the file sha. Target by urn, or path + "
-        "symbol_name (suffix match on the qualified name), or path + line. Python/TypeScript/JavaScript "
-        "(syntax tree only). Prefer this over reading the whole file."
+        "Implementation bodies of 1-20 symbols cut at AST node boundaries, with decorators, the doc comment above, @L line numbers and the file sha. Python/TS/JS (syntax tree only). Prefer this over reading the whole file."
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

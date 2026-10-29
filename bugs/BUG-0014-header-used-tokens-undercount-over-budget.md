@@ -28,3 +28,4 @@
 - 直した後は、回帰テストの全ケース（compact × 3 予算 × 3 件数 × 3 形）でヘッダの `~used` = 全文の数え直し、全文 ≤ `max_tokens`（票の観察: 直す前は常に 28〜30 小さく、500 で 4/13 ページ・200 で 2/2 ページが超過）。
 - 契約テストの予算を直した（正しい直しの帰結: ヘッダ・警告・封筒も予算に入るので、同じ `max_tokens` で入る量が減る）: `test_T02_data_files.py`（compact の最小の予算 200 → 230。ヘッダ・警告の約 30 トークン）。json の予算の調整は BUG-0017 に記載。
 - 残り（別の票）: json で前置き・固定部だけで `max_tokens` を超える応答（BUG-0054）。dot / mermaid（BUG-0053）。
+- コミット: 605e79b（push 済み。使い捨て作業ツリーで tests/unit と tests/contract は green。残る赤は tree-sitter-go を入れない環境の tests/unit/test_edit_normalize.py の 2 件のみで、この変更の前から同じ）

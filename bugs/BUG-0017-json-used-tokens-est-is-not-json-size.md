@@ -23,3 +23,4 @@
 ## 確認
 - 再現手順（T-02、2 ファイル、`max_tokens: 2000`、json）: 直す前は申告 1884 に対し本文 14192。直した後は本文を数え直した値が申告と一致し、2000 以下（入るのは 1 ファイルぶん以下になり、残りは `next_cursor`）。
 - 残り（別の票）: dot / mermaid（BUG-0053。グラフは `data_static["graph"]` を丸ごと描くので、レコードの詰めでは予算を守れない）。json で前置き・固定部だけで `max_tokens` を超える応答（BUG-0054）。T-02 の json が compact の約 3 倍で、既定の `max_tokens` 2000 では中規模のファイルが 1 件も入らない（BUG-0055）。
+- コミット: 605e79b（push 済み。使い捨て作業ツリーで tests/unit と tests/contract は green。残る赤は tree-sitter-go を入れない環境の tests/unit/test_edit_normalize.py の 2 件のみで、この変更の前から同じ）

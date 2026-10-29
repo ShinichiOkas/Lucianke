@@ -92,30 +92,28 @@ _WORD = re.compile(r"\w+")
 
 
 class RenameSymbolArgs(CommonArgs):
-    target: TargetRefArg = Field(
-        description="The symbol to rename (urn, or path + symbol_name, or path + line [+ character])."
-    )
-    new_name: str = Field(description="The new identifier.")
+    target: TargetRefArg
+    new_name: str
     scope_paths: list[str] | None = Field(
         default=None,
-        description="Only for degraded (lexical) renames; ignored when the language server is used.",
+        description="Lexical (degraded) renames only.",
     )
     dry_run: bool = Field(
-        default=False, description="Do not write; return the planned edits and the urn_map."
+        default=False
     )
     allow_heuristic_mutation: bool = Field(
         default=False,
-        description="Allow writing in degraded (heuristic / lexical_fallback) mode. Not used for exact renames.",
+        description="Allow writing a degraded (heuristic) file.",
     )
     expected_file_sha256s: dict[str, str] | None = Field(
         default=None,
-        description="path -> sha256 (64 hex, or a prefix of 12+) of the files as you read them. Mismatch is E_PRECONDITION_FAILED.",
+        description="path -> sha256 (or a 12+ prefix).",
     )
     diagnostics_wait_ms: int = Field(
         default=2000,
         ge=0,
         le=10000,
-        description="How long to wait for the language server's diagnostics after the write.",
+        description="ms to wait for diagnostics after the write.",
     )
 
 
@@ -769,14 +767,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Rename a symbol and every reference to it across the workspace with the language server (prepareRename + rename), "
-        "atomically: all files are written or none. Does not touch same-named symbols in other scopes, comments or strings. "
-        "Target by urn, or path + symbol_name, or path + line [+ character]. Returns every changed site, the urn_map "
-        "(old URN -> new URN for the symbol and its members) and the new diagnostics. Pass expected_file_sha256s to refuse "
-        "a stale write; use dry_run to preview. Needs a ready language server (E_LSP_UNAVAILABLE otherwise), except: a local variable "
-        "or parameter of a Python function (target by path + line + character) is renamed inside its function with the syntax tree "
-        "(structural), and a file without a grammar gets a word-boundary text replacement in every file with the same extension "
-        "(lexical_fallback; limit it with scope_paths; it is a dry_run unless allow_heuristic_mutation and expected_file_sha256s are given)."
+        "Rename a symbol and all its references via the language server, atomically. Returns changes, urn_map (old -> new URN) and new diagnostics. Needs a ready language server (E_LSP_UNAVAILABLE); except a Python local variable/parameter (path + line + character) is renamed structurally, and a file without a grammar gets a word-boundary replacement in same-extension files (dry_run unless allow_heuristic_mutation and expected_file_sha256s are given). expected_file_sha256s refuses a stale write; dry_run previews."
     ),
     writes=True,
     max_confidence=Confidence.EXACT,
