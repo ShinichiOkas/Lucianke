@@ -30,17 +30,30 @@ EXIT_DEADLINE_S = 2.0  # stdin を閉じてから終わるまで
 
 
 class RawSession:
-    def __init__(self, tmp_path: Path, *, dev_tools: bool = True) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        dev_tools: bool = True,
+        env_overrides: dict[str, str | None] | None = None,
+        cwd: Path | None = None,
+    ) -> None:
         self.cache = tmp_path / "cache"
+        self.ensure_ascii = True  # False にすると送る JSON の非 ASCII を UTF-8 の生バイトのまま送る（stdin の符号化の検査）
         env = dict(os.environ)
         env["LUCIANKE_CACHE_DIR"] = str(self.cache)
         env["PYTHONUTF8"] = "1"
         env.pop("LUCIANKE_DEV_TOOLS", None)
         if dev_tools:
             env["LUCIANKE_DEV_TOOLS"] = "1"
+        for key, value in (env_overrides or {}).items():  # None は「環境から外す」（BUG-0038: PYTHONUTF8 なし・cp932 の環境）
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         # cwd は空のディレクトリ。cwd がワークスペースになるので、リポジトリ直下で起動すると全ファイルの走査が走り、負荷のある機で終了が
         # 2 s を超える（BUG-0024）。この不変条件は stdout の純度で、索引の負荷は関係ない。
-        empty_cwd = tmp_path / "cwd"
+        empty_cwd = cwd if cwd is not None else tmp_path / "cwd"
         empty_cwd.mkdir(exist_ok=True)
         self.proc = subprocess.Popen(  # noqa: S603
             [sys.executable, "-m", "lucianke"],
@@ -75,7 +88,9 @@ class RawSession:
 
     def send(self, obj: dict[str, Any]) -> None:
         assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n")
+        self.proc.stdin.write(
+            json.dumps(obj, separators=(",", ":"), ensure_ascii=self.ensure_ascii).encode("utf-8") + b"\n"
+        )
         self.proc.stdin.flush()
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
@@ -273,3 +288,62 @@ def test_no_roots_request_without_the_capability(make_session):
     assert rc == 0
     assert not [line for line in s.stdout_lines if b"roots/list" in line]
     assert_pure_jsonrpc(s)
+
+
+# --- stdout / stdin は環境によらず常に UTF-8（BUG-0038） ------------------------------------------------------------------
+#
+# MCP は UTF-8 の JSON-RPC。サーバーは本物の stdout / stdin を ``bootstrap_io.open_transport_streams`` で ``encoding="utf-8"`` に
+# 固定して包む。ロケール（日本語 Windows は cp932）・``PYTHONUTF8``・``PYTHONIOENCODING`` に左右されないことを、これらを外した／
+# cp932 に倒した環境で実プロセスを起こして確かめる。BUG-0038 の「文字化け」は、応答（正しい UTF-8）を復号した文字列を cp932 の
+# stdout に print して、それを UTF-8 として読んだ観測側の化けだった。サーバーの出力が壊れたときにここで落ちる。
+
+JP_COMMENT = "# 日本語のコメント → 矢印"  # 日本語のコメント → 矢印
+ARROW = "→"
+
+ENCODING_ENVS = {
+    "no_utf8_mode": {"PYTHONUTF8": None, "PYTHONIOENCODING": None},  # 日本語 Windows の既定（ロケール = cp932）
+    "cp932_forced": {"PYTHONUTF8": "0", "PYTHONIOENCODING": "cp932"},  # 入出力の符号化を cp932 に倒した環境
+}
+
+
+@pytest.mark.parametrize("env_name", list(ENCODING_ENVS))
+def test_stdout_and_stdin_are_utf8_whatever_the_locale(make_session, tmp_path, env_name):
+    ws = tmp_path / "ws_utf8"
+    ws.mkdir()
+    (ws / "a.py").write_text("def foo(x):\n    return x + 1\n\n\ndef bar():\n    return foo(2)\n", encoding="utf-8")
+    s = make_session(dev_tools=False, env_overrides=ENCODING_ENVS[env_name], cwd=ws)
+    s.ensure_ascii = False  # 日本語と → を UTF-8 の生バイトで stdin に送る
+
+    def answer(msg: dict[str, Any]) -> dict[str, Any]:
+        return {"roots": [{"uri": ws.as_uri(), "name": "ws"}]}
+
+    s.initialize({"roots": {}})
+    assert s.wait_server_request(answer) == "roots/list"
+
+    # 索引が使えるまで待つ（固定の sleep ではなく、読み取りの呼び出しが成功するまで）。
+    ref_args = {"target": {"path": "a.py", "symbol_name": "foo"}, "query_type": "references"}
+    deadline = time.monotonic() + 60
+    ref = s.call("find_references_and_implementations", ref_args)
+    while ref["result"]["isError"] and time.monotonic() < deadline:
+        time.sleep(0.3)
+        ref = s.call("find_references_and_implementations", ref_args)
+    assert not ref["result"]["isError"], ref["result"]["content"][0]["text"]
+
+    new_code = f"def foo(x):\n    {JP_COMMENT}\n    return x + 2\n"
+    edit = s.call("edit_symbol_body", {"target": {"path": "a.py", "symbol_name": "foo"}, "operation": "replace_body", "new_code": new_code})
+    text = edit["result"]["content"][0]["text"]
+    assert not edit["result"]["isError"], text
+    assert f"…{ARROW}" in text, text  # files_changed の「旧 sha…→新 sha…」
+    assert JP_COMMENT in text  # diff が stdin から入った日本語をそのまま返す
+
+    # stdin: サーバーがディスクに書いたファイルは UTF-8 で日本語が読める
+    assert JP_COMMENT in (ws / "a.py").read_bytes().decode("utf-8")
+
+    rc, _ = s.close()
+    assert rc == 0, s.stderr_text
+
+    # stdout: 全行が厳密な UTF-8（cp932 のバイト列が混ざると UnicodeDecodeError）。→ は UTF-8 の 3 バイトで線に載る。純度も保たれる。
+    assert_pure_jsonrpc(s)
+    for line in s.stdout_lines:
+        line.decode("utf-8")
+    assert ARROW.encode("utf-8") in s.stdout_bytes
