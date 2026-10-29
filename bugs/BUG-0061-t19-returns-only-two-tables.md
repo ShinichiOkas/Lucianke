@@ -38,5 +38,12 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q
 - 失敗は事後条件 1（ビューの一覧）だけ。列・行数・coverage の比較には到達していない。
 - `_read_schema` は `_wanted(args)` の名前をそのまま並べるので、2 件だけになるのは上流（`data` の組み立て、または `_wanted` に渡る前）で絞られている可能性がある。
 
+## 追試（2026-10-29、別セッション・新 .venv）
+HEAD `9839053`（HANDOFF を含むコミット）で、`uv sync --extra langs` と `uv run --no-project python bench/fetch_fixtures.py`（`bench/.cache/httpx`・`bench/.cache/ky` 取得）を済ませた状態で再現した。
+
+- `uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q` → `2 failed, 4 passed in 29.53s`。落ちるのは `[F-PY]`・`[F-TS]` の T-19#1 のまま。
+- フィクスチャ未取得だと同じ 2 件は `6 skipped`（＝検査されない）。langs extra が無いと `tests/unit/test_syntax_boundaries.py` の `import tree_sitter_rust` で収集エラーになり、全体テストに到達しない。
+- T-19 が返した `data.tables` の名前は今回も `{'files', 'workspaces'}` の 2 つだけ。`t19.PUBLIC_VIEWS`（10 個）には `contracts`・`symbols`・`relations`・`diagnostics`・`commits`・`git_symbol_changes` などが含まれる。
+
 ## 仕様書
 §15.2 M1-1、§11 の T-19。
