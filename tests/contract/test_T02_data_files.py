@@ -111,6 +111,40 @@ async def test_notebook_skeleton_has_cells_and_never_outputs(pipeline: Pipeline)
     assert item["cell_count"] == 4 and [c["number"] for c in item["cells"]] == [1, 2, 3, 4]
 
 
+def _strings(node: Any) -> list[str]:
+    """JSON の値にある文字列（キーは除く）をすべて集める。"""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, list):
+        return [s for v in node for s in _strings(v)]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in _strings(v)]
+    return []
+
+
+async def test_t02_postcondition_3_notebook_outputs_never_appear_in_the_response(pipeline: Pipeline) -> None:
+    """PC:T-02#3 ``.ipynb`` の応答文字列に、その Notebook の ``outputs`` 配列の文字列が 1 つも現れない（compact・json の両方）。
+
+    期待値は固定の合言葉ではなく、Notebook JSON の ``outputs`` から集めた文字列そのもの。
+    """
+    doc = json.loads((POLY / NOTEBOOK).read_text(encoding="utf-8"))
+    pieces = {
+        part.strip()
+        for cell in doc["cells"]
+        for s in _strings(cell.get("outputs", []))
+        for part in s.splitlines()
+        if len(part.strip()) >= 8
+    }
+    assert len(pieces) >= 3, pieces  # 空の突き合わせにしない
+    for fmt in ("compact", "json"):
+        r = await call(pipeline, fmt, paths=[NOTEBOOK])
+        assert not r.is_error, r.text
+        text = r.text if fmt == "compact" else json.dumps(r.structured, ensure_ascii=False)
+        assert "load_frame" in text  # セルの宣言は出ている（出力だけが落ちている）
+        leaked = sorted(s for s in pieces if s in text)
+        assert leaked == [], (fmt, leaked)
+
+
 async def test_max_depth_folds_deeper_nodes(pipeline: Pipeline) -> None:
     """処理規約 4: `max_depth` を超える階層は `{ ...N nodes omitted }` に畳む（XML の深さ超過）。"""
     r = await call(pipeline, paths=[JUNIT], max_depth=2)

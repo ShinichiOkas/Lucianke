@@ -1,11 +1,14 @@
 """T-05 ``get_symbol_bodies`` の契約テスト（仕様書 §11 T-05 の事後条件 1・2・5 ほか）。
 
-パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。構文木だけ（``structural``）の縦切りなので、
-セレクタ（``xpath:`` など）・``cell:<n>``（事後条件 3）・``lexical_fallback`` の窓（事後条件 4）は対象外。
+パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。構文木だけ（``structural``）の縦切りの試験で、
+セレクタ（``xpath:`` など）・``cell:<n>``（事後条件 3）・``lexical_fallback`` の窓（事後条件 4）はツールが未対応
+（``E_UNSUPPORTED``。BUG-0049）。3・4 の試験は仕様書どおりの本物のアサーションを持つ ``xfail(strict=True)`` で、
+直ったら XPASS で赤になるので、印を外す。
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -35,8 +38,23 @@ async def call(pipeline: Pipeline, fmt: str = "compact", **args: Any):
     return await pipeline.call_tool("get_symbol_bodies", {"format": fmt, **args})
 
 
+NOTEBOOK = "notebooks/eda.ipynb"
+COBOL = "legacy/calc.cob"
+
+
 def source_lines(path: str) -> list[str]:
     return (POLY / path).read_text(encoding="utf-8").splitlines()
+
+
+def _strings(node: Any) -> list[str]:
+    """JSON の値にある文字列（キーは除く）をすべて集める。"""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, list):
+        return [s for v in node for s in _strings(v)]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in _strings(v)]
+    return []
 
 
 async def test_tools_list_has_t05(pipeline: Pipeline) -> None:
@@ -342,3 +360,48 @@ async def test_truncated_target_is_not_followed_by_the_next_target_until_it_is_c
     assert list(by_symbol) == [f["symbol"]["qualified_name"] for f in fulls]  # 対象の順を保つ
     for parts, full in zip(by_symbol.values(), fulls, strict=True):
         _assert_contiguous(parts, full)
+
+
+# --- セレクタ・lexical_fallback（事後条件 3・4。ツールが未対応: BUG-0049） ------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True, reason="BUG-0049: get_symbol_bodies は cell:<n> を E_UNSUPPORTED で断る（selector_not_supported）"
+)
+async def test_t05_postcondition_3_cell_item_is_the_cell_source_without_outputs(pipeline: Pipeline) -> None:
+    """PC:T-05#3 ``cell:<n>`` の項目の ``code`` は ``cells[n].source`` の連結と一致し、``outputs`` 内の文字列を含まない。
+
+    ``cell:3`` は 1 始まりで ``cells[2]``（Markdown も数える）。期待値は Notebook JSON から取る。
+    """
+    doc = json.loads((POLY / NOTEBOOK).read_text(encoding="utf-8"))
+    outputs = {
+        part.strip()
+        for cell in doc["cells"]
+        for s in _strings(cell.get("outputs", []))
+        for part in s.splitlines()
+        if len(part.strip()) >= 8
+    }
+    assert len(outputs) >= 3
+    r = await call(pipeline, "json", targets=[{"path": NOTEBOOK, "symbol_name": "cell:3"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["ok"] is True
+    assert item["code"] == "".join(doc["cells"][2]["source"])
+    assert [s for s in outputs if s in item["code"]] == []
+
+
+@pytest.mark.xfail(
+    strict=True, reason="BUG-0049: get_symbol_bodies は lexical_fallback の窓を返さず E_UNSUPPORTED で断る"
+)
+async def test_t05_postcondition_4_lexical_fallback_windows_are_at_most_31_lines_and_degraded(
+    pipeline: Pipeline,
+) -> None:
+    """PC:T-05#4 ``lexical_fallback`` の各窓は ``end_line - start_line + 1 ≤ 31`` で、応答は ``is_degraded: true``。"""
+    r = await call(pipeline, "json", targets=[{"path": COBOL, "symbol_name": "COMPUTE-TAX"}])
+    assert not r.is_error, r.text
+    assert r.structured["_resolution_meta"]["is_degraded"] is True
+    item = r.structured["data"]["items"][0]
+    assert item["ok"] is True and item["confidence_level"] == "lexical_fallback"
+    windows = item["windows"]
+    assert 1 <= len(windows) <= 3
+    assert all(w["end_line"] - w["start_line"] + 1 <= 31 for w in windows)

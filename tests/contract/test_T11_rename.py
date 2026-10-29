@@ -195,6 +195,7 @@ async def test_stub_happy_path_goes_through_prepare_rename_then_rename(stub):
 
 
 async def test_stub_prepare_rename_rejection_is_lsp_unavailable_and_writes_nothing(stub):
+    """PC:T-11#4 prepareRename の拒否（エラー）のあと、どのファイルの SHA-256 も呼び出し前と同じ。"""
     rig = stub({"textDocument/prepareRename": None})
     before = snapshot(rig.root)
     r = await rig.rename({"urn": U(PAY, PROCESS_CHARGE)}, "charge_order")
@@ -205,6 +206,7 @@ async def test_stub_prepare_rename_rejection_is_lsp_unavailable_and_writes_nothi
 
 
 async def test_stub_rename_timeout_is_e_timeout(stub):
+    """PC:T-11#4 rename のタイムアウト（エラー）のあと、どのファイルの SHA-256 も呼び出し前と同じ。"""
     rig = stub(
         {
             "textDocument/prepareRename": {
@@ -234,7 +236,7 @@ async def test_stub_rename_timeout_is_e_timeout(stub):
 async def test_stub_unacceptable_edits_write_no_file(
     stub, tmp_path: Path, kind: str, code: str, reason: str | None
 ):
-    """1 つでも受け入れられない編集があれば、正しい編集が同じ応答に混じっていてもどのファイルも書かない（EP-9）。"""
+    """1 つでも受け入れられない編集があれば、正しい編集が同じ応答に混じっていてもどのファイルも書かない（EP-9）。PC:T-11#4"""
     rig = stub(
         {
             "textDocument/prepareRename": {
@@ -295,6 +297,32 @@ def _doc_changes(we: dict[str, Any]) -> list[dict[str, Any]]:
         {"textDocument": {"uri": uri, "version": None}, "edits": edits}
         for uri, edits in we["changes"].items()
     ]
+
+
+async def test_t11_postcondition_4_applied_false_leaves_every_file_unchanged(stub):
+    """``applied: false`` のとき、ワークスペース内のどのファイルの SHA-256 も呼び出し前と同じ。
+
+    ``dry_run``（成功応答の ``applied: false``）と、期待ハッシュの不一致によるブロックを、全ファイルの SHA-256 で比べる。
+    """
+    rig = stub(
+        {
+            "textDocument/prepareRename": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 1},
+            }
+        }
+    )
+    rig.handle.client.script["textDocument/rename"] = rename_edit(rig.root)
+    before = snapshot(rig.root)
+    assert len(before) >= 10
+    target = {"urn": U(PAY, PROCESS_CHARGE)}
+    dry = await rig.rename(target, "charge_order", dry_run=True)
+    assert not dry.is_error, dry.text
+    assert dry.structured["data"]["applied"] is False and "charge_order" in dry.structured["data"]["diff"]
+    assert snapshot(rig.root) == before
+    blocked = await rig.rename(target, "charge_order", expected_file_sha256s={ROUTES: "0" * 64})
+    assert blocked.is_error and blocked.structured["error"]["code"] == "E_PRECONDITION_FAILED"
+    assert snapshot(rig.root) == before
 
 
 async def test_stub_external_write_while_computing_is_precondition_failed(stub):

@@ -4,7 +4,8 @@
 （``syntax/relations.py`` の抽出器の出来に左右されないため。呼び出し位置はフィクスチャの実際の行から探す）。
 ``tmp_path`` の DB に ``ingest_file`` で取り込み、ツールを ``Pipeline`` 経由で呼ぶ（``db_path`` は ``services`` から渡す約束）。
 
-事後条件（仕様書 §11 T-06 の 2〜5、T-07 の 1・3・4・5）を確かめる。事後条件 1 は LSP が要るので対象外。
+事後条件（仕様書 §11 T-06 の 2〜6、T-07 の 1・3〜6）を確かめる。T-06 の 1・T-07 の 2 は LSP が要るので ``test_T06_T07_lsp.py``。
+番号は仕様書の事後条件の並び（1 始まり）。名前の番号か ``PC:T-06#4`` の印で名乗る（``bench/postcondition_map.py``、BUG-0040）。
 """
 
 from __future__ import annotations
@@ -430,7 +431,8 @@ async def test_t06_postcondition_3_include_tests_false(pipeline: Pipeline) -> No
     assert not any(x["is_test"] for x in data["references"]) and data["totals"]["tests"] == 0
 
 
-async def test_t06_postcondition_4_5_pages_have_no_duplicates_and_fit_the_budget(pipeline: Pipeline) -> None:
+async def test_t06_postcondition_4_6_pages_have_no_duplicates_and_fit_the_budget(pipeline: Pipeline) -> None:
+    """PC:T-06#4 全ページを通じて同じ (path, line, col) は 1 度だけ。PC:T-06#6 各ページの used_tokens_est は max_tokens 以下。"""
     full = await refs(pipeline, {"urn": EXT_DECIMAL}, max_tokens=8000)
     expected = [(x["path"], x["line"], x["col"]) for x in full.structured["data"]["references"]]
     assert len(expected) >= 10 and len(set(expected)) == len(expected)
@@ -525,7 +527,7 @@ async def test_t06_graph_edges_merge_into_times_n(pipeline: Pipeline) -> None:
 # --- T-07 ---------------------------------------------------------------------------------------
 
 
-async def test_t07_incoming_depth1_has_when_strings(pipeline: Pipeline) -> None:
+async def test_t07_postcondition_3_incoming_depth1_has_when_strings(pipeline: Pipeline) -> None:
     """process_charge の incoming に create_order（when: req.amount > 0 and not paid）。"""
     r = await calls(pipeline, PC, "incoming", depth=1)
     assert not r.is_error, r.text
@@ -570,7 +572,7 @@ async def test_t07_postcondition_1_depth_bound_and_preorder(pipeline: Pipeline) 
     )
 
 
-async def test_t07_postcondition_3_cycle_is_shown_once_and_not_expanded(pipeline: Pipeline) -> None:
+async def test_t07_postcondition_4_cycle_is_shown_once_and_not_expanded(pipeline: Pipeline) -> None:
     for direction in ("outgoing", "incoming"):
         r = await calls(pipeline, {"urn": U(LIM, "retry")}, direction, depth=5)
         nodes = r.structured["data"]["nodes"]
@@ -592,6 +594,21 @@ async def test_t07_postcondition_3_cycle_is_shown_once_and_not_expanded(pipeline
             if n["direction"] == direction and not n["cycle"]
         ]
         assert len(path_urns) == len(set(path_urns)) and U(LIM, "schedule") not in path_urns
+
+
+async def test_t07_postcondition_5_unresolved_import_callee_is_an_external_leaf(pipeline: Pipeline) -> None:
+    """解決できない import の呼び先は ``is_external: true`` の葉（``lk://_ext/<pkg>#<name>``）として nodes[] に現れ、子を持たない。"""
+    r = await calls(pipeline, {"urn": U(ROUTES, "create_order")}, "outgoing", depth=3)
+    assert not r.is_error, r.text
+    nodes = r.structured["data"]["nodes"]
+    externals = [n for n in nodes if n["is_external"]]
+    assert EXT_DECIMAL in {n["urn"] for n in externals}
+    assert all(n["urn"].startswith("lk://_ext/") for n in externals)
+    ext_urns = {n["urn"] for n in externals}
+    assert not any(n["parent_urn"] in ext_urns for n in nodes)  # 外部の葉は展開されない
+    assert all(n["cycle"] is False for n in externals)
+    c = await calls(pipeline, {"urn": U(ROUTES, "create_order")}, "outgoing", "compact", depth=3)
+    assert g.validate(c.text) == [] and "-> Decimal (external) @" in c.text
 
 
 async def test_t07_options(pipeline: Pipeline) -> None:
@@ -633,7 +650,7 @@ async def test_t07_errors(pipeline: Pipeline) -> None:
     assert missing.is_error and missing.structured["error"]["code"] == "E_TARGET_NOT_FOUND"
 
 
-async def test_t07_postcondition_5_budget(pipeline: Pipeline) -> None:
+async def test_t07_postcondition_6_budget(pipeline: Pipeline) -> None:
     for depth in (1, 3, 5):
         r = await calls(pipeline, PC, "both", depth=depth, max_tokens=200)
         assert r.structured["budget"]["used_tokens_est"] <= 200
@@ -741,7 +758,7 @@ def sql(db: Path, query: str, *args: object) -> list[tuple[Any, ...]]:
 async def test_real_incoming_calls_of_process_charge_have_enclosing_definitions_and_when(
     real: Pipeline,
 ) -> None:
-    """(a)(b): 呼び出し元は最内の定義（関数・メソッド）、when は呼び出しを囲む if の条件。"""
+    """(a)(b): 呼び出し元は最内の定義（関数・メソッド）、when は呼び出しを囲む if の条件。PC:T-07#3（実索引の ``when:``）"""
     r = await calls(real, PC, "incoming", depth=1)
     assert not r.is_error, r.text
     by_name = {n["name"]: n for n in r.structured["data"]["nodes"]}
@@ -807,7 +824,11 @@ async def test_real_type_hierarchy_from_inherits_rows(real: Pipeline) -> None:
 
 
 async def test_real_external_nodes_have_stable_kinds_and_are_leaves(real: Pipeline) -> None:
-    """(e)(f): 未解決の import は ``lk://_ext/<pkg>#<name>``。kind は名前の形と使われ方から決まる。"""
+    """(e)(f): 未解決の import は ``lk://_ext/<pkg>#<name>``。kind は名前の形と使われ方から決まる。
+
+    PC:T-06#5 外部シンボルが索引に現れ（``is_external``）、それを target にした references は import の使用箇所を返す。
+    PC:T-07#5 外部の呼び先は ``is_external: true`` の葉ノード。
+    """
     kinds = dict(sql(real_db_of(real), "SELECT urn, kind FROM symbols WHERE is_external = 1"))
     assert kinds[EXT_DECIMAL] == "Class"  # IMPORTS・CALLS・TYPE_USES のどれが先でも
     assert kinds[EXT_EXCEPTION] == "Class"
@@ -821,6 +842,24 @@ async def test_real_external_nodes_have_stable_kinds_and_are_leaves(real: Pipeli
     uses = await refs(real, {"urn": EXT_DECIMAL})
     assert not uses.is_error, uses.text
     assert {x["use"] for x in uses.structured["data"]["references"]} >= {"call", "type", "import"}
+
+
+async def test_real_t06_postcondition_5_unresolved_import_is_an_external_symbol_with_import_sites(
+    real: Pipeline,
+) -> None:
+    """``from decimal import Decimal``（解決できない import）は ``lk://_ext/decimal#Decimal``（``is_external``）として索引に載り、
+    それを target にした references は import の使用箇所（``use: import``）を返す。"""
+    rows = sql(real_db_of(real), "SELECT kind, is_external FROM symbols WHERE urn = ?", EXT_DECIMAL)
+    assert rows == [("Class", 1)]
+    r = await refs(real, {"urn": EXT_DECIMAL}, use_kinds=["import"], max_tokens=8000)
+    assert not r.is_error, r.text
+    got = {(x["path"], x["line"]) for x in r.structured["data"]["references"]}
+    assert {x["use"] for x in r.structured["data"]["references"]} == {"import"}
+    want = {
+        (path, find_line(path, "from decimal import Decimal"))
+        for path in (ROUTES, PAY, LIM, TESTS, "src/shop/models/receipt.py")
+    }
+    assert got == want
 
 
 async def test_real_typescript_call_through_a_module_variable_reaches_the_overloaded_method(

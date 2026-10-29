@@ -1,7 +1,7 @@
-"""T-02 ``get_file_skeleton`` の契約テスト（仕様書 §11 T-02 の事後条件 1・2・5 ほか）。
+"""T-02 ``get_file_skeleton`` の契約テスト（仕様書 §11 T-02 の事後条件 1・2・4・5 ほか）。
 
 パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。ここは構文木のコード（Python・TypeScript）の検査で、
-Notebook・データファイルは ``test_T02_data_files.py``、未知言語（事後条件 3）は対象外。
+Notebook・データファイル（事後条件 3）は ``test_T02_data_files.py``。
 """
 
 from __future__ import annotations
@@ -126,6 +126,7 @@ async def test_json_item_shape(pipeline: Pipeline) -> None:
 
 @pytest.mark.parametrize("n", [0, 21])
 async def test_batch_size_is_rejected_without_items(pipeline: Pipeline, n: int) -> None:
+    """PC:T-02#4 ``paths`` が 21 件のとき ``E_INVALID_ARGUMENT`` で、``items`` を持たない（0 件も同じ）。"""
     r = await call(pipeline, "json", paths=[PAY_PY] * n)
     assert r.is_error
     assert r.structured["ok"] is False
