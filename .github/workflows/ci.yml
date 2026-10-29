@@ -32,3 +32,72 @@ jobs:
       # 仕様書 M1-8: 配布物（wheel と sdist）に LICENSE と THIRD_PARTY_NOTICES.md が入ること
       - run: uv build --out-dir dist
       - run: uv run python tools/check_dist.py dist
+
+  # 仕様書 M1-7（§15.2）: Windows / macOS / Linux で M1-1〜M1-6 が同じ結果になる。
+  # 出口条件の実行器を 3 OS で走らせて結果 JSON を上げ（exit-criteria）、集めて比べる（cross-os）。
+  # 実 LSP は uv sync が入れる basedpyright と ruff だけ。typescript-language-server は入れない
+  # （3 OS で入れ方を揃えられないと、差が製品の差か入れ方の差か分からなくなる）。無い LSP の試験は skip になり、
+  # その件数と理由が結果 JSON と .pair-agent/acceptance/M1-exit-*.md に残る。
+  exit-criteria:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras --frozen --python 3.12
+      # リポジトリに入っている過去の *-exit.json を成果物と実行器の M1-7.cross-os に混ぜない
+      - name: 過去の exit 結果を除く
+        shell: bash
+        run: rm -f bench/results/*-exit.json
+      - name: M1 の出口条件を走らせる（--skip-slow）
+        shell: bash
+        run: |
+          set +e
+          uv run --frozen python bench/run_exit_criteria.py --skip-slow
+          rc=$?
+          echo "run_exit_criteria.py の終了コード: $rc"
+          # 1 = 出口条件のどれかが不合格・未整備（現在地。この OS 単独では M1-7 は常に未整備）。
+          # 3 OS の一致は cross-os ジョブが判定する。2 以上は実行器自体の失敗なのでここで落とす
+          if [ "$rc" -gt 1 ]; then exit "$rc"; fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: exit-${{ matrix.os }}
+          path: |
+            bench/results/*-exit.json
+            .pair-agent/acceptance/M1-exit-*.md
+          if-no-files-found: error
+
+  cross-os:
+    needs: exit-criteria
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exit-*
+          path: exit-artifacts
+          merge-multiple: true
+      # 標準ライブラリだけの台本なので uv sync は要らない。0 = 一致、1 = 不一致、2 = 3 OS の結果が揃わない
+      - name: 3 OS の結果を比べる（M1-7）
+        shell: bash
+        run: |
+          set +e
+          uv run --no-project python bench/compare_cross_os.py exit-artifacts --json cross-os.json > cross-os.md
+          rc=$?
+          cat cross-os.md
+          cat cross-os.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: cross-os
+          path: |
+            cross-os.md
+            cross-os.json
