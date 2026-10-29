@@ -348,6 +348,158 @@ async def test_body_edit_does_not_reingest_importers(bare: Bare) -> None:
     )
 
 
+# --- 既存ファイルのシンボルの集合が変わったとき（BUG-0034。engine/reresolve.py の ``symbols_changed``） -----------------
+
+B_PY_WITHOUT_HELPER = "def other():\n    return 0\n"
+B_PY_WITH_HELPER = B_PY + "\n\n" + B_PY_WITHOUT_HELPER
+UTIL_TS_WITHOUT_HELPER = "export function other() { return 0; }\n"
+UTIL_TS_WITH_HELPER = "export function helper() { return 1; }\n" + UTIL_TS_WITHOUT_HELPER
+APP_TS = 'import { helper } from "./util";\nexport function run() { return helper(); }\n'
+
+
+@dataclass(frozen=True)
+class Pair:
+    """定義元（``helper`` を持つ・持たない版）とそれを import する側。"""
+
+    definer: str
+    importer: str
+    importer_text: str
+    without_helper: str
+    with_helper: str
+
+    @property
+    def run(self) -> str:
+        return f"{self.importer}#run"
+
+
+PAIRS = {
+    "python": Pair("pkg/b.py", "pkg/a.py", A_PY, B_PY_WITHOUT_HELPER, B_PY_WITH_HELPER),
+    "typescript": Pair("web/util.ts", "web/app.ts", APP_TS, UTIL_TS_WITHOUT_HELPER, UTIL_TS_WITH_HELPER),
+}
+
+
+async def _seed_importer_over_incomplete_definer(bare: Bare, language: str) -> Pair:
+    """``helper`` を持たない定義元を取り込み、そのあとで ``helper`` を import する側を取り込む（import 元の行は捨てられる）。"""
+    pair = PAIRS[language]
+    if language == "python":
+        bare.write("pkg/__init__.py", "")
+        await bare.indexer.index_file("pkg/__init__.py")
+    bare.write(pair.definer, pair.without_helper)
+    bare.write(pair.importer, pair.importer_text)
+    await bare.indexer.index_file(pair.definer)
+    await bare.indexer.index_file(pair.importer)
+    return pair
+
+
+@pytest.mark.parametrize("language", ["python", "typescript"])
+async def test_symbol_added_later_restores_importer_relations(bare: Bare, language: str) -> None:
+    """票の再現: 定義元に ``helper`` が無いうちに import 元を取り込む（行は捨てられ ``_ext`` にもならない）。あとで ``helper`` を足すと結ばれる。"""
+    pair = await _seed_importer_over_incomplete_definer(bare, language)
+    assert bare.edges(pair.importer) == set()
+    assert bare.edges(pair.run) == set()
+    version = bare.version()
+    assert bare.indexer.reingested_importers == 0
+
+    bare.write(pair.definer, pair.with_helper)
+    await bare.indexer.index_file(pair.definer)
+
+    assert bare.edges(pair.importer, "IMPORTS") == {("IMPORTS", f"{pair.definer}#helper")}
+    assert bare.edges(pair.run, "CALLS") == {("CALLS", f"{pair.definer}#helper")}
+    assert bare.rows(
+        "SELECT target_file_id = (SELECT file_id FROM files WHERE path = ?) FROM relations"
+        " WHERE source_urn = ? AND relation_kind = 'CALLS'",
+        pair.definer,
+        f"lk://{WS_ID}/{pair.run}",
+    ) == [(1,)]
+    assert bare.indexer.reingested_importers == 1
+    assert bare.version() == version + 1  # 定義元の取り込みと import 元の解き直しは 1 つのトランザクション
+
+
+@pytest.mark.parametrize("language", ["python", "typescript"])
+async def test_symbol_removed_drops_importer_relations(bare: Bare, language: str) -> None:
+    """定義元から ``helper`` を消すと、import 元の行は捨てられる（最初から ``helper`` が無かったときと同じ。``_ext`` には戻らない）。
+
+    定義元のファイルそのものが無くなったときだけ ``_ext`` に戻る（``test_removed_file_returns_importers_to_external``）。
+    """
+    pair = await _seed_importer_over_incomplete_definer(bare, language)
+    bare.write(pair.definer, pair.with_helper)
+    await bare.indexer.index_file(pair.definer)
+    assert bare.edges(pair.run, "CALLS") == {("CALLS", f"{pair.definer}#helper")}
+    before = bare.indexer.reingested_importers
+    version = bare.version()
+
+    bare.write(pair.definer, pair.without_helper)
+    await bare.indexer.index_file(pair.definer)
+
+    assert bare.edges(pair.importer) == set()
+    assert bare.edges(pair.run) == set()
+    assert bare.indexer.reingested_importers == before + 1  # 集合が変わったので import 元を取り込み直した
+    assert bare.version() == version + 1
+
+
+@pytest.mark.parametrize("language", ["python", "typescript"])
+async def test_body_only_edit_does_not_reingest_importers_when_symbols_are_the_same(
+    bare: Bare, language: str
+) -> None:
+    """シンボルの集合が同じ（本文だけの編集）なら、import している側を取り込み直さない（数えるのは取り込み直した import 元の数）。"""
+    pair = await _seed_importer_over_incomplete_definer(bare, language)
+    bare.write(pair.definer, pair.with_helper)
+    await bare.indexer.index_file(pair.definer)  # helper を足した（import 元の取り込み直しはここで 1 回）
+    importer_rows = bare.rows(
+        "SELECT relation_id FROM relations WHERE source_urn LIKE ?", f"lk://{WS_ID}/{pair.importer}%"
+    )
+    assert importer_rows
+    before, ingests = bare.indexer.reingested_importers, bare.indexer.ingest_calls
+    version = bare.version()
+
+    bare.write(pair.definer, pair.with_helper.replace("return 1", "return 2").replace("return 0", "return 3"))
+    await bare.indexer.index_file(pair.definer)
+
+    assert bare.indexer.ingest_calls == ingests + 1
+    assert bare.indexer.reingested_importers == before  # 取り込み直していない
+    assert (
+        bare.rows(
+            "SELECT relation_id FROM relations WHERE source_urn LIKE ?", f"lk://{WS_ID}/{pair.importer}%"
+        )
+        == importer_rows
+    )
+    assert bare.edges(pair.run, "CALLS") == {("CALLS", f"{pair.definer}#helper")}
+    assert bare.version() == version + 1
+
+
+async def test_symbol_added_with_no_importers_re_ingests_nothing_else(bare: Bare) -> None:
+    """import している側が無ければ、シンボルを足しても取り込み直すものは無い。"""
+    bare.write("pkg/__init__.py", "")
+    bare.write("pkg/b.py", B_PY_WITHOUT_HELPER)
+    await bare.indexer.index_file("pkg/__init__.py")
+    await bare.indexer.index_file("pkg/b.py")
+    version = bare.version()
+
+    bare.write("pkg/b.py", B_PY_WITH_HELPER)
+    await bare.indexer.index_file("pkg/b.py")
+
+    assert bare.indexer.reingested_importers == 0
+    assert bare.version() == version + 1
+
+
+async def test_incremental_scan_resolves_importers_when_a_symbol_was_added(bare: Bare) -> None:
+    """起動時の差分走査: 定義元に ``helper`` が足されていた（import 元は変わっていない）。走査の最後に import 元の行が結ばれ、消えていれば外れる。"""
+    pair = await _seed_importer_over_incomplete_definer(bare, "python")
+    bare.write(pair.definer, pair.with_helper)
+
+    report = await bare.indexer.scan()
+
+    assert report.indexed == 1 and report.created == 0, report
+    assert bare.edges(pair.run, "CALLS") == {("CALLS", f"{pair.definer}#helper")}
+    assert bare.indexer.reingested_importers == 1
+
+    bare.write(pair.definer, pair.without_helper)
+    report = await bare.indexer.scan()
+    assert report.indexed == 1, report
+    assert bare.edges(pair.run) == set()
+    assert bare.indexer.reingested_importers == 2
+
+
 async def test_excluded_file_is_not_resurrected_by_its_own_probes(bare: Bare) -> None:
     """``__init__.py`` は自分の親ディレクトリの語幹を調べる。除外に変わって ``remove`` されたとき、自分自身を取り込み直さない。"""
     bare.write("pkg/__init__.py", "from . import b\n")

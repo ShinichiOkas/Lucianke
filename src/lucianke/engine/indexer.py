@@ -241,6 +241,7 @@ class Indexer:
         self._ctags_probed = False
         self._ctags_lock = asyncio.Lock()
         self.ingest_calls = 0  # ``ingest_file`` に渡したファイル数（受入検査のカウンタ。設計書 §7.6.5）
+        self.reingested_importers = 0  # 定義元の変化で取り込み直した import 元のファイル数（``ingest_calls`` には入れない。engine/reresolve.py）
         self._rank_scheduler = RankScheduler(self._scheduled_refresh, delay=rank_delay_s, sleep=rank_sleep)
 
     @property
@@ -289,8 +290,9 @@ class Indexer:
         self.ingest_calls += 1
         facts = prepared.facts
 
-        # 新しいファイルなら、それを import している側の関係を同じトランザクションで解き直す（BUG-0025。engine/reresolve.py）
-        importers = await reresolve.prepare_importers(self, [str(path)]) if known is None else []
+        # 新しいファイル、またはシンボルの集合が変わるなら、それを import している側の関係を同じトランザクションで解き直す
+        # （BUG-0025・BUG-0034。本文だけの編集では触れない。engine/reresolve.py）
+        importers = await reresolve.importers_to_redo(self, str(path), facts, is_new=known is None)
 
         def job(conn: object) -> IngestStats:
             stats = ingest_file(conn, facts)  # type: ignore[arg-type]
@@ -298,6 +300,7 @@ class Indexer:
             return stats
 
         stats = await self._writer.asubmit(job, bumps_version=True, label=f"ingest:{path}")
+        self.reingested_importers += len(importers)
         self._rank_scheduler.touch()  # 順位は約 1 秒おとなしくなってから 1 回だけ計算し直す（engine/rank_scheduler.py）
         return stats
 
@@ -320,6 +323,7 @@ class Indexer:
             return removed
 
         removed = await self._writer.asubmit(job, bumps_version=True, label=f"remove:{path}")
+        self.reingested_importers += len(importers)
         if removed:
             self._rank_scheduler.touch()
         return removed
@@ -353,11 +357,16 @@ class Indexer:
         pending: asyncio.Future[list[IngestStats]] | None = None
         batch: list[FileFacts] = []
         file_ids: list[int] = []
+        # 既存でシンボルの集合が変わったファイル（import している側を解き直す。BUG-0034）
+        names_changed: list[str] = []
 
         async def flush() -> None:
             nonlocal pending, batch
             if pending is not None:
-                file_ids.extend(await self._collect(pending, report))
+                for s in await self._collect(pending, report):
+                    file_ids.append(s.file_id)
+                    if s.symbol_set_changed and not s.file_created:
+                        names_changed.append(s.path)
                 pending = None
             if batch:
                 pending = asyncio.ensure_future(self._submit_batch(batch))
@@ -393,7 +402,9 @@ class Indexer:
             )
         if known:  # 初回の全体走査は、取り込む側が最後のファイルシステムを見て解決済み。差分のときだけ、取り込まなかった側を解き直す
             created = [r for r in listing if r not in known]
-            await reresolve.after_scan(self, created=created, removed=gone, skip_file_ids=set(file_ids))
+            await reresolve.after_scan(
+                self, created=created, removed=gone, skip_file_ids=set(file_ids), changed=names_changed
+            )
         if report.indexed or report.removed or not await asyncio.to_thread(self._ranks_ready):
             await self.refresh_ranks_quietly()  # 全体の取り込みの後に 1 回（index/rank.py。T-01 の順位）
         progress(100)
@@ -911,7 +922,9 @@ class Indexer:
             raise _BatchFailure(stats, failures)
         return stats
 
-    async def _collect(self, pending: asyncio.Future[list[IngestStats]], report: ScanReport) -> list[int]:
+    async def _collect(
+        self, pending: asyncio.Future[list[IngestStats]], report: ScanReport
+    ) -> list[IngestStats]:
         try:
             stats = await pending
         except _BatchFailure as exc:
@@ -923,7 +936,7 @@ class Indexer:
             return []
         report.indexed += len(stats)
         report.created += sum(1 for s in stats if s.file_created)
-        return [s.file_id for s in stats]
+        return stats
 
     async def _remove_batch(self, paths: list[RelPath], report: ScanReport) -> None:
         ws_id = self._ws.workspace_id

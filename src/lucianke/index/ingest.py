@@ -182,10 +182,16 @@ class IngestStats:
     relations_added: int = 0
     external_symbols_added: int = 0
     diagnostics_added: int = 0
+    path: str = ""
 
     @property
     def symbols_changed(self) -> bool:
         return bool(self.symbols_added or self.symbols_updated or self.symbols_removed)
+
+    @property
+    def symbol_set_changed(self) -> bool:
+        """URN の集合が変わったか（足された・消えた）。import している側の ``relations`` を解き直す条件（``engine/reresolve.py``）。"""
+        return bool(self.symbols_added or self.symbols_removed)
 
 
 # --- 共通 -------------------------------------------------------------------------------
@@ -700,6 +706,7 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
 
     return IngestStats(
         file_id=file_id,
+        path=path,
         file_created=created,
         symbols_added=added,
         symbols_updated=updated,

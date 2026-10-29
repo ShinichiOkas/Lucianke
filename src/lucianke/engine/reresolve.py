@@ -1,4 +1,4 @@
-"""後から作られた・消えたファイルを import している側の ``relations`` を解き直す（BUG-0025。設計書 §7.6.2）。
+"""後から作られた・消えた・シンボルの集合が変わったファイルを import している側の ``relations`` を解き直す（BUG-0025・BUG-0034。設計書 §7.6.2）。
 
 import の解決は、定義元のファイルの有無を **取り込んだ時点のファイルシステム** で決める（``Indexer._exists``）。そのため、
 import 元 ``a.py`` を取り込んだあとで ``b.py`` が作られても、``a.py`` の行は ``lk://_ext/pkg#b.helper``（外部）のまま、
@@ -14,7 +14,12 @@ import 元 ``a.py`` を取り込んだあとで ``b.py`` が作られても、``
   取り込み直した側は、同じ内容でも ``exact`` の行を失い ``structural`` に戻る（ADR-8。次に LSP が答えたとき戻る）。
 * 語幹の一致は ``P`` を調べたパスと同じ語幹を持つという意味で、実際に ``P`` に解決されるとは限らない（大目に引く）。
   取り込み直した結果が前と同じなら行は変わらない。
-* 既存ファイルに **シンボルが増えた** だけの場合（``b.py`` に ``helper`` を足した）は解き直さない（BUG-0030）。
+* 既存ファイルの編集でも、**シンボルの集合が変わった**（URN が足された・消えた。``b.py`` に ``helper`` を足した、``helper`` を消した、
+  オーバーロードの宣言が増減した）ときは同じ扱いにする（BUG-0034）。import 元の行は、定義元に目標のシンボルがまだ無いと
+  ``_settle_relations`` に捨てられ（``_ext`` にもならない）、あとから足されても元に戻らないため。``index_file`` は書き込みの前に
+  ``symbols`` の URN の集合と取り込む事実のそれを比べ（``symbols_changed``）、違うときだけ ``prepare_importers`` で import 元の事実を作る。
+  **本文だけの編集（集合が同じ）では import 元に触れない**（編集のたびに解析し直す費用と ``exact`` の行を失う副作用を避ける）。
+  ``scan`` は取り込んだ結果（``IngestStats.symbols_added`` / ``symbols_removed``）から同じ判定をして ``after_scan`` に渡す。
 """
 
 from __future__ import annotations
@@ -37,9 +42,11 @@ __all__ = [
     "ProbeRecorder",
     "after_scan",
     "find_importers",
+    "importers_to_redo",
     "ingest_importers",
     "prepare_importers",
     "stem_of",
+    "symbols_changed",
 ]
 
 _log = logging.getLogger(__name__)
@@ -128,15 +135,49 @@ async def prepare_importers(
     return out
 
 
+async def symbols_changed(ix: Indexer, path: str, facts: FileFacts) -> bool:
+    """``path`` の取り込み済みのシンボルの URN の集合と、これから取り込む ``facts`` のそれが違うか（足された・消えた。中身だけの編集は違わない）。
+
+    まだ取り込まれていない・シンボルが無かったファイルに初めてシンボルができた場合も ``True``。書き込みの前に読み取り接続で調べる。
+    """
+    ws_id = ix.workspace.workspace_id
+
+    def lookup() -> set[str]:
+        with ix._readers.reader() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT s.urn FROM symbols s JOIN files f ON f.file_id = s.file_id WHERE f.workspace_id = ? AND f.path = ?",
+                (ws_id, str(path)),
+            )
+            return {str(urn) for (urn,) in rows}
+
+    return await asyncio.to_thread(lookup) != {str(rec.urn) for rec in facts.symbols}
+
+
+async def importers_to_redo(ix: Indexer, path: str, facts: FileFacts, *, is_new: bool) -> list[FileFacts]:
+    """``index_file`` が ``path`` と同じトランザクションで取り込み直す import 元の事実。
+
+    ファイルが新しい（``is_new``）か、シンボルの集合が変わるときだけ作る（``[]`` なら import 元には触れない）。
+    """
+    if not is_new and not await symbols_changed(ix, path, facts):
+        return []
+    return await prepare_importers(ix, [path])
+
+
 def ingest_importers(conn: sqlite3.Connection, facts: Iterable[FileFacts]) -> list[int]:
     """``prepare_importers`` の事実を取り込む（書き手スレッドのトランザクションの中で呼ぶ）。取り込んだ ``file_id`` を返す（呼び手が ``_settle_relations`` に渡す）。"""
     return [ingest_file(conn, f).file_id for f in facts]
 
 
 async def after_scan(
-    ix: Indexer, *, created: Sequence[RelPath], removed: Sequence[RelPath], skip_file_ids: Collection[int]
+    ix: Indexer,
+    *,
+    created: Sequence[RelPath],
+    removed: Sequence[RelPath],
+    skip_file_ids: Collection[int],
+    changed: Sequence[RelPath | str] = (),
 ) -> None:
-    """``scan`` の最後。この走査で新しく見つかった・消えたファイルを import している側のうち、この走査で取り込まなかったものを解き直す。
+    """``scan`` の最後。この走査で新しく見つかった・消えた・シンボルの集合が変わった（``changed``。BUG-0034）ファイルを
+    import している側のうち、この走査で取り込まなかったものを解き直す。
 
     失敗は握る（走査の成否に影響させない）。``data_version`` は進めない（この走査の取り込み・削除がすでに進めている）。
     """
@@ -144,7 +185,7 @@ async def after_scan(
 
     try:
         facts = await prepare_importers(
-            ix, (*map(str, created), *map(str, removed)), skip_file_ids=skip_file_ids
+            ix, (*map(str, created), *map(str, removed), *map(str, changed)), skip_file_ids=skip_file_ids
         )
         for start in range(0, len(facts), IMPORTER_BATCH_FILES):
             chunk = facts[start : start + IMPORTER_BATCH_FILES]
@@ -157,6 +198,7 @@ async def after_scan(
             await ix._writer.asubmit(  # noqa: SLF001
                 job, bumps_version=False, label=f"reresolve:{chunk[0].path}+{len(chunk) - 1}"
             )
+            ix.reingested_importers += len(chunk)
     except asyncio.CancelledError:
         raise
     except Exception:
