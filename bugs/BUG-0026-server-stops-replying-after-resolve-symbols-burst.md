@@ -12,3 +12,8 @@
 
 ## 再現
 `uv run python bench/run_latency.py --fixtures poly --warmup-timeout 90`（その時点の作業ツリー）。結果は `bench/results/<日時>-windows-latency.json` の `runs[0].tools.<tool>.raw.samples[].error` と `runs[0].shutdown`、`server_stderr_tail`。
+
+## 調査メモ（BUG-0020 の役。2026-10-29 15:15）
+- BUG-0020 の原因 1（解析から 5 秒後の `Node.text` が戻らず、イベントループ〈か索引器のスレッド〉が空回りする）と症状が重なる: 「約 100 回で止まる（＝最初の解析から 5 秒後）」「`--calls 20` では再現しない」「止まったあと全ツールが応答しない」「stdin を閉じても終わらない」。ただし **同じ原因とは確かめられていない**。
+- 確かめたこと: 020a19e + BUG-0020 の直し（作業ツリー）で `bench/run_latency.py --fixtures poly --tools resolve_symbols`（200 回）は 11 秒で完走（`pass server p95 8.0 ms`）。直しを外した 020a19e でも同じ台本が完走した（再現しなかった）。`t04_resolve_symbols.py` 自身は `definition_range`・`Node.text` を通らない。
+- なので、この票は閉じない。解析後の `Node.text` の空回りが、索引器のスレッド（`relations.py`・`imports.py`）で起きたのか、別の原因なのかは、止まった瞬間の `py-spy dump`（`uvx py-spy dump --pid <python.exe の pid>`。`lucianke.exe` は起動の殻で、本体は子の python.exe）で決まる。BUG-0020 の直しを入れた作業ツリーでもう一度 18b の台本を流し、止まれば py-spy で取ってほしい。

@@ -38,9 +38,13 @@ class RawSession:
         env.pop("LUCIANKE_DEV_TOOLS", None)
         if dev_tools:
             env["LUCIANKE_DEV_TOOLS"] = "1"
+        # cwd は空のディレクトリ。cwd がワークスペースになるので、リポジトリ直下で起動すると全ファイルの走査が走り、負荷のある機で終了が
+        # 2 s を超える（BUG-0024）。この不変条件は stdout の純度で、索引の負荷は関係ない。
+        empty_cwd = tmp_path / "cwd"
+        empty_cwd.mkdir(exist_ok=True)
         self.proc = subprocess.Popen(  # noqa: S603
             [sys.executable, "-m", "lucianke"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=empty_cwd,
         )  # fmt: skip
         self.stdout_lines: list[bytes] = []  # 本物の stdout に出たもの全部（生バイト、改行込み）
         self.stderr = bytearray()

@@ -1,6 +1,8 @@
 """ログ（設計書 §9.2、仕様書 §12.6）。
 
-* stderr: 人が読む 1 行（スタックは出さない）。stdout には何も出さない（NFR-OPS-1）。
+* stderr: 人が読む 1 行（スタックは出さない）。stdout には何も出さない（NFR-OPS-1）。**書き込みで止まらない**: ホストが stderr のパイプを
+  読まないと（Windows のパイプは約 4 KB）、同期の書き込みがバッファ満杯でイベントループごと止まる（BUG-0020）。stderr へは別スレッドの
+  書き手（``NonBlockingLineHandler``）が書き、詰まったら溢れた行を捨てる（ファイルのログには全行が残る）。
 * ファイル: ``<cache_root>/logs/lucianke-<日付>.log``（JSON Lines、日次、既定 7 日保持）。各行は ``event`` と ``request_id`` を持つ。
   スタックはここにだけ出す。ファイル本文・``new_code`` は載せない（呼び出し側の責任）。
 * ログ先を作れなくても落ちない（stderr のみで続行）。
@@ -13,9 +15,13 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import os
 import re
 import sys
+import threading
 import time
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -65,6 +71,104 @@ class HumanFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[1] is not None:
             line += f" ({type(record.exc_info[1]).__name__})"
         return line.replace("\r", " ").replace("\n", " ")
+
+
+STDERR_QUEUE_MAX = 512  # stderr の書き手が詰まっている間に溜める行数の上限（約 60 KB）。超えた行は捨てる
+
+
+class NonBlockingLineHandler(logging.Handler):
+    """整形した 1 行を、別スレッドの書き手（``write``）に渡す。``emit`` は書き込みを待たない。
+
+    ``write`` が止まっても（読まれない stderr のパイプが満杯など）呼び出し元は止まらない。書き手が戻れなかった間に ``queue_max`` 行を
+    超えた分は捨て、書き手が戻ったら「N 行捨てた」と 1 行出す。書き手のスレッドは daemon（プロセスの終了を待たせない）。
+    ``flush`` / ``close`` は溜まった行が書かれるのを ``drain_s`` 秒だけ待つ。
+    """
+
+    def __init__(self, write: Callable[[str], None], *, queue_max: int = STDERR_QUEUE_MAX, drain_s: float = 0.5) -> None:
+        super().__init__()
+        self._write = write
+        self._queue_max = queue_max
+        self._drain_s = drain_s
+        self._lines: deque[str] = deque()
+        self._dropped = 0
+        self._writing = False
+        self._closed = False
+        self._cv = threading.Condition()
+        self._thread = threading.Thread(target=self._pump, name="lucianke-stderr", daemon=True)
+        self._thread.start()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = self.format(record)
+        except Exception:  # noqa: BLE001
+            self.handleError(record)
+            return
+        with self._cv:
+            if self._closed:
+                return
+            if len(self._lines) >= self._queue_max:
+                self._dropped += 1
+                return
+            self._lines.append(line)
+            self._cv.notify_all()
+
+    def _pump(self) -> None:
+        while True:
+            with self._cv:
+                while not self._lines and not self._closed:
+                    self._cv.wait()
+                if not self._lines:
+                    return
+                batch = list(self._lines)
+                self._lines.clear()
+                dropped, self._dropped = self._dropped, 0
+                self._writing = True
+            try:
+                if dropped:
+                    batch.append(f"{time.strftime('%H:%M:%S')} WARN  lucianke.logging: {dropped} log lines dropped (stderr is not being read)")
+                self._write("\n".join(batch) + "\n")
+            except Exception:  # noqa: BLE001  stderr が壊れても本処理を落とさない（書けない行は捨てる）
+                pass
+            finally:
+                with self._cv:
+                    self._writing = False
+                    self._cv.notify_all()
+
+    def flush(self) -> None:
+        deadline = time.monotonic() + self._drain_s
+        with self._cv:
+            while (self._lines or self._writing) and (left := deadline - time.monotonic()) > 0:
+                self._cv.wait(left)
+
+    def close(self) -> None:
+        self.flush()
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+        super().close()
+
+
+class _FdWriter:
+    """fd へ直接書く（``sys.stderr`` の内部ロックを使わない）。書き手が詰まったままでも、終了時の ``sys.stderr.flush()`` が巻き込まれない。"""
+
+    def __init__(self, fd: int, encoding: str) -> None:
+        self._fd = fd
+        self._encoding = encoding
+
+    def __call__(self, text: str) -> None:
+        data = memoryview(text.encode(self._encoding, "replace"))
+        while data:
+            data = data[os.write(self._fd, data) :]
+
+
+def _stderr_handler() -> logging.Handler:
+    """本物の stderr 用。fd が取れれば非ブロッキングの書き手、取れなければ同期の ``StreamHandler``。"""
+    try:
+        fd = sys.stderr.fileno()
+        os.fstat(fd)
+    except (AttributeError, OSError, ValueError):
+        return logging.StreamHandler(sys.stderr)
+    return NonBlockingLineHandler(_FdWriter(fd, getattr(sys.stderr, "encoding", None) or "utf-8"))
 
 
 class DailyJsonlHandler(logging.Handler):
@@ -128,7 +232,7 @@ def setup_logging(
     """stderr + JSON Lines ファイルのハンドラを ``names`` のロガーに付ける。何度呼んでも付け直す（重複しない）。"""
     level = _LEVELS.get(settings.log_level, logging.INFO)
     handlers: list[logging.Handler] = []
-    human = logging.StreamHandler(stream if stream is not None else sys.stderr)
+    human = logging.StreamHandler(stream) if stream is not None else _stderr_handler()
     human.setFormatter(HumanFormatter())
     handlers.append(human)
     file_error: OSError | None = None

@@ -116,3 +116,62 @@ def test_old_log_files_are_pruned_to_keep_days(tmp_path):
     left = sorted(p.name for p in logs.iterdir())
     assert left == ["lucianke-2026-10-23.log", "lucianke-2026-10-26.log", "lucianke-2026-10-29.log", "other.log"]
     h.close()
+
+
+# --- BUG-0020: stderr の書き込みで止まらない ---------------------------------------------------------
+
+
+def _record(i: int) -> logging.LogRecord:
+    return logging.LogRecord("lucianke.t", logging.INFO, __file__, 1, "line %d", (i,), None)
+
+
+def test_nonblocking_handler_does_not_wait_for_a_stuck_writer_and_drops_the_overflow():
+    import threading
+    import time
+
+    from lucianke.logging_setup import NonBlockingLineHandler
+
+    release = threading.Event()
+    written: list[str] = []
+
+    def stuck_write(text: str) -> None:  # 読まれない stderr のパイプ
+        release.wait(30)
+        written.append(text)
+
+    h = NonBlockingLineHandler(stuck_write, queue_max=50, drain_s=0.1)
+    t0 = time.perf_counter()
+    for i in range(2000):
+        h.handle(_record(i))
+    assert time.perf_counter() - t0 < 2.0  # 書き手が止まっていても emit は即座に戻る
+    release.set()
+    h.flush()
+    text = "".join(written)
+    assert "line 0" in text and "line 1999" not in text  # 先頭が残り、溢れた分は捨てられる
+    assert "log lines dropped" in text
+    h.close()
+
+
+def test_nonblocking_handler_writes_every_line_in_order_when_the_writer_keeps_up():
+    from lucianke.logging_setup import NonBlockingLineHandler
+
+    written: list[str] = []
+    h = NonBlockingLineHandler(written.append, drain_s=5.0)
+    for i in range(100):
+        h.handle(_record(i))
+    h.flush()
+    lines = "".join(written).splitlines()
+    assert lines == [f"line {i}" for i in range(100)]
+    h.close()
+
+
+def test_real_stderr_uses_the_nonblocking_handler(tmp_path):
+    from lucianke.logging_setup import NonBlockingLineHandler
+
+    names = ("lucianke.test_bug0020",)
+    setup_logging(Settings(cache_root=tmp_path), names=names)
+    try:
+        assert any(isinstance(h, NonBlockingLineHandler) for h in logging.getLogger(names[0]).handlers)
+    finally:
+        for h in list(logging.getLogger(names[0]).handlers):
+            logging.getLogger(names[0]).removeHandler(h)
+            h.close()

@@ -19,6 +19,8 @@ GIL と期限（S-02 の結論。設計書 ADR-13 の「スレッドプールで
   停止は最長でも約 20 ms に縮む（並列にはならない。並列度が要るなら別プロセス）。
 * ``parse_deadline_ms`` を過ぎると ``read_callback`` が ``b""`` を返して解析を打ち切る。打ち切られた木はソースの先頭部分
   だけを覆うので、``ParsedFile.has_errors = True`` とし、``error_ranges`` の末尾に「解析が届かなかった範囲」を足す。
+  **期限が効くのは解析の間だけ**: 木は ``read_callback`` を保持し、``Node.text`` のたびに呼び直す。解析の後も ``b""`` を返すと
+  ``Node.text`` が戻らず、イベントループが空回りする（BUG-0020）ので、解析が終わった後は期限と打ち切りを無視してソースをそのまま返す。
   打ち切られた結果は **キャッシュしない**（次の要求で改めて解析する）。``progress_callback`` は Windows でプロセスが落ちるので
   使わない。例外を投げる方式も不安定（``SystemError``）なので使わない。
 * ``async aget_or_parse`` は ``asyncio.to_thread`` の包み。イベントループ上で直接 ``get_or_parse`` を呼んではならない。
@@ -115,18 +117,25 @@ def _parse_with_deadline(
     n = len(source)
     t_end = None if deadline_ms is None else time.perf_counter() + deadline_ms / 1000.0
     stopped: list[int | None] = [None]
+    parsing = [True]
 
     def read(offset: int, _point: Any) -> bytes:
-        if stopped[0] is not None:
-            return b""
+        # 期限と打ち切りは **解析の間だけ** 効かせる。木はこの関数を保持し、``Node.text`` のたびに呼び直す（解析が終わった後も）。
+        # 解析後に ``b""`` を返すと ``Node.text`` が戻らない（BUG-0020: 期限〈5 s〉後の ``get_symbol_bodies`` でイベントループが空回り）。
         if offset >= n:
             return b""  # 末尾の確認は期限切れにしない
-        if t_end is not None and time.perf_counter() >= t_end:
-            stopped[0] = offset
-            return b""
+        if parsing[0]:
+            if stopped[0] is not None:
+                return b""
+            if t_end is not None and time.perf_counter() >= t_end:
+                stopped[0] = offset
+                return b""
         return source[offset : offset + PARSE_CHUNK_BYTES]
 
-    tree = parser.parse(read)
+    try:
+        tree = parser.parse(read)
+    finally:
+        parsing[0] = False
     return tree, stopped[0]
 
 

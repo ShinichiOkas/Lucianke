@@ -567,3 +567,47 @@ def test_parser_is_per_thread_and_language() -> None:
     t.join()
     assert other[0] is not a
     assert parsers._parser_for("javascript", SUPPORT["javascript"].grammar()) is not a
+
+
+# --- BUG-0020: 解析後の Node.text（木が read_callback を保持している） --------------------------------
+
+_TEXT_AFTER_DEADLINE_SCRIPT = r"""
+import sys, time
+from lucianke.syntax.parsers import parse_source
+
+def comments(root):
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "comment":
+            yield n
+        stack.extend(n.children)
+
+# (a) 期限内に解析を終えた木でも、期限を過ぎたあとの Node.text が戻る（以前は空回りして戻らなかった）
+src = b"# lead\ndef f():\n    return 1\n"
+p, timed_out = parse_source(src, "python", "s", deadline_ms=200)
+assert not timed_out
+time.sleep(0.4)
+assert [c.text for c in comments(p.tree.root_node)] == [b"# lead"]
+assert p.tree.root_node.children[1].text == b"def f():\n    return 1"
+
+# (b) 期限で打ち切られた木でも、解析できた部分の Node.text は戻る
+big = b"# head\n" + b"x = 1\n" * 200_000
+q, timed_out = parse_source(big, "python", "s", deadline_ms=1)
+assert timed_out
+time.sleep(0.05)
+assert next(iter(comments(q.tree.root_node))).text == b"# head"
+print("OK")
+"""
+
+
+def test_node_text_after_the_parse_deadline_does_not_spin() -> None:
+    """木は ``read_callback`` を保持し、``Node.text`` のたびに呼び直す。期限切れの後に ``b""`` を返すと ``Node.text`` が戻らず、
+    イベントループが空回りしてサーバーが無応答になった（BUG-0020 / 0024 / 0026）。空回りは別プロセスで見張る（回帰時にテスト実行を巻き込まない）。"""
+    import subprocess
+    import sys
+
+    cp = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _TEXT_AFTER_DEADLINE_SCRIPT], capture_output=True, text=True, timeout=60, check=False
+    )  # fmt: skip
+    assert cp.returncode == 0 and cp.stdout.strip() == "OK", cp.stderr
