@@ -31,8 +31,8 @@ from lucianke.engine.indexer import Indexer
 from lucianke.index.connection import ReaderPool
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.action_store import CodeActionStore
-from lucianke.lsp.pool import LspPool
-from lucianke.lsp.servers import LspServerDef
+from lucianke.lsp.pool import LspPool, default_resolver
+from lucianke.lsp.servers import LspServerDef, servers_for
 from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.mcp.render import compact
@@ -49,6 +49,7 @@ BROKEN = "src/shop/broken.py"
 UNI = "src/shop/uni.py"
 MANY = "src/shop/many.py"
 MUTABLE = "src/shop/mutable.py"
+LINTY = "src/shop/linty.py"
 
 EXTRA_FILES: dict[str, str] = {
     BROKEN: "def broken(:\n    pass\n",
@@ -57,6 +58,7 @@ EXTRA_FILES: dict[str, str] = {
     ),
     MANY: "".join(f"BAD_{i:02d} = {i}\n" for i in range(60)),
     MUTABLE: "x = 1\n",
+    LINTY: "import os, sys\n",  # ruff: F401（os・sys が未使用）と 1 行 import の指摘（E401 / I001。版で違う）
 }
 
 FAKE_LSP = r"""
@@ -805,6 +807,144 @@ async def test_real_basedpyright_and_ruff(indexed: tuple[Path, Path]) -> None:
             f401 = next(d for d in got if d["source"] == "ruff" and d["code"] == "F401")
             assert f401["line"] == 5 and "`os` imported but unused" in f401["message"]
             assert f401["code_actions"] and store.get(f401["code_actions"][0]["id"]) is not None
+        assert snapshot(root) == before
+    finally:
+        await pool.shutdown_all(500)
+        await registry.terminate_all(500, close=True)
+
+
+# --- 型の LSP が落ちていても lint の LSP が ready なら lint の診断を返す（BUG-0039）-------------------
+
+
+async def _only_lint_ready(pool: LspPool, ws: Workspace, *, lint_ms: int = 60_000) -> None:
+    assert not await pool.wait_ready("python", ws, 5000)  # types 役: unavailable
+    assert pool.status("python", ws, "types").status.value == "unavailable"
+    assert await pool.wait_ready("python", ws, lint_ms, role="lint")
+
+
+async def test_types_unavailable_lint_ready_returns_lint_diagnostics(
+    indexed: tuple[Path, Path], lsp: LspEnv
+) -> None:
+    """型の LSP が unavailable で lint の LSP が ready なら、lint の診断を返し、水準と警告は実際の経路を言う。"""
+    pool = lsp.pool()
+    original = pool._resolver
+    pool._resolver = lambda defn, ws: None if defn.role == "types" else original(defn, ws)  # type: ignore[assignment]
+    await _only_lint_ready(pool, lsp.ws(), lint_ms=20_000)
+    pipe = make_pipeline(indexed, pool=pool, store=CodeActionStore())
+
+    r = await call(pipe, "compact", paths=[UNI], min_severity="hint")
+    assert not r.is_error, r.text
+    assert g.validate(r.text) == [], r.text
+    head = r.text.splitlines()[0]
+    assert head.startswith("# get_diagnostics ok conf=structural lsp=unavailable rev=WORKING_TREE ws=poly ")
+    assert f"W {UNI}:3:" in r.text and "[fakelint:W200]" in r.text  # lint 役の診断は返る
+    assert "[fakels:" not in r.text  # 型役の診断は無い
+    assert "fix=qf_" in next(ln for ln in r.text.splitlines() if ln.startswith(f"W {UNI}:3:"))
+    # 警告は「構文エラーだけ」とは言わず、無いもの（型）と有るもの（Lint・構文）を分けて言う
+    assert "構文エラー（Tree-sitter）だけを返しています" not in r.text
+    assert "型の LSP" in r.text and "Lint" in r.text and "含まれていません" in r.text
+
+    j = await call(pipe, paths=[UNI, BROKEN], min_severity="hint")
+    got = diags_of(j)
+    assert {d["source"] for d in got} == {"fakelint", "tree-sitter"}
+    lint = next(d for d in got if d["source"] == "fakelint")
+    assert lint["confidence_level"] == "exact" and lint["code_actions"]
+    meta = j.structured["_resolution_meta"]
+    assert (meta["lsp_status"], meta["confidence_level"], meta["is_degraded"]) == (
+        "unavailable",
+        "structural",
+        True,
+    )
+    assert meta["accuracy_warning"] and "型の LSP" in meta["accuracy_warning"]
+    assert "Lint の診断は含まれていません" not in meta["accuracy_warning"]
+    servers = {(s["language"], s["role"]): s["status"] for s in j.structured["data"]["lsp_sources"]}
+    assert servers == {("python", "types"): "unavailable", ("python", "lint"): "ready"}
+    assert j.structured["data"]["summary"]["by_source"] == {"fakelint": 1, "tree-sitter": 1}
+
+
+async def test_types_indexing_lint_ready_returns_lint_diagnostics(
+    indexed: tuple[Path, Path], lsp: LspEnv
+) -> None:
+    """初回の呼び出し（型の LSP は起動中・ruff はもう ready）でも lint の診断を返す。型は完了後に exact になる。"""
+    pool = lsp.pool()
+    base = pool._resolver
+
+    def slow_types(defn: LspServerDef, ws: Workspace) -> list[str] | None:
+        argv = base(defn, ws)
+        return argv + ["--init-delay", "2.5"] if defn.role == "types" and argv else argv
+
+    pool._resolver = slow_types  # type: ignore[assignment]
+    assert await pool.wait_ready("python", lsp.ws(), 20_000, role="lint")
+    pipe = make_pipeline(indexed, pool=pool, store=CodeActionStore())
+    r = await call(pipe, "compact", paths=[UNI], min_severity="hint", include_code_actions=False)
+    assert r.text.splitlines()[0].startswith("# get_diagnostics ok conf=structural lsp=indexing ")
+    assert f"W {UNI}:3:" in r.text and "[fakelint:W200]" in r.text and "[fakels:" not in r.text
+    assert "起動・索引中" in r.text and "型の LSP" in r.text and "構文エラー（Tree-sitter）だけ" not in r.text
+    await ready(pool, lsp.ws())
+    j = await call(pipe, paths=[UNI], min_severity="hint", include_code_actions=False)
+    assert j.structured["_resolution_meta"]["confidence_level"] == "exact"
+    assert {d["source"] for d in diags_of(j)} == {"fakels", "fakelint"}
+
+
+async def test_types_ready_lint_unavailable_says_lint_is_missing(
+    indexed: tuple[Path, Path], lsp: LspEnv
+) -> None:
+    """逆の組: 型の LSP が ready で lint が unavailable なら、型の診断を返し、Lint が無いことを警告に書く。"""
+    pool = lsp.pool()
+    original = pool._resolver
+    pool._resolver = lambda defn, ws: None if defn.role == "lint" else original(defn, ws)  # type: ignore[assignment]
+    assert await pool.wait_ready("python", lsp.ws(), 20_000)
+    assert not await pool.wait_ready("python", lsp.ws(), 5000, role="lint")
+    r = await call(
+        make_pipeline(indexed, pool=pool), paths=[UNI], min_severity="hint", include_code_actions=False
+    )
+    got = diags_of(r)
+    assert {d["source"] for d in got} == {"fakels"}
+    meta = r.structured["_resolution_meta"]
+    assert meta["lsp_status"] == "ready"
+    warnings = r.structured["warnings"]
+    assert any("Lint" in w and "含まれていません" in w for w in warnings), warnings
+
+
+_HAVE_RUFF = any((_VENV / f"ruff{ext}").exists() for ext in ("", ".exe", ".cmd"))
+
+
+@pytest.mark.skipif(not _HAVE_RUFF, reason="ruff is not installed in this environment")
+async def test_real_ruff_ready_with_types_lsp_unavailable(indexed: tuple[Path, Path]) -> None:
+    """実の ruff だけが ready のとき（型の LSP は起動に失敗）、ruff の診断（E401・F401）が返る。BUG-0039。"""
+    root, _ = indexed
+    registry = ProcessRegistry()
+    defs = (servers_for("python", "types")[0], servers_for("python", "lint")[0])  # basedpyright, ruff
+
+    def resolver(defn: LspServerDef, ws: Workspace) -> list[str] | None:
+        return None if defn.role == "types" else default_resolver(defn, ws)  # 型の LSP は見つからない
+
+    pool = LspPool(registry, servers=defs, resolver=resolver, ready_fallback_s=5.0, grace_ms=500)
+    ws = Workspace(
+        workspace_id=WS_ID,
+        root=root,
+        python_env=PythonEnv(interpreter=sys.executable),
+        case_insensitive=IS_WINDOWS,
+    )
+    try:
+        await _only_lint_ready(pool, ws)
+        pipe = make_pipeline(indexed, pool=pool, store=CodeActionStore(), diagnostics_wait_ms=60_000)
+        before = snapshot(root)
+        r = await call(pipe, paths=[LINTY], min_severity="hint")
+        got = diags_of(r)
+        # ruff の既定の規則は版で違う（0.17 は E401 を既定にせず I001 を足す）。F401 と、1 行 import の指摘をもう 1 つ見る
+        codes = {d["code"] for d in got}
+        assert all(d["source"] == "ruff" for d in got) and "F401" in codes and codes & {"E401", "I001"}, got
+        f401 = next(d for d in got if d["code"] == "F401")
+        assert f401["line"] == 1 and f401["snippet"] == "import os, sys"
+        assert f401["confidence_level"] == "exact" and f401["code_actions"]
+        meta = r.structured["_resolution_meta"]
+        assert (meta["lsp_status"], meta["confidence_level"]) == ("unavailable", "structural")
+        assert "構文エラー（Tree-sitter）だけを返しています" not in " ".join(r.structured["warnings"])
+        servers = {(s["language"], s["role"]): s["status"] for s in r.structured["data"]["lsp_sources"]}
+        assert servers == {("python", "types"): "unavailable", ("python", "lint"): "ready"}
+        default = diags_of(await call(pipe, paths=[LINTY]))  # 既定の min_severity（warning）でも見える
+        assert "F401" in {d["code"] for d in default}
         assert snapshot(root) == before
     finally:
         await pool.shutdown_all(500)

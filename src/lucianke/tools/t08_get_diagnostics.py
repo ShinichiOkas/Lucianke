@@ -5,9 +5,11 @@
 * **exact**: 言語の LSP（``types`` 役）が ``ready``。LSP が ``publishDiagnostics`` で通知した診断（``types`` と ``lint`` の
   両役のハブ）を、``DocumentSync.sync`` で最新の内容を見せたうえで ``DiagnosticsHub.wait_for`` の版待ちで取る
   （固定の ``sleep`` はしない）。索引の構文エラー（``source = tree-sitter``）も足し、同一位置・同一メッセージは LSP を採る。
-* **structural**: LSP が ``indexing`` / ``standby`` / ``unavailable``、または LSP の定義が無い言語・Tier 3。起動は待たず
-  （``ensure_started`` で遅延起動の契機にはする）、索引の構文エラーだけで応える。``accuracy_warning`` に
-  「型・未定義参照・Lint の診断は含まれていない」と書く。
+  ``lint`` 役（ruff）が ``ready`` でないときは、その診断が含まれないことを ``warnings`` に書く（水準は ``exact`` のまま）。
+* **structural**: ``types`` 役が ``indexing`` / ``standby`` / ``unavailable``、または LSP の定義が無い言語・Tier 3。起動は待たず
+  （``ensure_started`` で遅延起動の契機にはする）、``ready`` な ``lint`` 役があればその診断（``confidence_level`` は ``exact``）と、
+  索引の構文エラーで応える（BUG-0039。型の LSP が落ちていても Lint の診断を捨てない）。どちらの LSP も ``ready`` でなければ
+  索引の構文エラーだけ。``accuracy_warning`` には実際の経路を書く（型・未定義参照が含まれない／Lint も含まれない）。
 * **lexical_fallback**: 文法の無い Tier 4。診断なし（0 件）。
 
 ``ctx.services`` に求めるもの（duck typing。``tools`` は ``mcp`` を import できない）:
@@ -36,7 +38,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -88,6 +90,9 @@ _COMPACT_MESSAGE_MAX = 160
 _SOURCE_ALIASES = {"pyright": ("pyright", "basedpyright"), "basedpyright": ("basedpyright", "pyright")}
 
 _NOT_COVERED = "型・未定義参照・Lint の診断は含まれていません。"
+_LSP_DOWN_STATUSES = frozenset(
+    {LspStatus.INDEXING.value, LspStatus.UNAVAILABLE.value, LspStatus.STANDBY.value}
+)  # 型の LSP が答えられない状態（lint 役が ready なら、その診断だけは集める）
 
 
 class GetDiagnosticsArgs(CommonArgs):
@@ -147,8 +152,22 @@ class _Diag:
 @dataclass(slots=True)
 class _FileRoute:
     file: FileInfo
+    # 水準と ``lsp_status`` は型の LSP（``types`` 役）の状態で決まる（lint 役が答えていても）
     choice: EngineChoice
+    # 診断を集める ``ready`` なハンドル（役を問わない）
     lsp_handles: list[LspHandle] = field(default_factory=list)
+    # ``lint`` 役の状態（その言語に ``lint`` 役の定義が無ければ ``None``）
+    lint_status: LspStatus | None = None
+
+    @property
+    def lint_names(self) -> list[str]:
+        """診断を集める ``lint`` 役のサーバー名（ruff など）。"""
+        return sorted({h.server_name or h.language_id for h in self.lsp_handles if h.role == "lint"})
+
+    @property
+    def lint_only(self) -> bool:
+        """型の LSP が ``ready`` でなく、``lint`` 役の LSP だけが答えている経路か。"""
+        return bool(self.lsp_handles) and self.choice.confidence is not Confidence.EXACT
 
 
 @dataclass(slots=True)
@@ -448,15 +467,43 @@ def _status_of(pool: Any, language: str, ws: Workspace) -> PoolStatus:
     return pool.status(language, ws, primary)  # type: ignore[no-any-return]
 
 
+def _lint_status_of(pool: Any, language: str, ws: Workspace) -> LspStatus | None:
+    """``lint`` 役（ruff など）の状態。プールが無い・その言語に ``lint`` 役の定義が無ければ ``None``。"""
+    if pool is None or not _has_lsp_def(language):
+        return None
+    status: PoolStatus = pool.status(language, ws, "lint")
+    return None if status.status is LspStatus.NOT_APPLICABLE else status.status
+
+
 def _ready_handles(pool: Any, language: str, ws: Workspace) -> list[LspHandle]:
+    """``ready`` なハンドルすべて（``types`` が先、``lint`` が後。役は問わない）。"""
     if pool is None:
         return []
-    return [h for h in pool.handles(ws, language) if h.state is LspState.READY and h.client is not None]
+    ready = [h for h in pool.handles(ws, language) if h.state is LspState.READY and h.client is not None]
+    return sorted(ready, key=lambda h: h.role != "types")
 
 
-def _degraded_warning(choice: EngineChoice) -> str | None:
+def _degraded_warning(r: _FileRoute) -> str | None:
+    """この経路が降格のときの警告文（``exact`` なら ``None``）。実際に答えている LSP の役に合わせて言う。"""
+    choice = r.choice
     if choice.confidence is Confidence.EXACT:
         return None
+    if r.lint_only and choice.lsp_status in (
+        LspStatus.INDEXING.value,
+        LspStatus.UNAVAILABLE.value,
+        LspStatus.STANDBY.value,
+    ):
+        have = f"Lint の LSP（{'・'.join(r.lint_names)}）と構文木（Tree-sitter）の診断を返しています。"
+        if choice.lsp_status == LspStatus.INDEXING.value:
+            pct = "" if choice.lsp_progress is None else f"（{choice.lsp_progress}%）"
+            return (
+                f"型の LSP が起動・索引中{pct}のため、型・未定義参照の診断は含まれていません。{have}"
+                "完了後に呼び直すと `exact` になります。"
+            )
+        return (
+            f"型の LSP が利用できないため、型・未定義参照の診断は含まれていません。{have}"
+            "`configure_workspace status` で LSP の状態を確認してください。"
+        )
     if choice.lsp_status == LspStatus.INDEXING.value:
         pct = "" if choice.lsp_progress is None else f"（{choice.lsp_progress}%）"
         return (
@@ -471,6 +518,20 @@ def _degraded_warning(choice: EngineChoice) -> str | None:
     if choice.confidence is Confidence.STRUCTURAL:
         return f"この言語・形式には LSP が無く、構文エラー（Tree-sitter）だけを返しています。{_NOT_COVERED}"
     return None
+
+
+def _lint_missing_warning(r: _FileRoute) -> str | None:
+    """型の LSP が答える経路（``exact``）で、``lint`` 役が答えていないとき、Lint の診断が含まれないことを言う。"""
+    if r.choice.confidence is not Confidence.EXACT or r.lint_status is None:
+        return None
+    if any(h.role == "lint" for h in r.lsp_handles) or r.lint_status is LspStatus.READY:
+        return None
+    if r.lint_status is LspStatus.UNAVAILABLE:
+        return (
+            "Lint の LSP が利用できないため、Lint の診断は含まれていません。"
+            "`configure_workspace status` で LSP の状態を確認してください。"
+        )
+    return "Lint の LSP が起動・索引中のため、Lint の診断は含まれていません。完了後に呼び直すと含まれます。"
 
 
 # --- QuickFix -----------------------------------------------------------------------------------
@@ -643,7 +704,7 @@ def _overall_engine(routes: list[_FileRoute]) -> EngineChoice:
         confidence=choice.confidence,
         lsp_status=status,
         lsp_progress=progress,
-        warning=_degraded_warning(choice) if choice.confidence is not Confidence.EXACT else None,
+        warning=_degraded_warning(worst) if choice.confidence is not Confidence.EXACT else None,
     )
 
 
@@ -706,13 +767,22 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
             has_ctags=False,
             lsp_name=st.server_name,
         )
-        handles = _ready_handles(pool, f.language, ws) if choice.confidence is Confidence.EXACT else []
-        if choice.confidence is Confidence.EXACT and not handles:  # ready の合図の直後に落ちた
+        # 診断を集めるのは ready なハンドルすべて（役は問わない）。水準は型の LSP（types 役）の状態で決まるので、型の LSP が
+        # 落ちていても lint 役（ruff）が ready ならその診断は捨てない（BUG-0039。水準は structural のまま）。
+        handles = _ready_handles(pool, f.language, ws) if f.language in statuses else []
+        primary = "types" if servers_for(f.language, "types") else "lint"
+        if choice.confidence is Confidence.EXACT and not any(h.role == primary for h in handles):
+            # ready の合図の直後に落ちた（lint 役だけ生きていても、型の LSP が答える経路ではない）
             choice = select(
                 f, Capability.DIAGNOSTICS, lsp_status=LspStatus.UNAVAILABLE, lsp_progress=None,
                 has_grammar=f.tier is not Tier.T4, has_ctags=False,
             )  # fmt: skip
-        routes.append(_FileRoute(f, choice, handles))
+        if choice.confidence is not Confidence.EXACT and choice.lsp_status not in _LSP_DOWN_STATUSES:
+            handles = []  # Tier 3・文法なし・LSP の定義なし: 集めない
+        route = _FileRoute(f, choice, handles, lint_status=_lint_status_of(pool, f.language, ws))
+        if route.lint_only:  # 実際の経路を engine_used に出す（仕様書 §8.4 の ``<lsp 名>+tree-sitter``）
+            route.choice = replace(choice, engine=f"{'+'.join(route.lint_names)}+tree-sitter")
+        routes.append(route)
 
     # 2. LSP の診断（exact のファイルだけ。並行して版待ち）
     lsp_routes = [r for r in routes if r.lsp_handles]
@@ -727,6 +797,7 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
                 has_grammar=True, has_ctags=False,
             )  # fmt: skip
             r.lsp_handles = []
+            r.lint_status = None  # 集めないファイルに「Lint が無い」とは言わない（上の警告が理由）
         lsp_routes = lsp_routes[:MAX_LSP_FILES]
     jobs = [(r, h) for r in lsp_routes for h in r.lsp_handles]
     results = await asyncio.gather(
@@ -817,11 +888,12 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
     notes = [
         w
         for r in routes
-        if r.choice.confidence is not Confidence.LEXICAL_FALLBACK and (w := _degraded_warning(r.choice))
+        if r.choice.confidence is not Confidence.LEXICAL_FALLBACK and (w := _degraded_warning(r))
     ]
     if level < Confidence.EXACT:  # accuracy_warning（engine.warning）に出る分は重ねない
         notes = [w for w in notes if w != engine.warning]
     warnings.extend(dict.fromkeys(notes))
+    warnings.extend(dict.fromkeys(w for r in routes if (w := _lint_missing_warning(r))))
     if len({r.choice.confidence for r in routes}) > 1:
         warnings.append(
             "Files are at mixed accuracy levels; see lsp_sources and each diagnostic's confidence_level"
@@ -865,8 +937,9 @@ SPEC = ToolSpec(
         "Return the latest syntax, type and lint diagnostics (errors, warnings) of files or the whole workspace without "
         "running a build or linter. Each line is 'E|W|I|H path:line:col [source:code] message'; a diagnostic with a "
         "QuickFix carries fix=qf_... (pass it to apply_code_action). min_severity filters (default warning); sources filters "
-        "by server (pyright, ruff, tree-sitter). When the language server is starting or unavailable only syntax errors "
-        "are returned and the response says so."
+        "by server (pyright, ruff, tree-sitter). When the type server is starting or unavailable, only lint (ruff) "
+        "diagnostics and syntax errors are returned; when no language server is ready, only syntax errors. "
+        "The response says which."
     ),
     max_confidence=Confidence.EXACT,
     milestone="M1",
