@@ -212,7 +212,7 @@ def test_mermaid_escapes_and_aliases() -> None:
     assert lines[1] == "flowchart LR"
     assert lines[2] == ('  n1["say #quot;hi#quot; #35;1 #lt;b#gt;#amp;#37; #96;x#96; 注文<br/>a#quot;b"]')
     assert lines[3] == '  n2["関数"]'
-    assert lines[4] == '  n1 -->|"C|A#quot;LLS ×3"| n2'
+    assert lines[4] == '  n1 -->|"C#124;A#quot;LLS ×3"| n2'
     # ID は英数の別名だけ。URN の記号は ID に現れない
     ids = set(re.findall(r"^  (n\d+)[\[ ]", r.text, flags=re.MULTILINE))
     assert ids == {"n1", "n2"}

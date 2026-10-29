@@ -71,8 +71,9 @@ _MERMAID_ENTITY: dict[str, str] = {
     ">": "#gt;",
     "&": "#amp;",
     "`": "#96;",
+    "|": "#124;",
 }
-_MERMAID_SPECIAL = re.compile(r"[#%\"<>&`]")
+_MERMAID_SPECIAL = re.compile(r"[#%\"<>&`|]")
 
 
 # --- 中間表現 ---------------------------------------------------------------------------------
@@ -309,7 +310,7 @@ def _dot_attr_value(value: object) -> str | None:
 
 
 def _mm_text(text: object) -> str:
-    """mermaid の引用符つきラベルの中身。``# % " < > & ```` を実体参照にし、改行は空白にする。"""
+    """mermaid の引用符つきラベルの中身。``# % " < > & ` |`` を実体参照にし、改行は空白にする。"""
     s = _NEWLINE.sub(" ", _CTRL.sub(" ", str(text)))
     return _MERMAID_SPECIAL.sub(lambda m: _MERMAID_ENTITY[m.group()], s)
 
