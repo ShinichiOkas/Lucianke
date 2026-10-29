@@ -1,0 +1,29 @@
+# ベンチのフィクスチャ（仕様書 §14.2、OD-10）。コミット SHA で固定する。
+# status = "provisional": 師匠が OD-10 で選ぶまでの仮置き（推奨）。候補の実測は bench/FIXTURES.md。
+# 取得: uv run --no-project python bench/fetch_fixtures.py  （bench/.cache/<name>/ に SHA 固定で浅く clone）
+[meta]
+status = "provisional"
+decided_by = ""        # 師匠が決めたら "master 2026-MM-DD" を入れ、status を "fixed" にする
+measured_on = "2026-10-29"
+
+[F-PY]
+name = "httpx"
+url = "https://github.com/encode/httpx"
+sha = "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+language = "python"
+license = "BSD-3-Clause"
+src_dirs = ["httpx"]
+test_dirs = ["tests"]
+config = "pyproject.toml"
+install = ""            # Python は取得だけで足りる（型解決は stdlib と同梱の型で足りる。外部依存は import 不可でも降格応答で可）
+
+[F-TS]
+name = "ky"
+url = "https://github.com/sindresorhus/ky"
+sha = "3541888878c4d303a8bc2ad61815f4e048f55a5d"
+language = "typescript"
+license = "MIT"
+src_dirs = ["source"]
+test_dirs = ["test", "test-d"]
+config = "tsconfig.json"
+install = "npm ci --ignore-scripts"   # fetch_fixtures.py --install のときだけ実行（型解決に node_modules が要る）

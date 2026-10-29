@@ -10,3 +10,4 @@ bench/results/
 spikes/**/out/
 spikes/**/node_modules/
 spikes/**/.cache/
+bench/.cache/
