@@ -74,6 +74,7 @@ asyncio_default_fixture_loop_scope = "function"
 line-length = 110
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["spikes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S602", "S604", "S605"]
