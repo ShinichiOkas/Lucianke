@@ -427,7 +427,7 @@ TOOL_SPEC = ToolSpec(
     tid="T-19",
     args_model=GetProjectDbSchemaArgs,
     handler=handler,
-    default_max_tokens=2500,
+    default_max_tokens=6000,
     description=(
         "Describe the project knowledge DB used by query_project_db: the 10 public tables (columns, types, PK/FK, meanings), row counts, confidence_level composition, and up to 5 ready-to-run sample SQL statements. Call it once before writing SQL."
     ),

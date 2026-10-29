@@ -1254,7 +1254,7 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 | T-16 | `verify_contract` | E | Verification | M3 | 2000 | | |
 | T-17 | `get_symbol_history` | F Git 時系列 | Verification | M2 | 2000 | | |
 | T-18 | `analyze_git_diff_symbols` | F | Verification | M2 | 3000 | ○ | |
-| T-19 | `get_project_db_schema` | G DB 直接クエリ | Fast | M1 | 2500 | | |
+| T-19 | `get_project_db_schema` | G DB 直接クエリ | Fast | M1 | 6000 | | |
 | T-20 | `query_project_db` | G | Fast | M1 | 2000 | ○（`source_urn` / `target_urn` 列があるとき） | |
 
 「経路」の Fast は NFR-PERF-1（p95 < 50 ms）、Verification は NFR-PERF-2（p95 < 500 ms）の対象を示す。「書き込み」が空のツールはファイルを変更しない（呼び出し前後でワークスペース内の全ファイルの `sha256` が不変であることを、第 14 章の全テストで常時検査する）。
@@ -2906,7 +2906,7 @@ json の `data`:
 
 **対応要求**: FR-DB-1, FR-FMT-2, FR-FMT-3, NFR-PERF-1, NFR-SAFE-2
 
-**入力**（`max_tokens` の既定は 2500）
+**入力**（`max_tokens` の既定は 6000）
 
 | パラメータ | 型 | 必須 | 既定 | 規約 |
 |---|---|---|---|---|
@@ -2931,7 +2931,7 @@ json の `data`:
 compact の例:
 
 ```
-# get_project_db_schema ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~900/2500tok
+# get_project_db_schema ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~900/6000tok
 db: sqlite  views=10  indexed_at=2026-10-29T11:20:04+09:00  coverage: exact 94% structural 4% heuristic 1% lexical_fallback 1%
 table: symbols (14230 rows)
   sig: urn PK, file_id FK files, parent_urn, name, qualified_name, kind, modifiers_json, start_line, end_line, signature, return_type, doc_summary, declared_in, scip_symbol, confidence_level
