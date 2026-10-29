@@ -14,7 +14,7 @@ Project Luciankeは、コーディングエージェントにおけるトーク�
 - **高効率トークン戦略**: 転送データを最小限に抑制し、推論リソースを本質的な問題解決に集中させる。
 
 ## 開発メモ
-- Lucianke を MCP でつないだまま（`.mcp.json` の `uv run ... lucianke` が `.venv\Scripts\lucianke.exe` を握っている間）`pyproject.toml` を変えたら、`uv run` / `uv sync` の前にホストのサーバーを止める（Windows では動いている exe を消せず、同期が `os error 32` で失敗する。BUG-0030）。テスト・ベンチは `python -m lucianke`（`tests/_server_cmd.py`、`bench/_stdio.py` の `server_argv`）で起こすので exe を握らない。
+- `.mcp.json` の起動は `uv run --directory <repo> python -P -m lucianke`（コンソールスクリプトの `lucianke.exe` を使わない）。Lucianke を MCP でつないだままでも `.venv\Scripts\lucianke.exe` を握らないので、`pyproject.toml` を変えて `uv run` / `uv sync` が `lucianke.exe` を入れ直しても `os error 32` で失敗しない（Windows では動いている exe を消せない。BUG-0030）。握るのは `python.exe` で、同期は python のバージョンが変わらない限り触らない。テスト・ベンチも同じ形（`python -P -m lucianke`。`tests/_server_cmd.py`、`bench/_stdio.py` の `server_argv`）で起こす。`-P` は cwd（解析対象のワークスペース）を `sys.path` に足さないため。ホストの `uv run ... lucianke` に戻さないこと（`tests/unit/test_server_launch_guard.py` が見張る）。
 
 ---
 *論理的整合性と構造的なエレガンスの追求。*

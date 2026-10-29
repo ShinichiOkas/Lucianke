@@ -2,9 +2,11 @@
 
 ``uv run ... lucianke``（コンソールスクリプトの ``lucianke.exe``）で起こしたサーバーが動いている間に ``pyproject.toml``
 が変わると、Windows では全員の ``uv run`` が exe を消せず（os error 32）テストの前に落ちる。テスト・ベンチは
-``tests/_server_cmd.py`` / ``bench/_stdio.py`` の ``server_argv``（``sys.executable -m lucianke``）で起こす。
+``tests/_server_cmd.py`` / ``bench/_stdio.py`` の ``server_argv``（``sys.executable -P -m lucianke``）で起こす。
+ホストの設定 ``.mcp.json`` も同じ形（``uv run --directory <repo> python -P -m lucianke``。``uv run ... lucianke`` ではない）。
 ここは (1) その形を固定し、(2) tests/ と bench/ に ``uv run`` 経由の起動が戻ってきたら落とし、
-(3) ホストの設定 ``.mcp.json`` が ``lucianke`` のエントリーポイントを指し続けることを確かめる（縦切りの e2e が以前担っていた確認）。
+(3) ``.mcp.json`` が ``lucianke.exe`` を握らない形で、``python -m lucianke`` の入口（``[project.scripts] lucianke`` と同じ ``main``）を指し続けることを確かめる
+（縦切りの e2e が以前担っていた確認）。
 """
 
 from __future__ import annotations
@@ -60,9 +62,20 @@ def test_bench_server_argv_matches_tests() -> None:
     assert _stdio.server_argv() == server_argv()
 
 
-def test_host_config_points_at_the_console_script_entry() -> None:
-    """ホスト（``.mcp.json``）は ``uv run`` でコンソールスクリプトを起こす。エントリーポイントが ``python -m`` と同じ ``main`` であること。"""
+def test_host_config_launches_python_dash_m_not_the_console_script() -> None:
+    """ホスト（``.mcp.json``）は ``uv run --directory <repo> python -P -m lucianke``。``lucianke.exe``（コンソールスクリプト）を握らない。
+
+    ``uv run`` の同期は ``pyproject.toml`` が変わると ``Scripts/lucianke.exe`` を消して作り直すが、握られていると Windows では
+    消せない（os error 32）。``python`` 以降はテスト・ベンチの ``server_argv`` と同じ形（``-P`` で cwd を ``sys.path`` に足さない）。
+    """
     spec = json.loads((REPO / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["lucianke"]
-    assert spec["command"] == "uv" and spec["args"][-1] == "lucianke"
+    args = spec["args"]
+    assert spec["command"] == "uv" and args[0] == "run"
+    assert args[1] == "--directory"  # 作業ディレクトリは開発者の環境ごと（パスは見ない）
+    assert args[3:] == ["python", "-P", "-m", "lucianke"]  # コンソールスクリプトの ``lucianke`` を直接起こさない
+    assert args[3:] == ["python", *server_argv()[1:]]  # テスト・ベンチと同じ形
+    # ``python -m lucianke`` が実行する ``__main__`` は、コンソールスクリプトと同じ ``main`` を呼ぶ
     scripts = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]
     assert scripts["lucianke"] == "lucianke.__main__:main"
+    main_src = (REPO / "src" / "lucianke" / "__main__.py").read_text(encoding="utf-8")
+    assert "def main(" in main_src and re.search(r'if __name__ == "__main__":', main_src)
