@@ -2227,8 +2227,8 @@ json `data`（共通フィールドに加えて）:
 | 水準 | 挙動 |
 |---|---|
 | exact | LSP の `WorkspaceEdit` に従う |
-| structural | 参照が対象ファイル内に閉じるローカル変数・引数に限り、Tree-sitter のスコープ解析による同一ファイル内改名を提供してもよい（MAY）。それ以外は `E_LSP_UNAVAILABLE` |
-| heuristic / lexical_fallback | 単語境界（`\b旧名\b`）の字句置換。対象は同じ拡張子のファイル（`scope_paths` 指定時はその配下）。`allow_heuristic_mutation` が無ければ `dry_run` 強制。各変更箇所に `conf=lexical_fallback` を付け、コメントや文字列内の一致も置換対象になることを `accuracy_warning` に明記する |
+| structural | 参照が対象ファイル内に閉じるローカル変数・引数に限り、Tree-sitter のスコープ解析による同一ファイル内改名を提供してもよい（MAY）。それ以外は `E_LSP_UNAVAILABLE`。**M1 の実装**（実装で確定 2026-10-29、8dc7658、`tools/_t11_scope.py`）: Python の関数内の引数・ローカル変数（代入・拡張代入・`for` / `with` / `except` の `as`・`:=`・入れ子の `def` / `class` の名前）で、対象を `path` + `line` + `character` で指すときに限る。`scope_paths` は無視して `warnings` に書く。LSP が使えない（`standby` / `unavailable` / `indexing` / 時間切れ）ときの降格で、その関数（と入れ子）の中の同じ綴りの識別子を改名する。属性アクセスの属性名（`obj.name`）、キーワード引数の名前、import 文の中、同名を自分で束縛する入れ子の関数・ラムダ・内包表記の中は除く。`global` / `nonlocal` の宣言がある、import で束縛している、入れ子のクラスが同名をクラス直下で束縛している、モジュール直下・クラス直下・メンバーのときは対象にせず、元の `E_LSP_UNAVAILABLE` を返す（誤って改名するより断る）。`new_name` が関数の中（または外側の関数）で既に使われていれば `E_MUTATION_BLOCKED`。書き込みは通常どおり行い（`allow_heuristic_mutation` は要らない）、変更箇所は `conf=structural` |
+| heuristic / lexical_fallback | 単語境界（`\b旧名\b`）の字句置換。対象は同じ拡張子のファイル（`scope_paths` 指定時はその配下）。`allow_heuristic_mutation` が無ければ `dry_run` 強制。各変更箇所に `conf=lexical_fallback` を付け、コメントや文字列内の一致も置換対象になることを `accuracy_warning` に明記する。**M1 の実装**（実装で確定 2026-10-29、8dc7658、`tools/_t11_degrade.py`）: 対象は文法の無いファイル（Tier 4、文法の無い Tier 1）で、LSP を使わない。単語境界は `(?<!\w)旧名(?!\w)`。`new_name` が書き換え対象のどこかに単語として既にあれば、`allow_heuristic_mutation: true` のとき `E_MUTATION_BLOCKED`（許可が無いときは強制 `dry_run` なので警告だけ）。**実書き込み**（`dry_run: false`）には `allow_heuristic_mutation: true` **と**、書き換える各ファイルの `expected_file_sha256s`（T-10 の `lexical_fallback` と同じ規則）が要る。Tier 3 と、文法の無い Tier 2 は `E_UNSUPPORTED` |
 
 **事後条件**:
 
@@ -3393,7 +3393,7 @@ Lucianke は **できるだけ自由なライセンス** で公開する。本�
 | `THIRD_PARTY_NOTICES.md` | 依存ごとに: 名前、版、SPDX、確認した URL、デュアルの場合に選んだ側、Apache-2.0 の NOTICE 転記、wheel 同梱物（libxml2、jq、鬼車、SQLite など）の表示 |
 | `docs/licenses/`（任意） | 同梱が必要な全文（Apache-2.0、BSD の著作権表示など） |
 
-`THIRD_PARTY_NOTICES.md` は手で書かず、L-8 の検査ツールの出力から生成する（SHOULD）。
+`THIRD_PARTY_NOTICES.md` は手で書かず、L-8 の検査ツールの出力から生成する（SHOULD）。実装（ec55f1b・f748e04。実装で確定 2026-10-29）: `tools/gen_notices.py` が `uv.lock` の依存木（本体と extras。dev は除く）から生成し、`--check` で最新であることを検査する。`pyproject.toml` の `license-files` で wheel に入れ、sdist は許可リスト方式にして作業用ファイル（`.claude`・`.pair-agent`・`.mcp.json`）を配らない。`tools/check_dist.py` が wheel と sdist の中身（`LICENSE`・`THIRD_PARTY_NOTICES.md` が入り、後者がリポジトリのものと一致する）を検査し、CI の license ジョブが両方を通す（M1-8）。詳細は設計書 §10.5。
 
 ---
 

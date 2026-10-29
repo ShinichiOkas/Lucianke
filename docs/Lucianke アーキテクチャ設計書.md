@@ -1994,8 +1994,14 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 | typecheck | basedpyright（strict ではなく standard から始め、`core` と `edit` は strict） |
 | test | unit + contract + invariants（3 OS × Python 3.12 / 3.13） |
 | e2e | 1 OS ずつ基本シナリオ |
-| license | `pip-licenses` で依存木の SPDX を許可リストと照合（仕様書第 16 章 L-8）。`THIRD_PARTY_NOTICES.md` を生成して差分が無いことを確認 |
-| schema | `index/schema.sql` と仕様書 §9.2 の DDL の一致。内部テーブル（`_meta`, `_hover_cache`）と `symbols_fts` の追従トリガは許容リストで除外 |
+| license | `pip-licenses` で依存木の SPDX を許可リストと照合（仕様書第 16 章 L-8）。`python tools/gen_notices.py --check` で `THIRD_PARTY_NOTICES.md` が最新であること、`uv build` の後に `python tools/check_dist.py` で配布物の中身を確認（下記。ec55f1b・f748e04。実装で確定 2026-10-29） |
+| schema | `index/schema.sql` と仕様書 §9.2 の DDL の一致。内部テーブル（`_meta`, `_hover_cache`, `_symbol_rank`, `_import_probes`）と `symbols_fts` の追従トリガは許容リストで除外 |
+
+**`THIRD_PARTY_NOTICES.md` の生成と配布物の検査（実装で確定 2026-10-29）**:
+
+- `tools/gen_notices.py` が `THIRD_PARTY_NOTICES.md` を `uv.lock` の依存木から生成する（手で書かない。仕様書 §16.3）。対象は本体の `dependencies` と extras（`all` を除く）ごとの推移的閉包で、dev 依存は含めない（57 パッケージ）。依存の条件（`sys_platform` / Python の版）は Windows・Linux・macOS × Python 3.12〜3.14 のどれかで要るものをすべて含め、どの OS で生成しても同じ内容になる。ライセンス情報は導入済みの配布情報から `pip-licenses` で読む（ネットワーク不要）。この環境に入らない依存（例: Windows 専用の pywin32）は表の値だけを出す（`STATIC_ENTRIES`）。デュアルライセンスの選択は検査器の `DUAL_CHOICES` を使う（dulwich は Apache-2.0 側。OD-20）。`--check` は生成物が古ければ 1 を返す。単体テスト `tests/unit/test_notices_up_to_date.py` も同じことを検査する。
+- `pyproject.toml` の `license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]` で wheel の `*.dist-info/licenses/` に入る。sdist は**許可リスト方式**（`[tool.hatch.build.targets.sdist]`）にして、`.claude`・`.pair-agent`・`.mcp.json` などの作業用ファイルを配らない。
+- `tools/check_dist.py`（`dist/` または `--build`）が、wheel に `LICENSE` と `THIRD_PARTY_NOTICES.md` が入りリポジトリのものと一致すること（古い生成物を配らない）、`METADATA` に `License-Expression: MIT` と両方の `License-File` があること、sdist の直下に両ファイルがあり作業用ファイルが無いことを確かめる（`tests/unit/test_dist_contents.py`）。CI の license ジョブに接続済み。
 
 ## 10.6 受入検査の役への引き渡し
 
@@ -2047,7 +2053,7 @@ build-backend = "hatchling.build"
 ## 11.2 導入と起動
 
 ```jsonc
-// .mcp.json（Claude Code の例）
+// .mcp.json（Claude Code の例。利用者が `uv tool install` / `pipx install` したとき）
 {
   "mcpServers": {
     "lucianke": {
@@ -2057,11 +2063,22 @@ build-backend = "hatchling.build"
     }
   }
 }
+
+// .mcp.json（リポジトリで開発するとき。実装で確定 2026-10-29、BUG-0030・1734b29・251eeb3）
+{
+  "mcpServers": {
+    "lucianke": {
+      "command": "uv",
+      "args": ["run", "--directory", "<repo>", "python", "-P", "-m", "lucianke"]
+    }
+  }
+}
 ```
 
 - `uv tool install lucianke[all]` または `pipx install lucianke[all]`。
-- `lucianke doctor` が、PATH 上の LSP・Node・ctags・git の有無、キャッシュディレクトリの書き込み可否、`stdout` 隔離の自己診断を表示する（`stderr` へ）。
-- `lucianke index <root>` が事前索引を行い、初回起動を速くする（任意。初回索引の重さは許容する方針なので必須ではない）。
+- **開発時の起動は `python -P -m lucianke`**（コンソールスクリプトの `lucianke.exe` を使わない）。`uv run` は起動のたびに環境を同期し、`pyproject.toml` が変わっていると editable の `lucianke.exe` を入れ直そうとするが、Windows では**動いている exe は消せない**（`os error 32`）ので、Lucianke を MCP でつないだままだと全員の `uv run` が落ちる（BUG-0030）。`python -m lucianke` なら握るのは `python.exe` で、同期は python のバージョンが変わらない限り触らない。`-P` は cwd（解析対象のワークスペース。任意の Python ファイルを含む）を `sys.path` に足さないため（足すとワークスペースの `mcp.py` などが SDK を隠しうる）。テスト・ベンチも同じ形で起こす（`tests/_server_cmd.py` の `server_argv`、`bench/_stdio.py`。`tests/unit/test_server_launch_guard.py` が `uv run … lucianke` に戻っていないかを見張る）。
+- `lucianke doctor`（`cli/doctor.py`、`__main__` のサブコマンド。1a7c487。実装で確定 2026-10-29）が環境を自己診断し、**結果は `stderr` だけ**に表で出す（`stdout` は MCP 専用。診断コマンドでも 1 バイトも書かず、`bootstrap_io` の隔離の後で走らせる）。項目（グループ順）: `runtime`（Python 3.12 以上。必須）、`dependencies`（実行に要る依存は必須、extras の欠けは warn。メタデータの `Requires-Dist` から読み、無ければ固定の一覧）、`stdout`（子プロセスで `bootstrap_io` を呼び、重い import・`print`・`os.write(1, …)` がすべて `stderr` へ出て、退避した fd のトランスポートだけが本物の `stdout` に届くことを確かめる。必須）、`cache`（キャッシュディレクトリの書き込み可否は必須、使用量は 5 GiB 超で warn、ディスクの空きが 1 GiB 未満で warn。R-10）、`tools`（Node・ctags〔Universal Ctags だけ〕・git の有無。任意。git は dulwich で直読するので不要）、`lsp`（PATH・`.venv`・`node_modules/.bin`・環境変数の上書きにある言語サーバー。任意。入れ方の手がかりを添える）。終了コードは必須項目の欠け（`fail`）が 1 つでもあれば 1、無ければ 0、`--strict` なら warn も 1、引数の誤りは 2。`--json` は同じ内容を 1 行の JSON で `stderr` に出す。`--no-selftest` は `stdout` 隔離の子プロセス検査を省く。
+- `lucianke index <root>` が事前索引を行い、初回起動を速くする（任意。初回索引の重さは許容する方針なので必須ではない）。**未実装**（`__main__` は `doctor` だけ。`index` と `bench` は M1 の後半）。
 
 ## 11.3 版管理
 
