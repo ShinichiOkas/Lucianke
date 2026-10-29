@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import sqlite3
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +30,7 @@ from lucianke.lsp.documents import DocumentSync
 from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool, LspState
 from lucianke.lsp.servers import LspServerDef
 from lucianke.workspace.paths import to_file_uri
-from lucianke.workspace.types import Workspace
+from lucianke.workspace.types import PythonEnv, Workspace
 
 FAKE_SERVER = r"""
 import argparse, json, os, sys, threading, time
@@ -883,3 +885,134 @@ async def test_tsserver_less_workspace_skips_tsls_for_vtsls(env: Env, ws: Worksp
     tried.clear()
     await ready_handle(pool, ws)
     assert pool.status("fake", ws).server_name == "tsls" and tried == ["tsls"]
+
+
+# --- started_at・rebind・router ------------------------------------------------------------------
+
+PY = LspServerDef(language_id="python", name="fakepy", argv_candidates=(("fakepy",),))
+
+
+def ticking_clock() -> Callable[[], datetime]:
+    """呼ぶたびに 1 秒進む壁時計（``started_at`` が「新しくなった」ことを時刻の比較だけで決定的に確かめる）。"""
+    t = [datetime(2026, 10, 29, 12, 0, 0, tzinfo=UTC)]
+
+    def now() -> datetime:
+        t[0] += timedelta(seconds=1)
+        return t[0]
+
+    return now
+
+
+def parsed(stamp: str | None) -> datetime:
+    assert stamp is not None
+    out = datetime.fromisoformat(stamp)
+    assert out.tzinfo is not None  # ISO 8601 のタイムゾーン付き
+    return out
+
+
+async def test_started_at_is_set_on_launch_refreshed_on_restart_and_cleared_on_stop(env: Env, ws: Workspace):
+    pool = env.pool("--progress", "0.05", "--crash-first", "1", wall_clock=ticking_clock())
+    await pool.ensure_started("fake", ws)
+    h = pool.handles(ws)[0]
+    first = parsed(h.started_at)  # 起動を始めた時点で入っている（ready を待たない）
+    await ready_handle(pool, ws)
+    assert env.launches == 2  # 1 回目はクラッシュ → 再起動
+    assert parsed(h.started_at) > first
+    await pool.reset("fake", ws)
+    assert h.started_at is None
+
+
+async def test_started_at_is_none_before_any_launch(env: Env, ws: Workspace):
+    pool = env.pool()
+    assert pool.handles(ws) == []
+    await pool.ensure_started("fake", ws)
+    h = pool.handles(ws)[0]
+    assert h.started_at is not None
+    await pool.shutdown_all(300)
+    assert h.started_at is None
+
+
+def moved(ws: Workspace, interpreter: str) -> Workspace:
+    return dataclasses.replace(ws, python_env=PythonEnv(interpreter=interpreter))
+
+
+async def test_rebind_restarts_python_when_the_interpreter_changes(env: Env, ws: Workspace):
+    seen: list[tuple[Any, ...]] = []
+    pool = env.pool(
+        "--progress",
+        "0.05",
+        servers=(PY,),
+        on_diagnostics=lambda *a: seen.append(a),
+        wall_clock=ticking_clock(),
+    )
+    h = await ready_handle(pool, ws, "python")
+    before = parsed(h.started_at)
+    assert env.launches == 1
+    ws2 = moved(ws, str(ws.root / "other" / "python"))
+    assert await pool.rebind(ws2) == [h]
+    assert h.ws is ws2 and h.documents.ws is ws2 and h.diagnostics.ws is ws2
+    assert parsed(h.started_at) > before  # 戻った時点で新しい（T-00 事後条件 3: 呼び出し時刻より後）
+    assert h.restarts == 0  # クラッシュではない
+    assert await pool.wait_ready("python", ws2, 20_000)
+    assert env.launches == 2
+    v = h.documents.did_open(A, "a = 1\n", "python")
+    assert await h.diagnostics.wait_for(
+        A, min_version=v, sent_at=h.documents.sent_at_of(A) or 0.0, timeout_ms=10_000
+    )
+    assert seen[-1][4] is ws2  # on_diagnostics の ws は新しい方
+
+
+async def test_rebind_without_an_interpreter_change_keeps_the_process(env: Env, ws: Workspace):
+    pool = env.pool("--progress", "0.05", servers=(PY,))
+    h = await ready_handle(pool, ws, "python")
+    pid = h.pid
+    ws2 = dataclasses.replace(ws, exclude_globs=("build/**",), default_base_ref="main")
+    assert await h.rebind(ws2) is False
+    assert h.ws is ws2 and h.documents.ws is ws2 and h.diagnostics.ws is ws2
+    assert h.state is LspState.READY and h.pid == pid and env.launches == 1
+
+
+async def test_rebind_does_not_restart_languages_that_ignore_the_interpreter(env: Env, ws: Workspace):
+    pool = env.pool("--progress", "0.05")
+    h = await ready_handle(pool, ws)
+    assert await h.rebind(moved(ws, str(ws.root / "py"))) is False
+    assert h.state is LspState.READY and env.launches == 1
+
+
+async def test_rebind_of_a_standby_handle_only_swaps_the_workspace(env: Env, ws: Workspace):
+    pool = env.pool("--progress", "0.05", servers=(PY,))
+    await ready_handle(pool, ws, "python")
+    await pool.reset("python", ws)
+    h = pool.handles(ws)[0]
+    ws2 = moved(ws, str(ws.root / "py"))
+    assert await h.rebind(ws2) is False
+    assert h.state is LspState.STANDBY and h.ws is ws2 and env.launches == 1
+
+
+async def test_rebind_gives_an_unavailable_python_a_fresh_start(env: Env, ws: Workspace):
+    pool = env.pool(servers=(PY,), resolver=lambda d, w: None)
+    assert not await pool.wait_ready("python", ws, 20_000)
+    h = pool.handles(ws)[0]
+    assert h.state is LspState.UNAVAILABLE and h.reason == "not_found"
+    assert await pool.rebind(moved(ws, str(ws.root / "py"))) == []
+    assert h.state is LspState.STANDBY and h.reason is None and h.restarts == 0
+
+
+async def test_rebind_rejects_another_workspace(env: Env, ws: Workspace):
+    pool = env.pool("--progress", "0.05")
+    h = await ready_handle(pool, ws)
+    with pytest.raises(ValueError):
+        await h.rebind(dataclasses.replace(ws, workspace_id="other"))
+    assert h.ws is ws
+
+
+async def test_pool_rebind_with_no_handles_is_a_noop(env: Env, ws: Workspace):
+    assert await env.pool().rebind(ws) == []
+
+
+async def test_router_is_one_per_workspace(env: Env, ws: Workspace):
+    pool = env.pool()
+    r = pool.router(ws)
+    assert pool.router(ws) is r
+    assert pool.router(dataclasses.replace(ws, exclude_globs=("x",))) is r  # workspace_id で引く
+    assert pool.router(dataclasses.replace(ws, workspace_id="v")) is not r
