@@ -1587,7 +1587,7 @@ json の `data`:
 **処理規約**:
 
 1. 各 TargetRef を §5.3 で解決する。項目の失敗は T-02 手順 1 のバッチ規約に従い、曖昧な項目は `candidates[]` 付きの `E_TARGET_AMBIGUOUS` を項目に入れ、他項目は処理を続ける。
-2. `exact`: LSP の定義ジャンプと hover 相当の情報からジェネリクス展開後の型を取り、SCIP 索引があれば `scip_symbol` を添える。
+2. `exact`: LSP の定義ジャンプと hover 相当の情報からジェネリクス展開後の型を取り、SCIP 索引があれば `scip_symbol` を添える。**M1 の実装**（実装で確定 2026-10-29、76a2aca・9259466）: ツールの `max_confidence` は `EXACT`（以前は `STRUCTURAL`）。解決したシンボル 1 件ごとに、(a) 内部表 `_hover_cache` に **(`urn`, 定義ファイルの `sha256`)** の行があれば LSP を呼ばず（起動も促さず）`exact` で答える（LSP が止まっていても、別のセッションでも、定義ファイルの内容が同じなら `exact`。設計書 R-11）。(b) 無ければ LSP が `ready` のときだけ、名前の位置（`selection.start`。文字境界）に `definition` と `hover` を送り、hover の型文字列を `signature_expanded` に入れて `_hover_cache` に書き戻す（`data_version` は進めない。同じ `urn` の古い `sha256` の行は消す）。`ready` でなければ**待たずに** `structural`（`standby` は起動を促すだけ）。(c) `definition` は確認に使う: 宣言の名前の位置から引いた定義が構文木の解決と違えば（別名・再エクスポート・オーバーロード）項目の `warnings` に LSP の答えを書き、解決先は付け替えない（`definition.range` と T-05 の `range_returned` の一致〔事後条件 1〕を保つため）。hover が空なら `structural`（`warnings` に「LSP が型情報を返さなかった」旨）。(d) タイムアウトと `E_LSP_UNAVAILABLE`（`position_clamped` を含む）は `structural` に降格する（`position_clamped` は位置が文字境界に当たらず要求を送らなかったとき。設計書 §7.8.4）。`scip_symbol` は未実装。
 3. `structural`: Tree-sitter の宣言と import 文のモジュールパス→ファイル対応（ワークスペース内に限る）で定義を引く。型の展開は行わず、宣言どおりの文字列を返す。
 4. Python 周辺ブリッジ（FR-LANG-3）: `.py` に定義が無く `.pyi` スタブ、Cython の `.pxd`/`.pyx`、同一ワークスペースの PyO3 属性付き Rust 関数、`*_pb2.py` の生成元 `.proto` に対応する宣言があるときは、それを `definition` とし `declared_in` に種別（`stub` \| `cython` \| `pyo3` \| `proto`）を書く。
 5. `heuristic` / `lexical_fallback`: ctags エントリまたは定義パターンの grep 一致行を `definition` とし、`signature` は一致行のテキストを返す。
@@ -1738,7 +1738,7 @@ json の `data`:
 **処理規約**:
 
 1. `target` を §5.3 で解決する。
-2. `exact`: LSP の参照検索・実装検索・型階層で位置を集め、各位置の使用種別を AST から決める。呼び出し式の関数位置なら `call`、代入の左辺なら `w`、複合代入なら `rw`、型注釈・ジェネリクス引数・キャストなら `type`、import 文なら `import`、基底クラス・`impl` ブロック・`implements` 節なら `impl`、それ以外は `r`。
+2. `exact`: LSP の参照検索・実装検索・型階層で位置を集め、各位置の使用種別を AST から決める。呼び出し式の関数位置なら `call`、代入の左辺なら `w`、複合代入なら `rw`、型注釈・ジェネリクス引数・キャストなら `type`、import 文なら `import`、基底クラス・`impl` ブロック・`implements` 節なら `impl`、それ以外は `r`。**M1 の実装は参照検索だけ LSP を使い**、実装検索と型階層は `structural` の推定のまま返し、`warnings[]` にその旨を書く（実装で確定 2026-10-29、1d8700d）。LSP の結果は `relations` に `exact` で書き戻し（`data_version` は進めない）、同じ問い合わせの 2 回目以降は、書き戻した行がまだ新しい（索引のどのファイルも変わっていない）間は LSP を呼ばず PaaD の `exact` 行だけで答える（LSP が止まっていても `exact`）。LSP が 0 件と答えたのに索引に参照があるときは信用せず `structural` に降格する（内部では `E_LSP_UNAVAILABLE`〔`details.reason: "indexing"`〕として扱い、エラーにはしない。呼び直すと `exact` になる）。設計書 §7.5.6。
 3. `structural`: Tree-sitter の識別子一致をワークスペース内で集める。スコープを区別しないため同名別シンボルを含みうる旨を `accuracy_warning` に書く。実装は基底クラス名の文字列一致で推定する。
 4. `heuristic` / `lexical_fallback`: 対象名の単語境界 grep で集め、`use` は定義パターンから `w`、それ以外 `r` とする。
 5. 並びはパス辞書順、次に行番号。`implementations` と `type_hierarchy` は先頭にまとめて出し、ページネーションしない（50 件を超えたら件数と先頭 50 件）。`references` は 1 参照箇所を 1 レコードとしてページネーションする。
@@ -1809,7 +1809,7 @@ json の `data`:
 **処理規約**:
 
 1. `target` を §5.3 で解決する。`Variable` / `Constant` / `Type` 等の呼び出せない種別は `E_UNSUPPORTED`。
-2. `exact`: LSP の呼び出し階層（prepare → incoming / outgoing）を幅優先で `depth` まで辿る。LSP が呼び出し階層を提供しない、または索引中のときは `relations` の `CALLS` エッジで代替し `structural` とする。
+2. `exact`: LSP の呼び出し階層（prepare → incoming / outgoing）を幅優先で `depth` まで辿る。辺は `relations` に `exact` で書き戻し（`data_version` は進めない）、2 回目以降はノードごとに、書き戻した行がまだ新しい（索引のどのファイルも変わっていない）間は LSP を呼ばず PaaD の `exact` 行だけで答える。根について LSP が 0 件と答えたのに索引に呼び出しがあるときは信用せず `structural` に降格する（設計書 §7.5.6。実装で確定 2026-10-29、1d8700d）。LSP が呼び出し階層を提供しない、または索引中のときは `relations` の `CALLS` エッジで代替し `structural` とする。
 3. `heuristic` / `lexical_fallback`: `name(` の単語境界 grep で呼び出し元候補を集め、1 段のみ返す。`depth ≥ 2` を要求されても 1 段で打ち切り、`accuracy_warning` にその旨を書く。
 4. ガード条件: 呼び出し箇所から囲みの関数本体まで AST の祖先を遡り、`if` / `elif` / `else`（否定で表す）/ `match`・`case` / `try`・`except`（`on: 例外型`）/ `while` / 三項演算 / 短絡 `and`・`or` の条件式のソーステキストを `&&` で連ねる。120 文字で省略する。囲みに条件が無ければ `when:` を付けない。
 5. 循環: 根からそのノードまでの経路に既に現れた URN は `(cycle)` を付けて 1 回だけ表示し、展開しない（MUST）。

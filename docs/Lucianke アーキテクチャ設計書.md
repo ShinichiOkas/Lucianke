@@ -195,7 +195,7 @@ lucianke（ホストが起動する 1 プロセス。寿命はホストのセッ
 - 文脈: 仕様書 §5.6「基になるデータが変わっていれば `E_CURSOR_EXPIRED`」。
 - 決定: カーソルは `{tool, args_hash, offset, data_version}` を base64url にしたもの。`data_version` は索引の書き込みトランザクションごとに増える（診断の更新では増やさない）。読み取り時に一致しなければ失効。
 - 捨てた案: 影響ファイルの集合を持つ（正確だが複雑。M1 では保守的な全体版で足りる）。
-- 帰結: 無関係なファイルの変更でもカーソルが失効しうる。仕様の範囲内（失効は常に安全側）。LSP 由来の `relations` 書き込み（§7.5.6）も `data_version` を進めるため、LSP の索引が進んでいる間はカーソルの失効が増える。ファイル変更時はそのファイルを `source_file_id` とする `relations` 行を `exact` も含めて全削除し `structural` を入れ直すので、編集直後は一時的に `structural` に下がり、LSP の再取得で `exact` に戻る。
+- 帰結: 無関係なファイルの変更でもカーソルが失効しうる。仕様の範囲内（失効は常に安全側）。LSP 由来の `relations` 書き込み（§7.5.6 の `exact` への書き戻し）は `data_version` を**進めない**（`bumps_version=False`。進めると、そのツール自身が直前に返した `next_cursor` が次のページで `E_CURSOR_EXPIRED` になる。パイプラインは `data_version` をハンドラの前に引くため。書き戻しは同じ問い合わせの答えを `structural` から `exact` に置き換えるだけで、結果集合は変わらない。1d8700d。実装で確定 2026-10-29）。ファイル変更時はそのファイルを `source_file_id` とする `relations` 行を `exact` も含めて全削除し `structural` を入れ直すので、編集直後は一時的に `structural` に下がり、LSP の再取得で `exact` に戻る。
 
 ### ADR-9 言語とフォーマットは `LanguageSupport` / `FormatAdapter` のプラグイン表で足す
 
@@ -527,8 +527,8 @@ class LuciankeError(Exception):
 
 - WAL のチェックポイントは `IndexWriter` が暇なときと終了時に行う。
 - **作り直し**（`reindex`、移行できない古い `schema_version`）は DB ファイルを削除せず、書き込み接続の中で全オブジェクトを `DROP` して流し直す（§7.6.5。Windows では読み取り接続が開いている DB ファイルを消せない。実装で確定 2026-10-29）。
-- `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（LSP 由来の `relations` 更新を含む）。`diagnostics` だけの更新では進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
-- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + `sha256`）、`_symbol_rank`（シンボル単位の PageRank と fan_in。schema v2。`index/rank.py`）、`_import_probes`（import の解決で調べたパスの語幹。schema v3。`engine/reresolve.py`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。公開 DDL（仕様書 §9.2）に列や表を足さないための表で、`schema.sql` に写しを置く。
+- `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（`WriteJob.bumps_version=True`）。`diagnostics` だけの更新、LSP の結果を `relations` へ `exact` で書き戻す更新（`upsert_exact_relations`。§7.5.6）、PageRank の再計算（§7.6.2）は進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
+- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + 定義ファイルの `sha256`。§7.5.6）、`_symbol_rank`（シンボル単位の PageRank と fan_in。schema v2。`index/rank.py`）、`_import_probes`（import の解決で調べたパスの語幹。schema v3。`engine/reresolve.py`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。公開 DDL（仕様書 §9.2）に列や表を足さないための表で、`schema.sql` に写しを置く。
 
 ## 6.3 ロックと順序
 
@@ -1202,8 +1202,15 @@ def to_exact_relations(source_urn, refs, *, locate, relation_kind="CALLS", …) 
 
 PaaD への反映:
 
-1. `definition` / `references` / `callHierarchy` の結果は `Location` → `symbols` の範囲包含で URN に写し（ワークスペース外は `_ext`）、`relations` に `exact` で書く。同じ `(source_urn, target_urn, relation_kind)` の `structural` 行は置き換える（仕様書 §9.4）。この書き込みは `data_version` を進める（結果集合が増えうるため。ADR-8 の規則どおり。親に報告）。
-2. `hover` の型文字列は内部テーブル `_hover_cache(urn, file_sha256, text)` に置き、T-04 の `signature_expanded` に使う。公開しない（`_` 接頭辞）。
+1. `definition` / `references` / `callHierarchy` の結果は `Location` → `symbols` の範囲包含で URN に写し（ワークスペース外は `_ext`）、`relations` に `exact` で書く。同じ `(source_urn, target_urn, relation_kind)` の `structural` 行は置き換える（仕様書 §9.4）。**この書き込みは `data_version` を進めない（`bumps_version=False`。実装で確定 2026-10-29、1d8700d）**。進めると、T-06・T-07 自身が直前に返した `next_cursor` が次のページで `E_CURSOR_EXPIRED` になる（パイプラインは `data_version` をハンドラの前に引く）。書き戻しは同じ問い合わせの答えを `structural` から `exact` に置き換えるだけで、そのツールの結果集合は変わらない。以前の版（本書の初版）は「進める」と書いていた。
+
+   **T-06・T-07 の `exact` 経路（`tools/_lsp_exact.py`。実装で確定 2026-10-29、1d8700d）**: ツールは次の順で答える。
+   - **PaaD から（2 回目以降）**: 以前 LSP で取って `relations` に `exact` で書いた集合が**まだ新しい**なら、LSP を呼ばずその `exact` 行だけで答える（LSP が止まっていても `exact`）。新しさの目印はプロセス内の `MEMO`（問い合わせごとに `(files_fingerprint, exact 行の指紋)`）。ファイルが 1 つでも変わる（索引の `sha256` が変わる）か、別の書き手が同じ行を書き換えると目印は外れる。ファイルの再取り込みはそのファイルの `exact` 行を消して `structural` を入れ直すので、行の有無だけを見ると「LSP でしか見つからない参照」が編集後に黙って落ちる。目印はその穴を塞ぐ条件である。
+   - **LSP から（1 回目）**: `ready` の LSP に聞き、`to_exact_relations` で `RelationFact` にして `IndexWriter` へ**1 回のジョブで**書き戻す（`upsert_exact_relations` は `(元, 先, 種別)` ごとの置換なので、同じ組を別ジョブで書くと互いに消す）。書けて読み戻した指紋が一致し、書いている間にファイルが変わっていなかったときだけ `MEMO` に目印を置く。使用種別・囲みのシンボル・ガード条件は LSP からは来ないので、参照箇所のファイルを構文木にかけて位置から引く（索引器と同じ分類。引けない位置は `REFERENCES` / `r` で囲みはファイルの URN）。
+   - **0 件の答えは信用しない**: 起動直後の LSP は `ready` でも解析が済まず 0 件を返すことがある（basedpyright の実測）。索引に参照・呼び出しがあるのに LSP が 0 件と答えたときは、内部では `E_LSP_UNAVAILABLE`（`details.reason: "indexing"`）として扱って `structural` に降格し（ツールの応答はエラーにならない）、目印も置かない（呼び直すと `exact` になる。未完了の LSP の空振りを固定しない）。
+   - **降格**: LSP が `ready` でない・時間切れ・`E_LSP_UNAVAILABLE` なら `structural`（`relations` の全行。今までどおり）。
+   - **範囲**: T-06 の実装検索（`implementations`）と型階層（`type_hierarchy`）に LSP 版は無い。`exact` の応答でも索引の継承関係（`INHERITS` / `IMPLEMENTS`）からの推定のままで、`warnings` に書く。T-07 の外部（標準ライブラリ等）の呼び先は、LSP が返したファイルのパスから推定した `lk://_ext/` の URN の葉にする（最善努力）。
+2. `hover` の型文字列は内部テーブル `_hover_cache(urn, sha256, hover_text, cached_at)`（主キーは **`(urn, sha256)`**。`sha256` は定義ファイルの内容の SHA-256）に置き、T-04 の `signature_expanded` に使う。公開しない（`_` 接頭辞）。行があれば LSP を呼ばず（起動も促さず）`exact` で答える（R-11）ので、定義ファイルの内容が変わると鍵が外れて LSP に聞き直す（同じ `urn` の古い `sha256` の行は書くときに消す）。書き込みは `data_version` を進めない（内部表。76a2aca。実装で確定 2026-10-29）。
 3. `rename` / `codeAction` の `WorkspaceEdit` は `edit/plan.py` の `Plan`（hunk 列）に変換して返すだけで、**書き込みは `EditTransaction`** が行う（ADR-11）。ファイルの作成・削除を含む `WorkspaceEdit` は `E_UNSUPPORTED`（実測ではどのサーバーも `resourceOperations` は 0 件）。`changes` と `documentChanges` の**両方の形**を変換する（サーバーごとの形は §7.5.1 の表。`textDocument.version` は `null`＝版検査なし。S-4・S-5 で確認）。開いたのが定義側 1 ファイルだけでも、basedpyright の `rename` は呼び元の編集も返す。
 - **Python の `codeAction`（quickfix・organizeImports・fixAll）は ruff に送る**（PaaD への反映ではなく送り先の規約）。`code_actions` は Python では ruff に送り、basedpyright には送らない。`resolve_code_action` は ruff のためにある（`data` あり・`edit` 無しが返り、`codeAction/resolve` で `edit` が付く）。TypeScript の organizeImports は経路が違う（§7.5.1 の表）ため、サーバー定義ごとに持つ。
 
@@ -1626,7 +1633,7 @@ class EngineSelector:
 
 ### 7.8.4 警告文の雛形と is_degraded
 
-- `is_degraded = choice.confidence < spec.max_confidence`（`ToolSpec.max_confidence`。T-12 は `STRUCTURAL`、T-00 / T-19 は常に `EXACT` で降格なし、T-20 は行から集計）。
+- `is_degraded = choice.confidence < spec.max_confidence`（`ToolSpec.max_confidence`。T-12 は `STRUCTURAL`、T-00 / T-19 は常に `EXACT` で降格なし、T-20 は行から集計。T-04 は `EXACT`〔LSP の hover で `exact` に上げる。76a2aca〕。T-01・T-02・T-03・T-05 の最高水準は `STRUCTURAL`）。
 - `accuracy_warning` は `is_degraded` のときだけ非 null。雛形は `engine/selector.py` に置き、`reason` で選ぶ:
 
 | `reason` | 水準 | 雛形（日本語） |
@@ -1634,6 +1641,7 @@ class EngineSelector:
 | `lsp_indexing` | structural | 「LSP が起動・索引中（{progress}%）のため構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。完了後に呼び直すと `exact` になります。」 |
 | `lsp_unavailable` | structural | 仕様書 §8.4 の `structural` 雛形 + 「`configure_workspace status` で LSP の状態を確認してください。」 |
 | `lsp_timeout` | structural | 「LSP の応答が {timeout} ms 内に得られなかったため構文木で解決しました。」 |
+| `position_clamped`（理由別の警告ではなく `engine/selector.py` の定数 `POSITION_CLAMPED_WARNING`） | structural | 「解決する位置が文字の境界に当たらないため LSP に要求を送らず構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。」LSP は動いているので `lsp_status` は `ready` のまま、`lsp_unavailable` の案内（`configure_workspace status`）は付けない（9259466。実装で確定 2026-10-29） |
 | `no_grammar_ctags` | heuristic | 仕様書 §8.4 の `heuristic` 雛形 |
 | `no_grammar_lexical` | lexical_fallback | 仕様書 §8.4 の `lexical_fallback` 雛形 |
 | `mixed` | （最低水準） | 上の雛形に「{n} 件のファイルがこの水準です（内訳は `confidence_breakdown`）。」を足す |
