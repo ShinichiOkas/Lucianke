@@ -727,14 +727,14 @@ async def test_budget_is_respected_and_pages_continue(indexed: tuple[Path, Path]
     assert "# summary:" in r.text and "# more: cursor=" in r.text
     shown = sum(1 for ln in r.text.splitlines() if ln.startswith("E "))
     assert 0 < shown < 60
-    j = await call(pipe, paths=[MANY], max_tokens=300, include_code_actions=False)
-    assert j.structured["budget"]["used_tokens_est"] <= 300
+    j = await call(pipe, paths=[MANY], max_tokens=800, include_code_actions=False)  # json は封筒と data の全項目も数える（BUG-0017）
+    assert j.structured["budget"]["used_tokens_est"] <= 800
     assert j.structured["page"]["next_cursor"] and j.structured["page"]["total_estimate"] == 60
     assert j.structured["data"]["summary"]["by_severity"]["error"] == 60  # 切り詰め前の総数
     nxt = await call(
         pipe,
         paths=[MANY],
-        max_tokens=300,
+        max_tokens=800,
         include_code_actions=False,
         cursor=j.structured["page"]["next_cursor"],
     )

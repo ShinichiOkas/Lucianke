@@ -79,7 +79,7 @@ class FakePacker:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def pack(self, out: ToolOutput, *, max_tokens: int, offset: int = 0, reserved_tokens: int = 0, cursor_factory=None) -> Page:
+    def pack(self, out: ToolOutput, *, max_tokens: int, offset: int = 0, reserved_tokens: int = 0, cursor_factory=None, **_format_hooks) -> Page:
         self.calls.append(dict(max_tokens=max_tokens, offset=offset))
         nxt = cursor_factory(offset + 1) if cursor_factory else None
         return Page(records=tuple(out.records[offset:]), next_cursor=nxt, summary=None, total_estimate=len(out.records),

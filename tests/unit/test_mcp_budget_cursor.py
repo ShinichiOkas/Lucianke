@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import random
 from collections.abc import Sequence
 
@@ -280,7 +281,7 @@ async def test_pipeline_zero_record_page_has_no_cursor_and_a_larger_max_tokens_s
     class Args(CommonArgs):
         pass
 
-    big = rec("big", size=400)
+    big = dataclasses.replace(rec("big", size=400), data={"k": "big", "blob": "x " * 400})  # json は data の大きさで数える
 
     async def handler(ctx: object, args: Args) -> ToolOutput:
         return make_out([big, rec("small")], None)

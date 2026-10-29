@@ -128,7 +128,8 @@ def pipeline(db: Path, tmp_path: Path) -> Pipeline:
 
 
 async def schema(pipeline: Pipeline, **args: Any):
-    return await pipeline.call_tool("get_project_db_schema", {"format": "json", **args})
+    # json は全テーブルの全列を数える（BUG-0017）。既定の予算では 10 テーブルが入らないので、全部入る予算にする
+    return await pipeline.call_tool("get_project_db_schema", {"format": "json", "max_tokens": 20000, **args})
 
 
 async def query(pipeline: Pipeline, sql: str, fmt: str = "json", **args: Any):

@@ -490,6 +490,8 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 - 計数器は `o200k_base` 互換の近似とする（MUST）。実装は厳密なトークナイザの代わりに、ベンチマーク（第 14 章）で誤差 ±10% 以内と確認したヒューリスティック（文字種別と連の数の係数。設計書 §7.2.1。S-12 で確認: 文字数だけの係数は日本語や base64 で 10〜60% 過小になった）を用いてもよい（MAY）。
 - `budget.used_tokens_est` には応答テキスト全体（ヘッダ・トレーラ含む）の推定値を入れる。
+- `max_tokens` は応答テキスト（`content[0].text`）全体の上限で、`used_tokens_est`（compact のヘッダの `~used`・json の `budget.used_tokens_est`）は **描いた応答テキスト全体を計数器で数え直した値** と一致する（MUST。json は `timing_ms` を最大桁数で数えるので、実際の全文より最大 4 トークン上になりうる）。ヘッダ・警告行・降格の警告行・`head_kv`・トレーラ（compact）、封筒の全キー・`_resolution_meta`・`data` の静的部分・`warnings`（json）もすべて数える。
+- `format: "json"` では、レコードを `data` の JSON の大きさで数える（compact の行の大きさではない。同じ内容でも JSON は compact の数倍になるので、同じ `max_tokens` で入る件数は json のほうが少ない）。`structuredContent` は `content[0].text` と同じ内容の写しなので、別に数えない。
 
 ## 5.8 エラー分類
 

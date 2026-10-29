@@ -201,7 +201,8 @@ async def test_postcondition_5_budget_is_respected(pipeline: Pipeline, max_token
 async def test_truncated_body_is_a_prefix_and_tells_where(pipeline: Pipeline) -> None:
     ref = {"path": PAY_PY, "symbol_name": "PaymentProcessor"}
     full = (await call(pipeline, "json", targets=[ref])).structured["data"]["items"][0]
-    small = await call(pipeline, "json", targets=[ref], max_tokens=300)
+    # json は封筒（_resolution_meta など）と data の全部を数えるので、compact の 300 より大きい予算で切る（BUG-0017）
+    small = await call(pipeline, "json", targets=[ref], max_tokens=600)
     items = small.structured["data"]["items"]
     assert items, small.text
     item = items[0]
@@ -286,7 +287,9 @@ def _assert_contiguous(parts: list[dict[str, Any]], full: dict[str, Any]) -> Non
 
 
 @pytest.mark.parametrize("context_lines", [0, 2])
-@pytest.mark.parametrize("max_tokens", [260, 300, 450])
+# json は封筒（約 150 トークン）も data の全項目（1 件あたり約 280 トークンの固定分）も数える。全文は約 670 トークンで、
+# 本体を 1 行も入れられない予算（約 480 未満）と全文が入る予算（約 670 以上）の間で切り詰めが起きる（BUG-0017）
+@pytest.mark.parametrize("max_tokens", [520, 580, 640])
 async def test_cursor_continues_a_truncated_body_without_overlap_or_gap(
     pipeline: Pipeline, max_tokens: int, context_lines: int
 ) -> None:
@@ -311,7 +314,7 @@ async def test_truncation_never_lands_inside_the_context_lines(tmp_path: Path) -
     full = await _full(pipeline, ref, context_lines=20)
     assert full["context_before_lines"] == 20 and full["range_returned"]["start_line"] == 1
     checked = 0
-    for max_tokens in range(200, 520, 17):  # 切り口が前置きの中に落ちうる小さな予算まで
+    for max_tokens in range(430, 750, 17):  # 切り口が前置きの中に落ちうる小さな予算まで（json の封筒の分だけ大きい）
         r = await call(pipeline, "json", targets=[ref], max_tokens=max_tokens, context_lines=20)
         assert not r.is_error, r.text
         items = r.structured["data"]["items"]
@@ -329,16 +332,17 @@ async def test_continue_with_line_range_gets_the_rest_and_the_note_says_how(pipe
     """続きの取り方が応答にある: json は continue_with.line_range、compact は注記と `# more: cursor=`。それで続きが取れる。"""
     ref = {"path": PAY_PY, "symbol_name": "PaymentProcessor"}
     full = await _full(pipeline, ref, context_lines=0)
-    first = (await call(pipeline, "json", targets=[ref], max_tokens=300, context_lines=0)).structured["data"]["items"][0]
+    first = (await call(pipeline, "json", targets=[ref], max_tokens=600, context_lines=0)).structured["data"]["items"][0]
     assert first["truncated"] is True
     hint = first["continue_with"]["line_range"]
     assert hint == {"start": first["truncated_at_line"], "end": full["range_returned"]["end_line"]}
     rest = (await call(pipeline, "json", targets=[ref], max_tokens=20000, line_range=hint)).structured["data"]["items"][0]
     assert rest["truncated"] is False and rest["range_returned"]["start_line"] == hint["start"]
     assert first["code"] + "\n" + rest["code"] == full["code"]
-    text = (await call(pipeline, targets=[ref], max_tokens=300, context_lines=0)).text
+    text = (await call(pipeline, targets=[ref], max_tokens=300, context_lines=0)).text  # compact は行で数えるので、切り口は json と違う
     assert g.validate(text) == []
-    assert f"line_range {hint['start']}-{hint['end']}" in text
+    m = re.search(r"truncated at line (\d+) of (\d+): continue with the cursor, or line_range (\d+)-(\d+)", text)
+    assert m and m.group(1) == m.group(3) and int(m.group(2)) == int(m.group(4)) == hint["end"], text
     assert "# more: cursor=" in text
 
 
@@ -350,7 +354,7 @@ async def test_truncated_target_is_not_followed_by_the_next_target_until_it_is_c
         {"path": PAY_TS, "symbol_name": "PaymentClient"},
     ]
     fulls = [await _full(pipeline, ref, context_lines=0) for ref in refs]
-    pages = await _drain(pipeline, refs, 300, context_lines=0)
+    pages = await _drain(pipeline, refs, 580, context_lines=0)  # json の最小の 1 ページ（封筒 + 1 件の固定分 + 本体 1 行）が入る予算
     flat = [item for items in pages for item in items]
     for items in pages:
         assert all(not it["truncated"] for it in items[:-1]), "切った対象の後ろに別の対象が詰まっている"

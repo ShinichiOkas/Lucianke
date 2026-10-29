@@ -169,8 +169,8 @@ async def test_budget_is_respected_for_data_files(pipeline: Pipeline, max_tokens
 async def test_shrink_reduces_depth_and_says_so(pipeline: Pipeline) -> None:
     full = await call(pipeline, paths=[SETTINGS], max_tokens=2000)
     small = await call(
-        pipeline, paths=ALL_DATA, max_tokens=200
-    )  # 最小の予算。先頭の 1 ファイルが深さ 1 に縮む
+        pipeline, paths=ALL_DATA, max_tokens=230
+    )  # 先頭の 1 ファイルが深さ 1 に縮む最小の予算（ヘッダ・警告の約 30 トークンも予算に数える。BUG-0014）
     assert not full.is_error and not small.is_error
     assert "[Key] max_attempts" in full.text and "truncated" not in full.text
     assert g.validate(small.text) == []
@@ -183,7 +183,7 @@ async def test_shrink_reduces_depth_and_says_so(pipeline: Pipeline) -> None:
 
 
 async def test_batch_keeps_request_order_and_mixes_code_and_data(pipeline: Pipeline) -> None:
-    r = await call(pipeline, "json", paths=[SETTINGS, PAY_PY, JUNIT])
+    r = await call(pipeline, "json", paths=[SETTINGS, PAY_PY, JUNIT], max_tokens=20000)  # json は data の全項目を数える（BUG-0017）
     assert [i["path"] for i in r.structured["data"]["items"]] == [SETTINGS, PAY_PY, JUNIT]
     assert r.structured["_resolution_meta"]["engine_used"] == "tree-sitter+data-adapter"
     assert r.structured["data"]["items"][1]["language"] == "python"

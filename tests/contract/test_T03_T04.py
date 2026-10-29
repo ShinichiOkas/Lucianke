@@ -301,14 +301,16 @@ async def test_t03_no_hit_anywhere(pipeline: Pipeline) -> None:
 
 async def test_t03_budget_postcondition_5(pipeline: Pipeline) -> None:
     """事後条件 5: budget.used_tokens_est <= max_tokens。小さい予算ではカーソルで続きを取る。"""
-    r = await search(pipeline, query="pay", max_tokens=200, limit=50)
+    # json は封筒（約 170 トークン）と data の全項目（1 件約 120 トークン）を数える。最小の 200 では 1 件も入らない（その応答は
+    # レコード 0 件・警告に必要な max_tokens の目安。別の票）ので、数件ずつのページになる予算で確かめる（BUG-0017）
+    r = await search(pipeline, query="pay", max_tokens=500, limit=50)
     assert not r.is_error
-    assert r.structured["budget"]["used_tokens_est"] <= 200
+    assert r.structured["budget"]["used_tokens_est"] <= 500
     first = urns(r)
     cursor = r.structured["page"]["next_cursor"]
     assert cursor and first
-    r2 = await search(pipeline, query="pay", max_tokens=200, limit=50, cursor=cursor)
-    assert r2.structured["budget"]["used_tokens_est"] <= 200
+    r2 = await search(pipeline, query="pay", max_tokens=500, limit=50, cursor=cursor)
+    assert r2.structured["budget"]["used_tokens_est"] <= 500
     assert not set(first) & set(urns(r2))  # ページが重ならない
 
 
@@ -575,7 +577,7 @@ async def test_t04_target_count_bounds(pipeline: Pipeline, n: int) -> None:
 
 async def test_t04_budget(pipeline: Pipeline) -> None:
     targets = [METHOD, IMPORTED, {"path": PAY_TS, "symbol_name": "PaymentClient"}]
-    for max_tokens in (200, 400, 2000):
+    for max_tokens in (400, 700, 2000):  # json は封筒と data の全項目を数える。200 では 0 件の応答（警告つき）も収まらない（BUG-0017）
         r = await resolve(pipeline, targets=targets, max_tokens=max_tokens)
         assert not r.is_error, r.text
         assert r.structured["budget"]["used_tokens_est"] <= max_tokens
@@ -598,7 +600,7 @@ async def test_t04_revision_other_than_working_tree(pipeline: Pipeline) -> None:
 
 async def test_t03_over_limit_issues_next_cursor_and_pages_do_not_overlap(pipeline: Pipeline) -> None:
     """BUG-0008: 一致が limit を超えるなら next_cursor を出す。カーソルで続きを辿ると重複も欠落も無い。"""
-    full = await search(pipeline, query="pay", limit=200)
+    full = await search(pipeline, query="pay", limit=200, max_tokens=8000)  # json は全項目を数えるので、既定の 1500 では全件が入らない
     all_urns = urns(full)
     total = full.structured["data"]["hits_total"]
     assert len(all_urns) == total > 2 and full.structured["page"]["next_cursor"] is None

@@ -440,13 +440,13 @@ async def test_t06_postcondition_4_6_pages_have_no_duplicates_and_fit_the_budget
     cursor: str | None = None
     pages = 0
     while True:
-        args: dict[str, Any] = {"max_tokens": 200}
+        args: dict[str, Any] = {"max_tokens": 600}  # json は封筒と target・totals など固定部（約 350 トークン）も数える（BUG-0017）
         if cursor is not None:
             args["cursor"] = cursor
         r = await refs(pipeline, {"urn": EXT_DECIMAL}, **args)
         assert not r.is_error, r.text
         env = r.structured
-        assert env["budget"]["used_tokens_est"] <= 200
+        assert env["budget"]["used_tokens_est"] <= 600
         seen += [(x["path"], x["line"], x["col"]) for x in env["data"]["references"]]
         pages += 1
         cursor = env["page"]["next_cursor"]
@@ -652,14 +652,14 @@ async def test_t07_errors(pipeline: Pipeline) -> None:
 
 async def test_t07_postcondition_6_budget(pipeline: Pipeline) -> None:
     for depth in (1, 3, 5):
-        r = await calls(pipeline, PC, "both", depth=depth, max_tokens=200)
-        assert r.structured["budget"]["used_tokens_est"] <= 200
-    again = await calls(pipeline, PC, "both", depth=5, max_tokens=200)
+        r = await calls(pipeline, PC, "both", depth=depth, max_tokens=1100)  # json は封筒と root・edges など固定部（約 860 トークン）も数える（BUG-0017）
+        assert r.structured["budget"]["used_tokens_est"] <= 1100
+    again = await calls(pipeline, PC, "both", depth=5, max_tokens=1100)
     cursor = again.structured["page"]["next_cursor"]
     seen = [n["urn"] + str(n["call_site_line"]) + n["direction"] for n in again.structured["data"]["nodes"]]
     while cursor:
-        nxt = await calls(pipeline, PC, "both", depth=5, max_tokens=200, cursor=cursor)
-        assert nxt.structured["budget"]["used_tokens_est"] <= 200
+        nxt = await calls(pipeline, PC, "both", depth=5, max_tokens=1100, cursor=cursor)
+        assert nxt.structured["budget"]["used_tokens_est"] <= 1100
         seen += [
             n["urn"] + str(n["call_site_line"]) + n["direction"] for n in nxt.structured["data"]["nodes"]
         ]
@@ -776,7 +776,7 @@ async def test_real_incoming_calls_of_process_charge_have_enclosing_definitions_
 
 async def test_real_call_hierarchy_create_order_to_process_charge_and_beyond(real: Pipeline) -> None:
     """create_order → process_charge → _validate_limit / PaymentDeclined（when は途中の if の条件）。"""
-    r = await calls(real, {"urn": U(ROUTES, "create_order")}, "outgoing", depth=3, exclude_external=False)
+    r = await calls(real, {"urn": U(ROUTES, "create_order")}, "outgoing", depth=3, exclude_external=False, max_tokens=8000)
     assert not r.is_error, r.text
     nodes = r.structured["data"]["nodes"]
     path = [(n["name"], n["depth"]) for n in nodes if not n["is_external"]]

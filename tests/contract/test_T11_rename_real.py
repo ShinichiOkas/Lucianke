@@ -177,7 +177,7 @@ async def test_real_rename_on_a_line_with_non_ascii_text_uses_utf16_columns(real
         "    データ = await p.process_charge(req)\n"
         "    return s, r, データ\n",
     )
-    r = await real.rename({"urn": U(PAY, PROCESS_CHARGE)}, "請求する")
+    r = await real.rename({"urn": U(PAY, PROCESS_CHARGE)}, "請求する", max_tokens=20000)  # json は edits の全項目を数える（BUG-0017）
     assert not r.is_error, r.text
     text = real.read("src/shop/jp.py")
     assert '    s = "😀日本語😀"; r = await p.請求する(req)  # process_charge\n' in text  # コメントは触らない

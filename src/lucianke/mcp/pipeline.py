@@ -27,6 +27,7 @@ from lucianke.core.limits import MIN_MAX_TOKENS, SNIPPET_MAX_CHARS
 from lucianke.core.records import ResolutionMeta
 from lucianke.mcp.budget import CursorCodec, Packer
 from lucianke.mcp.envelope import build_meta
+from lucianke.mcp.fit import pack_and_render
 from lucianke.mcp.registry import MILESTONES, ToolRegistry
 from lucianke.mcp.render import compact as compact_render
 from lucianke.mcp.render import graph as graph_render
@@ -233,12 +234,12 @@ class Pipeline:
             return self.cursor_codec.encode(tool=spec.name, args=cursor_args, offset=offset,
                                             data_version=data_version, workspace_id=workspace_id)  # fmt: skip
 
-        page = self.packer.pack(out, max_tokens=max_tokens, offset=cursor_offset, cursor_factory=cursor_factory)
-        meta = build_meta(out, page)
-        call = dataclasses.replace(call, timing_ms=self._elapsed_ms(t0))
-        rendered = self.renderers[fmt](RenderInput(call=call, meta=meta, out=out, page=page,
-                                                   warnings=tuple(warnings), records_key=spec.records_key))  # fmt: skip
-        return rendered, meta
+        # 詰めて描く。ヘッダ・警告・head_kv・json の封筒もトークン予算に数え、``~used`` ・``used_tokens_est`` は描いた全文の
+        # 数え直しに合わせる（仕様書 §5.6-4・§5.7。``mcp/fit.py``。BUG-0014・BUG-0017）
+        fitted = pack_and_render(packer=self.packer, renderer=self.renderers[fmt], fmt=fmt, out=out, call=call,
+                                 offset=cursor_offset, cursor_factory=cursor_factory, warnings=tuple(warnings),
+                                 records_key=spec.records_key, timing_ms=lambda: self._elapsed_ms(t0))  # fmt: skip
+        return fitted.rendered, fitted.meta
 
     # --- 失敗経路 -----------------------------------------------------------------------
 
@@ -251,25 +252,24 @@ class Pipeline:
         """
         fmt = call.format if call.format in _FORMATS and call.format in self.renderers else "compact"
         call = dataclasses.replace(call, format=fmt, timing_ms=self._elapsed_ms(t0))
-        out = page = None
-        shown = err
+        renderer = self.renderers.get(fmt) or default_renderers()[fmt]
         if err.partial is not None:
             try:
-                page = self.packer.pack(err.partial, max_tokens=call.max_tokens, offset=0)
-                out = err.partial
                 shown = LuciankeError(err.code, err.message, details={**err.details, "partial": True},
                                       candidates=err.candidates, partial=err.partial)  # fmt: skip
+                fitted = pack_and_render(packer=self.packer, renderer=renderer, fmt=fmt, out=err.partial, call=call,
+                                         offset=0, cursor_factory=None, warnings=(), records_key=spec.records_key,
+                                         timing_ms=lambda: self._elapsed_ms(t0), error=shown)  # fmt: skip
+                return dataclasses.replace(fitted.rendered, is_error=True)
             except Exception:  # noqa: BLE001  部分結果が詰められなくても、エラー自体は返す
                 log.warning("could not pack partial result", exc_info=True, extra={"event": "partial_pack_failed"})
         try:
-            meta = build_meta(out, page)
-            renderer = self.renderers.get(fmt) or default_renderers()[fmt]
-            rendered = renderer(RenderInput(call=call, meta=meta, out=out, page=page, error=shown,
+            rendered = renderer(RenderInput(call=call, meta=build_meta(None, None), out=None, page=None, error=err,
                                             records_key=spec.records_key))  # fmt: skip
             return dataclasses.replace(rendered, is_error=True)
         except Exception:  # noqa: BLE001  レンダラ自体の不具合でも、結果は必ず返す（SDK に例外を漏らさない）
             log.error("renderer failed on error result", exc_info=True, extra={"event": "render_failed"})
-            return _minimal_error(spec.name, shown)
+            return _minimal_error(spec.name, err)
 
     # --- 補助 ---------------------------------------------------------------------------
 

@@ -61,7 +61,7 @@ def make_pipeline(root: Path) -> tuple[Pipeline, TreeCache]:
 
 
 async def skeleton_of(pipeline: Pipeline, fmt: str = "json", **args: Any) -> Any:
-    return await pipeline.call_tool("get_file_skeleton", {"format": fmt, "paths": [PAY_PY], **args})
+    return await pipeline.call_tool("get_file_skeleton", {"format": fmt, "paths": [PAY_PY], "max_tokens": 20000, **args})  # json は data の全項目を数える（BUG-0017）。既定の 2000 では 1 件も入らない
 
 
 def comparable(r: Any) -> Any:
@@ -134,7 +134,7 @@ async def test_files_with_syntax_errors_are_not_remembered(counters: Counters, t
 async def test_second_path_in_a_later_call_is_the_only_new_work(counters: Counters) -> None:
     pipeline, _ = make_pipeline(POLY)
     one = await skeleton_of(pipeline)
-    both = await pipeline.call_tool("get_file_skeleton", {"format": "json", "paths": [PAY_PY, RECEIPT_PY]})
+    both = await pipeline.call_tool("get_file_skeleton", {"format": "json", "paths": [PAY_PY, RECEIPT_PY], "max_tokens": 20000})
     assert not one.is_error and not both.is_error
     assert counters.extract == 2  # 2 ファイル目だけが新しい
     assert counters.build == 2

@@ -9,8 +9,30 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from lucianke.core.records import Record
 from lucianke.mcp.envelope import collect_warnings
 from lucianke.mcp.types import Rendered, RenderInput
+
+
+def _dumps(value: Any) -> str:
+    """エンベロープ全体と同じ書き方（``ensure_ascii=False``、区切りは詰める、未知の型は ``str``）。"""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def record_text(rec: Record) -> str:
+    """json で描かれるときの 1 レコードの本文（``data`` 配列の 1 要素と、続く区切りの ``,``）。
+
+    パッカーが json の応答を見積もるときの単位（仕様書 §5.7: ``used_tokens_est`` は応答テキスト全体）。json は ``Record.lines`` ではなく
+    ``Record.data`` を描くので、compact の行で数えると実際の何分の一かに過小になる（BUG-0017）。区切りの ``,`` まで含めるのは、
+    compact の行末の改行と同じ理由（レコードごとの数を足した和が、応答全体を数え直した値以上になるようにする）。
+    """
+    return _dumps(dict(rec.data)) + ","
+
+
+def trailer_text(summary: str | None, cursor: str | None, remaining: int) -> str:
+    """続きがあるときに json へ増える本文。json に要約の行は無く（``page`` は ``next_cursor`` / ``returned`` /
+    ``total_estimate`` だけ）、増えるのは ``next_cursor`` の文字列だけ（``null`` の代わりに入る）。"""
+    return _dumps(cursor) if cursor else ""
 
 
 def build_envelope(inp: RenderInput) -> dict[str, Any]:
@@ -51,5 +73,4 @@ def build_envelope(inp: RenderInput) -> dict[str, Any]:
 def render(inp: RenderInput) -> Rendered:
     """json 形式に描画する。``text`` と ``structured`` は同じ dict から作る（``ensure_ascii=False``、区切りは詰める）。"""
     env = build_envelope(inp)
-    text = json.dumps(env, ensure_ascii=False, separators=(",", ":"), default=str)
-    return Rendered(text=text, structured=env, is_error=inp.error is not None)
+    return Rendered(text=_dumps(env), structured=env, is_error=inp.error is not None)
