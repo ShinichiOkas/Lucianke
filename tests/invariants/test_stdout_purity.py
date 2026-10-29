@@ -186,8 +186,10 @@ def test_stdout_stays_pure_jsonrpc_even_when_a_tool_writes_to_fd1(make_session):
     assert init["result"]["serverInfo"]["name"] == "lucianke"
 
     tools = s.request("tools/list")["result"]["tools"]
-    assert [t["name"] for t in tools] == ["ping"]
-    schema = tools[0]["inputSchema"]
+    # ツールの一覧は増えていく。不変条件の本質ではないので「ping を含む」ことだけを確かめる（決め打ちしない）
+    ping = next((t for t in tools if t["name"] == "ping"), None)
+    assert ping is not None, [t["name"] for t in tools]
+    schema = ping["inputSchema"]
     assert schema["additionalProperties"] is False and schema["properties"]["max_tokens"]["default"] == 500
 
     res = s.call("ping", {"echo": "hello", "noise": True})["result"]
@@ -224,7 +226,8 @@ def test_stdout_stays_pure_jsonrpc_even_when_a_tool_writes_to_fd1(make_session):
 def test_dev_tools_are_hidden_unless_enabled(make_session):
     s = make_session(dev_tools=False)
     s.initialize()
-    assert s.request("tools/list")["result"]["tools"] == []
+    names = [t["name"] for t in s.request("tools/list")["result"]["tools"]]
+    assert "ping" not in names  # 開発用ツールだけが隠れる。製品のツールは並ぶので一覧が空であることは求めない
     assert s.call("ping")["error"]["code"] == -32602
     rc, dt = s.close()
     assert rc == 0 and dt < EXIT_DEADLINE_S
