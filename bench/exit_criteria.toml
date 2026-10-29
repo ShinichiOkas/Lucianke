@@ -1,0 +1,468 @@
+# M1 の出口条件（仕様書 §15.2 の M1-1〜M1-8）を、機械で判定できる検査に分解した一覧。
+# 設計書 §10.6 / §12.2 タスク 12 の成果物。実行器は bench/run_exit_criteria.py（人手の検査は無い。§14.1）。
+#
+# 使い方:
+#   uv run python bench/run_exit_criteria.py                 # 全部
+#   uv run python bench/run_exit_criteria.py --skip-slow     # slow = true を飛ばす（数分で終わる）
+#   uv run python bench/run_exit_criteria.py --only M1-2     # 出口条件の番号（M1-5）・検査の id（M1-5.ops1-stdout）・接頭辞
+#
+# 検査（[[check]]）の項目:
+#   id         一意。"M1-<番号>.<名前>"
+#   criterion  対応する出口条件（M1-1〜M1-8）。"REF" は出口条件に含まれない参考（gating = false）
+#   spec       仕様書の根拠（章・要求 ID）
+#   title      何を確かめるか（1 行）
+#   kind       pytest | script | builtin
+#                pytest  : cmd は pytest の引数（ノード ID・ディレクトリ・-k）。junit-xml で件数と赤いノードを取る
+#                script  : cmd は argv。{py} は実行器の Python、{out} は結果 JSON の一時パス。終了コード 0 で合格
+#                          + expect があれば、結果ファイル（result_kind のもの、または {out}）を判定する
+#                builtin : 実行器に組み込んだ検査（builtin = "<名前>"）
+#   pass       合格の条件（人が読む文。判定は kind / expect / min_tests / skips がやる）
+#   expect     結果 JSON の判定。path は "." 区切り、"*" は辞書の値・配列の要素の全部。op は
+#                eq（全部が value）/ in（全部が value の中）/ count_ge（個数が value 以上）/ contains_all（集合が value を含む）/ ge / le
+#   min_tests  pytest: 走った件数の下限（0 件で「合格」にしない。既定 1）
+#   skips      pytest: "report"（既定。件数と理由を載せる）| "fail"（skip が 1 件でもあれば不合格＝未検証）
+#   slow       true なら --skip-slow で飛ばす
+#   timeout_s  1 検査の上限秒（超えたら process tree ごと止めて timeout）
+#   est_min    所要の目安（分。2026-10-29 の Windows 機での実測。負荷で変わる）
+#   needs      機械で調べる前提: fixture:F-PY / fixture:F-TS（bench/fetch_fixtures.py で取得済みか）/ exe:<名前>（PATH にあるか）
+#   requires_files    これが無ければ「未整備」（まだ作られていない成果物）
+#   requires_tracked  作業ツリーにあっても git の管理下に無ければ「未整備」（他の役が未コミット）
+#   quiet      true なら「同時に他の負荷を掛けない状態」が前提（§14.4）。CPU 使用率を記録し、高ければ注意を付ける
+#   lsp        どの LSP が要るか（記録用。無ければ skip になる試験があるので skips で見る）
+#   gating     false なら出口条件の合否に数えない（参考）
+#
+# 判定の語: pass 合格 / fail 不合格 / timeout 上限超過 / error 実行できなかった /
+#           missing 未整備（成果物が無い・未コミット）/ blocked 前提が満たせない / skipped 今回は走らせていない
+
+[meta]
+spec = "docs/Lucianke仕様書.md §15.2（M1-1〜M1-8）、第 14 章"
+design = "docs/Lucianke アーキテクチャ設計書.md §10.6、§12.2 タスク 12"
+network = "none"        # 検査の実行中に外向き通信はしない（フィクスチャの取得だけ別: bench/fetch_fixtures.py）
+manual_checks = 0       # 人手の検査は作らない（§14.1）
+
+# ======================================================================================
+# M1-1  14 ツールが第 11 章の事後条件を F-PY、F-TS、F-POLY で満たす
+# ======================================================================================
+
+[[check]]
+id = "M1-1.contract-fpoly"
+criterion = "M1-1"
+spec = "§11 各ツールの事後条件、§14.2 F-POLY"
+title = "ツールごとの契約テスト（F-POLY と実 LSP〈ruff・basedpyright〉・偽 LSP）"
+kind = "pytest"
+cmd = ["tests/contract"]
+pass = "tests/contract が全部通る（赤 0・エラー 0・走った件数 >= 1）。skip は件数と理由を載せる"
+min_tests = 100
+skips = "report"
+slow = false
+timeout_s = 1500
+est_min = 6
+lsp = ["ruff", "basedpyright"]
+
+[[check]]
+id = "M1-1.e2e-stdio"
+criterion = "M1-1"
+spec = "§11、§12.1（実プロセスの stdio 経由で 14 ツールが答える）"
+title = "実プロセスのサーバーに stdio でつなぐ縦串（tools/list と索引ツール）"
+kind = "pytest"
+cmd = ["tests/e2e"]
+pass = "tests/e2e が全部通る"
+min_tests = 1
+slow = false
+timeout_s = 600
+est_min = 2
+
+[[check]]
+id = "M1-1.postcondition-map"
+criterion = "M1-1"
+spec = "§11 各ツールの「事後条件」、設計書 R-9"
+title = "事後条件の番号 -> 契約テストの対応表を機械で作り、対応の無い事後条件が 0 であること"
+kind = "script"
+cmd = ["{py}", "bench/postcondition_map.py", "--m1-only", "--json", "{out}", "--quiet"]
+pass = "M1 の 14 ツールの事後条件のうち、テストに結び付かないもの（unmapped）が 0 件"
+expect = [
+  { path = "unmapped_total", op = "eq", value = 0 },
+]
+slow = false
+timeout_s = 120
+est_min = 0.1
+requires_files = ["bench/postcondition_map.py"]
+
+[[check]]
+id = "M1-1.tool-t01-get_repo_map"
+criterion = "M1-1"
+spec = "§11.2 T-01 `get_repo_map`（M1 の 14 ツールの 1 本）"
+title = "T-01 の実装と契約テストがある（tools/t01_*.py と repo_map を名前に持つ契約テスト）"
+kind = "pytest"
+cmd = ["tests/contract", "-k", "repo_map"]
+pass = "T-01 の実装ファイルが在り、repo_map を名前に持つ契約テストが 1 件以上通る"
+min_tests = 1
+slow = false
+timeout_s = 300
+est_min = 0.5
+requires_files = ["src/lucianke/tools/t01_get_repo_map.py"]
+
+[[check]]
+id = "M1-1.contract-fpy-fts"
+criterion = "M1-1"
+spec = "§14.2 F-PY・F-TS（bench/fixtures.toml）、§15.2 M1-1"
+title = "F-PY（httpx）と F-TS（ky）に対して契約テストを回す仕組み"
+kind = "pytest"
+cmd = ["tests/contract_fixtures"]
+pass = "取得済みの F-PY・F-TS を対象に、14 ツールの事後条件の試験が通る（契約テストを F-POLY 以外のワークスペースで回す仕組みが前提）"
+min_tests = 28
+skips = "fail"
+slow = true
+timeout_s = 1800
+est_min = 10
+needs = ["fixture:F-PY", "fixture:F-TS"]
+requires_files = ["tests/contract_fixtures"]
+# 未整備（2026-10-29）: bench/fetch_fixtures.py で取得はできるが、tests/contract は F-POLY（tests/fixtures/poly）の複製だけを
+# ワークスペースにしている。F-PY / F-TS を使うのは bench の台本だけで、契約テストを回す仕組みが無い。
+
+# ======================================================================================
+# M1-2  §10.10 の EP-1〜EP-9 を満たす
+# ======================================================================================
+
+[[check]]
+id = "M1-2.ep-transaction"
+criterion = "M1-2"
+spec = "§10.10 EP-1〜EP-9"
+title = "編集トランザクションの EP-1〜EP-9（外部変更の競合・恒等編集のバイト一致・多ファイル改名の巻き戻しを含む）"
+kind = "pytest"
+cmd = ["tests/unit/test_edit_transaction.py"]
+pass = "全部通る"
+min_tests = 20
+slow = false
+timeout_s = 600
+est_min = 1
+
+[[check]]
+id = "M1-2.ep-map"
+criterion = "M1-2"
+spec = "§10.10 EP-1〜EP-9"
+title = "EP-1〜EP-9 のそれぞれが、編集系のテストから名前で参照されている"
+kind = "script"
+cmd = ["{py}", "bench/postcondition_map.py", "--ep-only", "--json", "{out}", "--quiet"]
+pass = "EP-1〜EP-9 の未対応が 0 件"
+expect = [
+  { path = "ep.unmapped_total", op = "eq", value = 0 },
+]
+slow = false
+timeout_s = 120
+est_min = 0.1
+requires_files = ["bench/postcondition_map.py"]
+
+[[check]]
+id = "M1-2.edit-contract"
+criterion = "M1-2"
+spec = "§10.10、§11.5 T-10・T-11・T-13 の事後条件"
+title = "編集ツール（T-10 本体と削除、T-11、T-13）の契約テストと、書き込み・正規化・構文検査の単体"
+kind = "pytest"
+cmd = ["tests/contract/test_T10_edit_body.py", "tests/contract/test_T10_delete.py", "tests/contract/test_T11_rename.py", "tests/contract/test_T13_code_action.py", "tests/unit/test_edit_writer.py", "tests/unit/test_edit_normalize.py", "tests/unit/test_edit_syntax_check.py", "tests/unit/test_edit_plan.py", "tests/unit/test_edit_workspace_edit.py"]
+pass = "全部通る"
+min_tests = 100
+slow = false
+timeout_s = 900
+est_min = 3
+lsp = ["ruff"]
+
+# ======================================================================================
+# M1-3  NFR-PERF-1 を M1 の 14 ツールで満たす（§14.4）
+# ======================================================================================
+
+[[check]]
+id = "M1-3.latency"
+criterion = "M1-3"
+spec = "§14.4、NFR-PERF-1（Fast Path は p95 < 50 ms）"
+title = "14 ツール x 200 回（F-POLY と F-PY・F-TS）のサーバー内 timing_ms の p95 < 50 ms"
+kind = "script"
+cmd = ["{py}", "bench/run_latency.py"]
+result_kind = "latency"
+pass = "全フィクスチャ・14 ツールが pass（not_implemented・skip・fail が無い）。stdout 純度と子プロセスの監視も通る"
+expect = [
+  { path = "verdict", op = "eq", value = "pass" },
+  { path = "m1_3_by_tool.*", op = "eq", value = "pass" },
+  { path = "m1_3_by_tool.*", op = "count_ge", value = 14 },
+  { path = "runs.*.fixture.name", op = "contains_all", value = ["F-POLY", "F-PY", "F-TS"] },
+  { path = "runs.*.verdict", op = "eq", value = "pass" },
+]
+slow = true
+timeout_s = 3600
+est_min = 20
+needs = ["fixture:F-PY", "fixture:F-TS", "exe:uv"]
+quiet = true
+lsp = ["ruff", "basedpyright", "typescript"]
+requires_files = ["bench/run_latency.py"]
+
+# ======================================================================================
+# M1-4  NFR-TOK-1 をシナリオ S1・S2・S4 で満たす（§14.3。S3 は T-09 が M2 のため除く）
+# ======================================================================================
+
+[[check]]
+id = "M1-4.tokens"
+criterion = "M1-4"
+spec = "§14.3、NFR-TOK-1（削減率 >= 75%）"
+title = "S1・S2・S4 x F-PY・F-TS の 6 件で 1 - L/B >= 0.75（o200k_base）"
+kind = "script"
+cmd = ["uv", "run", "--with", "tiktoken", "python", "bench/run_tokens.py", "-s", "S1", "-s", "S2", "-s", "S4"]
+result_kind = "tokens"
+pass = "6 件すべて pass（skip・error・fail が無い）"
+expect = [
+  { path = "scenarios.*.verdict", op = "eq", value = "pass" },
+  { path = "scenarios.*.verdict", op = "count_ge", value = 6 },
+]
+slow = true
+timeout_s = 2400
+est_min = 15
+needs = ["fixture:F-PY", "fixture:F-TS", "exe:uv", "exe:npm"]
+quiet = false
+requires_files = ["bench/run_tokens.py"]
+
+# ======================================================================================
+# M1-5  NFR-SAFE-1〜4、NFR-OPS-1〜4 を満たす
+# ======================================================================================
+
+[[check]]
+id = "M1-5.safe1-edit-syntax"
+criterion = "M1-5"
+spec = "§14.5、NFR-SAFE-1（構文妥当 >= 99.9%、恒等編集は 100%）"
+title = "1,000 件の編集操作の構文妥当性・恒等編集のバイト一致 100%・ジャーナル復元 50 件"
+kind = "script"
+cmd = ["{py}", "bench/run_edit_safety.py"]
+result_kind = "edit_safety"
+pass = "結果 JSON の verdict が pass（未整備: 別の役が作成中。台本ができたら自動で判定に入る）"
+expect = [
+  { path = "verdict", op = "eq", value = "pass" },
+]
+slow = true
+timeout_s = 3600
+est_min = 20
+needs = ["fixture:F-PY", "fixture:F-TS"]
+requires_files = ["bench/run_edit_safety.py"]
+
+[[check]]
+id = "M1-5.safe2-db-readonly"
+criterion = "M1-5"
+spec = "§13.2、NFR-SAFE-2（書き込み文はすべて拒否。接続は読み取り専用）"
+title = "公開 DB の読み取り専用（多層防御の各層を外しても書けない・ATTACH 遮断）と T-20 の拒否"
+kind = "pytest"
+cmd = ["tests/invariants/test_public_db_readonly.py", "tests/unit/test_index_public.py", "tests/contract/test_T19_T20.py"]
+pass = "全部通る"
+min_tests = 40
+slow = false
+timeout_s = 600
+est_min = 1
+
+[[check]]
+id = "M1-5.safe3-path-containment"
+criterion = "M1-5"
+spec = "§13.1、NFR-SAFE-3（ルート外のパスは E_INVALID_ARGUMENT）"
+title = "パスの封じ込め（.. ・別ドライブ・拡張長接頭辞・禁止文字）"
+kind = "pytest"
+cmd = ["tests/unit/test_workspace_paths.py"]
+pass = "全部通る"
+min_tests = 10
+slow = false
+timeout_s = 300
+est_min = 0.2
+
+[[check]]
+id = "M1-5.safe4-atomic-edit"
+criterion = "M1-5"
+spec = "§10.6、NFR-SAFE-4（失敗時に部分的に書き換わったファイルが無い）"
+title = "原子的書き込み（2 本目・最後の rename 失敗の巻き戻し、新規作成の巻き戻し、ジャーナルからの手動復元）"
+kind = "pytest"
+cmd = ["tests/unit/test_edit_writer.py"]
+pass = "全部通る"
+min_tests = 10
+slow = false
+timeout_s = 300
+est_min = 0.3
+
+[[check]]
+id = "M1-5.ops1-stdout"
+criterion = "M1-5"
+spec = "§12.1、NFR-OPS-1（stdout は改行区切りの JSON-RPC のみ）"
+title = "実プロセスの stdout の全バイトが JSON-RPC 2.0（ノイズを書くツールを呼んでも混ざらない）"
+kind = "pytest"
+cmd = ["tests/invariants/test_stdout_purity.py", "tests/unit/test_smoke.py"]
+pass = "全部通る"
+min_tests = 2
+slow = false
+timeout_s = 300
+est_min = 0.5
+
+[[check]]
+id = "M1-5.ops2-children"
+criterion = "M1-5"
+spec = "§12.5、NFR-OPS-2（終了後 1 秒以内に子プロセス 0）"
+title = "終了手順と子プロセスの回収（SIGTERM・Ctrl-Break・子孫の kill）"
+kind = "pytest"
+cmd = ["tests/unit/test_lifecycle.py", "tests/unit/test_core_procs.py"]
+pass = "全部通る"
+min_tests = 20
+slow = false
+timeout_s = 300
+est_min = 1
+
+[[check]]
+id = "M1-5.ops3-nonblocking"
+criterion = "M1-5"
+spec = "§12.3、NFR-OPS-3（LSP の起動・索引中でも降格応答で答える）"
+title = "LSP が starting / indexing / unavailable でも待たずに降格応答"
+kind = "pytest"
+cmd = [
+  "tests/contract/test_T04_lsp.py::test_not_ready_lsp_is_not_waited_for_and_is_started",
+  "tests/contract/test_T08_diagnostics.py::test_lsp_indexing_degrades_to_syntax_errors_then_exact",
+  "tests/contract/test_T08_diagnostics.py::test_unavailable_lsp_degrades_without_error",
+  "tests/unit/test_engine_selector.py",
+  "tests/unit/test_engine_selector_failure.py",
+]
+pass = "全部通る"
+min_tests = 10
+slow = false
+timeout_s = 300
+est_min = 0.5
+
+[[check]]
+id = "M1-5.ops4-positions"
+criterion = "M1-5"
+spec = "§5.10、§12.2、NFR-OPS-4（行・列の正規化）"
+title = "位置の正規化（非 ASCII・絵文字・結合文字・CRLF・BOM・UTF-8/16 の往復）と LSP の位置変換"
+kind = "pytest"
+cmd = ["tests/unit/test_core_textpos.py", "tests/unit/test_lsp_features.py"]
+pass = "全部通る"
+min_tests = 30
+slow = false
+timeout_s = 300
+est_min = 0.5
+
+# ======================================================================================
+# M1-6  Claude Code の MCP 設定（.mcp.json）で接続し、台本化したセッションが完走する
+# ======================================================================================
+
+[[check]]
+id = "M1-6.e2e-session"
+criterion = "M1-6"
+spec = "§15.2 M1-6（骨格 -> 本体 -> 編集 -> 診断ゼロ確認）。台本と記録は bench/e2e/"
+title = ".mcp.json の起動コマンドで接続し、台本化したセッションを完走する"
+kind = "script"
+cmd = ["{py}", "bench/e2e/run_session.py", "--mcp-json", ".mcp.json"]
+result_kind = "e2e"
+pass = "結果 JSON の verdict が pass（骨格 -> 本体 -> 編集 -> 診断ゼロの全段が成功）。未整備: 別の役が作成中"
+expect = [
+  { path = "verdict", op = "eq", value = "pass" },
+]
+slow = true
+timeout_s = 900
+est_min = 3
+requires_files = ["bench/e2e/run_session.py"]
+
+# ======================================================================================
+# M1-7  Windows / macOS / Linux で M1-1〜M1-6 が同じ結果になる
+# ======================================================================================
+
+[[check]]
+id = "M1-7.cross-os"
+criterion = "M1-7"
+spec = "§15.2 M1-7、NFR-PORT-2（閾値は OS によらず同一）"
+title = "bench/results/ に 3 OS の *-exit.json があり、M1-1〜M1-6 の判定が OS 間で一致する"
+kind = "builtin"
+builtin = "cross_os"
+pass = "windows・macos・linux の最新の exit 結果が揃い、M1-1〜M1-6 の各判定が同じ（設計書 §10.5 の CI の OS 行列で実行器を回して集める）"
+slow = false
+timeout_s = 60
+est_min = 0.01
+
+# ======================================================================================
+# M1-8  L-8 のライセンス検査が CI で通る。LICENSE と THIRD_PARTY_NOTICES.md が配布物に含まれる
+# ======================================================================================
+
+[[check]]
+id = "M1-8.license-check"
+criterion = "M1-8"
+spec = "§16 L-8（依存木に許可リスト外の SPDX 識別子が無い）"
+title = "tools/check_licenses.py（CI の license ジョブと同じコマンド）"
+kind = "script"
+cmd = ["{py}", "tools/check_licenses.py"]
+pass = "終了コード 0"
+slow = false
+timeout_s = 300
+est_min = 0.3
+requires_files = ["tools/check_licenses.py"]
+
+[[check]]
+id = "M1-8.ci-runs-license-check"
+criterion = "M1-8"
+spec = "§15.2 M1-8（CI で通る）、設計書 §10.5"
+title = ".github/workflows/ci.yml が tools/check_licenses.py を実行している"
+kind = "builtin"
+builtin = "ci_runs_license_check"
+pass = "ci.yml に check_licenses.py を走らせる行がある"
+slow = false
+timeout_s = 30
+est_min = 0.01
+
+[[check]]
+id = "M1-8.notices-up-to-date"
+criterion = "M1-8"
+spec = "§16.1 L-7、§16.3、設計書 §10.5（生成して差分が無いこと）"
+title = "THIRD_PARTY_NOTICES.md が uv.lock の依存木から再生成したものと一致する（tools/gen_notices.py --check）"
+kind = "script"
+cmd = ["{py}", "tools/gen_notices.py", "--check"]
+pass = "終了コード 0（古ければ 1）"
+slow = false
+timeout_s = 300
+est_min = 0.3
+requires_files = ["tools/gen_notices.py", "THIRD_PARTY_NOTICES.md"]
+requires_tracked = ["tools/gen_notices.py", "THIRD_PARTY_NOTICES.md"]
+
+[[check]]
+id = "M1-8.dist-includes-license-files"
+criterion = "M1-8"
+spec = "§15.2 M1-8、§16.3（配布物に LICENSE と THIRD_PARTY_NOTICES.md を含める）"
+title = "pyproject.toml の license-files に LICENSE と THIRD_PARTY_NOTICES.md があり、どちらもリポジトリに在って git の管理下にある"
+kind = "builtin"
+builtin = "dist_license_files"
+pass = "license-files が両方を含み、両ファイルが git ls-files に載っている"
+slow = false
+timeout_s = 30
+est_min = 0.01
+
+# ======================================================================================
+# 参考（出口条件には含まれない。gating = false）
+# ======================================================================================
+
+[[check]]
+id = "REF.reaction"
+criterion = "REF"
+spec = "§14.6、NFR-PERF-3（外部変更の反映 p95 <= 500 ms）。M1 の出口条件には入っていない"
+title = "外部からの 1 ファイル変更が files.sha256 に反映されるまで（F-POLY の複製で 100 回）"
+kind = "script"
+cmd = ["{py}", "bench/run_reaction.py"]
+result_kind = "reaction"
+pass = "verdict が pass"
+expect = [
+  { path = "verdict", op = "eq", value = "pass" },
+]
+slow = true
+timeout_s = 900
+est_min = 3
+quiet = true
+gating = false
+requires_files = ["bench/run_reaction.py"]
+
+[[check]]
+id = "REF.full-suite"
+criterion = "REF"
+spec = "§15.1（前のマイルストーンの出口条件を壊さない＝非回帰）、CI の test ジョブ"
+title = "tests/ 全体（unit + contract + invariants + e2e）"
+kind = "pytest"
+cmd = ["tests"]
+pass = "全部通る"
+min_tests = 1000
+slow = true
+timeout_s = 2400
+est_min = 15
+gating = false
