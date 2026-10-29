@@ -1,0 +1,8 @@
+{
+  "sprint_id": "m1-impl-20261029",
+  "status": "deliberating",
+  "goal": "M1 実装（第 1 ラウンド）: 骨格・CI・core・スパイク S-1/S-2/S-7/S-9 → 以後 mcp/workspace/index/syntax/lsp/edit/tools を順に。設計書 §12.2 の着手順に従う",
+  "created_at": "2026-10-29T13:08:08+09:00",
+  "agreement_path": ".pair-agent/agreements/m1-1-ci-core-s-1-s-2-s-7-s-9-mcp-workspa.md",
+  "経過": []
+}
