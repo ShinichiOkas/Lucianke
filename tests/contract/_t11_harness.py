@@ -86,6 +86,7 @@ class Services(ToolServices):
 
     ws: Workspace | None = None
     lsp_pool: Any = None
+    handle: Any = None
     tx_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def workspace(self, workspace_id: str | None = None) -> Workspace:
@@ -96,7 +97,12 @@ class Services(ToolServices):
         return WS
 
     def edit_transaction(self, ws: Workspace, **overrides: Any) -> EditTransaction:
-        return EditTransaction(ws, **self.tx_kwargs, **overrides)
+        """本番のファクトリ（``WiredServices.edit_transaction``）の役: 文書の同期と診断の待ちはファクトリの仕事で、
+        ツールは ``lsp_status`` しか渡さない（BUG-0023）。ここでは 1 サーバーなので LSP ハンドル自身の口を使う。"""
+        wiring: dict[str, Any] = {}
+        if self.handle is not None:
+            wiring = {"documents": self.handle.documents, "diagnostics_hub": self.handle.diagnostics}
+        return EditTransaction(ws, **{**self.tx_kwargs, **wiring, **overrides})
 
 
 @dataclass
@@ -143,6 +149,7 @@ def build_rig(tmp_path: Path, pool: Any, handle: Any, ws: Workspace, writer: Ind
         lines=b.lines,
         ws=ws,
         lsp_pool=pool,
+        handle=handle,
         tx_kwargs={
             "locks": WorkspaceLocks(),
             "writer_index": writer,
