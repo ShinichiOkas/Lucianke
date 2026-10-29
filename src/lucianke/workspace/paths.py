@@ -24,7 +24,7 @@ import re
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote, urlsplit
 
 from lucianke.core.errors import ErrorCode, LuciankeError
@@ -139,7 +139,9 @@ def _prepare(user_path: object, param: str) -> str:
         text = rest
     body = text
     if _WIN_DRIVE.match(text):
-        if text[2:3] != "/":  # "C:foo" や "C:" はドライブごとのカレントディレクトリ相対で、ルートとの関係が決まらない
+        if (
+            text[2:3] != "/"
+        ):  # "C:foo" や "C:" はドライブごとのカレントディレクトリ相対で、ルートとの関係が決まらない
             raise _fail(param, "outside_root", user_path)
         body = text[2:]
     if ":" in body or _WIN_FORBIDDEN.search(body):  # NTFS の代替データストリーム (a.py:s) もここで落ちる
@@ -202,6 +204,10 @@ def to_abs(ws: Workspace, rel: RelPath) -> Path:
     parts = PurePosixPath(text).parts
     if ".." in parts:
         raise ValueError(f"not a confined relative path: {text!r}")
+    if _IS_WINDOWS:
+        win = PureWindowsPath(text)
+        if win.drive or win.root or "\\" in text:  # "C:/x"、"/x"、"a\b" は RelPath ではない
+            raise ValueError(f"not a confined relative path: {text!r}")
     abs_path = ws.root.joinpath(*parts)
     if not abs_path.is_relative_to(ws.root):  # 絶対パスや "C:/x" はここで落ちる
         raise ValueError(f"not a confined relative path: {text!r}")
@@ -214,7 +220,9 @@ def to_abs(ws: Workspace, rel: RelPath) -> Path:
 @dataclass(frozen=True, slots=True)
 class _Glob:
     regex: re.Pattern[str]
-    anchored: bool  # True: ルートからのパス全体（の先頭からの部分）に当てる。False: パスの要素のどれかに当てる
+    anchored: (
+        bool  # True: ルートからのパス全体（の先頭からの部分）に当てる。False: パスの要素のどれかに当てる
+    )
     dir_only: bool  # 末尾が "/" のパターン: 最後の要素（ファイル）には当てない
 
 
