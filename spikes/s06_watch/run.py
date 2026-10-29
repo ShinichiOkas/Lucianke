@@ -1,6 +1,6 @@
 """S-6 watchfiles の Windows 挙動: 遅延・バースト・イベントの種類・フィルタ・停止の再現スクリプト。
-使い方: .venv/Scripts/python.exe spikes/s06_watch/run.py        # 項目 10〜16 を全部実行（約 2〜3 分）
-        .venv/Scripts/python.exe spikes/s06_watch/run.py 10 14    # 項目番号を指定（10〜16）
+使い方: .venv/Scripts/python.exe spikes/s06_watch/run.py        # 項目 10〜17 を全部実行（約 2〜3 分）
+        .venv/Scripts/python.exe spikes/s06_watch/run.py 10 14    # 項目番号を指定（10〜17）
 一時ファイルは %TEMP% 配下に作り、終了時に消す。リポジトリには何も書かない。
 """
 
@@ -458,9 +458,44 @@ async def item16() -> None:
     await s.close()
 
 
+# ---------------------------------------------------------------- 項目 17
+async def item17() -> None:
+    hdr(17, "ディレクトリ単位の移動・改名（子ファイルのイベントが来るか）")
+    root = tmpdir()
+    outside = tmpdir()
+    for i in range(3):
+        (outside / "pkg").mkdir(exist_ok=True)
+        (outside / "pkg" / f"m{i}.py").write_text("x")
+    (root / "old").mkdir()
+    for i in range(3):
+        (root / "old" / f"o{i}.py").write_text("x")
+    s = Session(root, debounce=50, step=10, watch_filter=None)
+    await s.start()
+    loop = asyncio.get_running_loop()
+
+    def mv_in() -> None:
+        os.rename(outside / "pkg", root / "pkg")  # 中身のあるディレクトリを外から移し入れる
+
+    def rn() -> None:
+        os.rename(root / "old", root / "new")  # 中身のあるディレクトリを改名
+
+    def mv_out() -> None:
+        os.rename(root / "pkg", outside / "pkg2")  # 外へ移し出す
+
+    def cp() -> None:
+        shutil.copytree(outside / "pkg2", root / "cp")  # 中身ごとコピー
+
+    for label, fn in (("外から中身ありのディレクトリを移し入れる", mv_in), ("中身ありのディレクトリを改名 old -> new", rn), ("中身ありのディレクトリを外へ移し出す", mv_out), ("shutil.copytree で中身ごとコピー", cp)):
+        s.batches.clear()
+        await loop.run_in_executor(None, fn)
+        await asyncio.sleep(0.3)
+        print(f"[17] {label}\n       -> {sorted(e for _, bt in s.batches for e in bt)}")
+    await s.close()
+
+
 async def main() -> None:
     print(f"python {sys.version.split()[0]} / watchfiles {watchfiles.__version__} / {sys.platform}")
-    items = {"10": item10, "11": item11, "12": item12, "13": item13, "14": item14, "15": item15, "16": item16}
+    items = {"10": item10, "11": item11, "12": item12, "13": item13, "14": item14, "15": item15, "16": item16, "17": item17}
     for k in sys.argv[1:] or list(items):
         await items[k]()
 
