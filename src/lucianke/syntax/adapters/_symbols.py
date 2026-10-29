@@ -6,7 +6,8 @@ JSONL と、根が配列・スカラーのファイルはシンボルを持た�
 
 URN は ``lk://<ws>/<path>#jsonpath:$.service`` / ``#yaml:retry`` / ``#toml:project`` / ``#xpath:/testsuites/testsuite``。
 セレクタの式は同じアダプタの ``select`` が解釈できる形で作る（式にできない名前 = 引用符を含むキーなど は落とす）。
-同じ URN になるノードは先頭の 1 つだけ残す（``symbols.urn`` は主キー）。1 ファイルあたりの上限は ``MAX_INDEX_SYMBOLS``。
+同じ URN になるノードは先頭の 1 つだけ残す（``symbols.urn`` は主キー）。1 ファイルあたりの上限は ``MAX_INDEX_SYMBOLS``、
+対象のファイルの大きさの上限は ``MAX_SYMBOL_SOURCE_BYTES``。
 """
 
 from __future__ import annotations
@@ -19,11 +20,15 @@ from lucianke.core.model import Confidence, Kind, Range, RelPath, SymbolRecord
 from lucianke.core.records import Record
 from lucianke.core.urn import DATA_KINDS, DataKind, DataSel, Urn
 
-__all__ = ["MAX_INDEX_SYMBOLS", "data_symbols", "selector_expr"]
+__all__ = ["MAX_INDEX_SYMBOLS", "MAX_SYMBOL_SOURCE_BYTES", "data_symbols", "selector_expr"]
 
 MAX_INDEX_SYMBOLS = (
     500  # 1 ファイルが索引に出すシンボルの上限（巨大な i18n ファイルなどで symbols を膨らませない）
 )
+
+# これを超えるファイルはシンボルを出さない（``files`` 行だけ）。アダプタの位置つきパースは Tree-sitter より桁違いに遅く
+# （JSON で約 0.6 MB/s、YAML はさらに遅い）、大きなデータファイル（ロックファイル・データのダンプ）の最上位キーは手がかりにもなりにくい。
+MAX_SYMBOL_SOURCE_BYTES = 128 * 1024
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_\-]+")  # toml: / yaml: の経路でそのまま書ける名前
 _BARE_JSON = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # jsonpath の `.name`

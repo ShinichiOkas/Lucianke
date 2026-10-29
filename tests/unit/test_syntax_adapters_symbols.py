@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from lucianke.core.model import Confidence, Kind
-from lucianke.syntax.adapters._symbols import MAX_INDEX_SYMBOLS, selector_expr
+from lucianke.syntax.adapters._symbols import MAX_INDEX_SYMBOLS, MAX_SYMBOL_SOURCE_BYTES, selector_expr
 from lucianke.syntax.support import ADAPTERS, language_for_extension
 from lucianke.syntax.types import SkeletonOptions
 
@@ -160,6 +160,14 @@ def test_symbols_are_capped_per_file() -> None:
     syms = symbols("big.json", src)
     assert len(syms) == MAX_INDEX_SYMBOLS
     assert len({str(s.urn) for s in syms}) == MAX_INDEX_SYMBOLS
+
+
+def test_large_files_have_no_symbols() -> None:
+    pad = "x" * (MAX_SYMBOL_SOURCE_BYTES + 1)
+    big = json.dumps({"a": pad}).encode("utf-8")
+    assert len(big) > MAX_SYMBOL_SOURCE_BYTES and symbols("big.json", big) == []
+    ok = json.dumps({"a": pad[: MAX_SYMBOL_SOURCE_BYTES // 2]}).encode("utf-8")
+    assert [s.name for s in symbols("ok.json", ok)] == ["a"]
 
 
 def test_selector_expr_shapes() -> None:

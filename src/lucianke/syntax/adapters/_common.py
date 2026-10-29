@@ -24,7 +24,7 @@ from lucianke.core.compact_lines import file_block_header, note
 from lucianke.core.model import Confidence, Kind, Position, Range, SymbolRecord, Tier
 from lucianke.core.records import Record
 from lucianke.core.textpos import LineIndex
-from lucianke.syntax.adapters._symbols import data_symbols
+from lucianke.syntax.adapters._symbols import MAX_SYMBOL_SOURCE_BYTES, data_symbols
 from lucianke.syntax.types import Match, SkeletonOptions
 
 STREAM_BYTES = (
@@ -563,8 +563,8 @@ class DataAdapter:
         return self._skeleton(source, opts, rel=rel, sha256=sha256, estimate=estimate)
 
     def symbols(self, source: bytes, *, rel: str, workspace_id: str) -> list[SymbolRecord]:
-        """索引用のシンボル（最上位の節）。壊れたファイル・シンボルを持たない形式は空（呼び手は ``files`` 行だけにする）。"""
-        if self.symbol_kind is None:
+        """索引用のシンボル（最上位の節）。壊れたファイル・大きすぎるファイル（``MAX_SYMBOL_SOURCE_BYTES`` 超）・シンボルを持たない形式は空（呼び手は ``files`` 行だけにする）。"""
+        if self.symbol_kind is None or len(source) > MAX_SYMBOL_SOURCE_BYTES:
             return []
         try:
             record = self._skeleton(
