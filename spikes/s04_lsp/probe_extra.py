@@ -418,7 +418,7 @@ async def sec_watched() -> dict[str, Any]:
     didChangeWatchedFiles を送ると更新されるか。fixture は必ず元に戻す。"""
     R: dict[str, Any] = {}
     shapes, app = ROOT / "shapes.py", ROOT / "app.py"
-    orig = shapes.read_text(encoding="utf-8")
+    orig = shapes.read_bytes()
     c = LspClient("basedpyright", BP, ROOT, config_provider=py_config)
     await c.start()
     try:
@@ -427,7 +427,7 @@ async def sec_watched() -> dict[str, Any]:
         await settle(c, 1.0)
         R["初回 app.py"] = [(p["version"], p["codes"]) for p in pubs(c, app)]
         mark = len(c.notifications)
-        shapes.write_text(orig.replace("def describe(", "def describe_renamed("), encoding="utf-8")
+        shapes.write_bytes(orig.replace(b"def describe(", b"def describe_renamed("))
         t0 = c.now()
         await settle(c, 3.0, max_s=8.0)
         R["ディスク書き換えのみ(3秒待ち)"] = [(round(p["t"] - t0, 2), p["version"], p["codes"]) for p in pubs(c, app) if p["t"] > t0]
@@ -436,7 +436,7 @@ async def sec_watched() -> dict[str, Any]:
         await settle(c, 2.0, max_s=8.0)
         R["didChangeWatchedFiles 後"] = [(round(p["t"] - t1, 2), p["version"], p["codes"]) for p in pubs(c, app) if p["t"] > t1]
     finally:
-        shapes.write_text(orig, encoding="utf-8")
+        shapes.write_bytes(orig)
         R["shutdown"] = await c.shutdown()
     return R
 
