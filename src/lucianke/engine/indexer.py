@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
@@ -60,7 +60,7 @@ from lucianke.index.ingest import (
     upsert_workspace,
 )
 from lucianke.index.writer import IndexWriter
-from lucianke.syntax import heuristic
+from lucianke.syntax import heuristic, relations
 from lucianke.syntax.imports import extract_imports, imported_name_map, make_resolver
 from lucianke.syntax.parsers import TreeCache
 from lucianke.syntax.support import get_support
@@ -68,11 +68,6 @@ from lucianke.syntax.symbols import extract_detailed, load_query_source
 from lucianke.workspace.languages import Detected, detect, is_test
 from lucianke.workspace.paths import confine, is_excluded
 from lucianke.workspace.types import Workspace
-
-try:  # 関係の抽出は別の役が作る。無ければ relations は空で進める
-    from lucianke.syntax import relations as _relations_mod
-except ImportError:  # pragma: no cover - 取り込み前の暫定
-    _relations_mod = None  # type: ignore[assignment]
 
 __all__ = [
     "INGEST_BATCH_FILES",
@@ -691,8 +686,6 @@ class Indexer:
         self, parsed: object, lang: str, support: object, records: list[SymbolRecord], rel: RelPath
     ) -> list[RelationFact]:
         """関係の候補 → ``RelationFact``。目標は 同じファイル内 → import 表 の順で、解決できなければ捨てる。"""
-        if _relations_mod is None:
-            return []
         ws_id = self._ws.workspace_id
         try:
             facts = extract_imports(parsed, language_id=lang)  # type: ignore[arg-type]
@@ -716,7 +709,7 @@ class Indexer:
             except ValueError:
                 return None
 
-        candidates = _relations_mod.extract_relations(
+        candidates = relations.extract_relations(
             parsed,  # type: ignore[arg-type]
             language_id=lang,
             language=support.grammar(),  # type: ignore[attr-defined]
@@ -749,7 +742,11 @@ class Indexer:
         symbols_fn = getattr(support, "symbols", None)
         records: list[SymbolRecord] = []
         if callable(symbols_fn):
-            records = list(symbols_fn(data, rel=rel, workspace_id=self._ws.workspace_id))
+            records = list(
+                cast("Callable[..., Iterable[SymbolRecord]]", symbols_fn)(
+                    data, rel=rel, workspace_id=self._ws.workspace_id
+                )
+            )
         return self._base_facts(
             rel,
             loaded,

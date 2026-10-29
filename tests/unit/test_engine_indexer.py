@@ -10,6 +10,7 @@ import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,7 @@ class Env:
     writer: IndexWriter
     readers: ReaderPool
 
-    def rows(self, sql: str, *args: object) -> list[tuple[object, ...]]:
+    def rows(self, sql: str, *args: object) -> list[tuple[Any, ...]]:
         with self.readers.reader() as conn:
             return [tuple(r) for r in conn.execute(sql, args).fetchall()]
 
@@ -325,3 +326,44 @@ def test_batch_size_matches_design() -> None:
     from lucianke.engine.indexer import INGEST_BATCH_FILES
 
     assert INGEST_BATCH_FILES == 50
+
+
+async def test_large_scan_batches_files_and_bumps_once_per_transaction(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    (root / "pkg").mkdir(parents=True)
+    for i in range(120):
+        (root / "pkg" / f"m{i:03d}.py").write_text(f"def f{i}():\n    return {i}\n", encoding="utf-8")
+    e = _make(root, tmp_path / "paad.sqlite")
+    try:
+        before = e.version()
+        report = await e.indexer.scan()
+        assert report.indexed == 120
+        assert report.transactions == 3  # 50 + 50 + 20
+        assert e.version() == before + 3
+        assert e.count("symbols") == 120
+    finally:
+        await e.indexer.aclose()
+        e.readers.close()
+        e.writer.close()
+
+
+async def test_index_file_resolves_cross_file_calls_for_a_new_file(env: Env) -> None:
+    await env.indexer.scan()
+    new = env.root / "src" / "shop" / "api" / "extra.py"
+    new.write_text(
+        "from shop.services.payment import PaymentProcessor, PaymentRequest\n\n\n"
+        "async def pay(p: PaymentProcessor, req: PaymentRequest):\n"
+        "    return await p.process_charge(req)\n",
+        encoding="utf-8",
+    )
+
+    stats = await env.indexer.index_file("src/shop/api/extra.py")
+
+    assert stats is not None and stats.file_created
+    rows = env.rows(
+        "SELECT source_urn, target_urn FROM relations WHERE relation_kind = 'CALLS' AND source_file_id = ?",
+        stats.file_id,
+    )
+    assert any(
+        s.endswith("#pay") and t.endswith("payment.py#PaymentProcessor.process_charge") for s, t in rows
+    ), rows
