@@ -21,9 +21,12 @@
 * Tier 4（と、タグクエリの無い Tier 1〜2）: ``heuristic.outline``（ctags、無ければブロック走査）。
 * 秘密ファイル・バイナリ・``max_file_bytes`` 超過: ``files`` 行だけ（``lexical_fallback``。本文は解析しない）。
 
-関係の ``target_urn``: 同じファイル内の定義 → import 表（``imported_name_map``）→ 解決できなければ捨てる。
-import 表の解決は定義元の存在を確かめずに URN を作る（走査の順序に依存させないため）ので、取り込みの後に、
-``symbols`` に無い目標を指す行を消し、``target_file_id`` を埋める（``_settle_relations``）。
+関係の ``target_urn``: 同じファイル内の定義 → import 表（``imported_name_map``）→ 解決できなかった import は外部シンボル
+``lk://_ext/<パッケージ>#<名前>``（``external_name_map``。設計書 §7.4.6 項 3）→ 言語の組み込み名は ``lk://_ext/builtins#<名前>``（Python）・``lk://_ext/globals#<名前>``（TS / JS）
+→ それでも解決できなければ捨てる。import 表の解決は定義元の存在を確かめずに URN を作る（走査の順序に依存させないため）ので、
+取り込みの後に、``symbols`` に無い目標を指す行を消し、``target_file_id`` を埋める（``_settle_relations``）。
+オーバーロードのあるシンボル（TS の ``charge/1`` ``charge/2~hash``）への ``arity`` なしの目標は、同じ修飾名の最後の宣言
+（実装シグネチャ）の URN に直す。
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ from typing import Final, Literal, cast
 from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
-from lucianke.core.urn import CodeSel, Urn
+from lucianke.core.urn import CodeSel, Urn, parse
 from lucianke.index import queries
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
@@ -61,7 +64,8 @@ from lucianke.index.ingest import (
 )
 from lucianke.index.writer import IndexWriter
 from lucianke.syntax import heuristic, relations
-from lucianke.syntax.imports import extract_imports, imported_name_map, make_resolver
+from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
+from lucianke.syntax.imports import external_name_map, extract_imports, imported_name_map, make_resolver
 from lucianke.syntax.parsers import TreeCache
 from lucianke.syntax.support import get_support
 from lucianke.syntax.symbols import extract_detailed, load_query_source
@@ -685,12 +689,14 @@ class Indexer:
     def _relations(
         self, parsed: object, lang: str, support: object, records: list[SymbolRecord], rel: RelPath
     ) -> list[RelationFact]:
-        """関係の候補 → ``RelationFact``。目標は 同じファイル内 → import 表 の順で、解決できなければ捨てる。"""
+        """関係の候補 → ``RelationFact``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順で、解決できなければ捨てる。"""
         ws_id = self._ws.workspace_id
+        external: dict[str, str] = {}
         try:
             facts = extract_imports(parsed, language_id=lang)  # type: ignore[arg-type]
             resolver = make_resolver(from_rel=rel, language_id=lang, exists=self._exists)
             name_map = imported_name_map(facts, resolver)
+            external = external_name_map(facts, language_id=lang, internal=name_map)
         except Exception:
             _log.warning("import resolution failed for %s", rel, exc_info=True)
             name_map = {}
@@ -698,7 +704,7 @@ class Indexer:
         def resolve_name(name: str) -> str | None:
             hit = name_map.get(name)
             if hit is None:
-                return None
+                return external.get(name)
             path, original = hit
             try:
                 if original == "*":  # モジュールそのもの
@@ -717,6 +723,7 @@ class Indexer:
             workspace_id=ws_id,
             rel=rel,
             resolve_name=resolve_name,
+            builtins_package=BUILTINS_PACKAGE if lang == "python" else GLOBALS_PACKAGE,
         )
         return [
             RelationFact(
@@ -876,6 +883,7 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
     * ``target_file_id`` を目標のシンボルの持ち主で埋める（目標のファイルが後から取り込まれた場合に備える）。
     """
     for file_id in file_ids:
+        _redirect_overloads(conn, file_id)
         conn.execute(  # type: ignore[attr-defined]
             "DELETE FROM relations WHERE source_file_id = ? AND instr(target_urn, '#') > 0"
             " AND target_urn NOT IN (SELECT urn FROM symbols)",
@@ -886,3 +894,42 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
             " WHERE source_file_id = ? AND target_file_id IS NULL",
             (file_id,),
         )
+
+
+def _redirect_overloads(conn: object, file_id: int) -> None:
+    """``symbols`` に無い目標のうち、``arity`` / ``sighash`` なしの URN を、同じ修飾名の最後の宣言の URN に直す。
+
+    オーバーロード（TS の ``charge(req)`` / ``charge(req, retries)`` と実装、Python の ``@overload``）の URN は
+    ``Class.charge/1`` ``Class.charge/2~2797d533`` のように arity と sighash がつく。構文だけの抽出器は呼び出しの先を
+    ``Class.charge`` までしか決められないので、ここで実在する URN に結ぶ。同じ修飾名が複数あるときは、ファイルの中で最後のもの
+    （オーバーロード宣言は実装シグネチャの前に並ぶ）。
+    """
+    rows = conn.execute(  # type: ignore[attr-defined]
+        "SELECT DISTINCT target_urn FROM relations WHERE source_file_id = ? AND instr(target_urn, '#') > 0"
+        " AND target_urn NOT IN (SELECT urn FROM symbols)",
+        (file_id,),
+    ).fetchall()
+    for (target,) in rows:
+        try:
+            urn = parse(target)
+        except ValueError:
+            continue
+        sel = urn.selector
+        if (
+            urn.is_external
+            or not isinstance(sel, CodeSel)
+            or sel.arity is not None
+            or sel.sighash is not None
+        ):
+            continue
+        hit = conn.execute(  # type: ignore[attr-defined]
+            "SELECT s.urn FROM symbols s JOIN files f ON f.file_id = s.file_id"
+            " WHERE f.workspace_id = ? AND f.path = ? AND s.qualified_name = ?"
+            " ORDER BY s.start_line DESC, s.urn DESC LIMIT 1",
+            (urn.workspace_id, urn.path, sel.qualified),
+        ).fetchone()
+        if hit is not None:
+            conn.execute(  # type: ignore[attr-defined]
+                "UPDATE relations SET target_urn = ? WHERE source_file_id = ? AND target_urn = ?",
+                (hit[0], file_id, target),
+            )

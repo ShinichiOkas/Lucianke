@@ -84,11 +84,16 @@ _SYMBOL_COLUMNS: Final = (
     "body_sha256",
     "confidence_level",
 )
-_EXTERNAL_KIND_BY_RELATION: Final = {
-    "CALLS": Kind.FUNCTION,
-    "INHERITS": Kind.CLASS,
-    "IMPLEMENTS": Kind.CLASS,
-    "TYPE_USES": Kind.CLASS,
+_TYPE_RELATIONS: Final = frozenset({"INHERITS", "IMPLEMENTS", "TYPE_USES"})
+# 外部シンボルの kind の強さ（強い証拠が勝つ。順序に依らず同じ結果にするため、後から来た強い証拠で昇格する）
+_EXTERNAL_KIND_RANK: Final = {
+    Kind.MODULE.value: 0,
+    Kind.VARIABLE.value: 1,
+    Kind.CONSTANT.value: 2,
+    Kind.PROPERTY.value: 2,
+    Kind.FUNCTION.value: 3,
+    Kind.METHOD.value: 3,
+    Kind.CLASS.value: 4,
 }
 
 
@@ -268,8 +273,39 @@ def upsert_workspace(conn: sqlite3.Connection, ws_row: Mapping[str, object]) -> 
 # --- 外部シンボル -----------------------------------------------------------------------
 
 
-def _ensure_external(conn: sqlite3.Connection, target_urn: str, relation_kind: str) -> int:
-    """``lk://_ext/...`` の URN に最小の ``symbols`` 行を作る（仕様書 §9.3）。作ったら 1、既存・対象外なら 0。"""
+def external_kind(qualified: str | None, relation_kinds: Iterable[str]) -> Kind:
+    """外部シンボルの ``kind`` を、名前の形と使われ方（``relation_kind`` の集合）から決める。行の到着順に依らない。
+
+    * セレクタ無し（``lk://_ext/os``）は ``Module``。
+    * 型の位置で使われる（``INHERITS`` / ``IMPLEMENTS`` / ``TYPE_USES``）なら ``Class``。
+    * 名前（修飾名の最後の語）が大文字で始まる: 呼ばれる（``CALLS``）か、全部が大文字でなければ ``Class``
+      （``Decimal``、``Path``）。全部が大文字（``MAX_SIZE``）で呼ばれないなら ``Constant``。
+    * それ以外: 呼ばれるなら、持ち主（修飾名の手前の語）が大文字で始まれば ``Method``（``Decimal.quantize``）、
+      そうでなければ ``Function``（``os.getcwd``）。呼ばれないなら ``Property`` / ``Variable``。
+    """
+    if qualified is None:
+        return Kind.MODULE
+    kinds = set(relation_kinds)
+    owner, _, name = qualified.rpartition(".")
+    if kinds & _TYPE_RELATIONS:
+        return Kind.CLASS
+    called = "CALLS" in kinds
+    owner_is_class = owner.rpartition(".")[2][:1].isupper()
+    if name[:1].isupper():
+        if called or not name.isupper():
+            return Kind.CLASS
+        return Kind.CONSTANT
+    if called:
+        return Kind.METHOD if owner_is_class else Kind.FUNCTION
+    return Kind.PROPERTY if owner_is_class else Kind.VARIABLE
+
+
+def _ensure_external(conn: sqlite3.Connection, target_urn: str, relation_kinds: Iterable[str]) -> int:
+    """``lk://_ext/...`` の URN に最小の ``symbols`` 行を作る（仕様書 §9.3）。作ったら 1、既存・対象外なら 0。
+
+    ``kind`` は ``external_kind`` の規則。すでに行があるときは、より強い証拠（``Class`` > ``Function`` / ``Method`` >
+    ``Constant`` / ``Property`` > ``Variable`` > ``Module``）が来たときだけ昇格する（ファイルの取り込み順に依らない）。
+    """
     if not target_urn.startswith(f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"):
         return 0
     try:
@@ -280,16 +316,23 @@ def _ensure_external(conn: sqlite3.Connection, target_urn: str, relation_kind: s
     qualified = getattr(selector, "qualified", None)
     if isinstance(qualified, str):
         name = qualified.rpartition(".")[2]
-        kind = _EXTERNAL_KIND_BY_RELATION.get(relation_kind, Kind.VARIABLE)
     else:
         name = qualified = urn.path
-        kind = Kind.MODULE
+        selector = None
+    kind = external_kind(qualified if selector is not None else None, relation_kinds)
     cur = conn.execute(
         "INSERT OR IGNORE INTO symbols (urn, file_id, is_external, parent_urn, name, qualified_name, kind,"
         " start_line, end_line, confidence_level) VALUES (?, NULL, 1, NULL, ?, ?, ?, 1, 1, 'heuristic')",
         (target_urn, name, qualified, kind.value),
     )
-    return max(cur.rowcount, 0)
+    if cur.rowcount > 0:
+        return 1
+    row = conn.execute("SELECT kind FROM symbols WHERE urn = ? AND is_external = 1", (target_urn,)).fetchone()
+    if row is not None and _EXTERNAL_KIND_RANK.get(kind.value, 0) > _EXTERNAL_KIND_RANK.get(row[0], 0):
+        conn.execute(
+            "UPDATE symbols SET kind = ? WHERE urn = ? AND is_external = 1", (kind.value, target_urn)
+        )
+    return 0
 
 
 # --- relations --------------------------------------------------------------------------
@@ -309,6 +352,12 @@ def _insert_relations(
     seen: set[tuple[object, ...]] = set()
     external = 0
     rows: list[tuple[object, ...]] = []
+    facts = list(facts)
+    kinds_of_target: dict[str, set[str]] = {}  # 外部シンボルの kind を使われ方の全体から決めるため
+    for fact in facts:
+        tgt_text = _urn_str(fact.target_urn)
+        if tgt_text.startswith(f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"):
+            kinds_of_target.setdefault(tgt_text, set()).add(fact.relation_kind)
     for fact in facts:
         src, tgt = _urn_str(fact.source_urn), _urn_str(fact.target_urn)
         conf = force_confidence or fact.confidence
@@ -318,7 +367,7 @@ def _insert_relations(
             continue
         seen.add(key)
         if tgt not in target_files:
-            external += _ensure_external(conn, tgt, fact.relation_kind)
+            external += _ensure_external(conn, tgt, kinds_of_target.get(tgt, (fact.relation_kind,)))
             row = conn.execute("SELECT file_id FROM symbols WHERE urn = ?", (tgt,)).fetchone()
             target_files[tgt] = None if row is None else row[0]
         sfid = source_file_id

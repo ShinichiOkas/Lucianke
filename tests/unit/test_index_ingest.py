@@ -400,7 +400,7 @@ def test_external_symbols_get_a_minimal_row(conn: sqlite3.Connection) -> None:
         " WHERE is_external = 1 ORDER BY urn",
     ) == [
         ("lk://_ext/os", None, 1, "os", "os", "Module", "heuristic"),
-        ("lk://_ext/requests@2.31#Session.get", None, 1, "get", "Session.get", "Function", "heuristic"),
+        ("lk://_ext/requests@2.31#Session.get", None, 1, "get", "Session.get", "Method", "heuristic"),
     ]
     # 再取り込みで増えない。ファイルのシンボルを消しても外部の行は壊れない
     assert ingest(conn, f).external_symbols_added == 0
@@ -860,3 +860,63 @@ def test_symbols_in_file_parents_and_data_version(conn: sqlite3.Connection) -> N
     assert queries.data_version(conn) == version + 1
     tx(conn, lambda c: None, bump=False)
     assert queries.data_version(conn) == version + 1
+
+
+# --- 外部シンボルの kind（行の到着順に依らない。設計書 §7.4.6 項 3） --------------------------
+
+
+@pytest.mark.parametrize(
+    ("qualified", "relation_kinds", "expected"),
+    [
+        (None, ["IMPORTS"], Kind.MODULE),
+        ("Decimal", ["IMPORTS"], Kind.CLASS),
+        ("Decimal", ["CALLS"], Kind.CLASS),
+        ("Decimal", ["REFERENCES"], Kind.CLASS),
+        ("Exception", ["INHERITS"], Kind.CLASS),
+        ("Disposable", ["IMPLEMENTS"], Kind.CLASS),
+        ("str", ["TYPE_USES"], Kind.CLASS),
+        ("ROUND_UP", ["REFERENCES"], Kind.CONSTANT),
+        ("UUID", ["CALLS"], Kind.CLASS),
+        ("getcwd", ["CALLS"], Kind.FUNCTION),
+        ("getcwd", ["REFERENCES"], Kind.VARIABLE),
+        ("getcwd", ["IMPORTS"], Kind.VARIABLE),
+        ("Decimal.quantize", ["CALLS"], Kind.METHOD),
+        ("Decimal.quantize", ["REFERENCES"], Kind.PROPERTY),
+        ("path.join", ["CALLS"], Kind.FUNCTION),
+        ("path.sep", ["REFERENCES"], Kind.VARIABLE),
+    ],
+)
+def test_external_kind_follows_the_name_and_usage(
+    qualified: str | None, relation_kinds: list[str], expected: Kind
+):
+    from lucianke.index.ingest import external_kind
+
+    assert external_kind(qualified, relation_kinds) == expected
+
+
+@pytest.mark.parametrize("order", [("IMPORTS", "CALLS", "TYPE_USES"), ("TYPE_USES", "CALLS", "IMPORTS")])
+def test_external_kind_does_not_depend_on_which_relation_came_first(
+    conn: sqlite3.Connection, order: tuple[str, ...]
+):
+    """``Decimal`` は import が先でも、型注釈が先でも ``Class``。小文字の名前は、呼ぶ行が後から来ても ``Function`` に上がる。"""
+    for i, kind in enumerate(order):
+        path = f"src/f{i}.py"
+        ingest(
+            conn,
+            facts(
+                path=path,
+                symbols=(sym(path, "use", 1, 5),),
+                relations=(
+                    rel(urn(path, "use"), "lk://_ext/decimal#Decimal", kind=kind),
+                    rel(
+                        urn(path, "use"),
+                        "lk://_ext/os#getcwd",
+                        kind="REFERENCES" if kind != "CALLS" else "CALLS",
+                    ),
+                ),
+            ),
+        )
+    assert rows(
+        conn,
+        "SELECT urn, kind FROM symbols WHERE is_external = 1 ORDER BY urn",
+    ) == [("lk://_ext/decimal#Decimal", "Class"), ("lk://_ext/os#getcwd", "Function")]

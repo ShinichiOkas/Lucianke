@@ -16,8 +16,15 @@
      ``new Foo()`` で束ねた変数、``self.attr`` の型）が分かれば、そのクラスのメンバーを探す（同じファイルの定義、または
      ``resolve_name(型名)`` の URN + ``.name``）。レシーバがモジュール（``resolve_name`` が ``#`` なしの URN を返す名前）なら ``<URN>#name``。
   2. 同じファイルの定義の修飾名の末尾一致（一意のときだけ）。
-  3. ``resolve_name(name)``（呼び手が import 表から作る）。
-  4. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側が捨てるか外部扱いにする）。
+  3. ``resolve_name(name)``（呼び手が import 表から作る。解決できない import は呼び手が ``lk://_ext/<pkg>#<name>`` にして返す）。
+  4. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
+     （Python の ``builtins``、TS / JS の標準グローバル。``syntax/builtin_names.py``）なら ``lk://_ext/<builtins_package>#<name>``。
+  5. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側が捨てる）。
+
+  外部 URN は属性アクセスの連鎖にも伸びる（``import os`` の ``os.path.join(...)`` → ``lk://_ext/os#path.join``、
+  ``from decimal import Decimal`` の ``Decimal(x).quantize()`` → ``lk://_ext/decimal#Decimal.quantize``）。レシーバの型が分からない
+  ``obj.name`` の最後の手段（``resolve_name(name)``）では外部 URN を使わない（``config.load()`` を ``from json import load`` に
+  結ばないため）。
 
   素の識別子は、囲みの定義を内側から外へたどった修飾名（``outer.name``）→ トップレベルの定義 → ``resolve_name`` の順。
   ローカルに束縛された名前は参照に数えない。
@@ -38,12 +45,14 @@ from typing import Any
 from tree_sitter import Language, Node, Query, QueryCursor
 
 from lucianke.core.model import Confidence, Kind, Position, RelPath, SymbolRecord
-from lucianke.core.urn import CodeSel, Urn, parse
+from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
+from lucianke.syntax.builtin_names import JS_GLOBALS, PYTHON_BUILTINS
 from lucianke.syntax.guards import guard_for
 from lucianke.syntax.types import ParsedFile
 
 __all__ = ["RelationCandidate", "extract_relations", "load_refs_source"]
 
+_EXTERNAL_PREFIX = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
 _PYTHON = "python"
 _JS = "js"  # typescript / tsx / javascript / jsx は同じ処理（TS 固有のノードは JS の文法には現れない）
 _FAMILIES = {"python": _PYTHON, "typescript": _JS, "tsx": _JS, "javascript": _JS, "jsx": _JS}
@@ -172,16 +181,21 @@ def extract_relations(
     workspace_id: str,
     rel: RelPath,
     resolve_name: Callable[[str], str | None] | None = None,
+    builtins_package: str | None = None,
 ) -> list[RelationCandidate]:
     """構文木から ``structural`` の関係の候補を作る。文書順（行、列）。構文エラーがあっても拾えた分を返す。
 
     ``symbols`` はこのファイルの ``symbols.extract`` の結果。``resolve_name`` は import 表から作った「名前 → URN」
-    （``imports.imported_name_map`` と ``resolve_module`` から、定義元ファイルの URN に直したもの）。
+    （``imports.imported_name_map`` と ``resolve_module`` から、定義元ファイルの URN に直したもの。解決できない import は外部 URN）。
+    ``builtins_package`` は言語の組み込み名の外部パッケージ名（Python は ``"builtins"``、TS / JS は ``"globals"``）。``None`` なら
+    組み込み名を解決しない。
     """
     family = _FAMILIES.get(language_id)
     if family is None:
         raise ValueError(f"relation extraction is not supported for language {language_id!r}")
-    return _Extractor(parsed, language_id, family, language, symbols, workspace_id, rel, resolve_name).run()
+    return _Extractor(
+        parsed, language_id, family, language, symbols, workspace_id, rel, resolve_name, builtins_package
+    ).run()
 
 
 # --- 内部 -------------------------------------------------------------------------------
@@ -227,6 +241,7 @@ class _Extractor:
         workspace_id: str,
         rel: RelPath,
         resolve_name: Callable[[str], str | None] | None,
+        builtins_package: str | None = None,
     ) -> None:
         self.parsed = parsed
         self.language_id = language_id
@@ -236,6 +251,8 @@ class _Extractor:
         self.rel = rel
         self.file_urn = str(Urn(workspace_id, str(rel)))
         self._resolve_raw = resolve_name
+        self._builtins_package = builtins_package
+        self._builtin_names = PYTHON_BUILTINS if family == _PYTHON else JS_GLOBALS
         self._resolve_cache: dict[str, str | None] = {}
         self.functions = _PY_FUNCTIONS if family == _PYTHON else _JS_FUNCTIONS
         self.classes = _PY_CLASSES if family == _PYTHON else _JS_CLASSES
@@ -244,7 +261,9 @@ class _Extractor:
         self.by_qualified: dict[str, SymbolRecord] = {}
         self.by_selection: dict[tuple[int, int], SymbolRecord] = {}
         for s in symbols:
-            self.by_qualified.setdefault(s.qualified_name, s)
+            self.by_qualified[s.qualified_name] = (
+                s  # 同じ修飾名はあとの宣言が勝つ（オーバーロードの実装、再束縛）
+            )
             if s.selection is not None:
                 self.by_selection[(s.selection.start.line, s.selection.start.col)] = s
         self.symbols = sorted(symbols, key=lambda s: (s.range.start, _neg_pos(s.range.end)))
@@ -260,6 +279,15 @@ class _Extractor:
         if name not in self._resolve_cache:
             self._resolve_cache[name] = self._resolve_raw(name)
         return self._resolve_cache[name]
+
+    def resolve_builtin(self, name: str) -> str | None:
+        """言語の組み込み名なら ``lk://_ext/<builtins_package>#<name>``。"""
+        if self._builtins_package is None or name not in self._builtin_names:
+            return None
+        try:
+            return str(Urn.external(self._builtins_package, None, name))
+        except ValueError:
+            return None
 
     # --- 位置 ---
 
@@ -511,7 +539,7 @@ class _Extractor:
         top = self.by_qualified.get(name)
         if top is not None:
             return False, str(top.urn)
-        return False, self.resolve(name)
+        return False, self.resolve(name) or self.resolve_builtin(name)
 
     def _is_local(self, name: str, node: Node) -> bool:
         fns = self._enclosing_functions(node)
@@ -542,7 +570,8 @@ class _Extractor:
         ]
         if len(matches) == 1:
             return str(matches[0].urn)
-        return self.resolve(name)
+        got = self.resolve(name)
+        return None if got is not None and got.startswith(_EXTERNAL_PREFIX) else got
 
     def _is_self_attribute(self, recv: Node) -> bool:
         if recv.type not in _ATTRIBUTE_NODES:
@@ -594,6 +623,12 @@ class _Extractor:
                     tname = self.scan.attr_types.get(cls.id, {}).get(_text(prop))
                     if tname is not None:
                         return self._name_ref(tname, chain)
+            elif obj is not None and prop is not None and obj.type in ("identifier", *_ATTRIBUTE_NODES):
+                # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）
+                inner = self._type_ref(obj, node, chain)
+                if inner is not None and inner[0] == "urn" and inner[1].startswith(_EXTERNAL_PREFIX):
+                    joined = _append_member(inner[1], _text(prop))
+                    return ("urn", joined) if joined is not None else None
             return None
         if t in ("call", "new_expression"):
             fn = recv.child_by_field_name("constructor" if t == "new_expression" else "function")
@@ -613,7 +648,7 @@ class _Extractor:
         local = self.by_qualified.get(name)
         if local is not None and local.kind in _CLASS_KINDS | {Kind.MODULE}:
             return ("local", local.qualified_name)
-        urn = self.resolve(name)
+        urn = self.resolve(name) or self.resolve_builtin(name)
         if urn is not None:
             return ("urn", urn)
         return None

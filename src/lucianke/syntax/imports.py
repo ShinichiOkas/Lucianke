@@ -7,6 +7,10 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
 * ``resolve_module``: モジュール名 1 つをワークスペース内のファイルに対応づける。ファイルの存在は呼び手が ``exists`` で教える
   （workspace に依存しない）。``node_modules``・tsconfig の ``paths``・Python の site-packages は扱わない（外部は ``None``）。
 * ``imported_name_map``: ファイル内で使える名前 → ``(定義元ファイル, 元の名前)``。解決できた import だけが入る。
+* ``external_name_map``: 解決できなかった import の名前 → 外部シンボルの URN（``lk://_ext/<pkg>#<qualified>``。設計書 §7.4.6 項 3、
+  仕様書 §9.3）。パッケージは Python が最上位のモジュール名（``from os.path import join`` → ``lk://_ext/os#path.join``）、
+  TS / JS が裸の指定子のパッケージ名（``@scope/name`` を含む。サブパスは捨てる）。TS / JS の既定 import・名前空間 import は
+  モジュールそのもの（``lk://_ext/react``）。
 
 ``ImportFact.names`` の約束（``(name, alias)`` の列。``alias`` は無ければ ``None``）:
 
@@ -23,19 +27,21 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
 from __future__ import annotations
 
 import posixpath
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
 from tree_sitter import Node, Query, QueryCursor
 
 from lucianke.core.model import Range, RelPath
+from lucianke.core.urn import Urn
 from lucianke.syntax.types import ParsedFile
 
 __all__ = [
     "DEFAULT_SOURCE_ROOTS",
     "ImportFact",
     "ImportKind",
+    "external_name_map",
     "extract_imports",
     "imported_name_map",
     "make_resolver",
@@ -485,4 +491,73 @@ def wildcard_sources(
             target = resolve(fact)
             if target is not None and target not in out:
                 out.append(target)
+    return out
+
+
+def _external_urn(package: str, qualified: str | None = None) -> str | None:
+    try:
+        return str(Urn.external(package, None, qualified or None))
+    except ValueError:
+        return None
+
+
+def _js_package(spec: str) -> str | None:
+    """裸の指定子のパッケージ名。相対・絶対の指定子は ``None``。``node:fs`` は ``fs``、``@a/b/c`` は ``@a/b``、``a/b`` は ``a``。"""
+    spec = spec.removeprefix("node:")
+    if not spec or spec[0] in "./" or spec.startswith("\\"):
+        return None
+    parts = spec.split("/")
+    if spec.startswith("@"):
+        return "/".join(parts[:2]) if len(parts) >= 2 and parts[1] else None
+    return parts[0]
+
+
+def external_name_map(
+    facts: Iterable[ImportFact],
+    *,
+    language_id: str,
+    internal: Collection[str] = (),
+) -> dict[str, str]:
+    """解決できなかった import が束ねる名前 → 外部シンボルの URN。同じ名前は文書順で後のものが勝つ。
+
+    ``internal`` は ``imported_name_map`` の名前（ワークスペース内に解決できたもの。同じ名前は入れない）。
+    相対 import・``__future__``・ワイルドカード・``export ... from``（再エクスポート）は入れない。
+    Python の ``import a.b.c``（別名なし）は ``a`` を ``lk://_ext/a`` に、``import a.b as c`` は ``c`` を ``lk://_ext/a#b`` に、
+    ``from a.b import c as d`` は ``d`` を ``lk://_ext/a#b.c`` に束ねる。
+    """
+    out: dict[str, str] = {}
+    if language_id in _PY_FAMILY:
+        for fact in facts:
+            if fact.reexport or fact.is_relative or fact.level > 0:
+                continue
+            top, _, rest = fact.module.partition(".")
+            if not top or top == "__future__":
+                continue
+            if fact.kind == "import" and not fact.names:  # ``import a.b.c`` は先頭の ``a`` を束ねる
+                if top not in internal and (urn := _external_urn(top)) is not None:
+                    out[top] = urn
+                continue
+            for name, alias in fact.names:
+                if fact.kind == "import":  # ``import a.b as c``: ``("*", "c")``
+                    bound, qualified = alias, rest
+                elif name == "*":
+                    continue
+                else:  # ``from a.b import c``
+                    bound, qualified = alias or name, ".".join(p for p in (rest, name) if p)
+                if bound and bound not in internal and (urn := _external_urn(top, qualified)) is not None:
+                    out[bound] = urn
+    elif language_id in _JS_FAMILY:
+        for fact in facts:
+            if fact.reexport or fact.is_relative:
+                continue
+            package = _js_package(fact.module)
+            if package is None:
+                continue
+            for name, alias in fact.names:
+                if name in ("default", "*"):  # 既定 import・名前空間 import / require は、モジュールそのもの
+                    bound, qualified = alias, None
+                else:
+                    bound, qualified = alias or name, name
+                if bound and bound not in internal and (urn := _external_urn(package, qualified)) is not None:
+                    out[bound] = urn
     return out
