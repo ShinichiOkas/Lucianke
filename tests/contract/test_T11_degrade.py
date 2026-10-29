@@ -337,11 +337,14 @@ async def test_lexical_scope_paths_must_include_the_definition_file(rig: Rig):
 
 
 async def test_lexical_by_line_and_character_marks_the_definition(rig: Rig):
-    r = await rig.rename({"path": "app/main.rb", "line": 8, "character": 6}, "bill_order", dry_run=True)
+    r = await rig.rename({"path": "app/main.rb", "line": 2, "character": 8}, "bill_order", dry_run=True)
     assert not r.is_error, r.text
-    edits = {(e["path"], e["line"]): e for e in r.structured["data"]["edits"]}
-    assert edits[("app/main.rb", 8)]["use"] == "def" or edits[("app/main.rb", 8)]["use"] == "call"
-    assert r.structured["data"]["old_name"] == "charge_order"
+    data = r.structured["data"]
+    assert data["old_name"] == "charge_order"
+    edits = {(e["path"], e["line"]): e for e in data["edits"]}
+    assert edits[("app/main.rb", 2)]["use"] == "def"  # 指した位置が定義
+    assert edits[("app/main.rb", 8)]["use"] == "call"
+    assert edits[("app/other.rb", 1)]["use"] == "call"
 
 
 async def test_lexical_keeps_bom_crlf_and_non_ascii(rig: Rig):

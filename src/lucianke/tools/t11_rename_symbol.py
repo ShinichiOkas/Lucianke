@@ -186,7 +186,7 @@ async def _lsp_handle(svc: ToolServices, ws: Workspace, language_id: str) -> Lsp
     if status.status is LspStatus.NOT_APPLICABLE:
         raise LuciankeError(
             ErrorCode.E_UNSUPPORTED,
-            f"rename_symbol has no language server for {language_id!r} (the lexical fallback is not implemented)",
+            f"rename_symbol has no language server for {language_id!r} (without one only a function's local variable or parameter can be renamed; target it by path + line + character)",
             details={"reason": "no_lsp_for_language", "language": language_id},
         )
     await pool.wait_ready(language_id, ws, LSP_READY_WAIT_MS)
