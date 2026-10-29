@@ -58,6 +58,12 @@ def git(cwd, *args, check=True) -> str:
     return p.stdout.decode("utf-8", "replace")
 
 
+def rmtree_force(path: Path) -> None:
+    """読み取り専用の .git/objects も消す。"""
+    if Path(path).exists():
+        shutil.rmtree(path, onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)))
+
+
 def sha256_file(p: Path) -> str | None:
     return hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
 
@@ -165,12 +171,75 @@ def file_log(repo: Repo, head_sha: str, path: str, *, max_entries: int | None = 
     return out
 
 
+def file_log_fast(repo: Repo, head_sha: str, path: str, *, max_commits: int | None = None, threshold: int = 50):
+    """git log --follow 相当（自前）。コミットごとに「そのパスの (mode, sha)」だけを親と比べる（全ツリー差分はしない）。
+    マージで片方の親と同一ならその親だけ辿る（git の既定の履歴簡約）。パスが親に無いときだけ改名検出を走らせる。
+    max_commits は「調べたコミット数」の上限。戻りは (コミット SHA, 種別 A/M/D/R/C, その時点のパス, 改名前のパス)。"""
+    import heapq
+    store = repo.object_store
+    rd = RenameDetector(store, rename_threshold=threshold)
+    memo: dict[tuple[bytes, bytes], tuple[int, bytes] | None] = {}
+
+    def entry(tree_id: bytes, pth: bytes):
+        k = (tree_id, pth)
+        if k not in memo:
+            try:
+                memo[k] = store[tree_id].lookup_path(store.__getitem__, pth)
+            except Exception:   # KeyError / NotTreeError / SubmoduleEncountered -> 無い扱い
+                memo[k] = None
+        return memo[k]
+
+    seq = 0
+    heap = []
+    c0 = repo[head_sha.encode()]
+    heapq.heappush(heap, (-c0.commit_time, seq, c0.id, path.encode()))
+    seen: set[tuple[bytes, bytes]] = set()
+    out, examined = [], 0
+    while heap and (max_commits is None or examined < max_commits):
+        _, _, cid, cur = heapq.heappop(heap)
+        if (cid, cur) in seen:
+            continue
+        seen.add((cid, cur))
+        examined += 1
+        c = repo[cid]
+        mine = entry(c.tree, cur)
+        parents = c.parents
+        same_parent = None
+        kind, old = None, None
+        if not parents:
+            kind = "A" if mine else None
+        else:
+            theirs = [(pid, entry(repo[pid].tree, cur)) for pid in parents]
+            same_parent = next((pid for pid, e in theirs if e == mine), None)
+            if same_parent is None:
+                if mine is None:
+                    kind = "D"
+                elif all(e is None for _, e in theirs):
+                    kind = "A"
+                    if len(parents) == 1:      # 追加に見えるときだけ改名検出（親->子の全差分は、ここでしか取らない）
+                        for ch in rd.changes_with_renames(repo[parents[0]].tree, c.tree):
+                            if ch.type in (CHANGE_RENAME, CHANGE_COPY) and ch.new.path == cur:
+                                kind, old = ("R" if ch.type == CHANGE_RENAME else "C"), ch.old.path
+                                break
+                else:
+                    kind = "M"
+        if kind:
+            out.append((cid.decode(), kind, cur.decode(), old.decode() if old else None))
+        nxt = [same_parent] if same_parent is not None and len(parents) > 1 else list(parents)
+        for pid in nxt:
+            seq += 1
+            heapq.heappush(heap, (-repo[pid].commit_time, seq, pid, old if (old and kind in ("R", "C")) else cur))
+    return out
+
+
 # ---------------------------------------------------------------- 項目 1: リビジョン解決
 def item1(repo: Repo, root: Path, label: str, specs: list[str]):
     print(f"\n## 1 リビジョン解決 [{label}]")
     ok = True
     for spec in specs:
         want = git(root, "rev-parse", "--verify", "--quiet", spec + "^{commit}", check=False).strip() or None
+        if any(u in spec for u in ("@{", "..", ":", "^{")):
+            want = None   # 設計書 §7.9.1: 対応外の構文（git は解せる）は「見つからない」が正解
         try:
             got = resolve_revision(repo, spec)
             err = ""
@@ -206,7 +275,7 @@ def run_git_env(cwd, i, *args):
 def make_rename_repo(dst: Path) -> Path:
     """改名・改名＋小修正・改名＋大書き換え・ディレクトリ移動を含む 10 コミットの小さな履歴。"""
     if dst.exists():
-        shutil.rmtree(dst, onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)))
+        rmtree_force(dst)
     dst.mkdir(parents=True)
     run_git_env(dst, 0, "init", "-q", "-b", "main")
     run_git_env(dst, 0, "config", "core.autocrlf", "false")
@@ -234,7 +303,7 @@ def make_rename_repo(dst: Path) -> Path:
 def make_dirty_clone(dst: Path) -> Path:
     """このリポジトリの clone に、staged / unstaged / untracked / ignored / stat だけ変わったファイルを作る。"""
     if dst.exists():
-        shutil.rmtree(dst, onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)))
+        rmtree_force(dst)
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(ROOT), str(dst)], check=True, capture_output=True)
     run_git_env(dst, 0, "config", "user.email", "t@example.com"); run_git_env(dst, 0, "config", "user.name", "t")
     (dst / "README.md").write_text("STAGED CONTENT\n", newline="\n"); run_git_env(dst, 0, "add", "README.md")
@@ -323,9 +392,9 @@ def main() -> int:
     item8(results)
     import_cost()
     if click_root:
-        shutil.rmtree(click_root, onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)))
+        rmtree_force(click_root)
     for d in ("rename", "empty", "dirty", "click_copy"):
-        shutil.rmtree(TMP / d, onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)), ignore_errors=True)
+        rmtree_force(TMP / d)
     try:
         TMP.rmdir()
     except OSError:
@@ -421,20 +490,31 @@ def measure(label, root: Path, files, ref_old, follow_path, reps, results, click
 
         # 5: log --follow
         gt_follow = git(root, "log", "--follow", "--format=%H", "--", follow_path).split()
-        for thr in (50, 60):
-            fl = file_log(repo, head, follow_path, threshold=thr)
+        nrep = 1 if click else max(5, reps // 10)       # click の Walker は十数秒かかるので 1 回だけ
+        for thr in ((50,) if click else (50, 60)):
+            t0 = time.perf_counter(); fl = file_log(repo, head, follow_path, threshold=thr); tt = {"med": (time.perf_counter() - t0) * 1000}
+            if not click:
+                tt = bench(lambda: file_log(repo, head, follow_path, threshold=thr), nrep)
             shas = [x[0] for x in fl]
-            tt = bench(lambda: file_log(repo, head, follow_path, threshold=thr), max(5, reps // 10))
-            tb = bench(lambda: file_log(repo, head, follow_path, max_entries=500, threshold=thr), max(5, reps // 10))
-            tw = bench(lambda: list(repo.get_walker(paths=[follow_path.encode()])), max(5, reps // 10))
             same = shas == gt_follow
             ok = tt["med"] <= 500
-            if thr == 50:
-                results[f"5 log --follow {follow_path} [{label}]"] = ok
-            print(f"  5 {'合格' if ok else '不合格'} {follow_path} threshold={thr}: dulwich {len(shas)} 件 / git {len(gt_follow)} 件 / 完全一致={same} / "
-                  f"無制限 {tt['med']:.0f} ms（初回 {tt['first']:.0f}）/ max_entries=500: {tb['med']:.0f} ms / 改名追跡なし: {tw['med']:.0f} ms")
+            results[f"5 log --follow {follow_path} Walker [{label}] threshold={thr}"] = ok
+            print(f"  5 {'合格' if ok else '不合格'} Walker {follow_path} threshold={thr}: dulwich {len(shas)} 件 / git {len(gt_follow)} 件 / 完全一致={same} / 無制限 {tt['med']:.0f} ms")
             if not same:
                 print(f"     dulwich のみ {len(set(shas)-set(gt_follow))} 件、git のみ {len(set(gt_follow)-set(shas))} 件、順序差のみ={set(shas)==set(gt_follow)}")
+        for mc in (None, 500):
+            ff = file_log_fast(repo, head, follow_path, max_commits=mc)
+            fs = [x[0] for x in ff]
+            tf = bench(lambda: file_log_fast(repo, head, follow_path, max_commits=mc), nrep)
+            if mc is None:
+                same = fs == gt_follow
+                cmp = f" / git {len(gt_follow)} 件と{'完全一致' if same else f'不一致（自前のみ {len(set(fs)-set(gt_follow))}、git のみ {len(set(gt_follow)-set(fs))}、集合は同じ={set(fs)==set(gt_follow)}）'}"
+            else:
+                same = fs == gt_follow[:len(fs)]
+                cmp = f" / git の先頭 {len(fs)} 件と{'完全一致' if same else '不一致'}"
+            ok = tf["med"] <= 500 and same
+            results[f"5 log --follow {follow_path} 自前 max_commits={mc} [{label}]"] = ok
+            print(f"  5 {'合格' if ok else '不合格'} 自前 {follow_path} max_commits={mc}: {len(ff)} 件{cmp} / 中央値 {tf['med']:.0f} ms（初回 {tf['first']:.0f}）")
 
         # 6: .gitignore
         ignore_test(repo, root, reps, results, label)
@@ -509,8 +589,8 @@ def follow_rename_repo(rr: Path, results):
             for thr in (50, 60):
                 fl = file_log(r, head, path, threshold=thr)
                 shas = [x[0] for x in fl]
-                print(f"  {path:9} threshold={thr}: dulwich {len(shas)} 件 / git {len(gt)} 件 / 一致={shas == gt}"
-                      f" 種別={''.join(x[1] for x in fl)}")
+                fs = file_log_fast(r, head, path, threshold=thr)
+                print(f"  {path:9} threshold={thr}: Walker {len(shas)} 件 一致={shas == gt} 種別={''.join(x[1] for x in fl)} / 自前 {len(fs)} 件 一致={[x[0] for x in fs] == gt} 種別={''.join(x[1] for x in fs)} / git {len(gt)} 件")
         # 通常の blob 差分（改名つき）
         c = [x for x in git(rr, "log", "--format=%H").split()]
         for i in (2, 4, 7):
@@ -526,7 +606,7 @@ def follow_rename_repo(rr: Path, results):
 def pack_handle_test(click_root: Path):
     print("\n## Windows の保持ハンドル（Repo を開いたまま pack を触れるか）")
     cp = TMP / "click_copy"
-    shutil.rmtree(cp, onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)), ignore_errors=True)
+    rmtree_force(cp)
     shutil.copytree(click_root, cp)
     pack = next((cp / ".git/objects/pack").glob("*.pack"))
     r = Repo(str(cp))
@@ -579,10 +659,16 @@ def item8(results):
     print(f"  8a {'合格' if same else '不合格'} 一時 clone（dirty）: index/HEAD/refs/objects/作業ツリー全ファイル sha が前後で{'同一' if same else '変化'}"
           + ("" if same else f" 差分={ {k: (before[k], after[k]) for k in before if before[k] != after[k]} }"))
     # 既定の status（optional_locks=True）は?
+    lic = dirty / "LICENSE"; os.utime(lic, (time.time() - 9000, time.time() - 9000))   # git の整え直しの後に stat だけずらす
+    before = state_digest(dirty)
+    with Repo(str(dirty)) as r:
+        porcelain.status(r, optional_locks=False)
+    mid = state_digest(dirty)
     with Repo(str(dirty)) as r:
         porcelain.status(r)
     after2 = state_digest(dirty)
-    changed = {k for k in before if before[k] != after2[k]}
+    print(f"  8b' optional_locks=False: 変化={sorted(k for k in before if before[k] != mid[k]) or 'なし'}")
+    changed = {k for k in mid if mid[k] != after2[k]}
     print(f"  8b porcelain.status() 既定（optional_locks=True）: 変化した項目={sorted(changed) or 'なし'}（LICENSE の mtime だけ変えてあった）")
     results["8 status 既定が index を書く（不採用の根拠）"] = True
 
