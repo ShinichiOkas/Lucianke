@@ -22,13 +22,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lucianke.core.errors import LuciankeError
-from lucianke.core.model import RelPath
+from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.model import LspStatus, RelPath
 from lucianke.edit.lock import WorkspaceLocks
+from lucianke.edit.transaction import EditTransaction
 from lucianke.engine.indexer import Indexer
 from lucianke.index.connection import ReaderPool, db_path_for, open_reader
 from lucianke.index.ingest import DiagnosticFact, replace_lsp_diagnostics
 from lucianke.index.writer import IndexWriter
+from lucianke.lsp.action_store import CodeActionStore
 from lucianke.lsp.pool import FileChangeType, LspPool
 from lucianke.syntax.parsers import TreeCache
 from lucianke.tools._services import ToolServices
@@ -39,6 +41,7 @@ from lucianke.workspace.watcher import Watcher
 _log = logging.getLogger("lucianke.runtime")
 WATCHER_START_TIMEOUT_S = 5.0
 WATCHER_STOP_TIMEOUT_S = 2.0
+STARTUP_WAIT_S = 10.0  # roots の待ち上限（5 s）と cwd への退避（8 s）より長く
 
 
 class IndexerSink:
@@ -217,6 +220,7 @@ class RuntimeHub:
         self.trees = trees
         self.lsp_pool = lsp_pool
         self.locks = WorkspaceLocks()
+        self.code_action_store = CodeActionStore()  # T-08 が QuickFix を載せ、T-13 が引く（1 つを共有する）
         self.failed: dict[str, str] = {}  # workspace_id -> 開けなかった理由
         self._cwd = cwd
         self._env = env
@@ -224,6 +228,15 @@ class RuntimeHub:
         self._runtimes: dict[str, WorkspaceRuntime] = {}
         self._lock = asyncio.Lock()
         self._applied: tuple[str, ...] | None = None
+        self._started = asyncio.Event()  # 最初の sync_roots が終わった（束が開いた・開けなかった、のどちらでも）
+
+    async def wait_started(self, timeout: float = STARTUP_WAIT_S) -> bool:
+        """最初の ``sync_roots`` が終わるまで待つ（``tools/call`` の入口が呼ぶ。起動直後の呼び出しが束の準備より先に着く競合を埋める）。"""
+        if self._started.is_set():
+            return True
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._started.wait(), timeout)
+        return self._started.is_set()
 
     # --- 参照 ---
 
@@ -266,6 +279,12 @@ class RuntimeHub:
 
     async def sync_roots(self, paths: Sequence[str]) -> list[Workspace]:
         """ルートを登録し、束を起こす／畳む。同じ ``paths`` の再呼び出しは何もしない。"""
+        try:
+            return await self._sync_roots(paths)
+        finally:
+            self._started.set()
+
+    async def _sync_roots(self, paths: Sequence[str]) -> list[Workspace]:
         async with self._lock:
             key = tuple(os.path.realpath(p) for p in paths)
             if key == self._applied:
@@ -367,6 +386,57 @@ class WiredServices(ToolServices):
     @property
     def locks(self) -> WorkspaceLocks | None:
         return None if self.hub is None else self.hub.locks
+
+    @property
+    def code_action_store(self) -> CodeActionStore | None:
+        return None if self.hub is None else self.hub.code_action_store
+
+    # 編集ツールが属性で組む場合の入り口（アクティブなワークスペースの束）。普通は ``edit_transaction`` を使う。
+    @property
+    def writer_index(self) -> IndexWriter | None:
+        rt = self.runtime()
+        return None if rt is None else rt.writer
+
+    @property
+    def journal_dir(self) -> Path | None:
+        rt = self.runtime()
+        return None if rt is None else rt.journal_dir
+
+    @property
+    def indexer(self) -> Indexer | None:
+        rt = self.runtime()
+        return None if rt is None else rt.indexer
+
+    @property
+    def watcher(self) -> Watcher | None:
+        rt = self.runtime()
+        return None if rt is None else rt.watcher
+
+    def edit_transaction(self, ws: Workspace, *, lsp: Any = None, **overrides: Any) -> EditTransaction:
+        """編集トランザクションを組む（T-10・T-11・T-13 が呼ぶ）。束の ``writer`` / ``indexer`` / ``watcher`` / ``readers`` と共有の ``trees``・``locks``。
+
+        ``lsp`` に ``LspHandle`` が渡ればその ``documents`` / ``diagnostics`` を使い、LSP の状態は READY とする。``overrides`` が最優先。
+        """
+        rt = self.runtime(ws.workspace_id)
+        if rt is None or self.hub is None:
+            raise LuciankeError(
+                ErrorCode.E_UNSUPPORTED,
+                "editing is not available: the index for this workspace is not open",
+                details={"reason": "index_not_open", "workspace_id": ws.workspace_id},
+            )
+        kw: dict[str, Any] = {
+            "locks": self.hub.locks,
+            "writer_index": rt.writer,
+            "journal_dir": rt.journal_dir,
+            "indexer": rt.indexer,
+            "watcher": rt.watcher,
+            "reader_pool": rt.readers,
+            "trees": self.trees,
+        }
+        if lsp is not None:
+            kw.update(documents=lsp.documents, diagnostics_hub=lsp.diagnostics, lsp_status=lambda _lang: LspStatus.READY)
+        kw.update({k: v for k, v in overrides.items() if v is not None})
+        return EditTransaction(ws, **kw)
 
 
 __all__ = ["IndexerSink", "RuntimeHub", "WiredServices", "WorkspaceRuntime"]

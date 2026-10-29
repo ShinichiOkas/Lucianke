@@ -123,6 +123,7 @@ def run_stdio() -> int:
         services=build_services(lambda: roots.paths, trees=trees, hub=hub),
         data_version_provider=hub.data_version,
         shutdown_guard=make_shutdown_guard(lifecycle),
+        ready_gate=hub.wait_started,
     )
     server = build_server(registry, pipeline, roots, version=__version__)
     log.info("lucianke %s starting (tools=%d)", __version__, len(registry), extra={"event": "startup"})

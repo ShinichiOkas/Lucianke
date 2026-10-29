@@ -17,7 +17,7 @@ import dataclasses
 import logging
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
@@ -118,6 +118,7 @@ class Pipeline:
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = time.perf_counter,
         shutdown_guard: Callable[[], None] | None = None,
+        ready_gate: Callable[[], Awaitable[object]] | None = None,
     ) -> None:
         if current_milestone not in MILESTONES:
             raise ValueError(f"unknown milestone {current_milestone!r}")
@@ -130,6 +131,7 @@ class Pipeline:
         self.current_milestone = current_milestone
         self._logger = logger or _log
         self._clock = clock
+        self._ready_gate = ready_gate  # 起動直後の呼び出しが、索引の束の準備より先に着く競合を埋める（上限つきで待つ）
         self._shutdown_guard = shutdown_guard  # 終了が始まっていれば LuciankeError を投げる（lifecycle.make_shutdown_guard）
 
     # --- 入口 ---------------------------------------------------------------------------
@@ -172,6 +174,8 @@ class Pipeline:
     ) -> tuple[Rendered, ResolutionMeta]:
         if self._shutdown_guard is not None:
             self._shutdown_guard()  # 終了処理中の新規 tools/call は E_UNSUPPORTED（details.reason=shutting_down）
+        if self._ready_gate is not None:
+            await self._ready_gate()
         if MILESTONES.index(spec.milestone) > MILESTONES.index(self.current_milestone):
             raise LuciankeError(
                 ErrorCode.E_UNSUPPORTED,
