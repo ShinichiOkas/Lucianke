@@ -29,12 +29,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from typing import Any
 
 from lucianke.core.errors import LuciankeError
 from lucianke.core.model import Capability, Confidence, EngineChoice, FileInfo, LspStatus, SymbolRecord
 from lucianke.engine import selector
+from lucianke.index import ingest, queries
 from lucianke.lsp import features
 from lucianke.workspace.types import Workspace
 
@@ -76,23 +76,9 @@ class _Lang:
 # --- _hover_cache ---------------------------------------------------------------------------
 
 
-def cached_hover(conn: sqlite3.Connection, urn: str, sha256: str) -> str | None:
-    """``_hover_cache`` の行（定義ファイルの内容が同じとき）。無ければ ``None``。"""
-    row = conn.execute(
-        "SELECT hover_text FROM _hover_cache WHERE urn = ? AND sha256 = ?", (urn, sha256)
-    ).fetchone()
-    return None if row is None else str(row[0])
-
-
 def _store_job(urn: str, sha256: str, text: str) -> Any:
-    now = datetime.now(UTC).isoformat(timespec="seconds")
-
     def job(conn: sqlite3.Connection) -> None:
-        conn.execute("DELETE FROM _hover_cache WHERE urn = ? AND sha256 <> ?", (urn, sha256))  # 古い版の行
-        conn.execute(
-            "INSERT OR REPLACE INTO _hover_cache(urn, sha256, hover_text, cached_at) VALUES (?, ?, ?, ?)",
-            (urn, sha256, text, now),
-        )
+        ingest.store_hover(conn, urn, sha256, text)  # 古い版の行を消して入れる（SQL は index 層）
 
     return job
 
@@ -174,7 +160,7 @@ class ExactLifter:
     async def lift(self, sym: SymbolRecord, info: FileInfo, sha256: str) -> Lift:
         """``sym`` を ``exact`` に上げる。上げられなければ ``text=None`` と、降格したエンジン選択。"""
         urn = str(sym.urn)
-        cached = cached_hover(self._conn, urn, sha256)
+        cached = queries.cached_hover(self._conn, urn, sha256)
         if cached is not None:  # R-11: 2 回目以降は PaaD から。LSP は呼ばず、起動も促さない
             return Lift(cached, self._cache_choice(info), from_cache=True)
         lang = await self._prepare(info)

@@ -658,6 +658,20 @@ def diagnostics_for(
     return out
 
 
+# --- _hover_cache -----------------------------------------------------------------------
+
+
+def cached_hover(conn: sqlite3.Connection, urn: str, sha256: str) -> str | None:
+    """``_hover_cache`` の行（定義ファイルの内容 ``sha256`` が同じもの）の hover 文。無ければ ``None``。
+
+    書き込みは ``ingest.store_hover``。内部テーブルなので公開面（``query_project_db``）には出ない。
+    """
+    row = conn.execute(
+        "SELECT hover_text FROM _hover_cache WHERE urn = ? AND sha256 = ?", (urn, sha256)
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
 # --- data_version -----------------------------------------------------------------------
 
 

@@ -40,6 +40,7 @@ __all__ = [
     "ingest_file",
     "remove_file",
     "replace_lsp_diagnostics",
+    "store_hover",
     "upsert_exact_relations",
     "upsert_workspace",
 ]
@@ -735,3 +736,22 @@ def remove_file(conn: sqlite3.Connection, workspace_id: str, path: str) -> bool:
         conn.execute("DELETE FROM relations WHERE target_urn = ? OR source_urn = ?", (urn, urn))
     conn.execute("DELETE FROM files WHERE file_id = ?", (file_id,))
     return True
+
+
+# --- _hover_cache -----------------------------------------------------------------------
+
+
+def store_hover(
+    conn: sqlite3.Connection, urn: str, sha256: str, hover_text: str, *, now: str | None = None
+) -> None:
+    """LSP の hover 文を ``_hover_cache`` に書く（T-04。読みは ``queries.cached_hover``）。
+
+    同じ ``urn`` の古い版（``sha256`` が違う行）は消してから入れる。内部テーブルへの書き込みなので、呼び出し側の
+    ジョブは ``bumps_version=False`` で出す（``data_version`` を進めない）。
+    """
+    _require_transaction(conn)
+    conn.execute("DELETE FROM _hover_cache WHERE urn = ? AND sha256 <> ?", (urn, sha256))
+    conn.execute(
+        "INSERT OR REPLACE INTO _hover_cache(urn, sha256, hover_text, cached_at) VALUES (?, ?, ?, ?)",
+        (urn, sha256, hover_text, now or _now()),
+    )
