@@ -1,6 +1,6 @@
 """S-6 watchfiles の Windows 挙動: 遅延・バースト・イベントの種類・フィルタ・停止の再現スクリプト。
-使い方: uv run python spikes/s06_watch/run.py            # 項目 10〜12 と補足を全部実行（約 90 秒）
-        uv run python spikes/s06_watch/run.py 10 12       # 項目番号を指定（10 / 11 / 12 / 13）
+使い方: .venv/Scripts/python.exe spikes/s06_watch/run.py        # 項目 10〜16 を全部実行（約 2〜3 分）
+        .venv/Scripts/python.exe spikes/s06_watch/run.py 10 14    # 項目番号を指定（10〜16）
 一時ファイルは %TEMP% 配下に作り、終了時に消す。リポジトリには何も書かない。
 """
 
@@ -314,14 +314,153 @@ async def item13() -> None:
     s.arrived.clear()
     t = time.perf_counter()
     (root / "after.py").write_text("y")
-    s.arrived.wait(3)
+    await loop.run_in_executor(None, s.arrived.wait, 3)  # イベントループを塞がない（塞ぐと awatch が進まず「届かない」ように見える）
     print(f"[13] 5000 ファイルのバースト後の単一変更の遅延: {(s.batches[0][0] - t) * 1000:.0f} ms" if s.batches else "[13] バースト後のイベントが届かない")
+    await s.close()
+
+
+# ---------------------------------------------------------------- 項目 14
+async def item14() -> None:
+    hdr(14, "バースト検知（500 件超で rescan）の成立条件: 窓ごとの件数・持続書き込みの最大遅延・実際の git checkout")
+    for debounce, step in ((50, 10), (200, 10), (1000, 10), (2000, 10)):
+        await burst(600, debounce, step)
+    # 持続的に書き換わるファイル（ログなど）を debounce が抱え込む時間
+    for debounce, step in ((50, 10), (1000, 10)):
+        root = tmpdir()
+        s = Session(root, debounce=debounce, step=step, watch_filter=make_filter(root))
+        await s.start()
+        loop = asyncio.get_running_loop()
+        done = threading.Event()
+        t_info: dict[str, float] = {}
+
+        def spam() -> None:
+            t_info["t0"] = time.perf_counter()
+            while time.perf_counter() - t_info["t0"] < 3.0:  # 3 秒間、3 ms ごとに書く
+                (root / "log.txt").write_bytes(b"x" * 100)
+                time.sleep(0.003)
+            done.set()
+
+        await loop.run_in_executor(None, spam)
+        await asyncio.sleep(max(0.5, debounce / 1000 * 2))
+        ts = [(t - t_info["t0"]) * 1000 for t, _ in s.batches]
+        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        print(f"[14] 3 秒間 3 ms ごとに同じファイルを書く debounce={debounce} step={step}: バッチ数={len(ts)} 最初のバッチ={ts[0]:.0f} ms 最大の間隔={max(gaps) if gaps else float('nan'):.0f} ms")
+        await s.close()
+    # 実際の git checkout（600 ファイルが入れ替わるブランチ切替）
+    import subprocess
+
+    repo = tmpdir()
+
+    def git(*a: str) -> None:
+        subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=s06", *a], cwd=repo, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    for i in range(700):
+        d = repo / f"pkg{i % 20}"
+        d.mkdir(exist_ok=True)
+        (d / f"m{i}.py").write_text(f"v = {i}\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    git("checkout", "-q", "-b", "other")
+    for i in range(700):
+        (repo / f"pkg{i % 20}" / f"m{i}.py").write_text(f"v = {i + 1000}\n")
+    git("commit", "-q", "-am", "b")
+    for debounce, step in ((50, 10), (200, 10), (1000, 10)):
+        git("checkout", "-q", "main")
+        git("checkout", "-q", "other")  # 状態を揃える
+        s = Session(repo, debounce=debounce, step=step, watch_filter=make_filter(repo))
+        await s.start()
+        loop = asyncio.get_running_loop()
+        t0 = time.perf_counter()
+        await loop.run_in_executor(None, git, "checkout", "-q", "main")
+        t_end = time.perf_counter()
+        await asyncio.sleep(max(1.0, debounce / 1000 * 3))
+        sizes = [len(b) for _, b in s.batches]
+        got = {p for _, b in s.batches for _, p in b if p.endswith(".py")}
+        print(f"[14] git checkout（700 ファイルが入れ替わる、{1000 * (t_end - t0):.0f} ms）debounce={debounce} step={step}: バッチ数={len(sizes)} 件数={sizes[:10]} 最大={max(sizes) if sizes else 0} 届いた .py={len(got)}/700 最後のバッチ={1000 * (s.batches[-1][0] - t0):.0f} ms")
+        await s.close()
+
+
+# ---------------------------------------------------------------- 項目 15
+async def item15() -> None:
+    hdr(15, "停止: asyncio.Event / threading.Event / タスクのキャンセル（stop_event 無し）にかかる時間")
+    for kind in ("threading.Event", "asyncio.Event"):
+        for step in (50, 10):
+            root = tmpdir()
+            ev = threading.Event() if kind == "threading.Event" else asyncio.Event()
+
+            async def run() -> None:
+                async for _ in awatch(root, stop_event=ev, step=step, watch_filter=None):
+                    pass
+
+            task = asyncio.create_task(run())
+            await asyncio.sleep(0.5)
+            t0 = time.perf_counter()
+            ev.set()
+            await task
+            print(f"[15] stop_event={kind} step={step}: set() から終了まで {(time.perf_counter() - t0) * 1000:.0f} ms")
+    for step in (50, 10):
+        root = tmpdir()
+
+        async def run2() -> None:
+            async for _ in awatch(root, step=step, watch_filter=None):
+                pass
+
+        task = asyncio.create_task(run2())
+        await asyncio.sleep(0.5)
+        t0 = time.perf_counter()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        print(f"[15] stop_event 無しで task.cancel() step={step}: cancel() から終了まで {(time.perf_counter() - t0) * 1000:.0f} ms")
+
+
+# ---------------------------------------------------------------- 項目 16
+async def item16() -> None:
+    hdr(16, "アイドル時の CPU（step を小さくした代償）と force_polling の補足")
+    for step in (50, 10, 5):
+        root = tmpdir()
+        stop = threading.Event()
+
+        async def run() -> None:
+            async for _ in awatch(root, step=step, stop_event=stop, watch_filter=None):
+                pass
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(1.0)
+        c0, w0 = time.process_time(), time.perf_counter()
+        await asyncio.sleep(6.0)
+        c1, w1 = time.process_time(), time.perf_counter()
+        print(f"[16] 何も起きない 6 秒 step={step}: プロセスの CPU 時間 {1000 * (c1 - c0):.0f} ms（{100 * (c1 - c0) / (w1 - w0):.2f} %）")
+        stop.set()
+        await task
+    # force_polling の個別値（inf の原因を見る）
+    root = tmpdir()
+    s = Session(root, debounce=50, step=50, watch_filter=None, force_polling=True, poll_delay_ms=100)
+    await s.start()
+    loop = asyncio.get_running_loop()
+    res: list[str] = []
+
+    def w() -> None:
+        for i in range(8):
+            s.arrived.clear()
+            n0 = len(s.batches)
+            (root / "p.txt").write_text(f"v{i}" * (i + 1))  # 毎回サイズも変える
+            t = time.perf_counter()
+            ok = s.arrived.wait(3)
+            res.append(f"{(s.batches[n0][0] - t) * 1000:.0f}ms" if ok else "届かず")
+            time.sleep(0.5)
+
+    await loop.run_in_executor(None, w)
+    print(f"[16] 参考 force_polling=True poll_delay_ms=100 でサイズを変えて書く 8 回: {res}")
     await s.close()
 
 
 async def main() -> None:
     print(f"python {sys.version.split()[0]} / watchfiles {watchfiles.__version__} / {sys.platform}")
-    items = {"10": item10, "11": item11, "12": item12, "13": item13}
+    items = {"10": item10, "11": item11, "12": item12, "13": item13, "14": item14, "15": item15, "16": item16}
     for k in sys.argv[1:] or list(items):
         await items[k]()
 
