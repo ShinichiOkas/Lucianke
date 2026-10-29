@@ -35,6 +35,7 @@ from lucianke.core.records import Record, ToolOutput
 from lucianke.core.textpos import detect_indent
 from lucianke.core.urn import parse
 from lucianke.edit.builders import replace_body_builder
+from lucianke.edit.builders_delete import delete_symbol_builder
 from lucianke.edit.normalize import default_indent
 from lucianke.edit.transaction import EditResult, EditTransaction, PlanBuilder, PlanContext
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
@@ -136,6 +137,8 @@ def _plan_builder(args: EditSymbolBodyArgs, target: TargetRef) -> PlanBuilder:
     if args.operation == "replace_body":
         assert args.new_code is not None
         return replace_body_builder(target, args.new_code)
+    if args.operation == "delete_symbol":
+        return delete_symbol_builder(target)
     raise LuciankeError(
         ErrorCode.E_UNSUPPORTED,
         f"operation {args.operation} is not implemented yet (replace_body only)",

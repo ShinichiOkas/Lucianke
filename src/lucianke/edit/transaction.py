@@ -828,6 +828,10 @@ class EditTransaction:
         new_bytes: Mapping[RelPath, bytes],
     ) -> tuple[tuple[str, ...], Range | None]:
         """再索引後の対象 URN と定義範囲（書き込んだ内容を解析し直して対応付ける。``delete`` などで無ければ空と ``None``）。"""
+        hunks = plan.hunks_for(loaded.rel)
+        # 取り除くだけの編集（delete_symbol）。対象はもう無い（同名の定義が残っていても、それは別のシンボル）
+        if hunks and all(h.new_text == "" for h in hunks):
+            return plan.target_urns, None
         data = new_bytes.get(loaded.rel)
         spec = get_support(loaded.language_id)
         if symbol is None or data is None or spec is None or not callable(getattr(spec, "grammar", None)):
