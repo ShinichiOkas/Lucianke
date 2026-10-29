@@ -30,6 +30,7 @@ from dulwich.index import ConflictedIndexEntry, IndexEntry
 from dulwich.object_store import iter_tree_contents
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.objectspec import AmbiguousShortId, parse_commit, parse_object
+from dulwich.refs import Ref
 from dulwich.repo import Repo
 
 from lucianke.core.errors import ErrorCode, LuciankeError
@@ -198,7 +199,10 @@ class GitRepo:
                     repo, base
                 )  # 参照・リモート追跡・短縮 SHA（4 桁〜）・注釈付きタグの剥がし
                 if suffix:
-                    commit = parse_commit(repo, parse_object(repo, commit.id + suffix.encode("ascii")))
+                    moved = parse_object(repo, commit.id + suffix.encode("ascii"))
+                    if not isinstance(moved, Commit):
+                        raise ValueError(f"expected a commit: {rev}")
+                    commit = moved
             except AmbiguousShortId as exc:
                 raise _revision_not_found(rev, "ambiguous", f"revision is ambiguous: {_clip(rev)!r}") from exc
             except (KeyError, ValueError) as exc:
@@ -343,7 +347,7 @@ class GitRepo:
         from dulwich import porcelain  # 遅延 import（+70 ms）
 
         with self._open() as repo:
-            symbolic = repo.refs.read_ref(b"HEAD")
+            symbolic = repo.refs.read_ref(Ref(b"HEAD"))
             branch: str | None = None
             if symbolic is not None and symbolic.startswith(b"ref: "):
                 target = symbolic[5:].strip().decode("utf-8", "replace")
