@@ -1,7 +1,7 @@
 """T-02 ``get_file_skeleton`` の契約テスト（仕様書 §11 T-02 の事後条件 1・2・5 ほか）。
 
-パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。構文木だけ（``structural``）の縦切りなので、
-Notebook・データファイル・未知言語（事後条件 3）は対象外。
+パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。ここは構文木のコード（Python・TypeScript）の検査で、
+Notebook・データファイルは ``test_T02_data_files.py``、未知言語（事後条件 3）は対象外。
 """
 
 from __future__ import annotations
@@ -152,12 +152,12 @@ async def test_shrink_drops_doc_first_and_stays_grammatical(pipeline: Pipeline) 
 
 async def test_partial_failure_keeps_ok_and_marks_item(pipeline: Pipeline) -> None:
     """§5.4.4: 1 件以上成功すれば全体は ok。失敗項目は `! <path>: <CODE> <message>`。"""
-    r = await call(pipeline, paths=[PAY_PY, "src/missing.py", "../outside.py", "conf/app.yaml"])
+    r = await call(pipeline, paths=[PAY_PY, "src/missing.py", "../outside.py", "legacy/calc.cob"])
     assert not r.is_error
     assert g.validate(r.text) == []
     assert "! src/missing.py: E_TARGET_NOT_FOUND" in r.text
     assert "! ../outside.py: E_INVALID_ARGUMENT" in r.text
-    assert "! conf/app.yaml: E_UNSUPPORTED" in r.text  # データファイルは縦切りの範囲外
+    assert "! legacy/calc.cob: E_UNSUPPORTED" in r.text  # 文法も骨格のアダプタも無い言語（データファイルは test_T02_data_files.py）
     j = await call(pipeline, "json", paths=[PAY_PY, "src/missing.py"])
     items = j.structured["data"]["items"]
     assert [i["ok"] for i in items] == [True, False]
