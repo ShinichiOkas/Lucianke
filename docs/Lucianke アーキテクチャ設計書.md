@@ -92,7 +92,7 @@
 
 ```
 ┌──────────────────────────────┐   stdio (JSON-RPC 2.0)   ┌──────────────────────────────┐
-│ コーディングエージェントのホスト │ ◄──────────────────────► │ lucianke serve（1 プロセス）   │
+│ コーディングエージェントのホスト │ ◄──────────────────────► │ lucianke（1 プロセス）         │
 │ (Claude Code / Cline / Cursor) │                          │                              │
 └──────────────────────────────┘                          │  ┌─ 子プロセス（言語ごと）─┐  │
                                                           │  │ pyright / ruff / vtsls │  │
@@ -114,7 +114,7 @@
 ## 2.2 プロセス内の構成（コンテナ図）
 
 ```
-lucianke serve
+lucianke（ホストが起動する 1 プロセス。寿命はホストのセッションと同じ。ADR-16）
 │
 ├─ Transport        stdio 読み書き（退避した fd 1 を使う）。JSON-RPC の枠組みは MCP SDK
 ├─ McpAdapter       tools/list・tools/call・roots を SDK からツールレジストリへ橋渡し
@@ -235,6 +235,17 @@ lucianke serve
 - 決定: M1 の LSP 要求は `initialize`、`textDocument/definition`、`textDocument/references`、`callHierarchy/*`、`textDocument/rename`（`prepareRename` 含む）、`textDocument/codeAction`（`resolve` 含む）、`textDocument/hover`（型展開用）、および通知（`didOpen` / `didChange` / `didClose` / `didChangeWatchedFiles`、受信 `publishDiagnostics` / `$/progress`）。`workspace/symbol` と `typeHierarchy` は M2。
 - 帰結: `search_workspace_symbols` は PaaD（FTS5）で答え、LSP を使わない。
 
+### ADR-16 プロセスの寿命はセッション。永続状態はディスクに、プロセス内は復元できるキャッシュだけ
+
+- 文脈: 師匠 2026-10-29「serve としてサーバプロセスにする必要もないのでは？ ツールとしては状態を持たないですよね？」。MCP の stdio は、ホストがサーバーを 1 回起動してセッションの間つなぎ続ける形であり、呼び出しごとにコマンドを起動する形は無い。一方で、ツールの意味はステートレスであるべきで、Lucianke を「状態を抱えるサーバー」にしてはならない。
+- 決定:
+  1. Lucianke はホストが起動する **子プロセス** で、寿命はホストのセッションと同じ（`stdin` の EOF で終わる）。常駐デーモン・複数ホストで共有するサービスにしない。入口は `lucianke`（引数なし）。`serve` という名は使わない。
+  2. **ツールの意味は各呼び出しで閉じる**: 結果は作業ツリーと PaaD の内容から決まり、前の呼び出しに依存しない。
+  3. **永続する状態は PaaD（SQLite）とジャーナルだけ** で、どちらもディスク上にある。プロセスが死んでも次の起動で使える。PaaD はキャッシュであり、消えても再索引で作り直せる。
+  4. **プロセス内の状態は性能のためのキャッシュ** （温まった LSP 子プロセス、構文木キャッシュ、hover キャッシュ）と、**セッション限定の軽い対応表** （ページネーションの `cursor`、`code_action_id`、`edit_seq` の採番位置）だけ。失っても `E_CURSOR_EXPIRED` / `E_TARGET_NOT_FOUND` で再取得でき、ファイルや DB は壊れない。
+- 捨てた案: 呼び出しごとのコマンド起動（MCP に無い。LSP を毎回起こすと秒単位になり、NFR-PERF-1 を満たせない）。常駐デーモン（導入・終了・多重起動・権限の問題を増やす）。
+- 帰結: プロセスが生きている唯一の実利は「LSP と構文木を温めておくこと」であり、それは NFR-PERF-1 のための手段にすぎない。受入に「再起動耐性」（§10.1）を加える。LSP の温め直しは初回の重さとして現れるが、それは許容する（仕様書 §14.4）。
+
 ---
 
 # 4. パッケージ構成とモジュール責務
@@ -248,7 +259,7 @@ Lucianke/
 ├─ THIRD_PARTY_NOTICES.md    # 生成物（§10.5）
 ├─ src/lucianke/
 │  ├─ __init__.py            # __version__
-│  ├─ __main__.py            # `lucianke` CLI: serve | index | bench | doctor
+│  ├─ __main__.py            # `lucianke` CLI。引数なしで stdio の MCP 入口（ホストが起動）。補助サブコマンド index | doctor | bench
 │  ├─ app.py                 # 合成ルート: 設定読込 → サービス生成 → 起動・終了
 │  ├─ bootstrap_io.py        # ADR-3: fd 1 の退避と差し替え（最初に import される）
 │  ├─ config.py              # 設定モデル（環境変数 / .lucianke.toml / 既定）と cache_root
@@ -521,6 +532,8 @@ class LuciankeError(Exception):
 1. `bootstrap_io`（fd 1 の退避・差し替え）→ 2. ログ → 3. 設定 → 4. キャッシュディレクトリ → 5. `IndexWriter` 起動とスキーマ移行 → 6. MCP サーバーの `initialize` 受付 → 7. `roots/list` → `WorkspaceContext` 登録 → 8. 差分索引ジョブ投入（背景）→ 9. 監視開始。
 
 LSP はここでは起動しない。
+
+Lucianke はホストが起動する子プロセスであり、寿命はホストのセッションと同じ（`stdin` の EOF で終わる）。常駐デーモンや複数ホストで共有するサービスにはしない（ADR-16）。
 
 終了順（`stdin` EOF / SIGTERM / SIGINT / Windows の `SIGBREAK`）:
 
@@ -1509,7 +1522,7 @@ M2 / M3 の内部設計は着手時に足す。置き場所、入口、守る規
 ## 8.1 起動と差分索引
 
 ```
-host ──spawn──► lucianke serve
+host ──spawn──► lucianke
  1. bootstrap_io          fd 1 を退避、fd 1 → stderr（ADR-3）
  2. logging_setup         stderr + JSON Lines ファイル
  3. config                環境変数 / .lucianke.toml / 既定
@@ -1746,7 +1759,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 | unit | `core`、`budget`（パッカー・推定器・カーソル）、`textpos`、`urn`、`boundaries`、`normalize`、`writer`、`paths`、`languages` | 秒 | 不要 |
 | contract | 仕様書 §11 の事後条件を T-nn ごとに。フィクスチャ F-POLY と小さな Python / TS プロジェクト。LSP は偽物（録画した応答を返す `FakeLsp`） | 分 | 不要 |
 | e2e | 実 LSP（basedpyright、ruff、vtsls）と実 MCP クライアント（SDK のクライアント）で、`.mcp.json` に書くのと同じ起動方法 | 分〜十分 | 要 |
-| invariants | `stdout` 純度、子プロセス 0、読み取りツールでの `sha256` 不変、公開 DB の読み取り専用、外向き接続なし | 全テストに横断して適用 | |
+| invariants | `stdout` 純度、子プロセス 0、読み取りツールでの `sha256` 不変、公開 DB の読み取り専用、外向き接続なし、**再起動耐性**（プロセスを kill して再起動しても、同じ呼び出しが同じ結果を返す。cursor と code_action_id は失効して再取得できる。ADR-16） | 全テストに横断して適用 | |
 | bench | 仕様書第 14 章 | 別実行 | 要 |
 
 - `FakeLsp` は実 LSP との対話を一度録画して JSON に保存し、以後はそれを再生する。録画の更新は e2e と同じ環境で行う。
@@ -1835,7 +1848,7 @@ build-backend = "hatchling.build"
   "mcpServers": {
     "lucianke": {
       "command": "lucianke",
-      "args": ["serve"],
+      "args": [],
       "env": { "LUCIANKE_LOG_LEVEL": "info" }
     }
   }
@@ -1844,7 +1857,7 @@ build-backend = "hatchling.build"
 
 - `uv tool install lucianke[all]` または `pipx install lucianke[all]`。
 - `lucianke doctor` が、PATH 上の LSP・Node・ctags・git の有無、キャッシュディレクトリの書き込み可否、`stdout` 隔離の自己診断を表示する（`stderr` へ）。
-- `lucianke index <root>` が事前索引を行い、初回の `serve` を速くする（任意）。
+- `lucianke index <root>` が事前索引を行い、初回起動を速くする（任意。初回索引の重さは許容する方針なので必須ではない）。
 
 ## 11.3 版管理
 
