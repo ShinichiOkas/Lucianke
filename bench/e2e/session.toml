@@ -1,0 +1,261 @@
+# M1-6 の台本（仕様書 §15.2: 「Claude Code の MCP 設定（.mcp.json）で接続し、台本化したセッション
+# （骨格 -> 本体 -> 編集 -> 診断ゼロ確認）が完走する」）。実行器は bench/e2e/run_session.py、記録は bench/e2e/records/。
+#
+# 流れは §10.11「エージェント向けの推奨シーケンス」そのもの:
+#   get_file_skeleton（sha=）-> get_symbol_bodies -> edit_symbol_body（expected_file_sha256 つき）-> get_diagnostics
+#
+# 読み方:
+#   [[stage]]  呼ぶツールと引数。"$名前" だけの文字列は、実行器が前の段の応答から埋める（vars）。
+#              needs の段が未成立なら、その段は blocked（実行しない）。
+#              writes はその段で内容が変わってよいファイル。それ以外が変わったら「書き込み」の事後条件違反。
+#              wait_until は「条件待ち」（固定 sleep ではない）。timeout_s までその条件が満たされるのを繰り返し呼んで待つ。
+#   [check.*]  段で確かめる事後条件。spec は仕様書の根拠、level は must（落ちたら未成立）か should（記録するだけ）。
+#
+# 「診断ゼロ」は min_severity = "error" で数える。F-POLY の payment.py には意図的な未使用 import（ruff F401）があり、
+# 編集では消えない。警告までゼロにする台本ではない（意図的な型エラー 1 件を直すと error が 0 になる、を確かめる）。
+
+[session]
+name = "m1-6"
+spec = "docs/Lucianke仕様書.md §15.2 M1-6, §10.11"
+fixture = "tests/fixtures/poly"            # F-POLY。実行ごとに tmp にコピーし、そこを根にする
+workspace_via = "roots"                    # "roots"（MCP の roots/list。Claude Code と同じ）| "set_roots"（T-00 configure_workspace）
+file = "src/shop/services/payment.py"
+symbol = "PaymentProcessor.apply_discount"
+error_code = "reportAssignmentType"        # F-POLY の意図的な型エラー（factor: Decimal = "1"）の診断コード
+error_line = 63
+index_timeout_s = 120                      # 起動から最初の走査が終わるまで
+lsp_timeout_s = 150                        # 診断（LSP）が揃うまで。基準は起動から約 20 s
+call_timeout_s = 60                        # 1 回の tools/call の上限
+total_timeout_s = 420                      # 全体の上限
+
+# --- 1. tools/list -------------------------------------------------------------------------
+
+[[stage]]
+name = "tools_list"
+call = "tools/list"
+checks = ["tools_listed", "schemas_closed"]
+
+# --- 0. ワークスペース（根が F-POLY のコピーに向き、最初の走査が済む）----------------------------
+
+[[stage]]
+name = "workspace"
+tool = "configure_workspace"
+args = { format = "json" }                 # status（既定）。実行器の準備確認なので json で読む
+wait_until = "scan_done"
+timeout_s = 120
+checks = ["workspace_is_fixture", "scan_done"]
+
+# --- 2. 骨格 -------------------------------------------------------------------------------
+
+[[stage]]
+name = "skeleton"
+tool = "get_file_skeleton"
+args = { paths = ["$file"] }
+needs = ["workspace"]
+checks = ["skeleton_header", "skeleton_symbol", "skeleton_folds_body"]
+
+# --- 3. 本体 -------------------------------------------------------------------------------
+
+[[stage]]
+name = "bodies"
+tool = "get_symbol_bodies"
+args = { targets = [{ urn = "$urn" }] }    # 骨格の urn: 行で見たシンボルをそのまま渡す
+needs = ["skeleton"]
+checks = ["bodies_match_file", "bodies_sha"]
+
+# --- 4. 編集前の診断（意図的な型エラーが LSP から見える）-------------------------------------------
+
+[[stage]]
+name = "diag_before"
+tool = "get_diagnostics"
+args = { paths = ["$file"], min_severity = "error" }
+needs = ["workspace"]
+wait_until = "type_error_visible"
+timeout_s = 150
+checks = ["diag_exact", "diag_min_severity", "diag_positions", "diag_type_error"]
+
+# --- 5. 編集（型エラーを 1 件直す）-----------------------------------------------------------
+
+[[stage]]
+name = "edit"
+tool = "edit_symbol_body"
+needs = ["bodies"]
+writes = ["$file"]
+checks = ["edit_applied", "edit_bytes", "edit_sha_chain", "edit_new_diagnostics", "edit_resolves_error"]
+
+[stage.args]
+target = { urn = "$urn" }
+operation = "replace_body"
+expected_file_sha256 = "$sha"              # 骨格・本体で見た sha（§10.11 手順 3）
+diagnostics_wait_ms = 10000
+# 定義ノード全体（シグネチャ込み）を置き換える。Decimal("1") は ruff FURB157 が警告するので Decimal(1) にして、警告を増やさない。
+new_code = '''
+def apply_discount(self, price: Decimal, rate: int) -> Decimal:
+    """割引後の価格を返す。rate は 0 以上 100 以下。"""
+    factor: Decimal = Decimal(1)  # 型エラーを直した（str を Decimal に）
+    return price * (100 - rate) / 100 * Decimal(factor)
+'''
+
+# --- 6. 編集後の本体（編集した範囲が T-05 で読める）-----------------------------------------------
+
+[[stage]]
+name = "reread"
+tool = "get_symbol_bodies"
+args = { targets = [{ urn = "$new_urn" }], context_lines = 0 }
+needs = ["edit"]
+checks = ["reread_range"]
+
+# --- 7. 診断ゼロ確認（error が 0）---------------------------------------------------------------
+
+[[stage]]
+name = "diag_after"
+tool = "get_diagnostics"
+args = { paths = ["$file"], min_severity = "error" }
+needs = ["edit"]
+wait_until = "no_error_fresh"
+timeout_s = 60
+checks = ["diag_exact", "diag_min_severity", "diag_positions", "diag_zero_errors"]
+
+# --- 8. 型検査器が編集後の版を見ていることの証拠（0 件が「見ていない」ではないこと）---------------------
+
+[[stage]]
+name = "diag_alive"
+tool = "get_diagnostics"
+args = { paths = ["$file"], min_severity = "hint" }
+needs = ["edit"]
+wait_until = "typechecker_alive"
+timeout_s = 60
+checks = ["diag_exact", "diag_min_severity", "diag_positions", "diag_checker_alive", "diag_no_new_warnings", "edit_diff_vs_diagnostics"]
+
+# --- 事後条件の一覧 ------------------------------------------------------------------------------
+# 暗黙で全段に掛かる 3 本（tool_ok / compact_grammar / writes_as_declared）と、各段の checks。
+
+[check.tool_ok]
+spec = "§5.1 / §5.4"
+level = "must"
+desc = "tools/call が isError でなく、エンベロープの先頭行が ok"
+
+[check.compact_grammar]
+spec = "§6.1 (Compact DSL の EBNF)"
+level = "must"
+desc = "compact の応答が文法検査器 tests/contract/compact_grammar.py を通る"
+
+[check.writes_as_declared]
+spec = "§11.0 表注（書き込みが空のツールはファイルを変えない）, T-08 事後条件 4, T-10 事後条件 4"
+level = "must"
+desc = "呼び出しの前後で、writes に無いファイルの sha256 が変わらない"
+
+[check.tools_listed]
+spec = "§15.2 M1（ツール一覧）, §5.1"
+level = "must"
+desc = "この台本が呼ぶ 5 本（configure_workspace, get_file_skeleton, get_symbol_bodies, edit_symbol_body, get_diagnostics）が載る"
+
+[check.schemas_closed]
+spec = "§13.6"
+level = "must"
+desc = "公開した入力スキーマはすべて additionalProperties: false"
+
+[check.workspace_is_fixture]
+spec = "T-00 事後条件 1, FR-WS-1"
+level = "must"
+desc = "アクティブなワークスペースの根が F-POLY のコピーで、workspace_id が [A-Za-z0-9._-]+ に一致する"
+
+[check.scan_done]
+spec = "T-00 処理規約 6（jobs[]）"
+level = "must"
+desc = "最初の索引ジョブが done で、files が 1 以上"
+
+[check.skeleton_header]
+spec = "T-02 処理規約 9"
+level = "must"
+desc = "ファイルブロックのヘッダの行数と sha= が、ディスク上のファイルの行数と SHA-256 先頭 12 桁に一致する"
+
+[check.skeleton_symbol]
+spec = "T-02 処理規約 2"
+level = "must"
+desc = "対象メソッドの [Method] 行があり、@L の範囲が Python の ast で測った定義の範囲に一致し、urn: 行がある"
+
+[check.skeleton_folds_body]
+spec = "T-02 処理規約 2"
+level = "must"
+desc = "本体は { ...N lines omitted } に畳まれ、本体の字句（factor）が骨格に出ない"
+
+[check.bodies_match_file]
+spec = "T-05 事後条件 1・2"
+level = "must"
+desc = "@L<n>: を外した各行が、対象ファイルの range_returned の各行と順に一致し、n は連番"
+
+[check.bodies_sha]
+spec = "T-05 処理規約 8, T-02 処理規約 9"
+level = "must"
+desc = "sha: がディスクの SHA-256 先頭 12 桁と、骨格の sha= の両方に一致する"
+
+[check.diag_exact]
+spec = "T-08 精度と降格（exact = LSP 診断 + Tree-sitter）"
+level = "must"
+desc = "ヘッダが conf=exact lsp=ready"
+
+[check.diag_min_severity]
+spec = "T-08 事後条件 1"
+level = "must"
+desc = "返した診断の重大度がすべて min_severity 以上"
+
+[check.diag_positions]
+spec = "T-08 事後条件 2"
+level = "must"
+desc = "診断の path が存在し、line が 1 以上ファイルの行数以下"
+
+[check.diag_type_error]
+spec = "T-08 処理規約 2(b), FR-DIAG-1"
+level = "must"
+desc = "意図的な型エラー（reportAssignmentType）が LSP 由来で出て、位置が骨格で見たシンボルの範囲に入る"
+
+[check.edit_applied]
+spec = "T-10 出力, EP-5"
+level = "must"
+desc = "applied: true、op=replace_body、syntax_check: ok"
+
+[check.edit_bytes]
+spec = "T-10 処理規約 1・2・4, EP-1, 事後条件 5"
+level = "must"
+desc = "ディスク上の結果が「定義ノードの範囲だけを new_code で置換したもの」とバイト単位で一致し、改行（LF）・BOM なし・末尾改行が保たれ、(+a -b) が差分の行数に一致する"
+
+[check.edit_sha_chain]
+spec = "T-10 事後条件 1, EP-1"
+level = "must"
+desc = "files_changed の sha256 A->B が、編集前（骨格の sha）とディスクから計算した編集後の SHA-256 に一致する"
+
+[check.edit_new_diagnostics]
+spec = "T-10 出力, §10.7"
+level = "must"
+desc = "new_diagnostics 行があり、status が complete / pending / not_computed のどれか"
+
+[check.edit_resolves_error]
+spec = "T-10 目的・出力例（同じ応答で診断差分を返す）, §10.11 手順 4"
+level = "should"
+desc = "直した型エラーが resolved に出る（status が pending のときは対象外）。記録するだけで、未成立にはしない"
+
+[check.reread_range]
+spec = "T-10 事後条件 3, 処理規約 1"
+level = "must"
+desc = "編集後の target_urn が 1 件に解決し、その範囲が edit の new_range（@L）に一致し、コードが new_code に一致する"
+
+[check.diag_zero_errors]
+spec = "§15.2 M1-6（診断ゼロ確認）"
+level = "must"
+desc = "直したファイルの error が 0 件。古い診断の注意書き（No fresh diagnostics）が出ていない"
+
+[check.diag_checker_alive]
+spec = "T-08 処理規約 2(b)"
+level = "must"
+desc = "hint まで含めて、型検査器（basedpyright）の診断が出ていて、error は 0 件、reportAssignmentType は消えている"
+
+[check.diag_no_new_warnings]
+spec = "T-10 処理規約 4（new_code は警告を増やさない）, README（payment.py の意図的な未使用 import）"
+level = "should"
+desc = "このファイルの warning は、もともとある ruff F401（未使用 import）だけ。編集で警告が増えていない。記録するだけで、未成立にはしない"
+
+[check.edit_diff_vs_diagnostics]
+spec = "EP-7"
+level = "should"
+desc = "edit の new_diagnostics が complete のとき、added はすべて現在の診断に含まれ、resolved はどれも含まれない。記録するだけで、未成立にはしない"
