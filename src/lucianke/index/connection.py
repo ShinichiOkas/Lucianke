@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import sqlite3
@@ -26,6 +25,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.hashing import WORKSPACE_HASH_LEN as WORKSPACE_HASH_LEN  # 再公開
+from lucianke.core.hashing import workspace_hash
 from lucianke.core.limits import READ_REQUEST_TIMEOUT_MS, READER_POOL_SIZE
 
 if TYPE_CHECKING:
@@ -34,7 +35,6 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lucianke.index.connection")
 
 DB_FILENAME: Final = "paad.sqlite"  # 仕様書 §4.5: <cache_root>/<workspace_hash>/paad.sqlite
-WORKSPACE_HASH_LEN: Final = 16  # 実体パスの正規化文字列の SHA-1 の 16 進の先頭桁数（設計書 §7.3.1 は 12 桁）
 WRITER_BUSY_TIMEOUT_MS: Final = 5000  # 設計書 §6.2
 READER_BUSY_TIMEOUT_MS: Final = 1000  # 設計書 §6.2
 DEFAULT_ACQUIRE_TIMEOUT_S: Final = (
@@ -43,15 +43,6 @@ DEFAULT_ACQUIRE_TIMEOUT_S: Final = (
 
 
 # --- パス -------------------------------------------------------------------------------
-
-
-def workspace_hash(workspace_root: Path | str) -> str:
-    """ワークスペースのルートの実体パス（``realpath`` + ``normcase``）の SHA-1 の先頭 16 桁（16 進）。
-
-    ``<cache_root>/<workspace_hash>/`` の名前に使う。Windows では大文字小文字と区切りの違いを吸収する。
-    """
-    normalized = os.path.normcase(os.path.realpath(workspace_root))
-    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:WORKSPACE_HASH_LEN]
 
 
 def db_path_for(cache_root: Path | str, workspace_root: Path | str) -> Path:
