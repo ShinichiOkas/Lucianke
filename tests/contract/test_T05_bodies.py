@@ -1,9 +1,8 @@
 """T-05 ``get_symbol_bodies`` の契約テスト（仕様書 §11 T-05 の事後条件 1・2・5 ほか）。
 
 パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。構文木だけ（``structural``）の縦切りの試験で、
-セレクタ（``xpath:`` など）・``cell:<n>``（事後条件 3）・``lexical_fallback`` の窓（事後条件 4）はツールが未対応
-（``E_UNSUPPORTED``。BUG-0049）。3・4 の試験は仕様書どおりの本物のアサーションを持つ ``xfail(strict=True)`` で、
-直ったら XPASS で赤になるので、印を外す。
+``cell:<n>``（事後条件 3）と ``lexical_fallback`` の窓（事後条件 4）は BUG-0049 で結線した。セレクタ ``xpath:`` など
+はツールが未対応（``E_UNSUPPORTED``）。
 """
 
 from __future__ import annotations
@@ -366,12 +365,9 @@ async def test_truncated_target_is_not_followed_by_the_next_target_until_it_is_c
         _assert_contiguous(parts, full)
 
 
-# --- セレクタ・lexical_fallback（事後条件 3・4。ツールが未対応: BUG-0049） ------------------------------------
+# --- セレクタ・lexical_fallback（事後条件 3・4。BUG-0049 で結線） ------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True, reason="BUG-0049: get_symbol_bodies は cell:<n> を E_UNSUPPORTED で断る（selector_not_supported）"
-)
 async def test_t05_postcondition_3_cell_item_is_the_cell_source_without_outputs(pipeline: Pipeline) -> None:
     """PC:T-05#3 ``cell:<n>`` の項目の ``code`` は ``cells[n].source`` の連結と一致し、``outputs`` 内の文字列を含まない。
 
@@ -394,9 +390,6 @@ async def test_t05_postcondition_3_cell_item_is_the_cell_source_without_outputs(
     assert [s for s in outputs if s in item["code"]] == []
 
 
-@pytest.mark.xfail(
-    strict=True, reason="BUG-0049: get_symbol_bodies は lexical_fallback の窓を返さず E_UNSUPPORTED で断る"
-)
 async def test_t05_postcondition_4_lexical_fallback_windows_are_at_most_31_lines_and_degraded(
     pipeline: Pipeline,
 ) -> None:
@@ -409,3 +402,127 @@ async def test_t05_postcondition_4_lexical_fallback_windows_are_at_most_31_lines
     windows = item["windows"]
     assert 1 <= len(windows) <= 3
     assert all(w["end_line"] - w["start_line"] + 1 <= 31 for w in windows)
+
+
+# --- BUG-0049: cell: の周辺・Tier 4 の窓の周辺 -------------------------------------------------------------
+
+
+def _tmp_pipeline(root: Path) -> Pipeline:
+    registry = ToolRegistry()
+    register_tools(registry)
+    return Pipeline(registry, services=build_services(lambda: [str(root)]))
+
+
+async def test_cell_selector_errors_are_per_item(pipeline: Pipeline) -> None:
+    """構文の誤りは E_INVALID_ARGUMENT、範囲外は E_TARGET_NOT_FOUND、.ipynb 以外への cell: は E_UNSUPPORTED。"""
+    targets = [
+        {"path": NOTEBOOK, "symbol_name": "cell:0"},
+        {"path": NOTEBOOK, "symbol_name": "cell:x"},
+        {"path": NOTEBOOK, "symbol_name": "cell:99"},
+        {"path": PAY_PY, "symbol_name": "cell:1"},
+        {"path": COBOL, "symbol_name": "cell:1"},
+        {"path": NOTEBOOK, "symbol_name": "cell:4"},
+    ]
+    r = await call(pipeline, "json", targets=targets)
+    assert not r.is_error, r.text
+    items = r.structured["data"]["items"]
+    codes = [None if it["ok"] else it["error"]["code"] for it in items]
+    assert codes == [
+        "E_INVALID_ARGUMENT",
+        "E_INVALID_ARGUMENT",
+        "E_TARGET_NOT_FOUND",
+        "E_UNSUPPORTED",
+        "E_UNSUPPORTED",
+        None,
+    ]
+    assert items[5]["code"] == "len(frame)"
+
+
+async def test_cell_markdown_cell_is_returned_whole_without_line_numbers(pipeline: Pipeline) -> None:
+    """Markdown セルは仮想 Python ファイルの行を占めない（in_virtual_file が false）。全文を 1 レコードで返す。"""
+    doc = json.loads((POLY / NOTEBOOK).read_text(encoding="utf-8"))
+    r = await call(pipeline, "json", targets=[{"path": NOTEBOOK, "symbol_name": "cell:1"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["code"] == "".join(doc["cells"][0]["source"])
+    assert item["cell"]["cell_type"] == "markdown" and item["cell"]["in_virtual_file"] is False
+    assert item["symbol"]["kind"] == "Cell" and item["confidence_level"] == "structural"
+    c = await call(pipeline, targets=[{"path": NOTEBOOK, "symbol_name": "cell:1"}])
+    assert g.validate(c.text) == []
+    assert "@L1:" not in c.text  # 行番号は付けない
+
+
+async def test_cell_code_cell_compact_uses_virtual_lines(pipeline: Pipeline) -> None:
+    c = await call(pipeline, targets=[{"path": NOTEBOOK, "symbol_name": "cell:3"}])
+    assert not c.is_error and g.validate(c.text) == []
+    assert f"[Cell] {NOTEBOOK}#cell:3 @L4-11" in c.text
+    assert "@L4: def load_frame(path: str) -> list[dict]:" in c.text
+    assert "OUTPUT_SENTINEL" not in c.text
+
+
+async def test_cell_truncated_cell_continues_with_the_cursor(tmp_path: Path) -> None:
+    """大きいコードセルは続きを next_cursor で取れ、全ページの code を連結すると cells[n].source と一致する。"""
+    src = [f"x{i} = {i}\n" for i in range(400)]
+    src[-1] = src[-1].rstrip("\n")
+    nb = {
+        "cells": [{"cell_type": "code", "execution_count": 1, "metadata": {}, "outputs": [], "source": src}],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    (tmp_path / "big.ipynb").write_text(json.dumps(nb), encoding="utf-8")
+    pipeline = _tmp_pipeline(tmp_path)
+    parts: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(60):
+        args: dict[str, Any] = {"targets": [{"path": "big.ipynb", "symbol_name": "cell:1"}], "max_tokens": 1500}
+        if cursor:
+            args["cursor"] = cursor
+        r = await call(pipeline, "json", **args)
+        assert not r.is_error, r.text
+        parts.append(r.structured["data"]["items"][0])
+        cursor = r.structured["page"]["next_cursor"]
+        if not cursor:
+            break
+    assert len(parts) > 1 and all(p["truncated"] for p in parts[:-1]) and not parts[-1]["truncated"]
+    assert "\n".join(p["code"] for p in parts) == "".join(src)
+    for a, b in zip(parts, parts[1:], strict=False):
+        assert b["range_returned"]["start_line"] == a["range_returned"]["end_line"] + 1
+
+
+async def test_lexical_fallback_compact_is_degraded_and_marks_the_window(pipeline: Pipeline) -> None:
+    c = await call(pipeline, targets=[{"path": COBOL, "symbol_name": "COMPUTE-TAX"}])
+    assert not c.is_error and g.validate(c.text) == []
+    lines = c.text.splitlines()
+    assert lines[0].startswith("# get_symbol_bodies ok conf=lexical_fallback")
+    assert lines[1].startswith("! DEGRADED: confidence=lexical_fallback engine=internal_ripgrep_word_boundary")
+    assert "@L12:        COMPUTE-TAX." in c.text
+
+
+async def test_lexical_fallback_line_and_lex_urn_give_one_window_around_the_line(pipeline: Pipeline) -> None:
+    for ref in ({"path": COBOL, "line": 10}, {"urn": f"lk://{WS}/{COBOL}#lex:COMPUTE-TAX@L9"}):
+        r = await call(pipeline, "json", targets=[ref])
+        assert not r.is_error, r.text
+        item = r.structured["data"]["items"][0]
+        assert item["confidence_level"] == "lexical_fallback" and len(item["windows"]) == 1
+        w = item["windows"][0]
+        assert w["start_line"] <= w["match_line"] <= w["end_line"]
+    r = await call(pipeline, "json", targets=[{"path": COBOL, "line": 999}])
+    assert r.is_error and r.structured["error"]["code"] == "E_TARGET_NOT_FOUND"
+
+
+async def test_lexical_fallback_windows_are_at_most_three_and_do_not_overlap(tmp_path: Path) -> None:
+    """一致が離れて 5 か所あっても窓は最大 3 つ。各窓は 31 行以内で、前の窓に入る一致は別の窓にしない。"""
+    rows = [f"line {i}" for i in range(1, 201)]
+    for at in (10, 11, 60, 100, 140, 180):
+        rows[at - 1] = f"CALL TARGET-{at % 7} target_name here"
+    (tmp_path / "prog.xyz").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    pipeline = _tmp_pipeline(tmp_path)
+    r = await call(pipeline, "json", targets=[{"path": "prog.xyz", "symbol_name": "target_name"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    windows = item["windows"]
+    assert len(windows) == 3 and item["match_count"] == 6
+    assert all(w["end_line"] - w["start_line"] + 1 <= 31 for w in windows)
+    assert [w["match_line"] for w in windows] == [10, 60, 100]  # 11 行目は 10 行目の窓に入っている
+    assert r.structured["_resolution_meta"]["is_degraded"] is True
