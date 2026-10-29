@@ -137,16 +137,16 @@ def setup_logging(
         handlers.append(DailyJsonlHandler(settings.log_dir, settings.log_keep_days))
     except OSError as exc:  # ログ先を作れない（読み取り専用など）。stderr のみで続行
         file_error = exc
-    for name in names:
+    for i, name in enumerate(names):  # 先頭が自前のロガー。残り（SDK など）は警告以上だけ（debug のときは debug）
         logger = logging.getLogger(name)
         for old in list(logger.handlers):
             logger.removeHandler(old)
             old.close()
         for h in handlers:
             logger.addHandler(h)
-        logger.setLevel(level if name == "lucianke" else max(level, logging.WARNING))
+        logger.setLevel(level if i == 0 or level == logging.DEBUG else max(level, logging.WARNING))
         logger.propagate = False
-    log = logging.getLogger("lucianke")
+    log = logging.getLogger(names[0])
     if file_error is not None:
         log.warning("log file disabled: %s", file_error, extra={"event": "log_file_disabled"})
     return log
