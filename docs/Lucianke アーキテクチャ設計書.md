@@ -1681,12 +1681,12 @@ class ResolvedRevision:
 1. `VirtualTree.open(ws, resolved)` はメモリ上の SQLite（`:memory:`）に `index/schema.sql` と同じ DDL を作る。永続 DB には触れない（MUST）。
 2. `source(path) -> bytes` は `read_blob` / `read_staged_blob` で取り、`TreeCache` にはキー `(ws, path, sha256(blob))` で載せる（内容ハッシュなので作業ツリーの同内容と自然に共有される）。
 3. 要求されたパスだけを解析して `symbols` に入れる（遅延）。T-05 の `symbol_name` 解決は、この一時 `symbols` に対して §7.1.3 の規則を適用する。
-4. `ToolContext.file_source(path)` は `revision` が `WORKING_TREE` なら作業ツリー、それ以外なら `VirtualTree` を見る。T-02 / T-05 はこの 1 つの入口だけを使い、`revision` を意識しない。
+4. `ToolContext.file_source(path)` は `revision` が `WORKING_TREE` なら作業ツリー、それ以外なら `VirtualTree` を見る。T-02 / T-05 はこの 1 つの入口だけを使い、`revision` を意識しない。**実装との差（実装で確定 2026-10-29、de291be、BUG-0018）**: ツールの入口は `tools/_rev.py`（`open_revision`: `revision` を解決して `RevisionView` にする。作業ツリーのときは Git を一切開かず、dulwich の import〔約 130 ms〕を作業ツリー以外のときだけ遅延 import にする。`read_checked`: 断面から 1 ファイルを読み、封じ込め → 読み込み → 大きさ・秘密・バイナリの検査〔`E_TARGET_NOT_FOUND` / `E_UNSUPPORTED`〕を作業ツリーと同じ規約で行う。`analyze_at`: 作業ツリーは `analyze_file` にそのまま任せ、過去断面は読んだバイト列を同じ手順で構文木にかける〔`TreeCache` のキーは内容の SHA-256 を含むので作業ツリーの同じ内容の木と共有される〕）。T-02 の種類の振り分けは `tools/_skeletons.py`（データ形式 → コード → Markdown・rst の見出し `[Section]` → Tier 4 の `block_outline`。`ctags` は起動しない）。**M1 では 1 と 3 のメモリ上の SQLite は作らない**: 過去断面の解析結果は `FileAnalysis.symbols`（メモリ上のリスト）で `symbol_name` を解決し、PaaD にも一時テーブルにも書かない（`:memory:` の一時 `symbols` は M2 の `query_project_db` の `revision` 対応で足す）。Git のリポジトリでないワークスペースでの `WORKING_TREE` 以外は `E_REVISION_NOT_FOUND`（`details.reason: "no_git_repository"`）。
 5. 応答のヘッダは `rev=<display>`、`engine_used = "tree-sitter@<短縮 SHA>"`、最高水準 `structural`（LSP を使わない）、`accuracy_warning` に「過去断面のため LSP を使わず構文木で解析した」。
 6. パス名は `workspace/paths.py` の封じ込めを通す。Git のツリー項目に `..` や絶対パスが含まれていれば拒否する。
 7. 検査: 任意の `revision` 指定の読み取りの前後で、作業ツリー全ファイルの sha と `.git` 配下の sha が変わらない（M2-5 の受入をこの形で機械化する。M1 でも T-02 / T-05 に対して走らせる）。`porcelain.status` を使うときは **`optional_locks=False` を MUST** とする（既定の `True` は、stat だけが変わったファイルがあると `.git/index` を書き換える。S-8 で確認）。機械検査は `git status` を先に 1 回流してから `index` の sha を測る（`git status` 自体も index を更新するため）。
 
-M1 で `revision` を受けるのは T-02 と T-05 だけ（仕様書 §8.5）。他の読み取りツールは `E_UNSUPPORTED`（`details.reason: "revision_not_supported_until_M2"`）。
+M1 で `revision` を受けるのは T-02 と T-05 だけ（仕様書 §8.5）。他の読み取りツール（T-03・T-04・T-06・T-07・T-08）は、`tools/_rev.py` の `reject_unsupported_revision` が先に `revision` を解決し、存在しない参照・不正な構文は `E_REVISION_NOT_FOUND`、解決できた参照は `E_UNSUPPORTED`（`details.reason: "revision_not_supported_until_M2"`）を返す。
 
 ### 7.9.2 M2 の境界: 履歴・共変更（history.py、cochange.py）
 

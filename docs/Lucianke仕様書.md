@@ -821,14 +821,16 @@ lex-sel      = "lex:" , ident , "@L" , DIGIT , { DIGIT } ;                      
 ## 8.5 `revision` 指定時の解析
 
 - `revision` が `WORKING_TREE` 以外のとき、サーバーは Git オブジェクトから当該断面のファイル内容を読み、**作業ツリーに触れずに** メモリ上の仮想ツリーを作って解析する（MUST）。`STAGED` はインデックス（ステージ）の内容を用いる。
-- 仮想ツリーでは LSP を使わない。到達できる最高水準は `structural` とし、`_resolution_meta.accuracy_warning` にその旨を書く。`engine_used` は `tree-sitter@<短縮SHA>`。
+- 仮想ツリーでは LSP を使わない。到達できる最高水準は `structural` とし、`_resolution_meta.accuracy_warning` にその旨を書く。`engine_used` は `tree-sitter@<短縮SHA>`（短縮 SHA は 7 桁。`STAGED` は `tree-sitter@staged`）。
+- **M1 の実装（実装で確定 2026-10-29、de291be、BUG-0018）**: 入口は `tools/_rev.py`。`open_revision` が `revision` を解決し（作業ツリーのときは Git を一切開かない。Git 層の import は約 130 ms かかるので、作業ツリー以外のときだけ遅延 import する）、`read_checked` が断面から 1 ファイルを読む（封じ込め → 読み込み → 大きさ・秘密・バイナリの検査。作業ツリーでも過去断面でも同じ規約）。過去断面の読み取りは Git オブジェクトとインデックスを読むだけで、作業ツリーにも `.git` にも書かない。ヘッダの `rev=` は利用者が渡した文字列そのまま、`warnings[]` に「`revision` を Git オブジェクトから読み、構文木だけで解析した（LSP なし）」を入れる。Git のリポジトリでないワークスペースで `WORKING_TREE` 以外を渡すと `E_REVISION_NOT_FOUND`（`details.reason: "no_git_repository"`）。
+- **過去断面を M1 で扱わないツール**（下表の ×）は、まず `revision` を解決し、存在しない参照・不正な構文は `E_REVISION_NOT_FOUND`、解決できる参照は `E_UNSUPPORTED`（`details.reason: "revision_not_supported_until_M2"`）を返す。
 - 仮想ツリーの解析結果は PaaD の永続テーブルには書かず、要求の間だけの一時テーブルに置く。`query_project_db` の `revision` 対応は M2 とする（M1 では `E_UNSUPPORTED`）。
 - マイルストーン別の対応:
 
 | ツール | M1 | M2 以降 |
 |---|---|---|
 | T-02, T-05 | ○ | ○ |
-| T-03, T-04, T-06, T-07（`structural`） | × `E_UNSUPPORTED` | ○ |
+| T-03, T-04, T-06, T-07, T-08（`structural`） | × `E_UNSUPPORTED` | ○ |
 | T-17, T-18 | （M2 ツール） | ○（Git 層が供給） |
 | T-20 | × | ○ |
 | カテゴリ D | × `E_INVALID_ARGUMENT`（常に） | 同左 |
@@ -1426,7 +1428,9 @@ json の `data`:
 4. XML / HTML / SVG: タグ階層を `[Tag]` で、同名の兄弟は `×N` で集約し、属性名一覧を `type:` に出す。`max_depth` を超える階層は `{ ...N nodes omitted }` に畳む。
 5. JSON / JSONL / YAML / TOML: キー階層を `[Key]` で出し、配列は要素数と推論した要素スキーマ（`array<object{id:int,user:object}>`）を `type:` に出す。JSONL は先頭 100 レコードからスキーマを推論し、その旨を `note` に書く。
 6. DOT / Mermaid: グラフ種別、ノード数、エッジ数、サブグラフを `[Node]` `[Edge]` `[Section]` で要約する。
-7. Tier 4（未知言語）: ctags 互換の規則で取れたエントリを `[Function]` / `[Section]` にし、終了行はインデントまたは括弧の対応から推定する。何も取れなければ字句パターン（`def|function|fn|sub|proc|class` と `name = ` 形）で推定し、先頭に `! DEGRADED` 行を置く（MUST）。
+7. Tier 4（未知言語）: ctags 互換の規則で取れたエントリ（`syntax/heuristic.py` の `block_outline`）を `[Function]` / `[Class]` / `[Section]` などの入れ子にし、終了行はインデントまたは括弧の対応から推定する。取れれば `heuristic`、何も取れなければ見出しだけの空の骨格で `lexical_fallback` とし、どちらも先頭に `! DEGRADED` 行を置く（MUST。パイプラインがレコードの水準から付ける。§5.4.2）。T-02 の呼び出しでは `ctags` を起動しない（子プロセスと PATH の探索を持ち込まない。索引側の `Indexer` は使う）。`block_outline` の定義らしい行は、`def|function|fn|sub|proc|procedure|class|module` で始まる行、COBOL の段落名、字下げ 0 の `name = …` / `rule NAME = …` で、終了行は括弧の対応・字下げの戻り・`end` から推定する（実装で確定 2026-10-29、de291be）。
+   - **Markdown・reStructuredText**（Tier 3）: 見出しの入れ子を `[Section]`（`structural`）にする。節の終わりは次の同位以上の見出しの前（末尾の空行は含めない）。Markdown は ATX（`#`）と Setext（`===` `---`）の見出しを拾い（フェンス付きコードブロックと先頭の YAML front matter の中は見出しにしない）、reStructuredText は下線のみ・上下線つきの見出しを出現順に深さへ割り当てる。
+   - 種類の振り分けの順は、データ形式（JSON・JSONL・YAML・TOML・XML・`.ipynb`）→ コード（Python・TypeScript・JavaScript。構文木）→ Markdown・rst → それ以外（Tier 4）。
 8. 予算に収まらないとき、ファイル内では `doc:` → `urn:` → 非公開メンバー → 入れ子メンバー（最上位は残す）の順に落とし、落とした件数を `- truncated: N members omitted` に書く。それでも収まらなければ残りのファイルを次ページに回す。1 レコードは 1 ファイルブロック。
 9. ファイルブロックのヘッダに `sha=` としてファイル内容の SHA-256 の先頭 12 桁を付ける（MUST）。エージェントはこれを編集ツールの `expected_file_sha256` に渡せる（§10.4）。json では `items[].file_sha256` に 64 桁の完全形を入れる。
 
@@ -1662,7 +1666,7 @@ json の `data`:
 4. `cell:<n>` は `cells[n].source` の連結だけを返し、`outputs` を含めてはならない（MUST）。行番号は T-02 手順 3 の仮想行。
 5. `heuristic`: ctags の開始行から、インデントまたは括弧の対応で推定した終了行までを返す。`lexical_fallback`: 定義パターンの一致行を中心に前後 15 行（最大 31 行）の窓を返し、一致が複数なら最大 3 窓を `windows[]` に並べる。先頭に `! DEGRADED` 行（MUST）。
 6. `include_referenced_symbols` は、本体内の識別子のうち `symbols` テーブルに解決できたものを `- refs:` 行に列挙する（`exact` / `structural` のみ）。
-7. 1 レコードは 1 対象。1 対象が予算に収まらないときは先頭から詰め、`truncated_at_line` を記録して `next_cursor` で同じ対象の続きを返す。
+7. 1 レコードは 1 対象。1 対象が予算に収まらないときは先頭から詰め、`truncated_at_line` を記録して `next_cursor` で同じ対象の続きを返す。**続き**（実装で確定 2026-10-29、04ed9b7、BUG-0016）: カーソルは「同じ対象の `truncated_at_line` の次の行から本体の終わりまで」を指し（前置き〔`context_lines`〕は続きには付けない）、次のページの `range_returned` は前のページの終わりの次の行から始まる。全ページを連結すると本体全体とバイト一致する。切った項目には `items[].continue_with.line_range = {start, end}` を付け、compact には注記 `truncated at line N of M: continue with the cursor, or line_range N-M` と `# more: cursor=…` を出す（`budget.truncated` は true、`remaining` はそのレコードの残り）。`line_range` を明示して続きを取ってもよい。前置き（`context_lines`）の途中では切らない（本体の先頭の行が入らないなら、そのレコードは次のページに回す）。本体が変わってカーソルの行が範囲外になったときは `E_CURSOR_EXPIRED`。切れたレコードの後ろの対象は、そのページには詰めない（順を保つ）。
 8. 各項目に対象ファイルの SHA-256 を付ける（MUST）。json は `items[].file_sha256`（64 桁）、compact はシンボル行直下の `sha:` 属性行（先頭 12 桁）。エージェントはこれを編集ツールの `expected_file_sha256` に渡す（§10.4）。
 
 **出力**（compact）:
