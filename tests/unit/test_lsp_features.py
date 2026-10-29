@@ -735,3 +735,122 @@ def test_to_exact_relations_incoming_from_references():
         "lk://t/src/shop/services/payment.py#PaymentProcessor.process_charge"
     }
     assert all(f.confidence is Confidence.EXACT and f.relation_kind == "CALLS" for f in facts)
+
+
+# --- S-11: 位置の単位・丸め・vtsls の宣言全体の範囲 -------------------------------------------
+
+
+async def test_fake_clamped_position_is_not_sent(fake: FakeFactory):
+    f = await fake(files={"src/uni.py": "s = '日本語'\n"})
+    uni = RelPath("src/uni.py")
+    for call in (
+        lambda: features.definition(f.handle, uni, Position(0, 99)),  # 行末を越える列
+        lambda: features.hover(f.handle, uni, Position(0, 200)),
+        lambda: features.code_actions(f.handle, uni, Range(Position(0, 0), Position(0, 99))),
+    ):
+        with pytest.raises(LuciankeError) as e:
+            await call()
+        assert e.value.code is ErrorCode.E_LSP_UNAVAILABLE and e.value.details["reason"] == "position_clamped"
+    with pytest.raises(LuciankeError) as e2:
+        await features.definition(f.handle, uni, Position(5, 0))  # 範囲外の行
+    assert e2.value.code is ErrorCode.E_INVALID_ARGUMENT
+    assert f.requests("textDocument/definition") == []
+    assert f.requests("textDocument/hover") == []
+    assert f.requests("textDocument/codeAction") == []
+    # 行末ちょうどの列は丸めではないので送る
+    await features.hover(f.handle, uni, Position(0, len("s = '日本語'")))
+    assert len(f.requests("textDocument/hover")) == 1
+
+
+async def test_fake_wide_definition_range_is_narrowed_to_the_name(fake: FakeFactory):
+    # vtsls は識別子ではなく宣言文全体の範囲を返す（S-11）。
+    decl = "export const vAstral = 2;\nexport function other() {}\n"
+    f = await fake(
+        files={"src/decl.ts": decl, "src/use.ts": "console.log(vAstral);\n"},
+        responses={
+            "textDocument/definition": {"result": [{"uri": "{ROOT}/src/decl.ts", "range": rng(0, 0, 0, 25)}]}
+        },
+    )
+    [loc] = await features.definition(f.handle, RelPath("src/use.ts"), Position(0, 14))
+    assert loc.rel == RelPath("src/decl.ts")
+    assert loc.range == Range(Position(0, 13), Position(0, 20))
+    # 名前が見つからない（別名など）ときはそのまま
+    [same] = await features.definition(f.handle, RelPath("src/use.ts"), Position(0, 3))  # "console"
+    assert same.range == Range(Position(0, 0), Position(0, 25))
+
+
+async def test_fake_multi_line_declaration_range_is_narrowed_to_the_first_name(fake: FakeFactory):
+    decl = "function helper(\n  a: number,\n): number {\n  return a;\n}\n"
+    f = await fake(
+        files={"src/decl.ts": decl, "src/use.ts": "helper(1);\n"},
+        responses={
+            "textDocument/definition": {"result": [{"uri": "{ROOT}/src/decl.ts", "range": rng(0, 0, 4, 1)}]}
+        },
+    )
+    [loc] = await features.definition(f.handle, RelPath("src/use.ts"), Position(0, 2))
+    assert loc.range == Range(Position(0, 9), Position(0, 15))
+
+
+async def test_fake_references_drop_the_declaration_found_by_definition(fake: FakeFactory):
+    f = await fake(
+        files={"src/use.py": "from a import a\na()\n"},
+        responses={
+            "textDocument/definition": {"result": [{"uri": "{ROOT}/src/a.py", "range": rng(0, 4, 0, 5)}]},
+            "textDocument/references": {
+                "result": [
+                    {"uri": "{ROOT}/src/a.py", "range": rng(0, 4, 0, 5)},
+                    {"uri": "{ROOT}/src/use.py", "range": rng(1, 0, 1, 1)},
+                ]
+            },
+        },
+    )
+    use = RelPath("src/use.py")
+    got = await features.references(f.handle, use, Position(1, 0))
+    assert [(r.rel, r.range.start.line) for r in got] == [(use, 1)]
+    assert f.requests("textDocument/references")[0]["context"] == {"includeDeclaration": True}
+    both = await features.references(f.handle, use, Position(1, 0), include_declaration=True)
+    assert len(both) == 2
+
+
+# --- 実機: ruff（utf-8 を採るサーバー。codeAction の供給元） -------------------------------------
+
+_RUFF = default_server("python", "lint")
+_RUFF_CMD = find_command(_RUFF, workspace_root=REPO, venv=REPO / ".venv") if _RUFF else None
+
+
+@pytest.mark.skipif(_RUFF_CMD is None, reason="ruff is not installed")
+async def test_real_ruff_organize_imports_is_resolved_and_positions_are_utf8(
+    registry: ProcessRegistry, tmp_path: Path
+):
+    root = tmp_path / "rws"
+    root.mkdir()
+    (root / "pyproject.toml").write_bytes(b"[tool.ruff]\n")
+    text = "import sys\nimport os\n\nname = '日本語'\nprint(os, sys, name)\n"
+    (root / "m.py").write_bytes(text.encode("utf-8"))
+    ws = _workspace(root)
+    pool = LspPool(
+        registry,
+        servers=[_RUFF],
+        resolver=lambda defn, w: list(_RUFF_CMD),
+        ready_fallback_s=1.0,
+        grace_ms=300,
+    )
+    try:
+        assert await pool.wait_ready("python", ws, 30_000, role="lint")
+        handle = pool.get("python", ws, role="lint")
+        assert handle is not None and handle.client is not None
+        assert handle.client.negotiated_encoding.value == "utf-8"
+        rel = RelPath("m.py")
+        whole = Range(Position(0, 0), Position(4, 0))
+        actions = await features.code_actions(handle, rel, whole, only=["source.organizeImports"])
+        assert actions, "ruff should offer organizeImports"
+        organize = actions[0]
+        assert organize.get("edit"), organize  # resolve で edit が付いている（S-4）
+        # 日本語の後ろの列（コードポイント 14）は utf-8 では 18。文字境界なので送れる。
+        after_cjk = Range(Position(3, 0), Position(3, len("name = '日本語'")))
+        await features.code_actions(handle, rel, after_cjk, only=["quickfix"])
+        sent = handle.client  # 落ちていない（ruff は文字の途中の列でパニックする。S-11）
+        assert sent.is_connected
+    finally:
+        await pool.shutdown_all(300)
+    assert registry.live() == []
