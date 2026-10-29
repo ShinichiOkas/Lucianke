@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -39,6 +40,7 @@ __all__ = [
     "data_version",
     "diagnostics_for",
     "file_by_path",
+    "files_fingerprint",
     "files_in_scope",
     "references_from",
     "references_to",
@@ -273,6 +275,20 @@ def symbol_at(
         return (end - start, 0 if on_name else 1, -start, -str(row[3]).count("."))
 
     return _symbol(min(rows, key=key))
+
+
+def files_fingerprint(conn: sqlite3.Connection, workspace_id: str) -> str:
+    """ワークスペースの全ファイルの ``(path, sha256)`` の指紋（16 進）。ファイルの追加・削除・内容の変更で変わる。
+
+    LSP の結果を ``relations`` に書き戻したあと「この集合は完全」と覚えておく目印の鮮度に使う（T-06・T-07 の 2 回目以降を
+    PaaD から答えてよいかの判定）。索引に載っていないファイルの変更は見えない（索引が見るものだけが対象）。
+    """
+    digest = hashlib.sha1()
+    for path, sha in conn.execute(
+        "SELECT path, sha256 FROM files WHERE workspace_id = ? ORDER BY path", (workspace_id,)
+    ):
+        digest.update(f"{path}|{sha};".encode())
+    return digest.hexdigest()
 
 
 # --- 全文検索 ---------------------------------------------------------------------------

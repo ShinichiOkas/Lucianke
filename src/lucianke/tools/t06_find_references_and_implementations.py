@@ -1,6 +1,10 @@
 """T-06 ``find_references_and_implementations``（仕様書 §11.3）。参照箇所（使用種別つき）・実装・型階層を列挙する。
 
-``structural`` 版: PaaD の ``relations``（``target_urn`` が対象）から答える。LSP による ``exact`` は別の役が足す。
+``structural`` 版: PaaD の ``relations``（``target_urn`` が対象）から答える。
+``exact`` 版（仕様書 T-06 処理規約 2）: LSP が ``ready`` なら ``references`` で集め（``_lsp_exact`` の経路）、``relations`` に ``exact`` で書き戻す。
+2 回目以降は、目印が新しければ LSP を呼ばず PaaD の ``exact`` 行だけで答える（LSP が止まっていても ``exact``。設計書 R-11）。
+LSP が ``ready`` でない・時間切れ・失敗なら ``structural``（今までどおり）に降格する。実装・型階層は LSP の実装検索が無いので
+``exact`` の応答でも索引の継承関係からの推定のまま（応答の ``warnings`` に書く）。
 
 * 参照: ``relations`` のうち ``target_urn`` が対象の行。1 参照箇所 = 1 レコード（``records_key="references"``）。同じ
   ``(path, line, col)`` に複数の行があれば 1 つにまとめる（使用種別は ``impl > type > call > rw > w > r > import`` で選ぶ）。
@@ -13,23 +17,37 @@
   （その行は ``conf=lexical_fallback``。応答は ``mixed``）。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
+``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from pydantic import Field
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.model import Confidence, EngineChoice, Kind, SymbolRecord, Tier
+from lucianke.core.model import (
+    Capability,
+    Confidence,
+    EngineChoice,
+    FileInfo,
+    Kind,
+    SymbolRecord,
+    Tier,
+)
 from lucianke.core.records import Record, ToolOutput
 from lucianke.core.urn import LexSel, Urn
+from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
+from lucianke.lsp import features
 from lucianke.syntax.heuristic import lexical_scan
+from lucianke.tools import _lsp_exact as lx
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._nav import (
     SourceLines,
@@ -45,6 +63,8 @@ from lucianke.tools._nav import (
 from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.workspace.paths import to_abs
 from lucianke.workspace.types import Workspace
+
+_log = logging.getLogger("lucianke.tools.t06")
 
 UseName = Literal["r", "w", "rw", "call", "type", "import", "impl"]
 
@@ -63,6 +83,11 @@ _USE_RANK = {
     "r": 1,
     "import": 0,
 }  # 同じ位置の複数の行から選ぶ
+
+HIERARCHY_NOTE = (
+    "実装と型階層は索引の継承関係（基底クラス名の一致）からの推定で、直接の基底・派生（実装は派生の推移閉包）だけです"
+    "（LSP の実装検索は使っていません）。"
+)
 
 ACCURACY_WARNING = (
     "LSP が利用できないため構文木のみで解決しました。参照は識別子の一致で、スコープと型を区別しないため同名の別シンボルの参照を"
@@ -256,25 +281,42 @@ def _collect_refs(
     args: FindReferencesArgs,
     files: _Files,
     source: SourceLines,
+    exact_rows: Sequence[queries.ReferenceRow] | None = None,
 ) -> list[_Ref]:
+    """``exact_rows`` があればそれだけを参照の元にする（LSP の答え、または PaaD の ``exact`` 行）。無ければ ``relations`` の全行。"""
     ws_id = ws.workspace_id
     in_scope: set[str] | None = None
     if args.scope_paths:
         in_scope = {f.path for f in queries.files_in_scope(conn, ws_id, _glob_list(args.scope_paths))}
     wanted = set(args.use_kinds) if args.use_kinds else None
     best: dict[tuple[str, int, int], _Ref] = {}
-    for row in queries.references_to(conn, str(sym.urn), _REF_KINDS, include_tests=args.include_tests):
+    if exact_rows is None:
+        rows: Sequence[queries.ReferenceRow] = queries.references_to(
+            conn, str(sym.urn), _REF_KINDS, include_tests=args.include_tests
+        )
+    else:
+        rows = exact_rows
+    for row in rows:
         if row.path is None or row.site is None:
             continue
         path = str(row.path)
         if in_scope is not None and path not in in_scope:
+            continue
+        is_test = files.is_test(path) if exact_rows is not None else row.is_test
+        if not args.include_tests and is_test:
             continue
         use = use_of(row.use_kind, row.relation_kind)
         if wanted is not None and use not in wanted:
             continue
         key = (path, row.site.line + 1, row.site.col + 1)
         prev = best.get(key)
-        if prev is not None and _USE_RANK[prev.use] >= _USE_RANK[use]:
+        if prev is not None and (
+            _USE_RANK[prev.use] > _USE_RANK[use]
+            or (
+                _USE_RANK[prev.use] == _USE_RANK[use]
+                and not (row.confidence is Confidence.EXACT and prev.confidence is not Confidence.EXACT)
+            )
+        ):
             continue
         name = enclosing_name_of(row.source_urn)
         best[key] = _Ref(
@@ -286,7 +328,7 @@ def _collect_refs(
             enclosing_urn=row.source_urn if name is not None else None,
             enclosing_name=name,
             snippet=source.text(path, row.site.line) if args.context_snippet else "",
-            is_test=row.is_test,
+            is_test=is_test,
             confidence=row.confidence,
         )
     if args.include_declaration:
@@ -306,7 +348,7 @@ def _collect_refs(
                     enclosing_name=parent,
                     snippet=source.text(path, sel.start.line) if args.context_snippet else "",
                     is_test=files.is_test(path),
-                    confidence=sym.confidence,
+                    confidence=Confidence.EXACT if exact_rows is not None else sym.confidence,
                 )
     return [best[k] for k in sorted(best)]
 
@@ -357,11 +399,51 @@ def _lexical_refs(
     return out
 
 
-def _work(db_path: Any, ws: Workspace, args: FindReferencesArgs) -> _Found:
-    """同期の本体（``asyncio.to_thread`` で走らせる）。読み取り接続はここで開いて閉じる。"""
+@dataclass(slots=True)
+class _Pre:
+    """対象の解決と、2 回目以降（PaaD の ``exact`` 行で答えてよいか）の判定。"""
+
+    sym: SymbolRecord
+    info: FileInfo | None
+    token: str  # この時点の files_fingerprint（目印の鮮度。LSP に聞く前に取る）
+    cached: list[queries.ReferenceRow] | None  # 目印が新しいときの PaaD の exact 行
+    structural_hits: int = 0  # relations にある参照の数（LSP が 0 件と答えたときの突き合わせ用）
+
+
+def _refs_wanted(args: FindReferencesArgs) -> bool:
+    return args.query_type in ("references", "all")
+
+
+def _load_refs(urn: str) -> Any:
+    return lambda conn: queries.references_to(conn, urn, _REF_KINDS)
+
+
+def _pre(db_path: Any, ws: Workspace, args: FindReferencesArgs) -> _Pre:
     with reader(db_path) as conn:
         sym = resolve_target(conn, ws, args.target)
         info = queries.file_by_path(conn, ws.workspace_id, str(sym.path))
+        token = queries.files_fingerprint(conn, ws.workspace_id)
+        cached = (
+            lx.cached_rows(
+                conn, db_path, ws.workspace_id, "refs", str(sym.urn), _load_refs(str(sym.urn)), token=token
+            )
+            if _refs_wanted(args)
+            else None
+        )
+        hits = queries.count_references_to(conn, str(sym.urn), _REF_KINDS) if cached is None else 0
+        return _Pre(sym, info, token, cached, hits)
+
+
+def _work(
+    db_path: Any,
+    ws: Workspace,
+    args: FindReferencesArgs,
+    pre: _Pre,
+    exact_rows: Sequence[queries.ReferenceRow] | None = None,
+) -> _Found:
+    """同期の本体（``asyncio.to_thread`` で走らせる）。読み取り接続はここで開いて閉じる。"""
+    with reader(db_path) as conn:
+        sym, info = pre.sym, pre.info
         found = _Found(
             target=sym,
             language=info.language if info is not None else "n/a",
@@ -370,7 +452,7 @@ def _work(db_path: Any, ws: Workspace, args: FindReferencesArgs) -> _Found:
         files = _Files(conn, ws.workspace_id)
         source = SourceLines(ws)
         if args.query_type in ("references", "all"):
-            found.refs = _collect_refs(conn, ws, sym, args, files, source)
+            found.refs = _collect_refs(conn, ws, sym, args, files, source, exact_rows)
             if args.include_lexical_in_other_files:
                 known = {(r.path, r.line, r.col) for r in found.refs}
                 found.refs += _lexical_refs(conn, ws, sym, args, known, found)
@@ -462,12 +544,81 @@ def _graph(found: _Found, ws_id: str) -> dict[str, Any]:
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
+def _confirm(db_path: Any, ws_id: str, urn: str, rows: Sequence[queries.ReferenceRow], token: str) -> bool:
+    with reader(db_path) as conn:
+        return lx.confirm_marker(conn, db_path, ws_id, "refs", urn, _load_refs(urn), rows, token=token)
+
+
+async def _exact_references(
+    ctx: ToolContext, ws: Workspace, db_path: Any, route: lx.LspRoute, pre: _Pre
+) -> list[queries.ReferenceRow]:
+    """LSP の ``references`` で集め、``relations`` に ``exact`` で書き戻して、その行を返す（失敗は ``lx.LSP_FAILURES``）。"""
+    sym = pre.sym
+    assert route.handle is not None
+    sel = sym.selection or sym.range
+    locs = await features.references(route.handle, sym.path, sel.start, include_declaration=False)
+    target_urn = str(sym.urn)
+    sites = lx.SiteIndex(ctx.services, ws)
+    facts = []
+    rows: list[queries.ReferenceRow] = []
+    for loc in locs:
+        rel = str(loc.rel)
+        start = (loc.range.start.line, loc.range.start.col)
+        if loc.rel == sym.path and (sel.start.line, sel.start.col) <= start < (sel.end.line, sel.end.col):
+            continue  # 宣言そのもの
+        fact = lx.reference_fact(
+            target_urn, rel, loc.range, (await sites.of(rel)).get(start), ws.workspace_id
+        )
+        if fact is not None:
+            facts.append(fact)
+            rows.append(lx.row_of(fact, rel))
+    if not rows and pre.structural_hits:
+        # 起動直後の LSP は ``ready`` でも解析が済まず 0 件を返すことがある（basedpyright の実測）。索引に参照があるのに
+        # 0 件なら信用せず、LSP は索引中として構文木の答えに降格する（呼び直すと exact になる）。
+        raise LuciankeError(
+            ErrorCode.E_LSP_UNAVAILABLE,
+            "the LSP found no references although the index has some; it may not have finished analysing",
+            details={"reason": "indexing"},
+        )
+    wrote = await lx.write_facts(ctx.services, facts, label=f"lsp:references:{sym.qualified_name}")
+    if wrote:  # 0 件の答えは覚えない（未完了の LSP の空振りを固定しないため）
+        await asyncio.to_thread(_confirm, db_path, ws.workspace_id, target_urn, rows, pre.token)
+    return rows
+
+
 async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     await reject_unsupported_revision(ctx, args.revision)
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]
-    found = await asyncio.to_thread(_work, db_path, ws, args)
+    pre = await asyncio.to_thread(_pre, db_path, ws, args)
+
+    # 経路: PaaD の exact 行（2 回目以降）→ LSP（1 回目）→ structural（降格）
+    engine = EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, warning=ACCURACY_WARNING)
+    exact_rows: Sequence[queries.ReferenceRow] | None = None
+    if _refs_wanted(args):
+        if pre.cached is not None:
+            exact_rows = pre.cached
+            engine = EngineChoice(
+                engine=ENGINE_LSP_CACHE,
+                confidence=Confidence.EXACT,
+                lsp_status=lx.lsp_status_of(ctx.services, ws, pre.info),
+            )
+        elif pre.info is not None:
+            route = await lx.route_for(ctx.services, ws, pre.info, Capability.REFERENCES)
+            if route is not None:
+                engine = route.choice
+                if route.exact:
+                    try:
+                        exact_rows = await _exact_references(ctx, ws, db_path, route, pre)
+                    except lx.LSP_FAILURES as exc:
+                        if not lx.is_lsp_failure(exc):
+                            raise
+                        _log.info("LSP references failed; answering from the index: %r", exc)
+                        engine = lx.degraded_choice(route, exc)
+                if exact_rows is None:
+                    engine = replace(engine, warning=(engine.warning or "") + HIERARCHY_NOTE)
+    found = await asyncio.to_thread(_work, db_path, ws, args, pre, exact_rows)
 
     target_urn = str(found.target.urn)
     records = [_ref_record(L, r, i, target_urn, args.context_snippet) for i, r in enumerate(found.refs)]
@@ -499,6 +650,11 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     if args.query_type in ("references", "all"):
         head.append(("references", f"{totals['files']} files, {totals['sites']} sites (tests: {tests})"))
 
+    hierarchy_note = (
+        [HIERARCHY_NOTE]
+        if exact_rows is not None and args.query_type in ("implementations", "type_hierarchy", "all")
+        else []
+    )
     data: dict[str, Any] = {
         "target": found.target.to_json(),
         "implementations": [s.to_json() for s in found.implementations],
@@ -518,13 +674,13 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     return ToolOutput(
         records=records,
         max_confidence=Confidence.EXACT,
-        engine=EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, warning=ACCURACY_WARNING),
+        engine=engine,
         page_unit="site",
         head_kv=head,
         data_static=data,
         tier=found.tier,
         detected_language=found.language,
-        warnings=tuple(found.warnings),
+        warnings=tuple(found.warnings) + tuple(hierarchy_note),
         total_estimate=None,
     )
 

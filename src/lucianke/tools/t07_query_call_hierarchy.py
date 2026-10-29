@@ -1,6 +1,11 @@
 """T-07 ``query_call_hierarchy``（仕様書 §11.3）。関数・メソッドを起点に、呼び出し元（incoming）・呼び出し先（outgoing）を木で返す。
 
-``structural`` 版: PaaD の ``relations`` の ``CALLS`` エッジを深さ ``depth`` まで辿る。LSP の呼び出し階層（``exact``）は別の役が足す。
+``structural`` 版: PaaD の ``relations`` の ``CALLS`` エッジを深さ ``depth`` まで辿る。
+``exact`` 版（仕様書 T-07 処理規約 2）: LSP が ``ready`` なら呼び出し階層（prepare -> incoming / outgoing）で同じ木を作り、
+辺を ``relations`` に ``exact`` で書き戻す（``_lsp_exact.CallEdgeSource``）。2 回目以降は、ノードごとの目印が新しければ LSP を
+呼ばず PaaD の ``exact`` 行だけで答える（LSP が止まっていても ``exact``）。LSP が ``ready`` でない・時間切れ・失敗なら
+木ごと ``structural``（今までどおり）に降格する。外部（標準ライブラリ等）の呼び先は、LSP が返したファイルのパスから
+推定した ``lk://_ext/`` の URN で葉にする（最善努力）。
 
 * 木は ``(親, 子のシンボル)`` ごとに 1 ノード（同じ子が同じ親の中で何度も呼ぶときは最初の呼び出し箇所を表示し、残りは json の
   ``call_sites`` に入れる）。子は ``(呼び出し箇所のパス, 行)`` の順で、1 ノードあたり ``max_children`` まで。超過分は
@@ -15,23 +20,27 @@
 * ``dot`` / ``mermaid``: ``data_static["graph"]``。エッジは呼び出し元 → 呼び出し先（ラベル ``CALLS``、``attrs.guard`` に条件）。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
+``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from pydantic import Field
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.model import Confidence, EngineChoice, Kind, SymbolRecord, Tier
+from lucianke.core.model import Capability, Confidence, EngineChoice, FileInfo, Kind, SymbolRecord, Tier
 from lucianke.core.records import Record, ToolOutput
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME
+from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
+from lucianke.tools import _lsp_exact as lx
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._nav import (
     TargetRefArg,
@@ -43,6 +52,8 @@ from lucianke.tools._nav import (
 )
 from lucianke.tools._rev import reject_unsupported_revision
 
+_log = logging.getLogger("lucianke.tools.t07")
+
 DEPTH_MAX = 5
 NODE_CAP = 2000  # 木全体のノード数の歯止め（深さ 5 × 子 20 の爆発を防ぐ）
 CALLABLE_KINDS = frozenset({Kind.FUNCTION, Kind.METHOD, Kind.CONSTRUCTOR})
@@ -50,6 +61,8 @@ CONSTRUCTIBLE_KINDS = frozenset({Kind.CLASS, Kind.STRUCT})
 CONSTRUCTOR_NAMES = ("__init__", "constructor", "new")
 _EXTERNAL_PREFIX = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
 _ARROW = {"incoming": "<-", "outgoing": "->"}
+
+ACCURACY_NOTE = "relations の名前解決済みエッジを使うため、動的ディスパッチ（実装の取り違え・見落とし）と同名メソッドの区別が落ちます。"
 
 ACCURACY_WARNING = (
     "LSP が利用できないため構文木のみで解決しました。relations の名前解決済みエッジを使うため、動的ディスパッチ（実装の取り違え・"
@@ -124,8 +137,11 @@ class _Tree:
 class _Symbols:
     """シンボルと ``is_test`` の問い合わせ（URN・パスごとに 1 度）。"""
 
-    def __init__(self, conn: sqlite3.Connection, workspace_id: str) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, workspace_id: str, source: lx.CallEdgeSource | None = None
+    ) -> None:
         self.conn, self.ws = conn, workspace_id
+        self.source = source  # exact 経路の辺の供給（無ければ relations の全行）
         self._sym: dict[str, SymbolRecord | None] = {}
         self._test: dict[str, bool] = {}
 
@@ -167,7 +183,9 @@ def _call_edges(
     """``urns`` の CALLS エッジの相手（子）の URN → 呼び出し箇所。呼び出し箇所の順（パス、行）。"""
     grouped: dict[str, dict[tuple[str, int, int], _Site]] = {}
     for urn in urns:
-        if direction == "incoming":
+        if syms.source is not None:
+            rows = syms.source.rows(urn, direction, include_tests)
+        elif direction == "incoming":
             rows = queries.references_to(syms.conn, urn, ("CALLS",), include_tests=include_tests)
         else:
             rows = queries.references_from(syms.conn, urn, ("CALLS",))
@@ -246,11 +264,53 @@ def _expand(
     return kept, len(nodes) - len(kept)
 
 
-def _work(db_path: Any, ws: Any, args: QueryCallHierarchyArgs) -> _Tree:
+@dataclass(slots=True)
+class _Pre:
+    """対象の解決（``exact`` 経路の判定に言語・Tier が要る）。"""
+
+    sym: SymbolRecord
+    info: FileInfo | None
+
+
+def _pre(db_path: Any, ws: Any, args: QueryCallHierarchyArgs) -> _Pre:
     with reader(db_path) as conn:
         sym = resolve_target(conn, ws, args.target)
-        syms = _Symbols(conn, ws.workspace_id)
-        info = queries.file_by_path(conn, ws.workspace_id, str(sym.path))
+        return _Pre(sym, queries.file_by_path(conn, ws.workspace_id, str(sym.path)))
+
+
+@dataclass(slots=True)
+class _ExactCtx:
+    """``exact`` 経路でスレッドの中の ``CallEdgeSource`` を作るための材料。"""
+
+    loop: asyncio.AbstractEventLoop
+    services: Any
+    route: lx.LspRoute
+
+
+def _roots_of(conn: sqlite3.Connection, ws_id: str, sym: SymbolRecord) -> list[str]:
+    if sym.kind not in CALLABLE_KINDS | CONSTRUCTIBLE_KINDS:
+        return []
+    return [str(sym.urn)] + [u for d in ("incoming", "outgoing") for u in _start_urns(conn, ws_id, sym, d)]
+
+
+def _work(
+    db_path: Any, ws: Any, args: QueryCallHierarchyArgs, pre: _Pre, exact: _ExactCtx | None = None
+) -> tuple[_Tree, lx.CallEdgeSource | None]:
+    with reader(db_path) as conn:
+        sym, info = pre.sym, pre.info
+        source = None
+        if exact is not None:
+            source = lx.CallEdgeSource(
+                loop=exact.loop,
+                services=exact.services,
+                ws=ws,
+                db_path=db_path,
+                conn=conn,
+                route=exact.route,
+                token=queries.files_fingerprint(conn, ws.workspace_id),
+                roots=_roots_of(conn, ws.workspace_id, sym),
+            )
+        syms = _Symbols(conn, ws.workspace_id, source)
         tree = _Tree(
             root=sym,
             language=info.language if info is not None else "n/a",
@@ -268,7 +328,7 @@ def _work(db_path: Any, ws: Any, args: QueryCallHierarchyArgs) -> _Tree:
                     tree.root_truncated[direction] = skipped
             else:
                 tree.roots[direction] = []
-        return tree
+        return tree, source
 
 
 # --- 出力 ---------------------------------------------------------------------------------------
@@ -367,7 +427,42 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]
-    tree = await asyncio.to_thread(_work, db_path, ws, args)
+    pre = await asyncio.to_thread(_pre, db_path, ws, args)
+
+    # 経路: LSP の呼び出し階層（PaaD の exact 行が新しければそれ）→ structural（降格）
+    engine = EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, warning=ACCURACY_WARNING)
+    route = (
+        await lx.route_for(ctx.services, ws, pre.info, Capability.CALL_HIERARCHY)
+        if pre.info is not None
+        else None
+    )
+    tree: _Tree | None = None
+    source: lx.CallEdgeSource | None = None
+    if route is not None:
+        engine = replace(route.choice, warning=(route.choice.warning or "") + ACCURACY_NOTE)
+        try:
+            tree, source = await asyncio.to_thread(
+                _work, db_path, ws, args, pre, _ExactCtx(asyncio.get_running_loop(), ctx.services, route)
+            )
+        except lx.LSP_FAILURES as exc:
+            if not lx.is_lsp_failure(exc):
+                raise
+            _log.info("LSP call hierarchy failed; answering from the index: %r", exc)
+            if route.exact:
+                engine = lx.degraded_choice(route, exc)
+                engine = replace(engine, warning=(engine.warning or "") + ACCURACY_NOTE)
+        else:
+            if source is not None and source.from_lsp:
+                await source.flush()
+                engine = route.choice
+            else:
+                engine = EngineChoice(
+                    engine=ENGINE_LSP_CACHE,
+                    confidence=Confidence.EXACT,
+                    lsp_status=lx.lsp_status_of(ctx.services, ws, pre.info),
+                )
+    if tree is None:
+        tree, source = await asyncio.to_thread(_work, db_path, ws, args, pre, None)
     root_urn = str(tree.root.urn)
 
     records: list[Record] = []
@@ -416,10 +511,12 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
         head.append(("children", "; ".join(f"{d} {n} more" for d, n in tree.root_truncated.items())))
         data["root_children_truncated"] = dict(tree.root_truncated)
     warnings = ["the tree was cut at the node cap; narrow depth or max_children"] if tree.capped else []
+    if source is not None and source.skipped:
+        warnings.append(f"{source.skipped} call edge(s) were left out: the caller/callee is not in the index")
     return ToolOutput(
         records=records,
         max_confidence=Confidence.EXACT,
-        engine=EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, warning=ACCURACY_WARNING),
+        engine=engine,
         page_unit="tree-line",
         head_kv=head,
         data_static=data,
