@@ -25,6 +25,7 @@ from lucianke.syntax.support import (
     language_for_extension,
     unavailable_languages,
 )
+from lucianke.syntax.types import LanguageQueries
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -45,6 +46,14 @@ BEST_EFFORT = ("rust", "go", "c", "cpp", "c_sharp", "rst", "sql")
 
 def rp(s: str) -> RelPath:
     return RelPath(s)
+
+
+def wait_for_waiters(cache: TreeCache, n: int, timeout: float = 20.0) -> None:
+    """``n`` 本が進行中の解析を待つ状態になるまで、呼んだスレッド（解析する側）を止める。"""
+    end = time.monotonic() + timeout
+    while cache.stats().waits < n:
+        assert time.monotonic() < end, "waiters never arrived"
+        time.sleep(0.005)
 
 
 def py_src(n: int) -> bytes:
@@ -88,7 +97,7 @@ def test_registered_metadata() -> None:
     if "go" in SUPPORT:
         assert SUPPORT["go"].indent_default == IndentSpec("tab", 1)
     assert "**/test_*.py" in SUPPORT["python"].test_path_globs
-    assert SUPPORT["python"].queries.tags is None  # クエリは別の役が足す
+    assert all(isinstance(spec.queries, LanguageQueries) for spec in SUPPORT.values())  # 中身は別の役が足す
 
 
 def test_typescript_and_tsx_share_a_package_but_differ_in_grammar() -> None:
@@ -299,7 +308,9 @@ def test_concurrent_requests_for_the_same_key_parse_once() -> None:
     def load() -> bytes:
         nonlocal loads
         loads += 1
-        time.sleep(0.15)  # 他のスレッドがキーを引いて待ちに入るまで、解析を始めさせない
+        wait_for_waiters(
+            cache, n_threads - 1
+        )  # 他のスレッドが待ちに入るまで解析を始めさせない（時間に頼らない）
         return py_src(7) * 200
 
     def worker(i: int) -> None:
@@ -348,7 +359,7 @@ def test_failure_of_the_loader_reaches_waiters_and_does_not_poison_the_key() -> 
     seen: list[BaseException] = []
 
     def bad_load() -> bytes:
-        time.sleep(0.15)
+        wait_for_waiters(cache, 1)
         raise OSError("disk gone")
 
     def worker() -> None:
