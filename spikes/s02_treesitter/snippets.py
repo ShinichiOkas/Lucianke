@@ -74,7 +74,7 @@ def parse_with_deadline(parser: Parser, source: bytes, seconds: float, chunk: in
     """期限つき解析。(tree, timed_out)。timed_out のとき tree は途中までなので捨てる。
 
     read_callback が期限後に b"" を返すと入力終端として解析がすぐ終わる（4.8 MB・期限 50 ms で実測 53 ms）。
-    ついでに read_callback 版は解析中に GIL を手放すので、他スレッド（イベントループ）の停止が短くなる。
+    ついでに read_callback 版はチャンクごとにインタプリタへ戻るので、他スレッド（イベントループ）の停止が最長約 20 ms に縮む（並列にはならない）。
     例外を投げて中断する方式は不安定（SystemError になることがある）。progress_callback は 0.26.0/Windows でクラッシュする。
     """
     t_end = time.perf_counter() + seconds
