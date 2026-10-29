@@ -486,6 +486,7 @@ class FileInfo:
     byte_size: int
     is_test: bool
     confidence: Confidence
+    pagerank: float | None = None  # ``files.pagerank_score``（0〜1。未計算・グラフ未準備は ``None``）。T-03 の同順位の並びに使う
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
