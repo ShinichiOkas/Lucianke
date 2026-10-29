@@ -82,7 +82,7 @@
 ## 1.3 スコープ外
 
 - M2・M3 のコンポーネント（Git 時系列、データフロー、契約抽出、SMT）は **境界と置き場所** だけを定め、内部設計は各マイルストーン着手時に本書を改版して足す。
-- IDE 拡張、HTTP トランスポート（MAY）の設計。
+- IDE 拡張。HTTP 系トランスポートは提供しない（仕様書 §5.1、OD-22）。Lucianke は常にホストから子プロセスとして起動される stdio のコマンド実行型である。
 
 ---
 
@@ -1861,7 +1861,7 @@ build-backend = "hatchling.build"
 
 | ID | 確かめること | 合格条件 | 不合格時の代替 |
 |---|---|---|---|
-| S-1 | `mcp` 2.x の低水準サーバーで、`tools/list` のスキーマを自前 JSON で返せるか、`tools/call` の結果に `structuredContent` と `isError` を載せられるか、`roots/list` を要求できるか、トランスポートに任意のバイナリストリーム（退避 fd）を渡せるか | 4 点とも可能で、SDK クライアントから往復できる | 高水準 API へ切替（スキーマは後処理で `additionalProperties: false` を付ける）。ストリームが渡せなければ `sys.stdout` を退避 fd のラッパに戻す |
+| S-1 | `mcp` 2.x の低水準サーバーで、`tools/list` のスキーマを自前 JSON で返せるか、`tools/call` の結果に `structuredContent` と `isError` を載せられるか、`roots/list` を要求できるか、トランスポートに任意のバイナリストリーム（退避 fd）を渡せるか。あわせて、HTTP 系の依存（starlette / uvicorn 等）が extras で外せるか、外せないなら stdio 起動時に import されないか | 4 点とも可能で、SDK クライアントから往復できる | 高水準 API へ切替（スキーマは後処理で `additionalProperties: false` を付ける）。ストリームが渡せなければ `sys.stdout` を退避 fd のラッパに戻す |
 | S-2 | `tree-sitter` 0.26 の API（`Language(mod.language())`、`Query` / `QueryCursor`）と、2024 年で更新が止まった文法（typescript / cpp / json / xml / toml）の ABI 互換 | 対象 7 文法で解析・タグクエリが通る | 互換しない文法は版を下げるか、`tree-sitter-language-pack` を避けて個別に再ビルド（ライセンス再確認） |
 | S-3 | `ast-grep-py` でパターン検索と書き換え案（メタ変数展開）が得られるか | `print($MSG)` → `logger.info($MSG)` の一致と置換テキストが取れる | M2 まで保留。自前の Tree-sitter クエリで検索のみ |
 | S-4 | `basedpyright` を pip で入れ、`basedpyright-langserver --stdio` 相当で起動し、`initialize` → `didOpen` → `publishDiagnostics` → `definition` が通るか。`positionEncodings` に `utf-8` を返すか | Windows / macOS / Linux で通る | `pyright` + Node を利用者の環境に求める |

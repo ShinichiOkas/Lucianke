@@ -100,7 +100,7 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 - 外部 DB サーバー（Neo4j 等）、GPU、ネットワーク上のインデックスサービスへの依存。
 - IDE 拡張や GUI。Lucianke はエージェント向けの機械インターフェースに徹する。
 - 任意コードの実行（テストランナー・ビルドの起動）。エージェントは既存のシェルツールで行う。
-- `stdio` 以外のトランスポートの必須化（Streamable HTTP は MAY）。
+- `stdio` 以外のトランスポート。HTTP 系は提供しない（§5.1）。
 
 ## 1.4 中核原則
 
@@ -351,7 +351,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 ## 5.1 MCP との対応
 
-- Lucianke は MCP サーバーとして `tools/list` と `tools/call` を提供する。トランスポートは `stdio` を必須（MUST）とし、Streamable HTTP は任意（MAY）とする。
+- Lucianke は MCP サーバーとして `tools/list` と `tools/call` を提供する。トランスポートは **`stdio` のみ**（MUST）。ホストが Lucianke をコマンドとして子プロセス起動し、標準入出力で JSON-RPC をやり取りする。HTTP 系トランスポートは提供しない（師匠 2026-10-29「stdio のコマンド実行型。HTTP 型はあまり望ましくない」。必要が生じたら §17 OD-22 として改めて決める）。
 - 各ツールは `tools/list` で JSON Schema（入力スキーマ）を公開する。入力スキーマには第 5.2 節の共通パラメータを含めなければならない（MUST）。
 - ツール実行の結果は `tools/call` の `content[0]` に `type: "text"` として本章のエンベロープ（第 5.4 節）を格納する。`format: "json"` のときは、同じ JSON を `structuredContent` にも格納してもよい（MAY）。
 - ツール実行中の失敗（対象が見つからない、前提条件不一致など）は JSON-RPC エラーではなく、`isError: true` を伴う通常の結果として返す（MUST）。JSON-RPC エラーはプロトコル違反（未知のツール名、スキーマ違反の引数）に限る。
@@ -3039,7 +3039,7 @@ json の `data`:
 2. 子プロセス（LSP、ctags、grep、ソルバ）は `stdout` / `stderr` を必ずパイプで捕捉し、親の `stdout` を継承させない（MUST）。子の `stderr` はログへ転送する。
 3. 標準ライブラリや依存ライブラリが `stdout` に書く経路（`print`、警告、進捗バー）は、起動時に `stdout` のファイル記述子を差し替えて `stderr` に流す（SHOULD）。
 4. 受入: 起動から終了までの `stdout` を記録し、各行が JSON として解析でき、かつ JSON-RPC のメッセージであることを検査する（§14.2 の全テストで常時検査する）。
-5. Streamable HTTP を併せて提供する場合（MAY）も、ツールの挙動は同一とする。
+5. HTTP 系トランスポートは提供しない（§5.1）。ネットワークを聴くポートを開かないことは §13.7 の受入でも確かめる。
 
 ## 12.2 位置エンコーディング
 
@@ -3399,6 +3399,7 @@ Lucianke は **できるだけ自由なライセンス** で公開する。本�
 | OD-18 | LSP 不在時の Code Action | (a) 提供しない（T-13 は `E_LSP_UNAVAILABLE`）、(b) Tree-sitter だけで安全に行える数種（未使用 import の除去など）を内蔵する | **(a) で M1 を閉じる。** 需要が見えたら (b) を M2 以降で | M2 着手前 |
 | OD-19 | 本体のライセンス | (a) MIT、(b) Apache-2.0、(c) MIT OR Apache-2.0 のデュアル | **決定済み: (a) MIT**（師匠 2026-10-29「ライセンスは MIT に確定」）。リポジトリ直下に `LICENSE` を置いた。依存側の確認は第 16 章 | 決定済み |
 | OD-20 | Git 層のライブラリ（Python を選んだ場合） | (a) dulwich（Apache-2.0 側を選択）、(b) pygit2（GPL-2.0-only + リンク例外。GPL 文面の同梱が要る）、(c) GitPython（BSD-3。シェルの git を起動） | **(a) を第一候補。** 純 Python で寛容。M2 のベンチマーク（NFR-PERF-2）で足りなければ (b) を第 16 章 L-3 の手続きで検討する。(c) は §4.2 の方針と相反。アーキテクチャ設計書 §11.1 は dulwich を M1 の必須依存に置いた（T-02 / T-05 の revision 解決に要る） | M1 着手前 |
+| OD-22 | HTTP 系トランスポート | (a) 提供しない（stdio のみ）、(b) Streamable HTTP を任意で提供 | **決定済み: (a)**（師匠 2026-10-29「stdio のコマンド実行型でできるよね？ HTTP 型はあまり望ましくない」）。配布物に HTTP サーバーの起動経路を持たない | 決定済み |
 | OD-21 | Cython と Jinja2 の Tree-sitter 文法 | Cython: 専用文法が未特定。Jinja2: 公式系に無く、参考の cathaysia/tree-sitter-jinja は Apache-2.0 | **着手前に一次情報で確認して決める。** 見つからなければ Cython は Python 文法で寛容に解析、Jinja2 は自前の字句解析で `{{ }}` / `{% %}` だけを拾う | B1b / B7 着手前（M2） |
 
 ---
