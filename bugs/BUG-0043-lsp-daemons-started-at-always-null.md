@@ -16,3 +16,6 @@ HEAD（c613fb4 時点）では再現しない。見た作業ツリー（b24f766�
 - 回帰テスト `tests/unit/test_t00_set_python_env_restart.py::test_status_reports_started_at_of_the_python_daemons_after_set_python_env`（実物の `RuntimeHub` + `LspPool` + 偽 LSP。`_lsp_daemons` の `started_at` が `null` でなく、`set_python_env` の呼び出し時刻より後）。
 - `tests/contract/test_T00_configure.py::test_post3_...` も `started_at > called_at` を検査している（偽プールでの確認）。
 - 票の「サーバーの名前が T-00 では basedpyright、T-08 の `lsp_sources[].server` では pyright」は別件（BUG-0037）。
+
+## HEAD での再確認（dogfood-2、2026-10-29 15:21、42640ac の使い捨て作業ツリー）
+- HEAD では再現しない。`set_python_env`（インタープリタ指定）の直後の `status` で `lsp_daemons[]` の `started_at` は `basedpyright: 2026-10-29T06:21:09.541+00:00`、`ruff: 2026-10-29T06:21:09.579+00:00`（呼び出しより後）。見たコミットが `LspHandle.started_at` の追加（8a6f40f）より前（b24f766）だったための誤報。閉じてよい。
