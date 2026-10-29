@@ -92,9 +92,29 @@ async def real(registry: ProcessRegistry, tmp_path: Path):
     assert await pool.wait_ready("python", ws, 60_000), pool.status("python", ws)
     handle = pool.get("python", ws)
     assert handle is not None
+    await warm_up(handle, ws, [ROUTES, PAYMENT])
     yield Real(pool, handle, ws)
     await pool.shutdown_all(300)
     assert registry.live() == []
+
+
+async def warm_up(handle: LspHandle, ws: Workspace, rels: list[RelPath]) -> None:
+    """文書を開き、サーバーが最初の診断（= その文書の解析の完了）を返すまで待つ。
+
+    ``ready`` の合図（診断・``$/progress end``・猶予時間）は basedpyright の解析の完了を意味しない。何も開いていなければ猶予時間
+    （このフィクスチャでは 1 秒）で ``ready`` になるが、そのとき basedpyright はまだ何も解析していない。最初の要求が解析
+    そのものを払うので、負荷の下では hover・definition・references の 3 秒の期限（§12.3）を超えうる（BUG-0012）。
+    要求の期限を延ばしたり再試行したりせず、サーバーが解析を終えたという合図を待ってから本番の要求に入る。
+    """
+    for rel in rels:
+        text = (ws.root / rel).read_bytes().decode("utf-8")
+        handle.documents.sync(rel, text, "python")
+    for rel in rels:
+        sent_at = handle.documents.sent_at_of(rel)
+        assert sent_at is not None
+        assert await handle.diagnostics.wait_for(rel, min_version=1, sent_at=sent_at, timeout_ms=60_000), (
+            f"basedpyright did not finish analysing {rel}"
+        )
 
 
 @needs_basedpyright
