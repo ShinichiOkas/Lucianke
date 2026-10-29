@@ -467,6 +467,7 @@ def build_plan(cands: list[Cand], counts: dict[str, int], seed: int) -> tuple[li
     cands = sorted(cands, key=lambda c: (c.fx, c.rel, c.line, c.urn))
     used: set[str] = set()
     chosen: dict[str, list[Cand]] = {}
+    positions: dict[str, list[str]] = {}
     info: dict[str, Any] = {}
     for cat, n in counts.items():
         pool = [c for c in cands if eligible(cat, c)]
@@ -491,6 +492,14 @@ def build_plan(cands: list[Cand], counts: dict[str, int], seed: int) -> tuple[li
             rng.shuffle(rest)
             picked += rest[:left]
         used.update(c.urn for c in picked)
+        positions[cat] = ["end"] * len(picked)
+        if cat == "insert_member" and len(picked) < n and pool:
+            # 容器の数が足りないときは、同じ容器の先頭側（position=start）への挿入を足す（別の操作）
+            again = list(pool)
+            rng.shuffle(again)
+            extra = again[: n - len(picked)]
+            picked += extra
+            positions[cat] += ["start"] * len(extra)
         chosen[cat] = picked
         info[cat] = {
             "requested": n, "selected": len(picked), "eligible": len(pool),
@@ -514,7 +523,7 @@ def build_plan(cands: list[Cand], counts: dict[str, int], seed: int) -> tuple[li
             elif cat in ("insert_member", "insert_after"):
                 args["new_code"] = insert_code(c, operation)
                 if cat == "insert_member":
-                    args["position"] = "end"
+                    args["position"] = positions[cat][i]
             ops.append(Op(0, cat, operation, c, transform, args))
     random.Random(f"{seed}:order").shuffle(ops)  # 区分を混ぜる（復元検査の 50 件が区分に偏らない）
     for i, op in enumerate(ops):
@@ -634,14 +643,18 @@ class TsServer:
             self.version = pkg.get("version")
         except (OSError, ValueError):
             pass
-        res = await self._request("open", {"file": str(self.root / "__probe__.ts"), "fileContent": "const a = 1;\n",
-                                           "scriptKindName": "TS", "projectRootPath": str(self.root)})  # fmt: skip
-        return bool(res and res.get("success"))
+        try:  # 自己診断: 正しい断片は 0 件、壊れた断片は 1 件以上
+            good, _ = await self._syntax_count("__probe__.ts", "const a = 1;\n")
+            bad, _ = await self._syntax_count("__probe__.ts", "function f( {\n")
+        except (OSError, ConnectionError, TimeoutError, ValueError):
+            return False
+        return good == 0 and bad > 0
 
     async def _read_message(self) -> dict[str, Any]:
         assert self.proc is not None and self.proc.stdout is not None
         while True:
             head, sep, rest = self._buf.partition(b"\r\n\r\n")
+            head = head.lstrip()  # 前のメッセージの末尾の改行
             if sep and head.lower().startswith(b"content-length:"):
                 n = int(head.split(b":", 1)[1].strip())
                 if len(rest) >= n:
@@ -652,12 +665,18 @@ class TsServer:
                 raise ConnectionError("tsserver closed")
             self._buf += chunk
 
-    async def _request(self, command: str, arguments: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] | None:
+    async def _request(
+        self, command: str, arguments: dict[str, Any], timeout: float = 30.0, *, wait_response: bool = True
+    ) -> dict[str, Any] | None:
+        """tsserver へ要求を送る。``open`` / ``close`` は応答を返さない（``wait_response=False``）。"""
         assert self.proc is not None and self.proc.stdin is not None
         self.seq += 1
         seq = self.seq
-        self.proc.stdin.write((json.dumps({"seq": seq, "type": "request", "command": command, "arguments": arguments}) + "\n").encode())
+        line = json.dumps({"seq": seq, "type": "request", "command": command, "arguments": arguments})
+        self.proc.stdin.write((line + "\n").encode())
         await self.proc.stdin.drain()
+        if not wait_response:
+            return None
 
         async def wait() -> dict[str, Any]:
             while True:
@@ -670,12 +689,13 @@ class TsServer:
     async def _syntax_count(self, rel: str, text: str) -> tuple[int, list[dict[str, Any]]]:
         path = str(self.root / rel)
         kind = "TSX" if rel.endswith(".tsx") else "TS"
-        await self._request("open", {"file": path, "fileContent": text, "scriptKindName": kind, "projectRootPath": str(self.root)})
+        await self._request("open", {"file": path, "fileContent": text, "scriptKindName": kind, "projectRootPath": str(self.root)},
+                            wait_response=False)
         try:
             res = await self._request("syntacticDiagnosticsSync", {"file": path})
         finally:
             with contextlib.suppress(Exception):
-                await self._request("close", {"file": path})
+                await self._request("close", {"file": path}, wait_response=False)
         body = (res or {}).get("body") or []
         return len(body), body
 
