@@ -1362,11 +1362,11 @@ class Plan:
 規約:
 
 - 同一ファイル内の hunk は **後ろから** 適用する（`range.start` の降順）。先に適用した hunk が前方の座標を動かさないため、すべての hunk を適用前座標のまま書ける。
-- hunk の範囲が重なっていれば計画は不正。`E_INVALID_ARGUMENT`（`details.reason: "overlapping_edits"`）とし、ログに計画を残す（実装で確定 2026-10-29。旧版は `E_UNSUPPORTED` と書いていた。重なりは LSP またはツールが作った計画の誤りで、機能が無いのではないため）。
+- hunk の範囲が重なっていれば計画は不正。`E_INVALID_ARGUMENT`（`details.reason: "overlapping_edits"`）とし、ログに計画を残す（実装で確定 2026-10-29。旧版は `E_UNSUPPORTED` と書いていた。重なりは計画の誤りで、機能が無いのではないため）。
 - 位置の変換は `LineIndex`（`core/textpos.py`）だけが行う。LSP の位置（UTF-16 または交渉した UTF-8 単位）→ コードポイント（`LineIndex.from_lsp`）、コードポイント → バイトオフセット（`LineIndex.to_byte`。Tree-sitter 用）。
 - `WorkspaceEdit` → `Plan` の変換（`plan.from_workspace_edit`）:
   1. `documentChanges` があればそれを、無ければ `changes` を使う。
-  2. `TextDocumentEdit` の URI を `workspace/paths.py` でルート相対に直す。ルート外なら `E_INVALID_ARGUMENT`（`details.reason: "edit_outside_workspace"`。実装で確定 2026-10-29。旧版は `E_UNSUPPORTED`）。同じ文書への `TextDocumentEdit` が 2 つ以上あるときは `E_UNSUPPORTED`（`details.reason: "repeated_document_edit"`。1 文書の編集は 1 つの `TextDocumentEdit` にまとまっている前提で、分割された列の順序保証を M1 では持たない）。
+  2. `TextDocumentEdit` の URI を `workspace/paths.py` でルート相対に直す。ルート外なら `E_INVALID_ARGUMENT`（`details.reason: "edit_outside_workspace"`。実装で確定 2026-10-29。旧版は `E_UNSUPPORTED`）。同じ文書への `TextDocumentEdit` が 2 つ以上あるときは `E_UNSUPPORTED`（`details.reason: "repeated_document_edit"`。同じ文書への編集が複数あると座標が逐次〔前の編集を適用した後の座標〕になり、適用前座標の hunk にできないため。改名後の URI への編集は旧パスの文書として数える）。
   3. `textDocument.version` が付いていて `lsp/documents.py` の現在版と違えば `E_PRECONDITION_FAILED`（`details.reason: "lsp_document_version_mismatch"`）。
   4. `RenameFile` は `renames` に、`CreateFile` / `DeleteFile` は `E_UNSUPPORTED`。
   5. `TextEdit` の `range` を `LineIndex.from_lsp` で変換し `Hunk` にする。`newText` は正規化しない（LSP が返した本文をそのまま使う。改行だけ `"\n"` に揃える）。
@@ -1394,9 +1394,9 @@ class Plan:
 2. BOM を外したテキストに hunk を後ろから適用し、適用後のテキストと **適用後座標での編集範囲** を得る（`LineIndex.shift` で前方の hunk による行ずれを加算）。
 3. `syntax/parsers.py` のプールから Parser を借り、**`TreeCache` を経由せず** 一時解析する。得られた構文木と新しいバイト列は `SyntaxCheckResult` に抱え、Written 成功後に Reindexed が新しいキー `(ws, path, sha_after)` で `TreeCache` に登録する（二重解析を避ける）。
 4. エラーノードの集合を取る: 走査して `is_error` または `is_missing` のノードを `(start_line, end_line, kind, node_type)` で集める。編集前の集合は `TreeCache` にある元の木から同じ方法で取る。
-5. 判定: `had_errors_before == False` ならファイル全体で新集合が空であること。そうでなければ、**編集範囲（適用後座標。前後 1 行を含む窓）の中のエラーノードの個数**が編集前の同じ窓の個数を超えないこと。エラーノードの比較は位置の一致ではなく窓の中の個数で行う（Python は構文が壊れると位置の粗い 1 個の大きな ERROR になり、位置では比べられない。S-2 で確認。実装で確定 2026-10-29）。**既知の盲点**: 窓の中の既存の壊れを直しつつ、同じ窓の中に別の壊れを 1 つ足すと、個数が変わらず見逃す（`had_errors_before == False` の場合はファイル全体で検査するのでこの盲点は無い）。
+5. 判定: `had_errors_before == False` ならファイル全体で新集合が空であること。そうでなければ、**編集範囲（適用後座標。前後 1 行を含む窓）の中のエラーノードの個数**が編集前の同じ窓の個数を超えないこと。エラーノードの比較は位置の一致ではなく窓の中の個数で行う（Python は構文が壊れると位置の粗い 1 個の大きな ERROR になり、位置では比べられない。S-2 で確認。窓の外のエラー〔もともとあった別の箇所の壊れ〕は問わない。窓は編集範囲と実際に変わった行を覆う区間の前後 1 行。実装で確定 2026-10-29）。**既知の盲点**: 窓の中の既存の壊れを直しつつ、同じ窓の中に別の壊れを 1 つ足すと、個数が変わらず見逃す（`had_errors_before == False` の場合はファイル全体で検査するのでこの盲点は無い）。
    - 解析が期限（`parse` の期限。ADR-13）を超えたときは、検証できなかったものとして結果を `failed` にする（構文が正しいとは見なさず、書き込みへ進まない。実装で確定 2026-10-29）。
-6. 違反は `E_SYNTAX_INVALID`。`details.errors[]` は `{line, message}` を最大 10 件（`line` は適用後の 1 始まりの行、`message` は種別・ノード型・該当行の抜粋を 1 文にしたもの。実装で確定 2026-10-29。旧版は `{path, line, col, kind, node_type, snippet}` の 6 項目だった）。`operation == "replace_body"` で `new_code` の先頭行が定義の開始語（`def` / `class` / `async def` / `function` / `fn` / `pub fn` / `impl` / `struct` / `enum` / `interface` / `type` / `export`）で始まらないときは `details.hint` に「`replace_body` はシグネチャを含む定義全体を渡す」を入れる。
+6. 違反は `E_SYNTAX_INVALID`。`details.errors[]` は `{line, message}` を最大 10 件（`line` は適用後の 1 始まりの行、`message` は `syntax error: missing "<ノード型>"`（MISSING）または `syntax error near '<該当行の先頭の抜粋>'`（ERROR）。仕様書 §5.8 は元から `{line, message}`。実装で確定 2026-10-29。旧版は `{path, line, col, kind, node_type, snippet}` の 6 項目だった）。`operation == "replace_body"` で `new_code` の先頭行が定義の開始語（`def` / `class` / `async def` / `function` / `fn` / `pub fn` / `impl` / `struct` / `enum` / `interface` / `type` / `export`）で始まらないときは `details.hint` に「`replace_body` はシグネチャを含む定義全体を渡す」を入れる。
 7. 恒等判定: 適用後のバイト列（改行・BOM を戻した形）が元と同一なら `identical: true`。
 
 ### 7.7.5 原子的書き込みとジャーナル（writer.py）

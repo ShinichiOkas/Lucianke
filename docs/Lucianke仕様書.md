@@ -569,7 +569,7 @@ kind         = "Module" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | 
 modifiers    = modifier , { " " , modifier } ;
 modifier     = "pub" | "priv" | "prot" | "static" | "async" | "abstract" | "export" ;
 sig-inline   = "(" , text , ")" , [ " -> " , text ] ;
-fold         = "{ ..." , int , " lines omitted }" ;
+fold         = "{ ..." , int , ( " lines omitted }" | " nodes omitted }" ) ;   (* nodes は XML の max_depth 超過。T-02 の 4 *)
 attr-line    = attr-key , ": " , text , NL ;
 attr-key     = "sig" | "doc" | "urn" | "type" | "body" | "when" | "conf" | "scip" | "decorators" | "raises"
              | "refs" | "rank" | "sha" | "declared_in" | "change" ;
@@ -609,7 +609,7 @@ level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
 6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。
 7. `kind` の `File` は、シンボルに分解せずファイル全体を 1 要素として扱う場合（T-18 の Tier 3 / Tier 4 のファイルの変更要素。`modified_symbols[].kind`）に使う。`symbols` テーブルには格納しない。
 8. ツール固有の見出し行（`kv-line`: `target:`、`applied:`、`resolved:` など）はインデント 0 に置く。インデントされた `key: text` は `attr-line` で、キーは `attr-key` の語彙に限る。
-9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
+9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない（範囲 `@Ls-e` は、集約した最初の要素の開始行から最後の要素の終了行まで）。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
 
 ### 6.1.1 代表例
 
@@ -2908,6 +2908,7 @@ json の `data`:
 5. 1 レコードは 1 ビュー。通常は予算内に収まるが、超えた場合は §5.6 に従う。
 6. 本ツールの `_resolution_meta.confidence_level` は常に `exact`（メタデータ自体は正確）。データの精度構成は `data.coverage` で示す。
 7. LSP を必要としない。ヘッダの `lsp` は `n/a`。
+8. compact では各ビューを `table: <名前> (<N> rows)` の見出し行（`kv-line`）とし、`sig:`・`doc:` を付帯行（`attr-line`）にする。`[Table]` の `symbol-block` は `@L` と範囲を要するが、ビューには行範囲が無いため（T-02 の SQL の `[Table]` 要素とは別。実装で確定 2026-10-29）。
 
 **出力**
 
@@ -2916,10 +2917,10 @@ compact の例:
 ```
 # get_project_db_schema ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~900/2500tok
 db: sqlite  views=10  indexed_at=2026-10-29T11:20:04+09:00  coverage: exact 94% structural 4% heuristic 1% lexical_fallback 1%
-[Table] symbols (14230 rows)
+table: symbols (14230 rows)
   sig: urn PK, file_id FK files, parent_urn, name, qualified_name, kind, modifiers_json, start_line, end_line, signature, return_type, doc_summary, declared_in, scip_symbol, confidence_level
   doc: クラス・関数・変数・スキーマ要素・未知言語タグ。1 行 1 シンボル
-[Table] relations (48910 rows)
+table: relations (48910 rows)
   sig: relation_id PK, source_urn -> symbols.urn, target_urn -> symbols.urn, relation_kind, source_file_id FK files, target_file_id FK files, call_site_line, use_kind, guard_condition, confidence_level
   doc: シンボル間の有向エッジ（CALLS, IMPLEMENTS, INHERITS, REFERENCES, IMPORTS, TYPE_USES, READS_TABLE, WRITES_TABLE, RENDERS_TEMPLATE, EXPOSES_ENDPOINT, BINDS_NATIVE）
 sample_queries:
@@ -3010,7 +3011,7 @@ json の `data`:
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `columns[]` | array | `{name, decl_type}`。`decl_type` は SQLite が報告する宣言型（式の列は null） |
-| `rows[][]` | array | 行の配列。各行は `columns[]` と同じ順の値配列 |
+| `rows[]` | array | 行の配列。**各行は列名をキーにしたオブジェクト**（キーの順は `columns[]` の列順。同じ列名が重複するときは 2 つ目以降に `_2`、`_3` を付ける。実装で確定 2026-10-29。旧版は `columns[]` と同じ順の値配列） |
 | `row_count` | integer | 返した行数（`limit` 以下） |
 | `truncated` | boolean | `limit` で切ったか |
 | `elapsed_ms` | integer | 実行時間 |
