@@ -14,7 +14,7 @@ import pytest
 
 from lucianke.engine.indexer import Indexer
 from lucianke.index import rank
-from lucianke.index.connection import ReaderPool
+from lucianke.index.connection import ReaderPool, read_data_version
 from lucianke.index.writer import IndexWriter
 from lucianke.syntax.parsers import TreeCache
 from lucianke.workspace.types import Workspace
@@ -185,7 +185,7 @@ def _eligible_scores(env: Env, result: rank.RankResult, path: str) -> list[float
         for u, mods, kind in rows
         if u in result.scores
         and not ({"priv", "prot"} & set(json.loads(mods)))
-        and kind not in rank.MEMBER_KINDS
+        and kind not in rank.MINOR_KINDS
     ]
     return sorted(out, reverse=True)
 
@@ -222,6 +222,9 @@ async def test_stored_file_score_uses_the_default_five_and_is_normalized(env: En
 
 
 async def test_repo_map_files_without_ranks_returns_zero_scores(env: Env) -> None:
+    await env.writer.asubmit(
+        lambda c: rank.store_ranks(c, WS, rank.RankResult({}, {}, 0)), bumps_version=False, label="rank"
+    )
     with env.readers.reader() as conn:
         files = rank.repo_map_files(conn, WS)
     assert files and all(f.score == 0.0 and f.fan_in == 0 for f in files)
@@ -250,3 +253,49 @@ def test_store_requires_a_transaction() -> None:
     conn = sqlite3.connect(":memory:", isolation_level=None)
     with pytest.raises(RuntimeError):
         rank.store_ranks(conn, WS, rank.RankResult({}, {}, 0))
+
+
+# --- Indexer の結線（scan の最後に 1 回） ---------------------------------------------------------
+
+
+async def test_scan_writes_the_ranks_without_a_separate_call(env: Env) -> None:
+    """env は scan しただけ（``_store`` を呼んでいない）。それでもシンボルの重要度とファイルのスコアが入っている。"""
+    with env.readers.reader() as conn:
+        assert rank.ranked_symbol_count(conn, WS) > 0
+        assert conn.execute("SELECT MAX(pagerank_score) FROM files").fetchone()[0] == 1.0
+
+
+async def test_refresh_ranks_does_not_bump_data_version(env: Env) -> None:
+    with env.readers.reader() as conn:
+        before = read_data_version(conn)
+        first = conn.execute("SELECT urn, score, fan_in FROM _symbol_rank ORDER BY urn").fetchall()
+    assert await env.indexer.refresh_ranks() == len(first)
+    with env.readers.reader() as conn:
+        assert read_data_version(conn) == before
+        assert conn.execute("SELECT urn, score, fan_in FROM _symbol_rank ORDER BY urn").fetchall() == first
+
+
+async def test_scan_after_a_change_recomputes_the_ranks(env: Env) -> None:
+    with env.readers.reader() as conn:
+        before = dict(conn.execute("SELECT urn, fan_in FROM _symbol_rank"))
+    (env.root / "src/shop/extra.py").write_text(
+        "from shop.services.payment import PaymentProcessor\n\n\ndef build(limits):\n    return PaymentProcessor(limits)\n",
+        encoding="utf-8",
+    )
+    report = await env.indexer.scan()
+    assert report.indexed == 1 and not report.errors
+    with env.readers.reader() as conn:
+        after = dict(conn.execute("SELECT urn, fan_in FROM _symbol_rank"))
+    assert f"lk://{WS}/src/shop/extra.py#build" in after
+    assert (
+        after[PROC] == before[PROC] + 2
+    )  # 別ファイルからの辺が 2 本増えた（import 文の IMPORTS と build の CALLS）
+
+
+async def test_scan_without_changes_keeps_the_ranks(env: Env) -> None:
+    with env.readers.reader() as conn:
+        first = conn.execute("SELECT urn, score, fan_in FROM _symbol_rank ORDER BY urn").fetchall()
+    report = await env.indexer.scan()
+    assert report.indexed == 0
+    with env.readers.reader() as conn:
+        assert conn.execute("SELECT urn, score, fan_in FROM _symbol_rank ORDER BY urn").fetchall() == first

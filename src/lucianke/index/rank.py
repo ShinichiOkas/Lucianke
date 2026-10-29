@@ -38,7 +38,7 @@ __all__ = [
     "DEFAULT_PER_FILE",
     "EDGE_KINDS",
     "MAX_ITERATIONS",
-    "MEMBER_KINDS",
+    "MINOR_KINDS",
     "PUBLIC_SYMBOL_SQL",
     "TOLERANCE",
     "Graph",
@@ -61,12 +61,12 @@ TOLERANCE: Final = 1e-10
 DEFAULT_PER_FILE: Final = 5
 SCORE_DIGITS: Final = 12
 
-MEMBER_KINDS: Final = ("Field", "Property", "Column", "Cell")
-"""ファイルの代表に選ばない種別（クラスやテーブルの中身。親が代表になる）。"""
+MINOR_KINDS: Final = ("Field", "Property", "Column", "Cell", "Key", "Tag")
+"""ファイルの代表に選ばない種別（クラスやテーブルの中身は親が代表になる。データ形式の最上位の節 ``Key`` / ``Tag`` は構造の地図に出さない）。"""
 
 PUBLIC_SYMBOL_SQL: Final = (
     "s.is_external = 0 AND s.modifiers_json NOT LIKE '%\"priv\"%' AND s.modifiers_json NOT LIKE '%\"prot\"%'"
-    " AND s.kind NOT IN (" + ", ".join(f"'{k}'" for k in MEMBER_KINDS) + ")"
+    " AND s.kind NOT IN (" + ", ".join(f"'{k}'" for k in MINOR_KINDS) + ")"
 )
 """``symbols`` のエイリアス ``s`` に対する「ファイルの代表になれる公開シンボル」の条件。
 修飾子が空（ctags 由来など可視性の分からないもの）は公開として扱う。"""
