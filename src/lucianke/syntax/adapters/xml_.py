@@ -46,12 +46,21 @@ def _parser() -> expat.XMLParserType:
     return p
 
 
-def _close_line(source: bytes, parser: expat.XMLParserType, line0: int) -> int:
-    """直前の開始・終了イベントが指すタグを閉じる ``>`` の行（0 始まり）。空要素の ``/>`` が別の行にあるときのために数える。"""
-    m = _TAG_END.match(source, parser.CurrentByteIndex)
+def _close_line(source: bytes, parser: expat.XMLParserType) -> int:
+    """終了イベントが指す要素の最後の ``>`` の行（0 始まり）。
+
+        空要素（``<e/>``）の終了イベントはタグの直後を指し、行番号がそのまま ``/>`` の行になる。通常の閉じタグ（``</e>``）は
+        閉じタグの先頭を指すので、``</e
+    >`` のように ``>`` が次の行にある場合のために ``>`` までの改行を数える。
+    """
+    line0 = parser.CurrentLineNumber - 1
+    idx = parser.CurrentByteIndex
+    if source[idx : idx + 2] != b"</":
+        return line0
+    m = _TAG_END.match(source, idx)
     if m is None:  # UTF-16 など ASCII 互換でない入力
         return line0
-    return line0 + len(_NL_B.findall(source, parser.CurrentByteIndex, m.end()))
+    return line0 + len(_NL_B.findall(source, idx, m.end()))
 
 
 # --- 骨格 ---------------------------------------------------------------------------------------
@@ -97,7 +106,7 @@ def _aggregate(source: bytes) -> _Agg:
     def end(_name: str) -> None:
         agg, line, _, real = stack.pop()
         if real:
-            agg.end = max(agg.end, _close_line(source, p, p.CurrentLineNumber - 1), line)
+            agg.end = max(agg.end, _close_line(source, p), line)
 
     p.StartElementHandler = start
     p.EndElementHandler = end
@@ -164,7 +173,7 @@ def _build_tree(source: bytes) -> tuple[ET.Element, dict[ET.Element, tuple[int, 
     def end(_name: str) -> None:
         el = stack.pop()
         line = starts.pop()
-        spans[el] = (line, max(line, _close_line(source, p, p.CurrentLineNumber - 1)))
+        spans[el] = (line, max(line, _close_line(source, p)))
         last_closed[0] = el
 
     def chars(data: str) -> None:
