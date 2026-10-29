@@ -210,7 +210,8 @@ class LspHandle:
 
     def snapshot(self) -> PoolStatus:
         name = self.server_name
-        if self.state is LspState.STANDBY:  # 止まっている間の名前は、次に起こす定義（前回の定義が残っていても、環境が変わりうる）
+        if self.state is LspState.STANDBY:
+            # 止まっている間の名前は、次に起こす定義（前回の定義が残っていても、環境が変わりうる）
             defs = self._pool._defs(self.language_id, self.role)
             if defs:
                 name = self._pool._expected_name(self.language_id, self.ws, self.role, defs)

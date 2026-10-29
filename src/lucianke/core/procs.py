@@ -38,6 +38,8 @@ _log = logging.getLogger("lucianke.procs")
 # minimal_env が親の環境から引き継ぐ変数（仕様書 §13.3: PATH、ロケール、…）。
 # SYSTEMROOT 系は Windows の子プロセス（Python、node）が起動に必要とする。
 # HOME / USERPROFILE / TEMP / TMP は LSP サーバーが設定・キャッシュの置き場を決めるのに使う。
+# APPDATA / LOCALAPPDATA（Windows）は、Python 製のコンソールスクリプト（``pip install --user`` の pyright など）が
+# ユーザーの site-packages ``%APPDATA%\Python\PythonXY\site-packages`` を見つけるのに要る（BUG-0037）。
 _ENV_BASELINE = frozenset(
     {
         "PATH",
@@ -51,6 +53,8 @@ _ENV_BASELINE = frozenset(
         "TMPDIR",
         "HOME",
         "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
         "LANG",
         "LANGUAGE",
     }

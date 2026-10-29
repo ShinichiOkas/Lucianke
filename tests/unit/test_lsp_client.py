@@ -39,6 +39,7 @@ from lucianke.lsp.servers import (
     env_var_name,
     find_command,
     find_tsserver,
+    host_venv,
     server_env_var_name,
     servers_for,
     split_command,
@@ -902,6 +903,48 @@ def test_search_order_venv_then_node_modules_then_path(tmp_path: Path):
     in_path.unlink()
     assert find() is None
     assert find(venv=explicit_venv) == [str(in_explicit), "server"]
+
+
+def test_host_venv_is_searched_after_workspace_and_before_path(tmp_path: Path):
+    """BUG-0037: ``.venv`` の無いワークスペースでも、Lucianke 自身の Python 環境の basedpyright を PATH 上の別の pyright より先に拾う。"""
+    based, pyright = servers_for("python", "types")
+    assert (based.name, pyright.name) == ("basedpyright", "pyright")
+    host = tmp_path / "lucianke-venv"
+    path_dir = tmp_path / "pathdir"
+    ws_root = tmp_path / "ws"
+    ws_root.mkdir()
+    in_path = make_exe(path_dir, exe("pyright-langserver"))
+    in_host = make_exe(venv_bin_of(host), exe("basedpyright-langserver"))
+    env = {"PATH": str(path_dir)}
+
+    # 症状: Lucianke の環境を見ないと、既定の basedpyright は見つからず PATH 上の pyright に落ちる
+    assert find_command(based, workspace_root=ws_root, environ=env) is None
+    assert find_command(pyright, workspace_root=ws_root, environ=env) == [str(in_path), "--stdio"]
+    # 直し: host_venv を渡すと basedpyright が見つかる（優先順の先頭）
+    assert find_command(based, workspace_root=ws_root, host_venv=host, environ=env) == [
+        str(in_host),
+        "--stdio",
+    ]
+    # ワークスペースの venv は host_venv より先（プロジェクトが固定した版が勝つ）
+    in_ws = make_exe(venv_bin(ws_root), exe("basedpyright-langserver"))
+    assert find_command(based, workspace_root=ws_root, host_venv=host, environ=env) == [
+        str(in_ws),
+        "--stdio",
+    ]
+    in_ws.unlink()
+    # host_venv の実行ファイルが無ければ見つからない（PATH に basedpyright が無い）。pyright は PATH から
+    in_host.unlink()
+    assert find_command(based, workspace_root=ws_root, host_venv=host, environ=env) is None
+    assert find_command(pyright, workspace_root=ws_root, host_venv=host, environ=env) == [
+        str(in_path),
+        "--stdio",
+    ]
+    in_path.unlink()
+    assert find_command(pyright, workspace_root=ws_root, host_venv=host, environ=env) is None
+
+
+def test_host_venv_is_the_running_interpreters_prefix():
+    assert host_venv() == Path(sys.prefix)
 
 
 def venv_bin_of(venv: Path) -> Path:

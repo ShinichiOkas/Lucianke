@@ -207,6 +207,18 @@ def test_minimal_env_contains_path_and_locale(monkeypatch: pytest.MonkeyPatch) -
         assert "SYSTEMROOT" in keys
 
 
+def test_minimal_env_passes_appdata_for_user_site_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``pip install --user`` の Python 製コンソールスクリプト（pyright など）は ``%APPDATA%`` が無いとユーザーの
+    site-packages を見つけられず ``ModuleNotFoundError`` で落ちる（BUG-0037）。"""
+    monkeypatch.setenv("APPDATA", "/home/u/AppData/Roaming")
+    monkeypatch.setenv("LOCALAPPDATA", "/home/u/AppData/Local")
+    monkeypatch.setenv("LUCIANKE_SECRET_TOKEN", "x")
+    env = {k.upper(): v for k, v in minimal_env().items()}
+    assert env["APPDATA"] == "/home/u/AppData/Roaming"
+    assert env["LOCALAPPDATA"] == "/home/u/AppData/Local"
+    assert "LUCIANKE_SECRET_TOKEN" not in env
+
+
 def test_minimal_env_extra_wins_and_adds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANG", "C")
     env = minimal_env({"LANG": "en_US.UTF-8", "VIRTUAL_ENV": "/venv"})

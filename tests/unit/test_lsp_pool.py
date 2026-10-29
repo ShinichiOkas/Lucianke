@@ -27,8 +27,8 @@ from lucianke.core.procs import ProcessRegistry
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.diagnostics import PROVISIONAL_QUIET_MS, DiagnosticsHub
 from lucianke.lsp.documents import DocumentSync
-from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool, LspState
-from lucianke.lsp.servers import LspServerDef
+from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool, LspState, default_resolver
+from lucianke.lsp.servers import LspServerDef, find_command, servers_for
 from lucianke.workspace.paths import to_file_uri
 from lucianke.workspace.types import PythonEnv, Workspace
 
@@ -334,6 +334,73 @@ async def test_not_found_is_unavailable_without_process(env: Env, ws: Workspace)
     assert pool.status("fake", ws)[0] is LspStatus.UNAVAILABLE
     assert pool.status("fake", ws).reason == "not_found"
     assert env.registry.live() == [] and env.launches == 0
+
+
+async def test_not_found_reason_names_every_candidate(env: Env, ws: Workspace):
+    """BUG-0037: 見つからないときは ``not_found`` で、どのサーバー（実行ファイル）をどこで探したかが ``last_error`` に残る。"""
+    primary = LspServerDef(language_id="fake", name="primary", argv_candidates=(("primary-ls", "--stdio"),))
+    alt = LspServerDef(language_id="fake", name="alt", argv_candidates=(("alt-ls", "--stdio"),))
+    pool = env.pool(servers=(primary, alt), resolver=lambda d, w: None)
+    # 起こす前から: どれも見つからないなら既定（先頭）の名前
+    assert pool.status("fake", ws).server_name == "primary"
+    assert not await pool.wait_ready("fake", ws, 10_000)
+    status = pool.status("fake", ws)
+    assert (status.status, status.reason, status.server_name) == (
+        LspStatus.UNAVAILABLE,
+        "not_found",
+        "primary",
+    )
+    err = pool.handles(ws)[0].last_error or ""
+    assert "primary (primary-ls)" in err and "alt (alt-ls)" in err and "PATH" in err
+    assert env.launches == 0
+
+
+async def test_server_name_is_the_one_that_actually_starts(env: Env, ws: Workspace):
+    """BUG-0037: 既定が見つからず代替に落ちるとき、起こす前の ``status`` も代替の名前を返す（T-00 は既定、T-08 は代替と食い違った）。"""
+    primary = LspServerDef(language_id="fake", name="primary", argv_candidates=(("primary-ls",),))
+    alt = LspServerDef(language_id="fake", name="alt", argv_candidates=(("alt-ls",),))
+    argv = [sys.executable, str(env.script), "--silent"]
+    found: dict[str, list[str]] = {"alt": argv}
+
+    def resolver(defn: LspServerDef, w: Workspace) -> list[str] | None:
+        return found.get(defn.name)
+
+    pool = env.pool("--silent", servers=(primary, alt), resolver=resolver, ready_fallback_s=0.2)
+    assert pool.status("fake", ws).server_name == "alt"  # まだ起こしていない（standby）
+    await ready_handle(pool, ws)
+    assert pool.status("fake", ws).server_name == "alt"  # 起こした後も同じ
+    await pool.reset("fake", ws)
+    found["primary"] = argv  # 既定が見つかるようになったら、起こす前の名前も既定に戻る
+    assert pool.status("fake", ws).server_name == "primary"
+    await ready_handle(pool, ws)
+    assert pool.status("fake", ws).server_name == "primary"
+
+
+def test_default_resolver_finds_the_hosts_own_basedpyright(
+    tmp_path: Path, ws: Workspace, monkeypatch: pytest.MonkeyPatch
+):
+    """BUG-0037: ``.venv`` の無いワークスペースで、PATH に pyright だけある環境でも、Lucianke 自身の環境の basedpyright を選ぶ。"""
+    exe_ext = ".exe" if sys.platform == "win32" else ""
+    bin_name = "Scripts" if sys.platform == "win32" else "bin"
+    host = tmp_path / "host-venv"
+    (host / bin_name).mkdir(parents=True)
+    based_exe = host / bin_name / f"basedpyright-langserver{exe_ext}"
+    based_exe.write_text("", encoding="utf-8")
+    based_exe.chmod(0o755)
+    path_dir = tmp_path / "pathdir"
+    path_dir.mkdir()
+    pyright_exe = path_dir / f"pyright-langserver{exe_ext}"
+    pyright_exe.write_text("", encoding="utf-8")
+    pyright_exe.chmod(0o755)
+    for var in ("LUCIANKE_LSP_PYTHON_CMD", "LUCIANKE_LSP_BASEDPYRIGHT_CMD", "LUCIANKE_LSP_PYRIGHT_CMD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setattr("lucianke.lsp.pool.host_venv", lambda: host)
+    based, pyright = servers_for("python", "types")
+    assert default_resolver(based, ws) == [str(based_exe), "--stdio"]
+    assert default_resolver(pyright, ws) == [str(pyright_exe), "--stdio"]
+    # 症状の再現: host_venv を見ない探索（修正前の default_resolver）では basedpyright が見つからない
+    assert find_command(based, workspace_root=ws.root) is None
 
 
 async def test_spawn_failure_is_init_failed(env: Env, ws: Workspace):
