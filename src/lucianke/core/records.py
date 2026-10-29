@@ -68,6 +68,9 @@ class ToolOutput:
     head_kv: Sequence[tuple[str, str]] = ()
     data_static: Mapping[str, Any] = field(default_factory=dict)
     summarize: Callable[[Sequence[Record]], str] | None = None
+    tier: Tier = Tier.T1  # _resolution_meta.tier（混在時は最も大きい数）
+    detected_language: str = "n/a"  # _resolution_meta.detected_language
+    total_estimate: int | None = None  # 範囲内の総数をツールが知っているとき（遅延列のとき）
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

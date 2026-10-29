@@ -50,6 +50,7 @@ class RenderInput:
     page: Page | None = None
     error: LuciankeError | None = None
     warnings: Sequence[str] = ()
+    records_key: str = "items"  # json の data でレコード配列を置くキー（ツールごと。例: "references"）
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
