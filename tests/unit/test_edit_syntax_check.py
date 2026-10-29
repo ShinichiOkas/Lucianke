@@ -325,3 +325,28 @@ def test_to_error_details_shape():
     )
     assert to_error_details(r) == {"errors": [{"line": 5, "message": "syntax error near 'x'"}]}
     assert to_error_details(SyntaxCheckResult("ok")) == {"errors": []}
+
+
+# --- plan.apply_hunks との組み合わせ（複数 hunk・CRLF・BOM） -------------------------------------
+
+
+def test_multi_hunk_plan_on_crlf_bom_file():
+    from lucianke.core.model import RelPath
+    from lucianke.edit.plan import Hunk, apply_hunks
+
+    path = RelPath("m.py")
+    before = BOM + PY.replace("\n", "\r\n").encode()
+
+    def hunks(first: str) -> list[Hunk]:
+        return [
+            Hunk(path, Range(Position(1, 4), Position(1, 16)), first),
+            Hunk(path, Range(Position(9, 4), Position(9, 16)), "return a ** b"),
+        ]
+
+    ranges = [Range(Position(1, 4), Position(1, 20)), Range(Position(9, 4), Position(9, 17))]
+    ok_after = apply_hunks(before, hunks("return a + b + 1"))
+    assert check_after("python", before, ok_after, edited_ranges_after=ranges).status == "ok"
+    bad_after = apply_hunks(before, hunks("return (a + b"))
+    r = check_after("python", before, bad_after, edited_ranges_after=ranges)
+    assert r.status == "failed"
+    assert any(2 <= e["line"] <= 5 for e in to_error_details(r)["errors"])
