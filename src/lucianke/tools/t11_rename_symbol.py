@@ -15,18 +15,25 @@
 5. ロック・前提検証（``expected_file_sha256s`` と ``resolved_shas``）・構文検証・ジャーナル・原子的書き込み・再索引・診断差分は
    トランザクションの仕事（全ファイルを書くか、1 つも書かないか）。
 
-実装していないもの（仕様書 T-11「精度と降格」）: ``structural``（同一ファイル内のローカル変数・引数の改名、MAY）と
-``heuristic`` / ``lexical_fallback``（単語境界の字句置換、``scope_paths``、``E_MUTATION_BLOCKED``）。LSP が使えなければ
-``E_LSP_UNAVAILABLE``、文法の無い対象は ``E_UNSUPPORTED``。``scope_paths`` は無視して ``warnings`` に書く。
+降格（仕様書 T-11「精度と降格」。計画は ``_t11_degrade`` / ``_t11_scope``）:
+
+* ``heuristic`` / ``lexical_fallback``: 文法の無いファイル（Tier 4、文法の無い Tier 1）。LSP を使わず、同じ拡張子のファイル
+  （``scope_paths`` 指定時はその配下）の単語境界の字句置換。``allow_heuristic_mutation`` が無ければ強制 ``dry_run``（トランザクションの
+  降格インターロック）。``new_name`` が書き換え対象に単語として既にあれば ``E_MUTATION_BLOCKED``。
+* ``structural``: 文法のある Python で LSP が使えず、対象が ``path`` + ``line`` + ``character`` で指す関数内のローカル変数・引数のとき、
+  同一ファイル内の改名（MAY）。それ以外は LSP の失敗（``E_LSP_UNAVAILABLE`` など）をそのまま返す。
+* Tier 3 と、文法の無い Tier 2 は ``E_UNSUPPORTED``。``scope_paths`` は LSP の経路では無視して ``warnings`` に書く。
+
 ファイル改名（``RenameFile``）は writer が対応するまで ``E_UNSUPPORTED``（``allow_renames=False``）。
 
 ``ctx.services`` に求めるもの（duck typing。結線は合成ルート）:
 
 * ``workspace(workspace_id)``・``lines``（``ToolServices``）。
 * ``lsp_pool``: ``LspPool``（``status`` / ``wait_ready`` / ``get``）。
-* ``edit_transaction(ws, *, documents, diagnostics_hub, lsp_status) -> EditTransaction``（呼べるものがあればこれを使う。
-  ``documents`` / ``diagnostics_hub`` は **LSP ハンドル自身のもの**〈``handle.documents`` / ``handle.diagnostics``〉で、
-  ``lsp_status`` は ``language_id -> LspStatus`` の関数）。無ければ T-10 と同じ属性（``locks`` / ``writer_index`` /
+* ``edit_transaction(ws, *, lsp_status) -> EditTransaction``（呼べるものがあればこれを使う。``lsp_status`` は
+  ``language_id -> LspStatus`` の関数。文書の同期と診断の待ちはファクトリが ``DocumentRouter`` 経由で言語の全サーバーに行う〈BUG-0023〉）。
+  無ければ ``documents`` / ``diagnostics_hub`` を **LSP ハンドル自身のもの**〈``handle.documents`` / ``handle.diagnostics``〉にして、
+  T-10 と同じ属性（``locks`` / ``writer_index`` /
   ``journal_dir`` と任意の ``indexer`` / ``watcher`` / ``reader_pool`` / ``trees`` / ``has_ctags`` / ``lock_wait_ms``）から組む。
 """
 
@@ -59,11 +66,13 @@ from lucianke.core.urn import parse
 from lucianke.edit.plan import Plan, apply_hunks
 from lucianke.edit.transaction import EditResult, EditTransaction, PlanBuilder, PlanContext
 from lucianke.edit.workspace_edit import new_positions, plan_from_workspace_edit
+from lucianke.engine.selector import LEVEL_TEMPLATES, WarningReason, warning_text
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle
 from lucianke.syntax.parsers import parse_source
 from lucianke.syntax.support import get_support
 from lucianke.syntax.symbols import extract, load_query_source
+from lucianke.tools import _t11_degrade
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._nav import TargetRefArg
 from lucianke.tools._services import ToolServices, services_of
@@ -197,16 +206,27 @@ async def _lsp_handle(svc: ToolServices, ws: Workspace, language_id: str) -> Lsp
     return handle
 
 
-def _transaction(svc: ToolServices, ws: Workspace, handle: LspHandle) -> EditTransaction:
-    overrides: dict[str, Any] = {
-        "documents": handle.documents,
-        "diagnostics_hub": handle.diagnostics,
-        "lsp_status": lambda _language_id: LspStatus.READY,
-    }
+def _transaction(svc: ToolServices, ws: Workspace, handle: LspHandle | None) -> EditTransaction:
+    """``handle`` が無いとき（降格の経路）は ``lsp_status`` を ``unavailable`` にする。
+
+    ``edit_transaction`` のファクトリがあれば ``lsp_status`` だけを渡す。文書の同期と診断の待ちは、ファクトリが
+    ``DocumentRouter`` 経由でその言語の全サーバー（basedpyright と ruff）に行う（BUG-0023）。ハンドル 1 つの
+    ``documents`` / ``diagnostics`` を渡すと、ruff に同期しない・待たない片手落ちになる。
+    ファクトリが無いときだけ、従来どおり ``handle`` の ``documents`` / ``diagnostics`` で組む。
+    """
+    status = LspStatus.READY if handle is not None else LspStatus.UNAVAILABLE
+
+    def lsp_status(_language_id: str) -> LspStatus:
+        return status
+
     factory = getattr(svc, "edit_transaction", None)
     if callable(factory):
-        tx: EditTransaction = factory(ws, **overrides)
+        tx: EditTransaction = factory(ws, lsp_status=lsp_status)
         return tx
+    overrides: dict[str, Any] = (
+        {"documents": handle.documents, "diagnostics_hub": handle.diagnostics} if handle is not None else {}
+    )
+    overrides["lsp_status"] = lsp_status
     missing = [n for n in ("locks", "writer_index", "journal_dir") if getattr(svc, n, None) is None]
     if missing:
         raise LuciankeError(
@@ -252,6 +272,8 @@ class _Seen:
     language_id: str = "n/a"
     tier: Tier = Tier.T1
     confidence: Confidence = Confidence.EXACT
+    engine: EngineChoice | None = None  # 降格経路のエンジン（LSP の経路では None）
+    site_confidence: Confidence | None = None  # 降格経路の変更箇所の水準（LSP の経路では None）
 
 
 def _identifier_at(index: LineIndex, pos: Position) -> str | None:
@@ -470,6 +492,57 @@ def _rename_builder(
     return build
 
 
+def _degraded_builder(
+    ws: Workspace,
+    target: TargetRef,
+    args: RenameSymbolArgs,
+    seen: _Seen,
+    mode: str,
+    lsp_error: LuciankeError | None,
+) -> PlanBuilder:
+    """降格の経路（``lexical`` か ``structural``）の計画。``structural`` で対象にならなければ ``lsp_error`` をそのまま返す。"""
+
+    async def build(ctx: PlanContext) -> Plan:
+        seen.language_id, seen.tier, seen.confidence = ctx.language_id, ctx.tier, ctx.confidence
+        if mode == "lexical":
+            got = await _t11_degrade.lexical_plan(
+                ctx,
+                target=target,
+                new_name=args.new_name,
+                scope_paths=args.scope_paths,
+                allow_heuristic_mutation=args.allow_heuristic_mutation,
+                dry_run=args.dry_run,
+                expected_file_sha256s=args.expected_file_sha256s,
+            )
+            seen.engine = EngineChoice(
+                engine=_t11_degrade.LEXICAL_ENGINE,
+                confidence=Confidence.LEXICAL_FALLBACK,
+                lsp_status=LspStatus.NOT_APPLICABLE.value,
+                warning=LEVEL_TEMPLATES[Confidence.LEXICAL_FALLBACK] + _t11_degrade.LEXICAL_WARNING_EXTRA,
+            )
+        else:
+            structural = await _t11_degrade.structural_plan(ctx, target=target, new_name=args.new_name)
+            if structural is None:
+                assert lsp_error is not None
+                raise lsp_error
+            got = structural
+            seen.engine = EngineChoice(
+                engine="tree-sitter",
+                confidence=Confidence.STRUCTURAL,
+                lsp_status=LspStatus.UNAVAILABLE.value,
+                warning=warning_text(WarningReason.LSP_UNAVAILABLE),
+            )
+            if args.scope_paths:
+                seen.warnings.append("scope_paths ignored: a structural rename stays inside one function")
+        seen.site_confidence = seen.engine.confidence
+        seen.old_name = got.old_name
+        seen.warnings.extend(got.warnings)
+        await asyncio.to_thread(_analyse, ws, got.plan, got.sources, seen, ctx, got.name_pos)
+        return got.plan
+
+    return build
+
+
 # --- 応答 -------------------------------------------------------------------------------------
 
 
@@ -528,7 +601,7 @@ def _summarize(rest: Sequence[Record]) -> str:
 
 
 def _build_output(svc: ToolServices, args: RenameSymbolArgs, result: EditResult, seen: _Seen) -> ToolOutput:
-    conf = result.confidence
+    conf = seen.site_confidence or result.confidence
     delta = result.new_diagnostics
     edits_count = len(seen.sites)
     ordered = sorted(
@@ -587,7 +660,7 @@ def _build_output(svc: ToolServices, args: RenameSymbolArgs, result: EditResult,
             },
         },
         max_confidence=Confidence.EXACT,
-        engine=EngineChoice(engine="lsp", confidence=conf, lsp_status=LspStatus.READY.value),
+        engine=seen.engine or EngineChoice(engine="lsp", confidence=conf, lsp_status=LspStatus.READY.value),
         page_unit="edit",
         summarize=_summarize,
         tier=seen.tier,
@@ -613,25 +686,37 @@ async def handler(ctx: ToolContext, args: RenameSymbolArgs) -> ToolOutput:
         ) from None
     det = detect(rel, head)
     spec = get_support(det.language_id)
-    if (
-        not det.index_content
-        or det.tier > Tier.T2
-        or spec is None
-        or not callable(getattr(spec, "grammar", None))
-    ):
+    has_grammar = spec is not None and callable(getattr(spec, "grammar", None))
+    if not det.index_content or det.tier is Tier.T3 or (not has_grammar and det.tier is Tier.T2):
         raise LuciankeError(
             ErrorCode.E_UNSUPPORTED,
             f"rename_symbol supports code files with a grammar and a language server; {rel} is {det.language_id!r} "
             f"(tier {int(det.tier)})",
             details={"reason": "tier_not_supported", "language_id": det.language_id, "tier": int(det.tier)},
         )
-    check_identifier(det.language_id, args.new_name)
     seen = _Seen()
+    # 文法の無いファイル（Tier 4、文法の無い Tier 1）: 単語境界の字句置換（LSP は使わない）
+    if not has_grammar:
+        _t11_degrade.check_lexical_identifier(args.new_name)
+        return await _run_degraded(svc, ws, args, target, seen, "lexical", None)
+    check_identifier(det.language_id, args.new_name)
     if args.scope_paths:
         seen.warnings.append(
             "scope_paths ignored: the language server renames every reference in the workspace"
         )
-    handle = await _lsp_handle(svc, ws, det.language_id)
+    try:
+        handle = await _lsp_handle(svc, ws, det.language_id)
+    except LuciankeError as exc:
+        # LSP が使えない。参照が 1 つの関数に閉じるローカル変数・引数なら、構文木だけで同一ファイル内を改名する（structural）
+        if (
+            _lsp_is_down(exc)
+            and det.language_id == "python"
+            and target.line is not None
+            and target.character is not None
+        ):
+            seen.warnings.clear()
+            return await _run_degraded(svc, ws, args, target, seen, "structural", exc)
+        raise
     tx = _transaction(svc, ws, handle)
     run: Callable[..., Any] = tx.run
     result: EditResult = await run(
@@ -641,6 +726,37 @@ async def handler(ctx: ToolContext, args: RenameSymbolArgs) -> ToolOutput:
         allow_heuristic_mutation=args.allow_heuristic_mutation,
         expected_shas=args.expected_file_sha256s,
         diagnostics_wait_ms=args.diagnostics_wait_ms,
+        revision=args.revision,
+    )
+    return _build_output(svc, args, result, seen)
+
+
+def _lsp_is_down(exc: LuciankeError) -> bool:
+    """LSP が使えないための失敗か（降格してよい失敗）。"""
+    if exc.code is ErrorCode.E_LSP_UNAVAILABLE:
+        return True
+    return exc.code is ErrorCode.E_UNSUPPORTED and exc.details.get("reason") == "no_lsp_for_language"
+
+
+async def _run_degraded(
+    svc: ToolServices,
+    ws: Workspace,
+    args: RenameSymbolArgs,
+    target: TargetRef,
+    seen: _Seen,
+    mode: str,
+    lsp_error: LuciankeError | None,
+) -> ToolOutput:
+    """LSP を使わない経路（``lexical`` か ``structural``）。降格インターロックはトランザクションが行う（文法の無いファイルは強制 dry_run）。"""
+    tx = _transaction(svc, ws, None)
+    run: Callable[..., Any] = tx.run
+    result: EditResult = await run(
+        _degraded_builder(ws, target, args, seen, mode, lsp_error),
+        target=target,
+        dry_run=args.dry_run,
+        allow_heuristic_mutation=args.allow_heuristic_mutation,
+        expected_shas=args.expected_file_sha256s,
+        diagnostics_wait_ms=0,  # この経路では LSP の診断を待たない（待っても来ない）
         revision=args.revision,
     )
     return _build_output(svc, args, result, seen)
@@ -657,7 +773,10 @@ TOOL_SPEC = ToolSpec(
         "atomically: all files are written or none. Does not touch same-named symbols in other scopes, comments or strings. "
         "Target by urn, or path + symbol_name, or path + line [+ character]. Returns every changed site, the urn_map "
         "(old URN -> new URN for the symbol and its members) and the new diagnostics. Pass expected_file_sha256s to refuse "
-        "a stale write; use dry_run to preview. Needs a ready language server (E_LSP_UNAVAILABLE otherwise)."
+        "a stale write; use dry_run to preview. Needs a ready language server (E_LSP_UNAVAILABLE otherwise), except: a local variable "
+        "or parameter of a Python function (target by path + line + character) is renamed inside its function with the syntax tree "
+        "(structural), and a file without a grammar gets a word-boundary text replacement in every file with the same extension "
+        "(lexical_fallback; limit it with scope_paths; it is a dry_run unless allow_heuristic_mutation and expected_file_sha256s are given)."
     ),
     writes=True,
     max_confidence=Confidence.EXACT,
