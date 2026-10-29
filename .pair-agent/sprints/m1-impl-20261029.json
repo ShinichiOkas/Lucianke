@@ -1,8 +1,19 @@
 {
   "sprint_id": "m1-impl-20261029",
-  "status": "deliberating",
+  "status": "executing",
   "goal": "M1 実装（第 1 ラウンド）: 骨格・CI・core・スパイク S-1/S-2/S-7/S-9 → 以後 mcp/workspace/index/syntax/lsp/edit/tools を順に。設計書 §12.2 の着手順に従う",
   "created_at": "2026-10-29T13:08:08+09:00",
   "agreement_path": ".pair-agent/agreements/m1-1-ci-core-s-1-s-2-s-7-s-9-mcp-workspa.md",
-  "経過": []
+  "経過": [
+    {
+      "at": "2026-10-29T16:0:00+09:00",
+      "status": "deliberating -> executing",
+      "note": "M1-1〜M1-3（CI・core・スパイク・14 ツール）を実装。受入は .pair-agent/acceptance/M1-exit-20261029-150743.md・M1-3-latency-20261029-154219.md、不合格は BUG-0057〜0060"
+    },
+    {
+      "at": "2026-10-29T16:00:00+09:00",
+      "status": "executing (引き継ぎ)",
+      "note": "トークンクォータで中断したセッションの作業ツリー（関数の中の require の束縛 = BUG-0052、Node.text 全廃 = BUG-0051 の残り）を完成させてコミット。現在地と次の作業は docs/HANDOFF.md。T-19 の契約テスト 2 件は HEAD でも落ちる（BUG-0061）"
+    }
+  ]
 }

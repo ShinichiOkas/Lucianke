@@ -50,6 +50,7 @@ from lucianke.core.model import Confidence, Kind, Position, RelPath, SymbolRecor
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
 from lucianke.syntax.builtin_names import JS_GLOBALS, PYTHON_BUILTINS
 from lucianke.syntax.guards import guard_for
+from lucianke.syntax.imports import JS_FUNCTION_NODES, js_require_bindings
 from lucianke.syntax.types import ParsedFile
 
 __all__ = ["ImportKey", "RelationCandidate", "extract_relations", "load_refs_source"]
@@ -111,17 +112,8 @@ _ANNOTATION_SKIP = frozenset(
 )
 
 _PY_FUNCTIONS = frozenset({"function_definition", "lambda"})
-_JS_FUNCTIONS = frozenset(
-    {
-        "function_declaration",
-        "function_expression",
-        "function",
-        "generator_function",
-        "generator_function_declaration",
-        "arrow_function",
-        "method_definition",
-    }
-)
+# ``imports.extract_imports`` が関数の中の ``require`` を ``nested`` にする基準と同じ集合
+_JS_FUNCTIONS = JS_FUNCTION_NODES
 _PY_CLASSES = frozenset({"class_definition"})
 _JS_CLASSES = frozenset({"class_declaration", "abstract_class_declaration", "class"})
 _PY_SKIP_ANCESTORS = frozenset(
@@ -245,10 +237,6 @@ class _Scan:
     nested_imports: set[ImportKey] = field(default_factory=set)  # def / class の中の import 文の位置
 
 
-def _text(node: Node) -> str:
-    return node.text.decode("utf-8", "replace") if node.text is not None else ""
-
-
 class _Extractor:
     def __init__(
         self,
@@ -293,6 +281,12 @@ class _Extractor:
         self.class_bases: dict[str, list[str]] = {}  # クラスの修飾名 → 基底クラス名（同じファイルでの解決用）
 
     # --- 名前解決の窓口 ---
+
+    def _text(self, node: Node) -> str:
+        """ノードの綴り。``Node.text`` は使わない（read_callback で解析した木では読み取り関数を呼び直し、
+        解放済みの領域を読みうる。BUG-0020・BUG-0051）。"""
+        src = self.parsed.source
+        return src[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
     def resolve(self, name: str) -> str | None:
         if self._resolve_raw is None:
@@ -385,7 +379,7 @@ class _Extractor:
                     alias = caps.get("import.alias")
                     for n in nodes:
                         cur = imports.get(n.start_byte)
-                        text = _text(alias[0]) if alias else None
+                        text = self._text(alias[0]) if alias else None
                         if cur is None:
                             imports[n.start_byte] = _Import(n, text, module=key == "import.module")
                         elif cur.alias is None and text is not None:
@@ -418,7 +412,7 @@ class _Extractor:
             return None
         if self._in_skipped_context(node):
             return None
-        name = _text(node)
+        name = self._text(node)
         if not name:
             return None
         container = self._container(chain)
@@ -452,7 +446,7 @@ class _Extractor:
         self, imp: _Import, position: Position, chain: list[SymbolRecord]
     ) -> RelationCandidate | None:
         node = imp.node
-        name = _text(node)
+        name = self._text(node)
         if not name:
             return None
         target: str | None = None
@@ -607,7 +601,7 @@ class _Extractor:
                 return None  # ``self.x.name``: x の型が分からないとき、同名の他の定義に当てると組み込み型のメソッドを誤認する
         suffix = f".{name}"
         container = chain[-1] if chain else None
-        own = recv is not None and (recv.type == "this" or _text(recv) in _RECEIVER_SELF)
+        own = recv is not None and (recv.type == "this" or self._text(recv) in _RECEIVER_SELF)
         matches = [
             s
             for q, s in self.by_qualified.items()
@@ -624,7 +618,7 @@ class _Extractor:
         if recv.type not in _ATTRIBUTE_NODES:
             return False
         obj = recv.child_by_field_name("object")
-        return obj is not None and (obj.type == "this" or _text(obj) in _RECEIVER_SELF)
+        return obj is not None and (obj.type == "this" or self._text(obj) in _RECEIVER_SELF)
 
     def _member_of(self, ref: tuple[str, str], name: str, *, depth: int) -> str | None:
         kind, value = ref
@@ -647,7 +641,7 @@ class _Extractor:
         """レシーバ式の型を ``("local", 修飾名)`` か ``("urn", URN)`` で。分からなければ ``None``。"""
         t = recv.type
         if t in ("identifier", "this"):
-            text = _text(recv)
+            text = self._text(recv)
             if text in _RECEIVER_SELF or t == "this":
                 cls = self._class_node(node)
                 if cls is None:
@@ -664,23 +658,23 @@ class _Extractor:
         if t in _ATTRIBUTE_NODES:
             obj = recv.child_by_field_name("object")
             prop = recv.child_by_field_name("attribute" if t == "attribute" else "property")
-            if obj is not None and prop is not None and (obj.type == "this" or _text(obj) in _RECEIVER_SELF):
+            if obj is not None and prop is not None and (obj.type == "this" or self._text(obj) in _RECEIVER_SELF):
                 cls = self._class_node(node)
                 if cls is not None:
-                    tname = self.scan.attr_types.get(cls.id, {}).get(_text(prop))
+                    tname = self.scan.attr_types.get(cls.id, {}).get(self._text(prop))
                     if tname is not None:
                         return self._name_ref(tname, chain, node)
             elif obj is not None and prop is not None and obj.type in ("identifier", *_ATTRIBUTE_NODES):
                 # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）
                 inner = self._type_ref(obj, node, chain)
                 if inner is not None and inner[0] == "urn" and inner[1].startswith(_EXTERNAL_PREFIX):
-                    joined = _append_member(inner[1], _text(prop))
+                    joined = _append_member(inner[1], self._text(prop))
                     return ("urn", joined) if joined is not None else None
             return None
         if t in ("call", "new_expression"):
             fn = recv.child_by_field_name("constructor" if t == "new_expression" else "function")
             if fn is not None and fn.type == "identifier":
-                text = _text(fn)
+                text = self._text(fn)
                 if t == "new_expression" or self._looks_like_class(text):
                     return self._name_ref(text, chain, node)
         return None
@@ -745,7 +739,7 @@ class _Extractor:
             self._scan_js(root)
 
     def _bind(self, node: Node, fn: Node | None) -> None:
-        name = _text(node)
+        name = self._text(node)
         if fn is not None and name in self.scan.globals.get(fn.id, ()):
             return
         self.scan.binders.add(node.id)
@@ -782,7 +776,7 @@ class _Extractor:
         if node is None:
             return None
         for n in self._annotation_names(node):
-            name = _text(n[0])
+            name = self._text(n[0])
             if name not in _ANNOTATION_SKIP:
                 return name
         return None
@@ -795,10 +789,10 @@ class _Extractor:
             return self._py_value_type(inner, scope)
         if value.type == "call":
             fn = value.child_by_field_name("function")
-            if fn is not None and fn.type == "identifier" and self._looks_like_class(_text(fn)):
-                return _text(fn)
+            if fn is not None and fn.type == "identifier" and self._looks_like_class(self._text(fn)):
+                return self._text(fn)
         if value.type == "identifier" and scope is not None:
-            return self.scan.var_types.get(scope.id, {}).get(_text(value))
+            return self.scan.var_types.get(scope.id, {}).get(self._text(value))
         return None
 
     def _scan_python(self, root: Node) -> None:
@@ -845,7 +839,7 @@ class _Extractor:
                     self._py_scoped_import(node, scope)
             elif t == "global_statement" and fn is not None:
                 for n in node.named_children:
-                    self.scan.globals.setdefault(fn.id, set()).add(_text(n))
+                    self.scan.globals.setdefault(fn.id, set()).add(self._text(n))
             for c in reversed(node.children):
                 stack.append((c, child_fn, child_scope, child_cls))
 
@@ -862,7 +856,7 @@ class _Extractor:
             first = bound if bound.type == "identifier" else (bound.named_children or [None])[0]
             if first is None:
                 continue
-            name = _text(first)
+            name = self._text(first)
             if name in self.scan.globals.get(scope.id, ()):
                 continue  # ``global X`` + ``import X``: モジュールの名前を束ねる
             table[name] = key
@@ -878,15 +872,15 @@ class _Extractor:
         sup = cls.child_by_field_name("superclasses")
         for c in sup.named_children if sup is not None else ():
             if c.type == "identifier":
-                out.append(_text(c))
+                out.append(self._text(c))
             elif c.type == "attribute":
                 attr = c.child_by_field_name("attribute")
                 if attr is not None:
-                    out.append(_text(attr))
+                    out.append(self._text(attr))
             elif c.type == "subscript":
                 value = c.child_by_field_name("value")
                 if value is not None and value.type == "identifier":
-                    out.append(_text(value))
+                    out.append(self._text(value))
         return out
 
     def _js_base_names(self, cls: Node) -> list[str]:
@@ -895,7 +889,7 @@ class _Extractor:
             for clause in heritage.named_children:
                 value = clause.child_by_field_name("value") if clause.type == "extends_clause" else clause
                 if value is not None and value.type == "identifier":
-                    out.append(_text(value))
+                    out.append(self._text(value))
         return out
 
     def _py_params(self, params: Node, fn: Node) -> None:
@@ -906,12 +900,12 @@ class _Extractor:
                 first = next((c for c in p.named_children if c.type == "identifier"), None)
                 if first is not None:
                     self._bind(first, fn)
-                    self._set_var_type(fn, _text(first), self._py_ann_name(p.child_by_field_name("type")))
+                    self._set_var_type(fn, self._text(first), self._py_ann_name(p.child_by_field_name("type")))
             elif p.type in ("default_parameter", "typed_default_parameter"):
                 n = p.child_by_field_name("name")
                 if n is not None:
                     self._bind(n, fn)
-                    self._set_var_type(fn, _text(n), self._py_ann_name(p.child_by_field_name("type")))
+                    self._set_var_type(fn, self._text(n), self._py_ann_name(p.child_by_field_name("type")))
             elif p.type in ("list_splat_pattern", "dictionary_splat_pattern"):
                 for n in p.named_children:
                     if n.type == "identifier":
@@ -926,10 +920,10 @@ class _Extractor:
         )
         if left.type == "identifier":
             self._bind(left, fn)
-            self._set_var_type(scope, _text(left), tname)
+            self._set_var_type(scope, self._text(left), tname)
             if scope is not fn and cls is not None and scope.id == cls.id:
                 self._set_attr_type(
-                    cls, _text(left), tname
+                    cls, self._text(left), tname
                 )  # クラス直下の ``x: T``（dataclass のフィールドなど）
         elif left.type in ("pattern_list", "tuple_pattern", "list_pattern"):
             for n in self._py_targets(left):
@@ -941,9 +935,9 @@ class _Extractor:
                 obj is not None
                 and attr is not None
                 and obj.type == "identifier"
-                and _text(obj) in _RECEIVER_SELF
+                and self._text(obj) in _RECEIVER_SELF
             ):
-                self._set_attr_type(cls, _text(attr), tname)
+                self._set_attr_type(cls, self._text(attr), tname)
 
     # TypeScript / JavaScript
 
@@ -965,7 +959,7 @@ class _Extractor:
         elif t == "rest_pattern":
             for c in node.named_children:
                 yield from self._js_targets(c)
-        elif t == "assignment_pattern":
+        elif t in ("assignment_pattern", "object_assignment_pattern"):  # 後者は ``{ foo = 1 }`` の ``foo``
             yield from self._js_targets(node.child_by_field_name("left"))
 
     def _js_ann_name(self, node: Node | None) -> str | None:
@@ -975,7 +969,7 @@ class _Extractor:
         while stack:
             n = stack.pop()
             if n.type == "type_identifier":
-                return _text(n)
+                return self._text(n)
             stack.extend(reversed(n.children))
         return None
 
@@ -988,9 +982,9 @@ class _Extractor:
         if value.type == "new_expression":
             ctor = value.child_by_field_name("constructor")
             if ctor is not None and ctor.type == "identifier":
-                return _text(ctor)
+                return self._text(ctor)
         if value.type == "identifier" and fn is not None:
-            return self.scan.var_types.get(fn.id, {}).get(_text(value))
+            return self.scan.var_types.get(fn.id, {}).get(self._text(value))
         return None
 
     def _scan_js(self, root: Node) -> None:
@@ -1021,20 +1015,26 @@ class _Extractor:
             elif t == "variable_declarator":
                 name = node.child_by_field_name("name")
                 if name is not None:
+                    imported = (
+                        js_require_bindings(node, self.parsed.source) if fn is not None else []
+                    )
                     for n in self._js_targets(name):
-                        self._bind(n, fn)
+                        if fn is not None and self._text(n) in imported:
+                            self._js_scoped_require(node, n, fn)
+                        else:
+                            self._bind(n, fn)
                     if name.type == "identifier":
                         tname = self._js_ann_name(node.child_by_field_name("type")) or self._js_value_type(
                             node.child_by_field_name("value"), fn
                         )
-                        self._set_var_type(scope, _text(name), tname)
+                        self._set_var_type(scope, self._text(name), tname)
             elif t in ("public_field_definition", "field_definition"):
                 name = node.child_by_field_name("name") or node.child_by_field_name("property")
                 if name is not None and cls is not None:
                     tname = self._js_ann_name(node.child_by_field_name("type")) or self._js_value_type(
                         node.child_by_field_name("value"), fn
                     )
-                    self._set_attr_type(cls, _text(name), tname)
+                    self._set_attr_type(cls, self._text(name), tname)
             elif t == "assignment_expression":
                 left = node.child_by_field_name("left")
                 if left is not None and left.type == "member_expression":
@@ -1042,7 +1042,7 @@ class _Extractor:
                     prop = left.child_by_field_name("property")
                     if obj is not None and prop is not None and obj.type == "this":
                         self._set_attr_type(
-                            cls, _text(prop), self._js_value_type(node.child_by_field_name("right"), fn)
+                            cls, self._text(prop), self._js_value_type(node.child_by_field_name("right"), fn)
                         )
             elif t == "catch_clause":
                 for n in self._js_targets(node.child_by_field_name("parameter")):
@@ -1053,6 +1053,16 @@ class _Extractor:
             for c in reversed(node.children):
                 stack.append((c, child_fn, child_scope, child_cls))
 
+    def _js_scoped_require(self, declarator: Node, name_node: Node, fn: Node) -> None:
+        """関数の中の ``const { foo } = require("x")`` が束縛する ``foo`` を控える（ローカル変数とは別に。使用箇所は ``x`` の先を指す）。
+
+        キーは宣言文（``const ...``）の開始位置。``extract_imports`` が ``require`` の ``ImportFact.range`` に使う文と同じ。
+        """
+        decl = declarator.parent or declarator
+        p = self.pos(decl)
+        self.scan.binders.add(name_node.id)
+        self.scan.imports.setdefault(fn.id, {})[self._text(name_node)] = (p.line, p.col)
+
     def _js_params(self, params: Node, fn: Node, cls: Node | None) -> None:
         for p in params.named_children:
             if p.type in ("required_parameter", "optional_parameter"):
@@ -1062,12 +1072,12 @@ class _Extractor:
                     self._bind(n, fn)
                 tname = self._js_ann_name(p.child_by_field_name("type"))
                 if pattern is not None and pattern.type == "identifier":
-                    self._set_var_type(fn, _text(pattern), tname)
+                    self._set_var_type(fn, self._text(pattern), tname)
                     if any(
                         c.type in ("accessibility_modifier", "override_modifier") for c in p.children
                     ) or any(c.type == "readonly" for c in p.children):
                         self._set_attr_type(
-                            cls, _text(pattern), tname
+                            cls, self._text(pattern), tname
                         )  # コンストラクタのパラメータプロパティ
             else:
                 for n in self._js_targets(p):

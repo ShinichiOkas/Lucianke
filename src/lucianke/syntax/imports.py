@@ -44,6 +44,7 @@ __all__ = [
     "external_name_map",
     "extract_imports",
     "imported_name_map",
+    "js_require_bindings",
     "make_resolver",
     "resolve_module",
     "wildcard_sources",
@@ -82,7 +83,9 @@ class ImportFact:
     range: Range
     kind: ImportKind
     reexport: bool = False  # ``export ... from``: このファイルの名前空間には束ねない（再エクスポート）
-    nested: bool = False  # Python: ``def`` / ``class`` の中の import（束縛はそのスコープの中だけ。ファイルの名前表には入れない）
+    # 関数の中の import（束縛はそのスコープの中だけ。ファイルの名前表には入れない）。Python: ``def`` / ``class`` の中の import。
+    # TS / JS: 関数（アロー・メソッドを含む）の中の ``require``（``import`` 文はモジュール直下にしか書けない）
+    nested: bool = False
 
 
 # --- 抽出 -------------------------------------------------------------------------------
@@ -107,15 +110,16 @@ def _query_for(parsed: ParsedFile, language_id: str, family: str) -> Query:
     return q
 
 
-def _text(node: Node | None) -> str:
-    return "" if node is None or node.text is None else node.text.decode("utf-8", errors="replace")
+def _text(node: Node | None, src: bytes) -> str:
+    # Node.text は使わない（read_callback で解析した木では読み取り関数を呼び直し、解放済みの領域を読みうる。BUG-0020・BUG-0051）。
+    return "" if node is None else src[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
 
-def _string_value(node: Node | None) -> str | None:
+def _string_value(node: Node | None, src: bytes) -> str | None:
     """``string`` ノードの中身（引用符を除く）。"""
     if node is None or node.type != "string":
         return None
-    text = _text(node)
+    text = _text(node, src)
     return text[1:-1] if len(text) >= 2 else ""
 
 
@@ -142,14 +146,16 @@ def extract_imports(parsed: ParsedFile, *, language_id: str | None = None) -> li
         return Range(li.offset_to_position(node.start_byte).value, li.offset_to_position(node.end_byte).value)
 
     facts: list[ImportFact] = []
+    src = parsed.source
     for _key, node in sorted(nodes.items(), key=lambda kv: kv[0][:2]):
         if family == "python":
-            found = _python_facts(node, rng(node))
+            found = _python_facts(node, rng(node), src)
             facts.extend([replace(f, nested=True) for f in found] if _in_scope_body(node) else found)
         elif node.type == "call_expression":
-            facts.extend(_require_facts(node, rng))
+            found = _require_facts(node, rng, src)
+            facts.extend([replace(f, nested=True) for f in found] if _in_js_function(node) else found)
         else:
-            facts.extend(_es_facts(node, rng(node)))
+            facts.extend(_es_facts(node, rng(node), src))
     return facts
 
 
@@ -168,17 +174,17 @@ def _in_scope_body(node: Node) -> bool:
     return False
 
 
-def _python_facts(node: Node, rng: Range) -> list[ImportFact]:
+def _python_facts(node: Node, rng: Range, src: bytes) -> list[ImportFact]:
     if node.type == "import_statement":
         out: list[ImportFact] = []
         for child in node.children_by_field_name("name"):
             if child.type == "aliased_import":
-                module = _text(child.child_by_field_name("name"))
-                alias = _text(child.child_by_field_name("alias"))
+                module = _text(child.child_by_field_name("name"), src)
+                alias = _text(child.child_by_field_name("alias"), src)
                 if module and alias:
                     out.append(ImportFact(module, [("*", alias)], False, 0, rng, "import"))
             elif child.type == "dotted_name":
-                out.append(ImportFact(_text(child), [], False, 0, rng, "import"))
+                out.append(ImportFact(_text(child, src), [], False, 0, rng, "import"))
         return out
     # import_from_statement / future_import_statement
     if node.type == "future_import_statement":
@@ -189,24 +195,51 @@ def _python_facts(node: Node, rng: Range) -> list[ImportFact]:
             return []
         if mod.type == "relative_import":
             prefix = next((c for c in mod.children if c.type == "import_prefix"), None)
-            level = _text(prefix).count(".")
-            module = _text(next((c for c in mod.children if c.type == "dotted_name"), None))
+            level = _text(prefix, src).count(".")
+            module = _text(next((c for c in mod.children if c.type == "dotted_name"), None), src)
         else:
-            module, level = _text(mod), 0
+            module, level = _text(mod, src), 0
     names: list[tuple[str, str | None]] = []
     for child in node.children_by_field_name("name"):
         if child.type == "aliased_import":
             names.append(
-                (_text(child.child_by_field_name("name")), _text(child.child_by_field_name("alias")) or None)
+                (
+                    _text(child.child_by_field_name("name"), src),
+                    _text(child.child_by_field_name("alias"), src) or None,
+                )
             )
         elif child.type == "dotted_name":
-            names.append((_text(child), None))
+            names.append((_text(child, src), None))
     if any(c.type == "wildcard_import" for c in node.children):
         names.append(("*", None))
     return [ImportFact(module, names, level > 0, level, rng, "from")]
 
 
 # --- TypeScript / JavaScript ------------------------------------------------------------
+
+# 関数のノード型。``syntax/relations.py`` の ``_JS_FUNCTIONS`` はこの集合そのもの（関数の中の束縛を import として扱う側と、ここで
+# ``nested`` にする側がずれると、使用が落ちるか解決できなくなるので、定義は 1 か所に置く）
+JS_FUNCTION_NODES = frozenset(
+    {
+        "function_declaration",
+        "function_expression",
+        "function",
+        "generator_function",
+        "generator_function_declaration",
+        "arrow_function",
+        "method_definition",
+    }
+)
+
+
+def _in_js_function(node: Node) -> bool:
+    """``node`` が関数（アロー・メソッド・ジェネレータを含む）の中にあるか。"""
+    anc = node.parent
+    while anc is not None:
+        if anc.type in JS_FUNCTION_NODES:
+            return True
+        anc = anc.parent
+    return False
 
 
 def _js_fact(
@@ -220,28 +253,30 @@ def _js_fact(
     return ImportFact(module, names, module.startswith("."), 0, rng, kind, reexport)
 
 
-def _specifier(node: Node) -> tuple[str, str | None]:
+def _specifier(node: Node, src: bytes) -> tuple[str, str | None]:
     """``import_specifier`` / ``export_specifier`` → ``(name, alias)``（名前が文字列リテラルのこともある）。"""
     name_node = node.child_by_field_name("name")
     name = (
-        _string_value(name_node) if name_node is not None and name_node.type == "string" else _text(name_node)
+        _string_value(name_node, src)
+        if name_node is not None and name_node.type == "string"
+        else _text(name_node, src)
     )
     alias = node.child_by_field_name("alias")
-    return (name or "", _text(alias) or None)
+    return (name or "", _text(alias, src) or None)
 
 
-def _es_facts(node: Node, rng: Range) -> list[ImportFact]:
+def _es_facts(node: Node, rng: Range, src: bytes) -> list[ImportFact]:
     if node.type == "import_statement":
         for child in node.children:
             if child.type == "import_require_clause":  # ``import x = require("y")``（source は節の中）
                 ident = next((c for c in child.children if c.type == "identifier"), None)
-                src = _string_value(child.child_by_field_name("source"))
+                mod = _string_value(child.child_by_field_name("source"), src)
                 return (
-                    [_js_fact(src, [("*", _text(ident))], rng, "require")]
-                    if ident is not None and src is not None
+                    [_js_fact(mod, [("*", _text(ident, src))], rng, "require")]
+                    if ident is not None and mod is not None
                     else []
                 )
-    module = _string_value(node.child_by_field_name("source"))
+    module = _string_value(node.child_by_field_name("source"), src)
     if module is None:
         return []
     names: list[tuple[str, str | None]] = []
@@ -250,28 +285,28 @@ def _es_facts(node: Node, rng: Range) -> list[ImportFact]:
             if child.type == "import_clause":
                 for part in child.children:
                     if part.type == "identifier":
-                        names.append(("default", _text(part)))
+                        names.append(("default", _text(part, src)))
                     elif part.type == "namespace_import":
                         ident = next((c for c in part.children if c.type == "identifier"), None)
-                        names.append(("*", _text(ident)))
+                        names.append(("*", _text(ident, src)))
                     elif part.type == "named_imports":
-                        names.extend(_specifier(s) for s in part.children if s.type == "import_specifier")
+                        names.extend(_specifier(s, src) for s in part.children if s.type == "import_specifier")
         return [_js_fact(module, names, rng, "es_import")]
     # export_statement（source つき = 再エクスポート）
     for child in node.children:
         if child.type == "export_clause":
-            names.extend(_specifier(s) for s in child.children if s.type == "export_specifier")
+            names.extend(_specifier(s, src) for s in child.children if s.type == "export_specifier")
         elif child.type == "namespace_export":
             ident = next((c for c in child.children if c.type == "identifier"), None)
-            names.append(("*", _text(ident) or None))
+            names.append(("*", _text(ident, src) or None))
         elif child.type == "*":
             names.append(("*", None))
     return [_js_fact(module, names, rng, "es_import", reexport=True)]
 
 
-def _require_facts(call: Node, rng_of: Callable[[Node], Range]) -> list[ImportFact]:
+def _require_facts(call: Node, rng_of: Callable[[Node], Range], src: bytes) -> list[ImportFact]:
     args = call.child_by_field_name("arguments")
-    module = _string_value(args.named_children[0] if args is not None and args.named_children else None)
+    module = _string_value(args.named_children[0] if args is not None and args.named_children else None, src)
     if module is None:
         return []
     names: list[tuple[str, str | None]] = []
@@ -286,7 +321,7 @@ def _require_facts(call: Node, rng_of: Callable[[Node], Range]) -> list[ImportFa
     ):
         prop = parent.child_by_field_name("property")
         if prop is not None:
-            member, value, parent = _text(prop), parent, parent.parent
+            member, value, parent = _text(prop, src), parent, parent.parent
     if (
         parent is not None
         and parent.type == "variable_declarator"
@@ -294,10 +329,7 @@ def _require_facts(call: Node, rng_of: Callable[[Node], Range]) -> list[ImportFa
     ):
         target = parent.child_by_field_name("name")
         if target is not None:
-            if target.type == "identifier":
-                names.append((member, _text(target)) if member else ("*", _text(target)))
-            elif target.type == "object_pattern" and member is None:
-                names.extend(_object_pattern_names(target))
+            names.extend(_declared_names(target, member, src))
         decl = parent.parent
         holder = decl if decl is not None else parent
     elif parent is not None and parent.type == "expression_statement":
@@ -305,21 +337,65 @@ def _require_facts(call: Node, rng_of: Callable[[Node], Range]) -> list[ImportFa
     return [_js_fact(module, names, rng_of(holder), "require")]
 
 
-def _object_pattern_names(pattern: Node) -> list[tuple[str, str | None]]:
+def _declared_names(target: Node, member: str | None, src: bytes) -> list[tuple[str, str | None]]:
+    """``const <target> = require("x")``（``member`` があれば ``require("x").member``）が束縛する名前。"""
+    if target.type == "identifier":
+        return [(member, _text(target, src)) if member else ("*", _text(target, src))]
+    if target.type == "object_pattern" and member is None:
+        return _object_pattern_names(target, src)
+    return []
+
+
+def js_require_bindings(declarator: Node, src: bytes) -> list[str]:
+    """``variable_declarator`` が ``require("x")``（か ``require("x").y``）の結果として束縛する名前（別名があれば別名）。
+
+    ``extract_imports`` が ``require`` の ``ImportFact`` に入れる名前と同じ形だけを返す（分割代入の入れ子・配列・rest は含まない。
+    それらはただのローカル変数）。``syntax/relations.py`` が、関数の中のこの束縛を「ローカル変数」でなく「import」として
+    扱うための共有。
+    """
+    value = declarator.child_by_field_name("value")
+    target = declarator.child_by_field_name("name")
+    if value is None or target is None:
+        return []
+    member: str | None = None
+    if value.type == "member_expression":
+        prop = value.child_by_field_name("property")
+        obj = value.child_by_field_name("object")
+        if prop is None or obj is None:
+            return []
+        member, value = _text(prop, src), obj
+    if value.type != "call_expression" or not _is_require_call(value, src):
+        return []
+    return [alias or name for name, alias in _declared_names(target, member, src)]
+
+
+def _is_require_call(call: Node, src: bytes) -> bool:
+    fn = call.child_by_field_name("function")
+    args = call.child_by_field_name("arguments")
+    first = args.named_children[0] if args is not None and args.named_children else None
+    return (
+        fn is not None
+        and fn.type == "identifier"
+        and _text(fn, src) == "require"
+        and _string_value(first, src) is not None
+    )
+
+
+def _object_pattern_names(pattern: Node, src: bytes) -> list[tuple[str, str | None]]:
     out: list[tuple[str, str | None]] = []
     for child in pattern.named_children:
         if child.type == "shorthand_property_identifier_pattern":
-            out.append((_text(child), None))
+            out.append((_text(child, src), None))
         elif child.type == "pair_pattern":
             key, val = child.child_by_field_name("key"), child.child_by_field_name("value")
             if val is not None and val.type == "assignment_pattern":
                 val = val.child_by_field_name("left")
             if key is not None and val is not None and val.type == "identifier":
-                out.append((_text(key), _text(val)))
+                out.append((_text(key, src), _text(val, src)))
         elif child.type == "object_assignment_pattern":
             left = child.child_by_field_name("left")
             if left is not None:
-                out.append((_text(left), None))
+                out.append((_text(left, src), None))
     return out
 
 

@@ -97,12 +97,9 @@ def _is_comment(node: Any, prof: _Profile) -> bool:
     return node.type in prof.comment_types
 
 
-def _comment_text(node: Any) -> bytes:
-    return node.text or b""
-
-
-def _is_doc_comment(node: Any, prof: _Profile) -> bool:
-    text = _comment_text(node)
+def _is_doc_comment(node: Any, parsed: ParsedFile, prof: _Profile) -> bool:
+    # Node.text は使わない（read_callback で解析した木では読み取り関数を呼び直し、解放済みの領域を読みうる。BUG-0020・BUG-0051）。
+    text = parsed.source[node.start_byte : node.end_byte]
     for prefix in prof.doc_prefixes:
         p = prefix.encode()
         if text.startswith(p):
@@ -164,7 +161,7 @@ def _leading_start(core: Any, parsed: ParsedFile, prof: _Profile) -> int:
         elif _is_comment(prev, prof):
             if not _is_standalone(prev, parsed):
                 break  # 直前の定義の行末コメント
-            if not _is_doc_comment(prev, prof) and start_line - _last_line(prev, parsed) > 1:
+            if not _is_doc_comment(prev, parsed, prof) and start_line - _last_line(prev, parsed) > 1:
                 break  # 通常コメントは空行を挟んだら含めない
             start_node = prev
         else:

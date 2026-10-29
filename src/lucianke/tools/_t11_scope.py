@@ -52,8 +52,9 @@ def _same(a: Any, b: Any | None) -> bool:
     return b is not None and a.id == b.id
 
 
-def _text(node: Any) -> str:
-    return node.text.decode("utf-8", "surrogateescape")
+def _text(src: bytes, node: Any) -> str:
+    """ノードの文字列。``Node.text`` は使わない（read_callback で解析した木では読み取り関数を呼び直し、解放済みの領域を読みうる。BUG-0020・BUG-0051）。"""
+    return src[node.start_byte : node.end_byte].decode("utf-8", "surrogateescape")
 
 
 def _children(node: Any) -> Iterator[Any]:
@@ -115,15 +116,16 @@ def _target_names(node: Any | None) -> Iterator[Any]:
 class _Bindings:
     """関数 1 つの **自分のスコープ** の束縛（入れ子の関数・ラムダ・クラスの中身は含まない）。"""
 
-    __slots__ = ("bound", "globals_", "imported", "nonlocals")
+    __slots__ = ("bound", "globals_", "imported", "nonlocals", "src")
 
-    def __init__(self, fn: Any) -> None:
+    def __init__(self, fn: Any, src: bytes) -> None:
+        self.src = src
         self.bound: set[str] = set()
         self.globals_: set[str] = set()
         self.nonlocals: set[str] = set()
         self.imported: set[str] = set()
         for n in _param_names(fn):
-            self.bound.add(_text(n))
+            self.bound.add(_text(self.src, n))
         body = fn.child_by_field_name("body")
         if body is not None:
             self._scan(body)
@@ -134,48 +136,48 @@ class _Bindings:
             if t == "function_definition":
                 name = node.child_by_field_name("name")
                 if name is not None:
-                    self.bound.add(_text(name))
+                    self.bound.add(_text(self.src, name))
             return  # 入れ子の関数の中身は別のスコープ
         if t == "class_definition":
             name = node.child_by_field_name("name")
             if name is not None:
-                self.bound.add(_text(name))
+                self.bound.add(_text(self.src, name))
             return
         if t in _COMPREHENSIONS:
             for n in _walrus_targets(node):
-                self.bound.add(_text(n))
+                self.bound.add(_text(self.src, n))
             return
         if t in ("global_statement", "nonlocal_statement"):
-            names = {_text(c) for c in node.children if c.type == "identifier"}
+            names = {_text(self.src, c) for c in node.children if c.type == "identifier"}
             (self.globals_ if t == "global_statement" else self.nonlocals).update(names)
             return
         if t in _IMPORTS:
-            self.imported.update(self._import_names(node))
+            self.imported.update(self._import_names(node, self.src))
             return
         if t == "assignment":
             for n in _target_names(node.child_by_field_name("left")):
-                self.bound.add(_text(n))
+                self.bound.add(_text(self.src, n))
         elif t == "augmented_assignment":
             for n in _target_names(node.child_by_field_name("left")):
-                self.bound.add(_text(n))
+                self.bound.add(_text(self.src, n))
         elif t == "for_statement":
             for n in _target_names(node.child_by_field_name("left")):
-                self.bound.add(_text(n))
+                self.bound.add(_text(self.src, n))
         elif t == "named_expression":
             name = node.child_by_field_name("name")
             if name is not None:
-                self.bound.add(_text(name))
+                self.bound.add(_text(self.src, name))
         elif t == "except_clause":
             seen_as = False
             for c in node.children:
                 if seen_as and c.type == "identifier":
-                    self.bound.add(_text(c))
+                    self.bound.add(_text(self.src, c))
                 seen_as = c.type == "as"
         elif t == "as_pattern":
             alias = node.child_by_field_name("alias") or (node.children[-1] if node.children else None)
             if alias is not None:
                 for n in _walk_identifiers(alias):
-                    self.bound.add(_text(n))
+                    self.bound.add(_text(self.src, n))
         for c in node.children:
             self._scan(c)
 
@@ -184,19 +186,19 @@ class _Bindings:
         return self.globals_ | self.nonlocals
 
     @staticmethod
-    def _import_names(node: Any) -> Iterator[str]:
+    def _import_names(node: Any, src: bytes) -> Iterator[str]:
         for c in node.children:
             if c.type == "aliased_import":
                 alias = c.child_by_field_name("alias")
                 if alias is not None:
-                    yield _text(alias)
+                    yield _text(src, alias)
             elif c.type == "dotted_name":
                 if node.type == "import_statement" and c.children:
-                    yield _text(c.children[0])
+                    yield _text(src, c.children[0])
                 elif node.type == "import_from_statement" and not _same(
                     c, node.child_by_field_name("module_name")
                 ):
-                    yield _text(c)
+                    yield _text(src, c)
             elif c.type == "wildcard_import":
                 continue
 
@@ -222,7 +224,7 @@ def _walrus_targets(node: Any) -> Iterator[Any]:
 # --- 改名するスコープの決定 -----------------------------------------------------------------------
 
 
-def _scope_function(node: Any, name: str, cache: dict[int, _Bindings]) -> Any | None:
+def _scope_function(node: Any, name: str, cache: dict[int, _Bindings], src: bytes) -> Any | None:
     """``node`` を含む関数のうち、``name`` を束縛する最も内側のもの。無ければ（または ``global`` / ``nonlocal`` なら）``None``。"""
     child = node
     cur = node.parent
@@ -235,7 +237,7 @@ def _scope_function(node: Any, name: str, cache: dict[int, _Bindings]) -> Any | 
             if in_scope:
                 b = cache.get(cur.id)
                 if b is None:
-                    b = cache[cur.id] = _Bindings(cur)
+                    b = cache[cur.id] = _Bindings(cur, src)
                 if name in b.declared:
                     return None
                 if name in b.bound:
@@ -265,8 +267,9 @@ def _is_member_or_keyword(node: Any) -> bool:
 
 
 class _Collector:
-    def __init__(self, scope_fn: Any, name: str) -> None:
+    def __init__(self, scope_fn: Any, name: str, src: bytes) -> None:
         self.scope_fn = scope_fn
+        self.src = src
         self.name = name
         self.found: list[Any] = []
         self._cache: dict[int, _Bindings] = {}
@@ -274,13 +277,13 @@ class _Collector:
     def _bindings(self, fn: Any) -> _Bindings:
         b = self._cache.get(fn.id)
         if b is None:
-            b = self._cache[fn.id] = _Bindings(fn)
+            b = self._cache[fn.id] = _Bindings(fn, self.src)
         return b
 
     def run(self) -> list[Any]:
         fn = self.scope_fn
         for n in _param_names(fn):
-            if _text(n) == self.name:
+            if _text(self.src, n) == self.name:
                 self.found.append(n)
         body = fn.child_by_field_name("body")
         if body is not None:
@@ -315,7 +318,7 @@ class _Collector:
     def walk(self, node: Any) -> None:
         t = node.type
         if t == "identifier":
-            if _text(node) == self.name and not _is_member_or_keyword(node):
+            if _text(self.src, node) == self.name and not _is_member_or_keyword(node):
                 self.found.append(node)
             return
         if t in _IMPORTS:
@@ -323,7 +326,7 @@ class _Collector:
         if t in _FUNCTIONS:
             if t == "function_definition":
                 nm = node.child_by_field_name("name")
-                if nm is not None and _text(nm) == self.name:
+                if nm is not None and _text(self.src, nm) == self.name:
                     self.found.append(nm)  # def name(): はこのスコープの束縛
             if self._shadows(node):
                 self._outer_parts(node)
@@ -335,10 +338,10 @@ class _Collector:
             return
         if t == "class_definition":
             nm = node.child_by_field_name("name")
-            if nm is not None and _text(nm) == self.name:
+            if nm is not None and _text(self.src, nm) == self.name:
                 self.found.append(nm)
             body = node.child_by_field_name("body")
-            if body is not None and _class_binds(body, self.name):
+            if body is not None and _class_binds(body, self.name, self.src):
                 raise _Unsupported("class body binds the name")
             for c in node.children:
                 if nm is not None and c.id == nm.id:
@@ -348,7 +351,9 @@ class _Collector:
         if t in _COMPREHENSIONS:
             clauses = [c for c in node.children if c.type == "for_in_clause"]
             binds = any(
-                _text(n) == self.name for c in clauses for n in _target_names(c.child_by_field_name("left"))
+                _text(self.src, n) == self.name
+                for c in clauses
+                for n in _target_names(c.child_by_field_name("left"))
             )
             if binds:
                 first = clauses[0].child_by_field_name("right") if clauses else None
@@ -366,34 +371,34 @@ def _descendants(node: Any) -> Iterator[Any]:
             yield from _descendants(c)
 
 
-def _class_binds(body: Any, name: str) -> bool:
+def _class_binds(body: Any, name: str, src: bytes) -> bool:
     """クラス直下（メソッドの中身は除く）で ``name`` を束縛するか。"""
     for n in body.children:
         t = n.type
         if t == "expression_statement":
             for sub in n.children:
                 if sub.type in ("assignment", "augmented_assignment") and any(
-                    _text(x) == name for x in _target_names(sub.child_by_field_name("left"))
+                    _text(src, x) == name for x in _target_names(sub.child_by_field_name("left"))
                 ):
                     return True
         elif t in ("function_definition", "class_definition"):
             nm = n.child_by_field_name("name")
-            if nm is not None and _text(nm) == name:
+            if nm is not None and _text(src, nm) == name:
                 return True
         elif t == "decorated_definition":
             d = n.child_by_field_name("definition")
             nm = d.child_by_field_name("name") if d is not None else None
-            if nm is not None and _text(nm) == name:
+            if nm is not None and _text(src, nm) == name:
                 return True
     return False
 
 
-def _used_names_outside(scope_fn: Any, name: str) -> bool:
+def _used_names_outside(scope_fn: Any, name: str, src: bytes) -> bool:
     """``name`` を、``scope_fn`` を含む最も外側の関数の中で使っているか（``new_name`` の衝突検査。入れ子の別関数も数える安全側）。"""
     outer = scope_fn
     while (nxt := _enclosing_function(outer)) is not None:
         outer = nxt
-    return any(_text(n) == name and not _is_member_or_keyword(n) for n in _walk_identifiers_deep(outer))
+    return any(_text(src, n) == name and not _is_member_or_keyword(n) for n in _walk_identifiers_deep(outer))
 
 
 def _enclosing_function(node: Any) -> Any | None:
@@ -441,15 +446,16 @@ def rename_local(
         return None
     if _is_member_or_keyword(node):
         return None
-    name = _text(node)
+    src = parsed.source  # 木を作ったバイト列（``source`` と同じ内容）。ノードの綴りはここから切り出す
+    name = _text(src, node)
     try:
-        scope_fn = _scope_function(node, name, {})
+        scope_fn = _scope_function(node, name, {}, src)
         if scope_fn is None:
             return None
-        b = _Bindings(scope_fn)
+        b = _Bindings(scope_fn, src)
         if name in b.declared or name in b.imported:
             return None
-        found = _Collector(scope_fn, name).run()
+        found = _Collector(scope_fn, name, src).run()
     except _Unsupported:
         return None
     if not found:
@@ -460,7 +466,7 @@ def rename_local(
             "new_name is the same as the current name",
             details={"param": "new_name", "reason": "same_name"},
         )
-    if _used_names_outside(scope_fn, new_name):
+    if _used_names_outside(scope_fn, new_name, src):
         raise LuciankeError(
             ErrorCode.E_MUTATION_BLOCKED,
             f"new_name {new_name!r} is already used in the function that binds {name!r} (or in a function around it)",

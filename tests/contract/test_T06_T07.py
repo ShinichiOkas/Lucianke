@@ -1008,3 +1008,66 @@ async def test_real_t06_use_after_a_function_local_import_is_a_reference(tmp_pat
         await indexer.aclose()
         readers.close()
         writer.close()
+
+
+async def test_real_t06_use_after_a_function_local_require_is_a_reference(tmp_path: Path) -> None:
+    """BUG-0052: JS の関数の中の ``const { foo } = require("./foo")`` で束縛した名前の使用も参照に載る。
+
+    同名を別のモジュールから別の関数の中で require していても、そちらの使用は巻き込まない。モジュール直下の require の使用は従来どおり。
+    """
+    root = tmp_path / "scoped-js"
+    (root / "app").mkdir(parents=True)
+    (root / "app/foo.js").write_text(
+        "function foo(x) {\n  return x;\n}\n\nmodule.exports = { foo };\n", encoding="utf-8"
+    )
+    (root / "app/other.js").write_text(
+        "function foo() {\n  return 2;\n}\n\nmodule.exports = { foo };\n", encoding="utf-8"
+    )
+    (root / "app/use.js").write_text(
+        "function f() {\n"
+        '  const { foo } = require("./foo");\n'
+        "  return foo(1);\n"
+        "}\n"
+        "\n"
+        "function g() {\n"
+        '  const { foo } = require("./other");\n'
+        "  return foo();\n"
+        "}\n"
+        "\n"
+        'const { foo } = require("./foo");\n'
+        "foo(3);\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "db" / "paad.sqlite"
+    writer = IndexWriter(db)
+    readers = ReaderPool(db, size=2)
+    indexer = Indexer(Workspace(workspace_id="scoped-js", root=root.resolve()), writer, readers, TreeCache())
+    try:
+        report = await indexer.scan()
+        assert not report.errors, report.errors
+        registry = ToolRegistry()
+        registry.register(t06.TOOL_SPEC)
+        base = build_services(lambda: [str(root)])
+
+        @dataclass(slots=True)
+        class Services(ToolServices):
+            db_path: Path | None = None
+
+        pipe = Pipeline(
+            registry, services=Services(roots=base.roots, trees=base.trees, lines=base.lines, db_path=db)
+        )
+
+        def lines_in(result, path: str) -> list[int]:
+            return sorted(x["line"] for x in result.structured["data"]["references"] if x["path"] == path)
+
+        foo = await refs(pipe, {"path": "app/foo.js", "symbol_name": "foo"}, include_declaration=True)
+        assert not foo.is_error, foo.text
+        assert lines_in(foo, "app/use.js") == [3, 12], foo.text  # f の中の foo(1) とモジュール直下の foo(3)。g の foo() は other.js
+
+        other = await refs(pipe, {"path": "app/other.js", "symbol_name": "foo"}, include_declaration=True)
+        assert not other.is_error, other.text
+        assert lines_in(other, "app/use.js") == [8], other.text
+    finally:
+        await indexer.aclose()
+        readers.close()
+        writer.close()

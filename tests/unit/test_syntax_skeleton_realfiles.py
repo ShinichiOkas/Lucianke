@@ -11,10 +11,15 @@
 py-tree-sitter 0.26.0（実測: Windows / cp312）の ``Point.row`` / ``Point.column`` は、タプルが持つ int への参照を
 1 つ余計に手放す。値が 256 を超える（小さい int の特別扱いに入らない）と、int が早く解放されてヒープを壊し、
 あとの木の走査（``_collect_raises`` など）でアクセス違反になる。``point[0]`` / ``point[1]`` は安全。
+
+さらに ``src/`` で Tree-sitter のノードの ``.text`` を **使っていない** ことを検査する（BUG-0020・BUG-0051）。Lucianke の解析は常に
+``read_callback`` を使い、py-tree-sitter 0.26.0 の ``Node.text`` はそのたびに読み取り関数を呼び直し（解析の期限の後に呼ぶと空回りして
+戻らない）、返された ``bytes`` を解放してから読む（アクセス違反）。ノードの綴りは ``source[node.start_byte : node.end_byte]`` で切り出す。
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -121,6 +126,129 @@ def test_src_never_reads_point_row_or_column_attributes() -> None:
     assert offenders == [], (
         "Point.row / Point.column の属性は使わない（py-tree-sitter 0.26.0 が int の参照を余計に手放す）。"
         "point[0] / point[1] を使う:\n" + "\n".join(offenders)
+    )
+
+
+# --- Node.text の禁止（BUG-0020・BUG-0051） -----------------------------------------------------
+
+# Tree-sitter のノードだけが持つ名前。これを 1 つでも参照するファイルは「ノードを扱うファイル」として ``.text`` を調べる。
+_NODE_API_ATTRS = frozenset(
+    {
+        "start_byte",
+        "end_byte",
+        "child_by_field_name",
+        "named_children",
+        "named_child_count",
+        "root_node",
+        "descendant_for_byte_range",
+        "next_sibling",
+        "prev_sibling",
+        "start_point",
+        "end_point",
+    }
+)
+# ノードを扱うファイルの中にある、ノードではない ``.text``（(src からの相対パス, 受け手の名前)）。増やすときは受け手がノードでないことを確かめる。
+_NOT_A_NODE = frozenset(
+    {
+        ("lucianke/tools/t04_resolve_symbols.py", "lift"),  # 持ち上げた型の文字列（_t04_exact の型）
+        ("lucianke/tools/t05_get_symbol_bodies.py", "match"),  # 仮想文書で見つけた塊（文字列を持つ自前の型）
+    }
+)
+
+
+def _node_text_offenders(source: str, rel: str) -> list[str]:
+    """``source``（``src/`` からの相対パスが ``rel`` のファイル）の、ノードの ``.text`` 参照らしき行。
+
+    ノードを扱うファイル（ノードだけの名前を参照している）で、``x.text``（読み取り。呼び出しではない）のうち、``self.text`` と
+    ``_NOT_A_NODE`` を除くもの。``getattr(x, "text")`` はファイルを問わず数える。
+    """
+    tree = ast.parse(source)
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    handles_nodes = bool(attrs & _NODE_API_ATTRS)
+    out: list[str] = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr == "text" and isinstance(n.ctx, ast.Load) and id(n) not in called:
+            recv = n.value.id if isinstance(n.value, ast.Name) else None
+            if handles_nodes and recv != "self" and (rel, recv) not in _NOT_A_NODE:
+                out.append(f"{rel}:{n.lineno}: {ast.unparse(n)}")
+        elif (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "getattr"
+            and len(n.args) >= 2
+            and isinstance(n.args[1], ast.Constant)
+            and n.args[1].value == "text"
+        ):
+            out.append(f"{rel}:{n.lineno}: {ast.unparse(n)}")
+    return out
+
+
+def test_node_text_detector_flags_node_text_and_spares_look_alikes() -> None:
+    node_file = """def f(node, src):
+    return node.start_byte, node.text, src[node.start_byte:node.end_byte]
+"""
+    assert _node_text_offenders(node_file, "x.py") == ["x.py:2: node.text"]
+    assert (
+        _node_text_offenders(
+            """def f(node):
+    return node.child_by_field_name('a').text
+""",
+            "x.py",
+        )
+        != []
+    )
+    assert (
+        _node_text_offenders(
+            """def f(n):
+    return n.next_sibling and getattr(n, 'text')
+""",
+            "x.py",
+        )
+        != []
+    )
+    # ノードを扱わないファイルの ``.text``、``self.text``、``obj.text(...)``（呼び出し）、書き込みは対象外
+    assert (
+        _node_text_offenders(
+            """def f(tok):
+    return tok.text
+""",
+            "x.py",
+        )
+        == []
+    )
+    assert (
+        _node_text_offenders(
+            """class A:
+    def f(self, n):
+        self.text = n.start_byte
+        return self.text
+""",
+            "x.py",
+        )
+        == []
+    )
+    assert (
+        _node_text_offenders(
+            """def f(c, n):
+    return c.text(n.start_byte)
+""",
+            "x.py",
+        )
+        == []
+    )
+
+
+def test_src_never_reads_node_text() -> None:
+    offenders = [
+        o
+        for path in sorted(_SRC.rglob("*.py"))
+        for o in _node_text_offenders(path.read_text(encoding="utf-8"), path.relative_to(_SRC).as_posix())
+    ]
+    assert offenders == [], (
+        "Node.text は使わない（read_callback で解析した木では読み取り関数を呼び直し、解放済みの領域を読みうる。BUG-0020・BUG-0051）。"
+        "source[node.start_byte : node.end_byte] で切り出す。ノードでない ``.text`` なら _NOT_A_NODE に足す:\n"
+        + "\n".join(offenders)
     )
 
 
