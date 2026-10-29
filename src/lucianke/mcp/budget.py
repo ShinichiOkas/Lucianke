@@ -273,35 +273,44 @@ class Packer:
             return self._page(kept, reserved_tokens + running, max_tokens, total, 0, None, None, ())
 
         # 2. 先頭から詰める。後ろに続きが残る間はトレーラの見込み分を差し引く。最後の 1 件はトレーラが要らない
-        reserve = self._trailer_reserve(out, start, n, cursor_factory)
-        included: list[Record] = []
-        costs: list[int] = []
-        left = avail
-        for i in range(start, n):
-            rec = records[i]
-            budget = left - (reserve if i < n - 1 else 0)
-            t = cost_of(i)
-            if t > budget and rec.shrink is not None and budget > 0:
-                small = rec.shrink(budget)  # 一度だけ
-                if small is not None:
-                    rec, t = small, est(_record_text(small))
-            if t > budget:
-                break  # 飛ばして後ろを詰めない（優先順位の順を保つ）
-            included.append(rec.with_tokens(t))
-            costs.append(t)
-            left -= t
+        shrunk: dict[int, Record | None] = {}  # 縮退は 1 レコードにつき一度だけ呼ぶ（2 周目は結果を使い回す）
 
-        m = len(included)
-        if start + m >= n:  # 縮退で全部入った
+        def greedy(reserve: int) -> tuple[list[Record], list[int]]:
+            included: list[Record] = []
+            costs: list[int] = []
+            left = avail
+            for i in range(start, n):
+                rec = records[i]
+                budget = left - (reserve if i < n - 1 else 0)
+                t = cost_of(i)
+                if t > budget and rec.shrink is not None:
+                    if i not in shrunk:
+                        shrunk[i] = rec.shrink(budget) if budget > 0 else None
+                    small = shrunk[i]
+                    if small is not None:
+                        rec, t = small, est(_record_text(small))
+                if t > budget:
+                    break  # 飛ばして後ろを詰めない（優先順位の順を保つ）
+                included.append(rec.with_tokens(t))
+                costs.append(t)
+                left -= t
+            return included, costs
+
+        included, costs = greedy(self._trailer_reserve(out, start, n, cursor_factory))
+        if start + len(included) >= n:  # 縮退で全部入った
             return self._page(tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ())
 
         # 3. 実際のトレーラ（カーソル・要約）を作って数え、収まらなければ末尾から外す
         need_first = cost_of(start)
-        fit = self._fit(out, records, start, n, m, costs, reserved_tokens, max_tokens, cursor_factory,
+        fit = self._fit(out, records, start, n, len(included), costs, reserved_tokens, max_tokens, cursor_factory,
                         with_summary=True, need_first=need_first)
-        if fit.m == 0:  # 要約を省けばレコードが入るかもしれない（要約は SHOULD）
-            alt = self._fit(out, records, start, n, m, costs, reserved_tokens, max_tokens, cursor_factory,
-                            with_summary=False, need_first=need_first)
+        if fit.m == 0:
+            # 要約（SHOULD）を省けばレコードが入るかもしれない。要約の見込みを引かずに詰め直す
+            included, costs = greedy(self._trailer_reserve(out, start, n, cursor_factory, with_summary=False))
+            if start + len(included) >= n:
+                return self._page(tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ())
+            alt = self._fit(out, records, start, n, len(included), costs, reserved_tokens, max_tokens,
+                            cursor_factory, with_summary=False, need_first=need_first)
             if alt.m > fit.m or fit.over:
                 fit = alt
         kept = tuple(included[: fit.m])
@@ -331,10 +340,16 @@ class Packer:
         return _one_line(text or default_summary(rest))
 
     def _trailer_reserve(
-        self, out: ToolOutput, start: int, n: int, cursor_factory: Callable[[int], str] | None
+        self,
+        out: ToolOutput,
+        start: int,
+        n: int,
+        cursor_factory: Callable[[int], str] | None,
+        *,
+        with_summary: bool = True,
     ) -> int:
         """詰める前のトレーラの見込み。実際の値は ``_fit`` が確かめるので、ここは大きめの近似でよい。"""
-        summary = self._summary(out, out.records[start + 1 :])
+        summary = self._summary(out, out.records[start + 1 :]) if with_summary else None
         cursor = cursor_factory(n - 1) if cursor_factory is not None else None
         return self.estimator.count("\n".join(trailer_lines(summary, cursor, n - start)))
 
