@@ -23,7 +23,7 @@
 ## 直し方
 - 定数（コミット 9c16f93、57f519d）: `WATCH_STEP_MS=10`、`WATCH_DEBOUNCE_MS=1000`、`WATCH_BURST_HINT=100`、`WATCH_BURST_QUIET_S=0.3`、`WATCH_EXPECT_TTL_S=10.0` を `core/limits.py` に置き、`watcher.py` は import する（`__all__` からは外した）。`tests/unit/test_core_limits.py` の表を S-06 の値に更新。設計書 §7.3.6-3 の定数名を合わせた。
 - burst 600 件（コミット 5b3af6c）: 実 FS のテストは `step_ms=400` で動かし（書き込み途中の停止に負けない）、窓の合算の規則は **決定的なテスト 2 件** で確かめる（`_consume` に窓を直接流す: 120 件×5 窓は rescan 1 回・個別 0 回、100 件未満の窓は待たずに個別処理）。実装は変えていない（仕様どおり）。
-- 巨大ディレクトリ移し入れ（コミット 4414fad の前後の次のコミット）: ディレクトリの移動を `move_dir`（`PermissionError` を最大 5 秒再試行）に統一し、主張を「最初の呼び出しが rescan」「rescan は 1 回」「見張りが届く」「`changed` が `WATCH_BURST_HINT` 未満」に改めた（後から届く少数の `changed` は冪等で無害なので許す）。
+- 巨大ディレクトリ移し入れ（コミット e091e88）: ディレクトリの移動を `move_dir`（`PermissionError` を最大 5 秒再試行）に統一し、主張を「最初の呼び出しが rescan」「rescan は 1 回」「見張りが届く」「`changed` が `WATCH_BURST_HINT` 未満」に改めた（後から届く少数の `changed` は冪等で無害なので許す）。
 - T-02: テストは変えていない（直すべき揺れが見つからなかった）。別の役の未コミットの途中状態が原因なので、その役がコミットすれば解ける。
 
 ## 確認
