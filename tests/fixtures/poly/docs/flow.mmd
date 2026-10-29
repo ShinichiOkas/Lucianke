@@ -1,0 +1,6 @@
+flowchart TD
+  A[create_order] --> B[process_charge]
+  C[retry_order] --> B
+  B --> D{validate_limit}
+  D -->|ok| E[Receipt]
+  D -->|ng| F[PaymentDeclined]

@@ -1,0 +1,26 @@
+{
+  "service": {
+    "name": "shop",
+    "port": 8080
+  },
+  "limits": [
+    {
+      "currency": "JPY",
+      "max": 1000000
+    },
+    {
+      "currency": "USD",
+      "max": 10000
+    },
+    {
+      "currency": "EUR",
+      "max": 9000
+    }
+  ],
+  "features": {
+    "discount": true,
+    "retry": {
+      "max_attempts": 3
+    }
+  }
+}

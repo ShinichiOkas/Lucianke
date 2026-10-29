@@ -1,0 +1,7 @@
+digraph order_flow {
+  rankdir=LR;
+  subgraph cluster_api { label="api"; create_order; retry_order; }
+  create_order -> process_charge [label="CALLS"];
+  retry_order -> process_charge [label="CALLS"];
+  process_charge -> validate_limit;
+}
