@@ -1,0 +1,9 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": ["src"],
+  "pythonVersion": "3.12",
+  "include": ["src", "tests"],
+  "exclude": ["spikes", "tests/fixtures", ".venv", "**/__pycache__", "bench/results"],
+  "typeCheckingMode": "standard"
+}
