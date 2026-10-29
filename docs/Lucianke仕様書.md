@@ -2262,7 +2262,7 @@ json `data`（共通フィールドに加えて）:
 
 compact:
 
-```
+````
 # structural_search_replace ok conf=structural lsp=ready rev=WORKING_TREE ws=app ~420/2000tok
 pattern: print($MSG)  rewrite: logger.info($MSG)  lang=python  dry_run=true
 matches: 3 in 2 files
@@ -2278,7 +2278,7 @@ applied: false  files_to_change: 2  syntax_check: ok
 +    logger.info(f"loaded {n} rows")
 ```
 new_diagnostics: not_computed
-```
+````
 
 json `data`（共通フィールドに加えて）:
 
