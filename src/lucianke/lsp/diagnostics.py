@@ -5,6 +5,10 @@
 
 * index への書き込みはここではしない。呼び手が渡す ``on_diagnostics(path, diags, version)`` を呼ぶだけ
   （``(file_id, source)`` 単位の全置換は呼び手＝index 側の仕事。``source`` はサーバー名で、呼び手が閉じ込める）。
+* **書き込みが済んでから「揃った」とする**（設計書 §7.7.6-4、EP-7: 編集の応答の診断差分と直後の ``get_diagnostics`` を一致させる）。
+  ``on_diagnostics`` が awaitable か ``concurrent.futures.Future``（``IndexWriter.submit``）を返したら、その完了までは
+  そのファイルについて ``wait_for`` を返さない。書き込みが失敗したら、次の受信（の書き込み）が通るまで「揃った」としない
+  （DB に載っていない診断で差分を取らない。タイムアウトで ``False`` = pending）。返り値が ``None`` などなら同期で済んだ扱い。
 * ``wait_for`` は編集ツールの診断待ち（``DiagnosticsWaiter``）の土台。**版**を付けるサーバー（basedpyright・ruff）は
   ``version >= min_version`` で（``==`` ではない: basedpyright はバーストを最後の版 1 件に畳む）、版を付けないサーバーは
   ``didChange`` を送った時刻 ``sent_at`` 以降に受信した最初の診断で「揃った」とする。
@@ -20,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import logging
 import time
@@ -42,7 +47,12 @@ PROVISIONAL_QUIET_MS = 300
 _RECENT_RECEIPTS = 16
 
 DiagnosticsCallback = Callable[[RelPath, list[dict[str, Any]], int | None], Any]
-"""``on_diagnostics(path, diags, version)``: 受信のたびに呼ぶ。同期関数でも、コルーチンを返す関数でもよい。"""
+"""``on_diagnostics(path, diags, version)``: 受信のたびに呼ぶ。
+
+返り値で「書き込みが済んだ時点」をハブに伝える: ``None`` など（同期で済んだ）、awaitable（コルーチン）、
+``concurrent.futures.Future``（``IndexWriter.submit`` の戻り）。後ろ 2 つは、完了するまで ``wait_for`` を返さない。
+書き込みを fire-and-forget にする（Future を捨てる）と、この順序の保証が外れる。
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +87,10 @@ class DiagnosticsHub:
         self._settled_at = float("-inf")
         self._waiters: dict[RelPath, set[asyncio.Future[None]]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self._pending_writes: dict[RelPath, int] = {}
+        """``on_diagnostics`` が返した書き込みのうち、まだ終わっていない件数（ファイルごと）。"""
+        self._write_failed: set[RelPath] = set()
+        """最後の受信の書き込みが失敗したファイル（次の受信で解く）。"""
         self._closed = False
         self._gen = 0
         self.publish_count = 0
@@ -109,28 +123,68 @@ class DiagnosticsHub:
         self._seq[path] = seq
         self._entries[path] = DiagnosticsEntry(version, received_at, tuple(diags), seq)
         self._receipts.setdefault(path, deque(maxlen=_RECENT_RECEIPTS)).append(received_at)
-        for fut in self._waiters.pop(path, ()):
-            if not fut.done():
-                fut.set_result(None)
+        self._write_failed.discard(path)
         if self._on_diagnostics is not None:
+            # 書き込みを先に始める。待ち手を起こす（下）のは「受信があった」という合図にすぎず、揃ったかどうかは
+            # ``_satisfied`` が書き込みの済み具合も見て決める（書き込み中は、起きた待ち手がまた待つ）。
             try:
                 result = self._on_diagnostics(path, list(diags), version)
             except Exception:
                 _log.exception("[%s] on_diagnostics failed for %s", self.source, path)
-                return
-            if inspect.isawaitable(result):
-                self._spawn(result, path)
+                self._write_failed.add(path)
+            else:
+                if isinstance(result, concurrent.futures.Future) or inspect.isawaitable(result):
+                    self._spawn(result, path, seq)
+        self._wake(path)
 
-    def _spawn(self, awaitable: Awaitable[Any], path: RelPath) -> None:
+    def _wake(self, path: RelPath) -> None:
+        for fut in self._waiters.pop(path, ()):
+            if not fut.done():
+                fut.set_result(None)
+
+    def _spawn(self, write: Awaitable[Any] | concurrent.futures.Future[Any], path: RelPath, seq: int) -> None:
+        """``on_diagnostics`` が返した書き込みを見張る。終わるまで ``path`` を「書き込み中」にする。"""
+
         async def run() -> None:
+            ok = False
             try:
-                await awaitable
+                if isinstance(write, concurrent.futures.Future):
+                    await asyncio.wrap_future(write)
+                else:
+                    await write
+                ok = True
             except Exception:
                 _log.exception("[%s] async on_diagnostics failed for %s", self.source, path)
+            finally:  # 取り消されたときも「書き込み中」を残さない（そのときは失敗扱い）
+                self._write_finished(path, seq, ok)
 
-        task = asyncio.ensure_future(run())
+        self._pending_writes[path] = self._pending_writes.get(path, 0) + 1
+        coro = run()
+        try:
+            task = asyncio.ensure_future(coro)
+        except Exception:  # 走っているイベントループが無い
+            coro.close()
+            if inspect.iscoroutine(write):
+                write.close()
+            _log.exception("[%s] could not schedule the on_diagnostics write for %s", self.source, path)
+            self._write_finished(path, seq, False)
+            return
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _write_finished(self, path: RelPath, seq: int, ok: bool) -> None:
+        left = self._pending_writes.get(path, 0) - 1
+        if left > 0:
+            self._pending_writes[path] = left
+        else:
+            self._pending_writes.pop(path, None)
+        if not ok and self._seq.get(path) == seq:  # 古い受信の失敗は、新しい受信の書き込みが上書きする
+            self._write_failed.add(path)
+        self._wake(path)
+
+    def _written(self, path: RelPath) -> bool:
+        """``path`` の最後の受信が index に書き込み済み（書き込み中でも、失敗でもない）。"""
+        return path not in self._pending_writes and path not in self._write_failed
 
     # --- 参照 -----------------------------------------------------------------------
 
@@ -146,11 +200,13 @@ class DiagnosticsHub:
         self._entries.pop(path, None)
         self._receipts.pop(path, None)
         self._seq.pop(path, None)
+        self._write_failed.discard(path)
 
     def clear(self) -> None:
         self._entries.clear()
         self._receipts.clear()
         self._seq.clear()
+        self._write_failed.clear()
 
     def settle_all(self) -> None:
         """いま保持している診断を「確定」とする（``$/progress end``）。空の最初の診断の仮置きを解く。"""
@@ -199,7 +255,7 @@ class DiagnosticsHub:
 
     def _satisfied(self, path: RelPath, min_version: int | None, sent_at: float, min_publishes: int) -> bool:
         entry = self._entries.get(path)
-        if entry is None or self.is_provisional(path):
+        if entry is None or self.is_provisional(path) or not self._written(path):
             return False
         if min_version is not None and entry.version is not None:
             return entry.version >= min_version
@@ -222,6 +278,8 @@ class DiagnosticsHub:
           ``min_publishes`` 通以上の受信。
         * ``settle_ms`` を指定すると、揃ったあとさらにそのファイルの診断が ``settle_ms`` 静かになるまで待つ
           （S-04: ``didChangeWatchedFiles`` 後の依存元・複数文書の ``didOpen`` 直後は、最初の診断のあとに本物が続く）。
+        * 受信した診断の ``on_diagnostics``（index への書き込み）が終わっていること。``True`` で返ったときは書き込み済みなので、
+          直後に index を読めば同じ診断が見える（EP-7）。書き込みが終わらない・失敗したときは ``False``。
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(timeout_ms, 0) / 1000
@@ -267,11 +325,13 @@ class DiagnosticsHub:
             if entry is None:  # reset / forget の最中
                 return False
             quiet = self._clock() - entry.received_at
-            if quiet >= settle_s:
+            written = self._written(path)
+            if written and quiet >= settle_s:
                 return True
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False
-            await wait_publish(min(settle_s - quiet, remaining))
+            # 書き込み中は静止時間では足りない: 書き込みの終わり（または次の受信）で起きる
+            await wait_publish(min(settle_s - quiet, remaining) if written else remaining)
             if aborted():
                 return False

@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +22,7 @@ import pytest
 from lucianke.core.limits import LSP_RESTART_BACKOFF_S
 from lucianke.core.model import LspStatus, RelPath
 from lucianke.core.procs import ProcessRegistry
+from lucianke.index.writer import IndexWriter
 from lucianke.lsp.diagnostics import PROVISIONAL_QUIET_MS, DiagnosticsHub
 from lucianke.lsp.documents import DocumentSync
 from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool, LspState
@@ -710,6 +713,140 @@ async def test_hub_callback_and_foreign_uris(ws: Workspace, tmp_path: Path):
     hub3 = DiagnosticsHub(ws, on_diagnostics=boom)
     publish(hub3, ws, A, 1)  # 例外は握りつぶしてログへ。保持は残る
     assert hub3.get(A) is not None
+
+
+# --- 待ち手は DB への書き込みが済んでから起こす（BUG-0007。設計書 §7.7.6-4、EP-7） -------------------
+
+
+async def spin(n: int = 10) -> None:
+    """イベントループを n 回回す（固定の sleep ではなく、待ち手が進めるだけ進んだ状態を作る）。"""
+    for _ in range(n):
+        await asyncio.sleep(0)
+
+
+async def test_hub_wakes_waiters_only_after_the_async_write_finished(ws: Workspace):
+    gate = asyncio.Event()
+    written: list[tuple[RelPath, int | None]] = []
+
+    async def write(path: RelPath, diags: list[dict[str, Any]], version: int | None) -> None:
+        await gate.wait()
+        written.append((path, version))
+
+    hub = DiagnosticsHub(ws, on_diagnostics=write)
+    early = asyncio.create_task(hub.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=5000))
+    await spin()
+    publish(hub, ws, A, 1, n=2)
+    # 受信のあとに来た待ち手も、書き込みが済むまで返らない
+    late = asyncio.create_task(hub.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=5000))
+    await spin()
+    assert not early.done() and not late.done()
+    assert written == []
+    entry = hub.get(A)
+    assert entry is not None and len(entry.diagnostics) == 2  # 受信した診断そのものはすぐ見える
+    gate.set()
+    assert await asyncio.wait_for(asyncio.gather(early, late), 5) == [True, True]
+    assert written == [(A, 1)]
+
+
+async def test_hub_waits_for_every_overlapping_write(ws: Workspace):
+    gates = {1: asyncio.Event(), 2: asyncio.Event()}
+
+    def write(path: RelPath, diags: list[dict[str, Any]], version: int | None) -> Any:
+        assert version is not None
+        return gates[version].wait()
+
+    hub = DiagnosticsHub(ws, on_diagnostics=write)
+    publish(hub, ws, A, 1)
+    publish(hub, ws, A, 2)
+    task = asyncio.create_task(hub.wait_for(A, min_version=2, sent_at=0.0, timeout_ms=5000))
+    gates[2].set()  # 新しい方の書き込みだけが先に終わった
+    await spin()
+    assert not task.done()
+    gates[1].set()
+    assert await asyncio.wait_for(task, 5) is True
+
+
+async def test_hub_waits_for_the_index_writer_job_returned_as_a_future(ws: Workspace, tmp_path: Path):
+    """``IndexWriter.submit``（``concurrent.futures.Future``）を返す呼び手でも、コミットのあとに起こす。"""
+    writer = IndexWriter(tmp_path / "cache" / "paad.sqlite")
+    gate = threading.Event()
+
+    def job(conn: sqlite3.Connection) -> None:
+        assert gate.wait(10)
+        conn.execute("UPDATE _meta SET edit_seq = edit_seq + 1")
+
+    def on_diagnostics(path: RelPath, diags: list[dict[str, Any]], version: int | None) -> Any:
+        return writer.submit(job, bumps_version=False, label="diag")
+
+    def edit_seq() -> int:
+        conn = sqlite3.connect(writer.path)
+        try:
+            return int(conn.execute("SELECT edit_seq FROM _meta").fetchone()[0])
+        finally:
+            conn.close()
+
+    try:
+        hub = DiagnosticsHub(ws, on_diagnostics=on_diagnostics)
+        publish(hub, ws, A, 1)
+        task = asyncio.create_task(hub.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=10_000))
+        await spin()
+        assert not task.done()
+        assert edit_seq() == 0
+        gate.set()
+        assert await asyncio.wait_for(task, 10) is True
+        assert edit_seq() == 1  # 起こされた時点で、書き込みはコミット済み
+    finally:
+        gate.set()
+        await asyncio.to_thread(writer.close)
+
+
+async def test_hub_settle_ms_also_waits_for_the_write(ws: Workspace):
+    gate = asyncio.Event()
+    now = [0.0]
+
+    def write(path: RelPath, diags: list[dict[str, Any]], version: int | None) -> Any:
+        return gate.wait() if version == 2 else None
+
+    hub = DiagnosticsHub(ws, on_diagnostics=write, clock=lambda: now[0])
+    publish(hub, ws, A, 1)
+    task = asyncio.create_task(hub.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=5000, settle_ms=50))
+    await spin()
+    publish(hub, ws, A, 2)  # 静止の最中に届いた診断（書き込みは未了）
+    now[0] = 10.0  # 静止時間はもう十分に過ぎている
+    await spin()
+    assert not task.done()  # 静止だけでは足りない: 書き込みを待つ
+    gate.set()
+    assert await asyncio.wait_for(task, 5) is True
+
+
+@pytest.mark.parametrize("kind", ["sync", "async"])
+async def test_hub_does_not_report_fresh_when_the_write_failed(ws: Workspace, kind: str):
+    attempts = 0
+
+    def write(path: RelPath, diags: list[dict[str, Any]], version: int | None) -> Any:
+        nonlocal attempts
+        attempts += 1
+        failing = attempts == 1
+        if kind == "sync":
+            if failing:
+                raise RuntimeError("disk full")
+            return None
+
+        async def run() -> None:
+            if failing:
+                raise RuntimeError("disk full")
+
+        return run()
+
+    hub = DiagnosticsHub(ws, on_diagnostics=write)
+    publish(hub, ws, A, 1)
+    # DB に載らなかった診断を「揃った」とは言わない（pending になる）
+    assert await hub.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=150) is False
+    entry = hub.get(A)
+    assert entry is not None and entry.version == 1  # 受信そのものは残る
+    publish(hub, ws, A, 2)  # 次の受信は書き込めた
+    assert await hub.wait_for(A, min_version=2, sent_at=0.0, timeout_ms=2000) is True
+    assert attempts == 2
 
 
 async def test_tsserver_less_workspace_skips_tsls_for_vtsls(env: Env, ws: Workspace):
