@@ -17,7 +17,9 @@
 ティアごとの取り込み:
 
 * Tier 1〜2（タグクエリのある言語）: 構文木 → ``symbols`` → ``relations``（``structural``）→ 構文エラーの診断。
-* Tier 3: ``files`` 行。アダプタが ``symbols(source, *, rel, workspace_id)`` を持てばそのシンボルも入れる。
+* Tier 3 と ``.ipynb``（データ形式アダプタ。``syntax.support.get_adapter``）: ``files`` 行と、アダプタの ``symbols(source, *, rel, workspace_id)``
+  （骨格の最上位の節 = JSON / YAML / TOML のキー、XML の根と直下のタグ。``Kind.KEY`` / ``Kind.TAG``。壊れたファイル・大きいファイル・
+  JSONL・ipynb は空）。
 * Tier 4（と、タグクエリの無い Tier 1〜2）: ``heuristic.outline``（ctags、無ければブロック走査）。
 * 秘密ファイル・バイナリ・``max_file_bytes`` 超過: ``files`` 行だけ（``lexical_fallback``。本文は解析しない）。
 
@@ -44,7 +46,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
@@ -67,7 +69,7 @@ from lucianke.syntax import heuristic, relations
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
 from lucianke.syntax.imports import external_name_map, extract_imports, imported_name_map, make_resolver
 from lucianke.syntax.parsers import TreeCache
-from lucianke.syntax.support import get_support
+from lucianke.syntax.support import get_adapter, get_support
 from lucianke.syntax.symbols import extract_detailed, load_query_source
 from lucianke.workspace.languages import Detected, detect, is_test
 from lucianke.workspace.paths import confine, is_excluded
@@ -614,7 +616,7 @@ class Indexer:
             if detected.tier <= Tier.T2 and _grammar_support(lang) is not None and _has_symbol_queries(lang):
                 facts = await asyncio.to_thread(self._analyze_code, rel, loaded, data, detected)
                 return _Prepared(facts)
-            if detected.tier == Tier.T3:
+            if detected.tier == Tier.T3 or get_adapter(lang) is not None:  # .ipynb（Tier 2）もアダプタの言語
                 return _Prepared(await asyncio.to_thread(self._analyze_adapter, rel, loaded, data, detected))
             return _Prepared(await self._analyze_outline(rel, loaded, data, detected))
         except Exception as exc:
@@ -744,16 +746,14 @@ class Indexer:
         return (self._ws.root / str(rel)).is_file() and not is_excluded(self._ws, rel)
 
     def _analyze_adapter(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
-        """Tier 3: ``files`` 行。アダプタが ``symbols(...)`` を持てばそのシンボルも入れる。"""
-        support = get_support(detected.language_id)
-        symbols_fn = getattr(support, "symbols", None)
+        """Tier 3 と ``.ipynb``: ``files`` 行と、データ形式アダプタのシンボル（最上位の節。無ければ ``files`` 行だけ）。
+
+        json / yaml / toml / xml は文法つきの登録（``get_support``）が先に返るので、アダプタは ``get_adapter`` で引く。
+        """
+        adapter = get_adapter(detected.language_id)
         records: list[SymbolRecord] = []
-        if callable(symbols_fn):
-            records = list(
-                cast("Callable[..., Iterable[SymbolRecord]]", symbols_fn)(
-                    data, rel=rel, workspace_id=self._ws.workspace_id
-                )
-            )
+        if adapter is not None:
+            records = adapter.symbols(data, rel=str(rel), workspace_id=self._ws.workspace_id)
         return self._base_facts(
             rel,
             loaded,
