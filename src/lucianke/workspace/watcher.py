@@ -8,7 +8,7 @@ S-06（Windows 実測）の結論が設計書 §7.3.6 より優先する:
   存在すれば ``changed``、不在なら ``removed`` とする（追加 + 削除 = 削除、の畳み込みはしない）。
 * **ディレクトリの移動・改名は子のイベントが来ない**。ディレクトリは ``os.walk`` で展開して取り込み、消えたパスは
   ``sink.known_paths_under("パス/")`` の前方一致で配下も ``removed`` にする。
-* バースト: 1 窓が ``BURST_HINT`` 件以上なら 0.3 秒静まるまで窓を合算し、合算が ``WATCH_BURST_FILES`` を超えたら
+* バースト: 1 窓が ``WATCH_BURST_HINT`` 件以上なら 0.3 秒静まるまで窓を合算し、合算が ``WATCH_BURST_FILES`` を超えたら
   個別処理をやめて ``rescan`` を 1 回だけ呼ぶ。小さい窓は待たず即処理する（単発の遅延を増やさない）。
 * ``.git/``・一時名（``.lucianke-tmp-*``）・``exclude_globs`` は ``watch_filter`` で落とす。``.gitignore`` は別の層が担う。
 * 停止は ``stop`` イベント（``awatch`` の ``stop_event``）。監視を開始できなければ ``mode = "polling"`` にして何もしない
@@ -34,29 +34,22 @@ from typing import Literal, Protocol, cast
 from watchfiles import awatch
 
 from lucianke.core.errors import LuciankeError
-from lucianke.core.limits import WATCH_BURST_FILES
+from lucianke.core.limits import (
+    WATCH_BURST_FILES,
+    WATCH_BURST_HINT,
+    WATCH_BURST_QUIET_S,
+    WATCH_DEBOUNCE_MS,
+    WATCH_EXPECT_TTL_S,
+    WATCH_STEP_MS,
+)
 from lucianke.core.model import RelPath
 from lucianke.workspace.paths import confine, is_excluded, to_abs
 from lucianke.workspace.types import Workspace
 
-__all__ = [
-    "BURST_HINT",
-    "BURST_QUIET_S",
-    "DEBOUNCE_MS",
-    "EXPECT_TTL_S",
-    "STEP_MS",
-    "TMP_PREFIX",
-    "IngestSink",
-    "Watcher",
-]
+__all__ = ["TMP_PREFIX", "IngestSink", "Watcher"]
 
 _log = logging.getLogger("lucianke.workspace.watcher")
 
-STEP_MS = 10  # S-06: 単発の遅延はほぼ 2×step。10 で p95 ≈ 20 ms（既定の 50 は p95 ≈ 100 ms）
-DEBOUNCE_MS = 1000  # 「新しいパスが増え続ける間」にグループ化する上限。単発の遅延には効かない
-BURST_HINT = 100  # 1 窓がこの件数以上なら「続きが来る」とみなして静まるまで合算する
-BURST_QUIET_S = 0.3  # 合算を打ち切る静穏の長さ
-EXPECT_TTL_S = 10.0  # expect の有効期間。自分の書き込みのイベントはこれより十分早く届く
 TMP_PREFIX = ".lucianke-tmp-"  # 編集トランザクションの一時名（edit/writer.py と同じ。workspace は edit を import できない）
 _DIR_PROBE = "x"  # 「このディレクトリの配下が除外か」を is_excluded に問う仮の子の名前（末尾 "/" の glob 用）
 
@@ -118,8 +111,8 @@ class Watcher:
         ws: Workspace,
         sink: IngestSink,
         *,
-        step_ms: int = STEP_MS,
-        debounce_ms: int = DEBOUNCE_MS,
+        step_ms: int = WATCH_STEP_MS,
+        debounce_ms: int = WATCH_DEBOUNCE_MS,
     ) -> None:
         self._ws = ws
         self._sink = sink
@@ -183,12 +176,12 @@ class Watcher:
 
         次にこのパスのイベントが届いたとき、現在の内容の ``sha256`` が ``sha256_after`` と一致すれば捨てる。
         一致しなくても期待は消費する（その後の別の変更を取りこぼさないため）。削除を期待するときは ``sha256_after = ""``。
-        期待は ``EXPECT_TTL_S`` 秒で失効する。
+        期待は ``WATCH_EXPECT_TTL_S`` 秒で失効する。
         """
         now = time.monotonic()
         for k in [k for k, (_, dl) in self._expected.items() if dl < now]:
             del self._expected[k]
-        self._expected[rel] = (sha256_after, now + EXPECT_TTL_S)
+        self._expected[rel] = (sha256_after, now + WATCH_EXPECT_TTL_S)
 
     # --- 監視ループ ---------------------------------------------------------------------
 
@@ -255,10 +248,10 @@ class Watcher:
             flushes: list[_Flush] = []
             ended = False
             while (
-                len(acc) >= BURST_HINT
+                len(acc) >= WATCH_BURST_HINT
             ):  # 大きい窓だけ、静まる（0.3 秒来ない）まで合算。小さい窓は待たず即処理
                 try:
-                    nxt = await asyncio.wait_for(q.get(), BURST_QUIET_S)  # queue.get のキャンセルは安全
+                    nxt = await asyncio.wait_for(q.get(), WATCH_BURST_QUIET_S)  # queue.get のキャンセルは安全
                 except TimeoutError:
                     break
                 if nxt is None:

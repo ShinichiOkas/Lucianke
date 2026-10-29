@@ -9,8 +9,12 @@ EXPECTED: dict[str, object] = {
     "BATCH_MAX_ITEMS": 20,
     "CANDIDATES_MAX": 10,
     "SNIPPET_MAX_CHARS": 200,
-    "WATCH_DEBOUNCE_MS": 50,
+    "WATCH_STEP_MS": 10,  # S-06: step=10 が必須（既定の 50 では単発の p95 が 100 ms 前後）
+    "WATCH_DEBOUNCE_MS": 1000,  # S-06: パスが増え続ける間にグループ化する最大時間
+    "WATCH_BURST_HINT": 100,
+    "WATCH_BURST_QUIET_S": 0.3,
     "WATCH_BURST_FILES": 500,
+    "WATCH_EXPECT_TTL_S": 10.0,
     "MAX_FILE_BYTES": 5 * 1024 * 1024,
     "TREE_CACHE_MAX_FILES": 2000,
     "TREE_CACHE_MAX_BYTES": 512 * 1024 * 1024,

@@ -16,8 +16,12 @@ CANDIDATES_MAX: Final = 10  # §5.3 / §5.8: E_TARGET_AMBIGUOUS の candidates[]
 SNIPPET_MAX_CHARS: Final = 200  # §6.1 規約 6 / §12.6 / §13.5: snippet・doc・when の最大文字数（超過は「…」）
 
 # --- ファイル監視と増分同期（仕様書 §12.4） ---------------------------------------------
-WATCH_DEBOUNCE_MS: Final = 50  # §12.4-2: イベントのデバウンス
+WATCH_STEP_MS: Final = 10  # §12.4-2 / S-06: awatch の step。単発の遅延はほぼ 2×step（50 では p95 ≈ 100 ms）
+WATCH_DEBOUNCE_MS: Final = 1000  # §12.4-2 / S-06: awatch の debounce。パスが増え続ける間にまとめる最大時間
+WATCH_BURST_HINT: Final = 100  # §12.4-4 / S-06: 1 窓がこの件数以上なら静まるまで窓を合算する
+WATCH_BURST_QUIET_S: Final = 0.3  # §12.4-4 / S-06: 合算を打ち切る静穏の長さ（秒）
 WATCH_BURST_FILES: Final = 500  # §12.4-4: 1 バーストでこの数以上が変わったら差分索引に切り替える
+WATCH_EXPECT_TTL_S: Final = 10.0  # 設計書 §7.3.6-8: expect() の有効期間（秒）
 MAX_FILE_BYTES: Final = 5 * 1024 * 1024  # §12.4-5: これを超えるファイルは構文木を作らない（設定で変更可）
 INDEX_REFLECT_MS: Final = 500  # §12.4-3 / NFR-PERF-3: 単一ファイルの変更が PaaD と LSP に反映されるまで
 

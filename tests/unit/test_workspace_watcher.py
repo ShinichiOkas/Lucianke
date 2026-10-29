@@ -364,7 +364,7 @@ async def test_drain_with_paths_syncs_without_waiting_for_the_event(tmp_path: Pa
 
 async def test_drain_cuts_short_the_burst_merge_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """100 件以上の窓は静穏を待って合算するが、後ろに drain が来たらその待ちを打ち切って処理し切る。"""
-    monkeypatch.setattr(watcher_mod, "BURST_QUIET_S", 30.0)  # 打ち切れるのは drain だけ
+    monkeypatch.setattr(watcher_mod, "WATCH_BURST_QUIET_S", 30.0)  # 打ち切れるのは drain だけ
     ws = make_ws(tmp_path)
     for i in range(150):
         put(ws.root, f"f{i}.py")
