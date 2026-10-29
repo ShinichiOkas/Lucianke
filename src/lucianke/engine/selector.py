@@ -8,6 +8,8 @@
   「文法なし（Tier 4）」。ファイル単位の判定で、列はファイルの状態から 1 つに決まる。
 * 待つ／待たない（ADR-6、§7.8.3）は ``DEFAULT_WAIT``。``WAIT_SHORT`` で上限（``LSP_TIMEOUT_MS``）を
   超えたら、呼び手が ``on_lsp_timeout`` で右隣の列へ 1 段降格する（その要求に限る）。
+* LSP 機能（``lsp.features``）の失敗も同じ右隣の列へ降格する: ``TimeoutError`` と ``E_LSP_UNAVAILABLE``
+  （``position_clamped`` を含む）は ``on_lsp_failure`` が受ける（``is_lsp_degradation`` で降格かどうかを先に引ける）。
 * Tier 4 の字句降格（表の ``→``。ctags で何も取れなかったとき）は ``on_nothing_found``。
 * 警告文の雛形は ``warning_text``（仕様書 §8.4 の 3 雛形 + 設計書 §7.8.4 の理由別）。
 
@@ -23,6 +25,7 @@ from enum import IntEnum, StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import (
     LSP_TIMEOUT_CALL_HIERARCHY_MS,
     LSP_TIMEOUT_CODE_ACTION_MS,
@@ -37,16 +40,20 @@ __all__ = [
     "ENGINE_EXCLUDED",
     "ENGINE_LEXICAL_GREP",
     "ENGINE_LSP",
+    "ENGINE_LSP_CACHE",
     "ENGINE_LSP_UNAVAILABLE",
     "ENGINE_NONE",
     "ENGINE_UNAVAILABLE",
     "LEVEL_TEMPLATES",
     "LSP_TIMEOUT_MS",
     "NOT_PROVIDED_ENGINES",
+    "POSITION_CLAMPED_WARNING",
     "Column",
     "WaitPolicy",
     "WarningReason",
     "is_degraded",
+    "is_lsp_degradation",
+    "on_lsp_failure",
     "on_lsp_timeout",
     "on_nothing_found",
     "select",
@@ -74,7 +81,10 @@ NOT_PROVIDED_ENGINES: Final = frozenset(
 )
 """この能力はこの状態では提供されない。レコードを作らず、ツールが ``E_*`` か除外件数で応える。水準は ``lexical_fallback``。"""
 
-_ENGINE_LSP_CACHE: Final = "lsp-cache+tree-sitter"
+ENGINE_LSP_CACHE: Final = "lsp-cache+tree-sitter"
+"""LSP の結果を PaaD に書き戻したもの（``relations`` の exact 行・``_hover_cache``）から答える。DIAGNOSTICS の ``ready`` 列と、
+T-04 の 2 回目以降（設計書 R-11）が使う。LSP が動いていなくても ``exact``。"""
+_ENGINE_LSP_CACHE: Final = ENGINE_LSP_CACHE
 
 _E = Confidence.EXACT
 _S = Confidence.STRUCTURAL
@@ -434,6 +444,87 @@ def on_lsp_timeout(choice: EngineChoice, cap: Capability) -> EngineChoice:
     cell = _TABLE[cap][Column.INDEXING]
     warning = None if cell.engine in NOT_PROVIDED_ENGINES else WarningReason.LSP_TIMEOUT
     return _make_choice(replace(cell, warning=warning), LspStatus.READY, None, timeout_ms=timeout_ms)
+
+
+POSITION_CLAMPED_WARNING: Final = (
+    "解決する位置が文字の境界に当たらないため LSP に要求を送らず構文木で解決しました。"
+    "型・オーバーロード・再エクスポート越しの参照は区別されていません。"
+)
+"""``lsp.features`` が丸めの要る位置を送らずに返した ``E_LSP_UNAVAILABLE``（``details.reason="position_clamped"``）の降格の警告文。
+LSP は動いているので ``lsp_unavailable`` の案内（``configure_workspace status``）は付けない。設計書 §7.8.4 の表には行が無い（理由別の警告ではなく
+この規則の定数）。"""
+
+_INDEXING_REASONS: Final = frozenset({"indexing"})
+_DOWN_REASONS: Final = frozenset({"standby", "unavailable", "disconnected"})
+_DEGRADING_REASONS: Final = _INDEXING_REASONS | _DOWN_REASONS | {"position_clamped", "lsp_error"}
+
+
+def _lsp_reason(exc: BaseException) -> str | None:
+    """``E_LSP_UNAVAILABLE`` の ``details.reason``（それ以外の例外は ``None``）。"""
+    if isinstance(exc, LuciankeError) and exc.code is ErrorCode.E_LSP_UNAVAILABLE:
+        return str(exc.details.get("reason", ""))
+    return None
+
+
+def is_lsp_degradation(exc: BaseException) -> bool:
+    """この例外は「LSP が使えなかった」降格の合図か。
+
+    * ``TimeoutError``（``lsp.features`` が上限で打ち切ったもの）。
+    * ``LuciankeError(E_LSP_UNAVAILABLE)`` で ``details.reason`` が ``indexing`` / ``standby`` / ``unavailable`` / ``disconnected`` /
+      ``position_clamped`` / ``lsp_error``。
+    それ以外（``prepare_rename_rejected`` など LSP の判断の結果、``E_TARGET_NOT_FOUND`` など入力の誤り）は降格ではない。
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    reason = _lsp_reason(exc)
+    return reason is not None and reason in _DEGRADING_REASONS
+
+
+def on_lsp_failure(choice: EngineChoice, cap: Capability, exc: BaseException) -> EngineChoice:
+    """LSP に要求を送った結果が失敗（降格の合図）だったとき、その要求に限り右隣の列（構文木・索引）へ降格する。
+
+    * ``TimeoutError``: ``on_lsp_timeout``（``lsp_status`` は ``ready`` のまま、``lsp_timeout`` の警告）。
+    * ``E_LSP_UNAVAILABLE`` の ``reason``:
+        - ``indexing``: 列 2（起動・索引中）。``lsp_status`` は ``indexing``、警告は ``lsp_indexing``（進捗は不明なので省く）。
+        - ``standby`` / ``unavailable`` / ``disconnected``: 列 3（利用不可）。``lsp_status`` は ``unavailable``、警告は ``lsp_unavailable``。
+          選択（``select``）の後に LSP が落ちた競合で起きる。
+        - ``position_clamped``: 位置が文字境界に当たらず要求を送らなかった。LSP は動いているので ``lsp_status`` は ``ready`` のまま、
+          警告は ``POSITION_CLAMPED_WARNING``。
+        - ``lsp_error``: サーバーがエラー応答を返した。``lsp_status`` は ``ready`` のまま、警告は ``lsp_unavailable``。
+    * 降格先が ``lsp_unavailable``（RENAME / CODE_ACTION）のときは警告なしで、ツールが ``E_LSP_UNAVAILABLE`` を返す
+      （``on_lsp_timeout`` と同じ）。
+    * LSP に要求を送らない選択（``ready`` 以外、``exact`` でない、LSP に要求しない能力）には何もせず ``choice`` を返す（降格は 1 段だけ）。
+    * 降格の合図でない例外（``is_lsp_degradation`` が偽）は、そのまま ``raise exc``。
+    """
+    if not is_lsp_degradation(exc):
+        raise exc
+    if isinstance(exc, TimeoutError):
+        return on_lsp_timeout(choice, cap)
+    if (
+        cap not in _REQUESTS_LSP
+        or choice.lsp_status != LspStatus.READY.value
+        or choice.confidence is not Confidence.EXACT
+    ):
+        return choice
+    reason = _lsp_reason(exc) or ""
+    if reason in _INDEXING_REASONS:
+        column, status = Column.INDEXING, LspStatus.INDEXING
+    elif reason in _DOWN_REASONS:
+        column, status = Column.UNAVAILABLE, LspStatus.UNAVAILABLE
+    else:  # position_clamped / lsp_error
+        column, status = Column.INDEXING, LspStatus.READY
+    cell = _TABLE[cap][column]
+    if cell.engine in NOT_PROVIDED_ENGINES:
+        return _make_choice(replace(cell, warning=None), status, None)
+    if reason == "position_clamped":
+        warning_cell = replace(cell, warning=None)
+        made = _make_choice(warning_cell, status, None)
+        return replace(made, warning=POSITION_CLAMPED_WARNING)
+    why = {
+        "indexing": WarningReason.LSP_INDEXING,
+        "lsp_error": WarningReason.LSP_UNAVAILABLE,
+    }.get(reason, WarningReason.LSP_UNAVAILABLE)
+    return _make_choice(replace(cell, warning=why), status, None)
 
 
 def on_nothing_found(choice: EngineChoice, cap: Capability) -> EngineChoice:
