@@ -630,14 +630,14 @@ tools/call(name, arguments)
 
 ### 7.2.1 `TokenEstimator`
 
-- **`lean_wide` 式**（文字種別と連の数の係数）で推定する（S-12 で `o200k_base` と比べて較正した提案。`core/tokens.py` の実装は追従する）。旧版の「ASCII 英数字と空白 1/4、ASCII 記号 1/2、全角・漢字・かな 1/1.5、その他 1/2」は、日本語 Markdown で −16〜−17%、compact 出力で −11%、base64 などの塊で −43〜−63% と**過小**だった（係数だけ当て直しても通らない。ASCII は文字数ではなく語の数、空白と記号は連でトークンになる）。トークン数 = 切り上げ(Σ 係数 × 数)。係数は 1/100 刻みの有理数で、整数演算にできる（分母 100）。置き場は `tokens.toml`（ベンチで `o200k_base` と比べて ±10% に保つ。§10.4）:
+- **`lean_wide` 式**（文字種別と連の数の係数）で推定する（S-12 で `o200k_base` と比べて較正し、27e0821 で `core/tokens.py` に採用済み）。旧版の「ASCII 英数字と空白 1/4、ASCII 記号 1/2、全角・漢字・かな 1/1.5、その他 1/2」は、日本語 Markdown で −16〜−17%、compact 出力で −11%、base64 などの塊で −43〜−63% と**過小**だった（係数だけ当て直しても通らない。ASCII は文字数ではなく語の数、空白と記号は連でトークンになる）。トークン数 = 切り上げ(Σ 係数 × 数)。係数は 1/100 刻みの有理数で、整数演算にできる（分母 100）。置き場は `core/tokens.py` の `TOKEN_COEFFICIENTS`（`Fraction` の表。`tokens.toml` は設けない。旧名 `TOKENS_PER_CHAR` は別名で残す。実装で確定 2026-10-29）。ベンチで `o200k_base` と比べて ±10% に保つ（§10.4）:
   - `blob_chars` 0.63: `[A-Za-z0-9+/=]{40,}` の文字数（base64・SHA-1/256 の hex）。**先に数えて本文から除く**。
   - `letters_runs` 0.85: `[A-Za-z]+` の個数。`digits_chars` 0.90: `[0-9]` の文字数。`symbol_runs` 0.87: ASCII 記号 `` [!-/:-@\[-`{-~]+ `` の連の個数。
   - `space_runs_multi` 0.92: `[ \t]{2,}` の個数（インデント）。単一の空白は 0（語に吸収される）。`nl_chars` 0.60: `\r` と `\n` の文字数。
   - `wide` 0.95: 仮名・漢字・全角記号の文字数（U+3000–30FF、U+31F0–31FF、U+3400–4DBF、U+4E00–9FFF、U+F900–FAFF、U+FF00–FFEF、U+20000–2FA1F）。`other` 0.46: 上記のどれでもない文字の個数（ASCII 以外の記号・制御文字・ハングルなど）。
-  - 誤差（ファイル単位の 2 分割交差検証の保持側）は、種類別の合計で ±3.3% 以内（標本が 1 つの base64 だけ標本内で −8.9%）。安全側にしたければ全係数を ×1.03 にしてよい（MAY。推定が実測より小さいと実測が `max_tokens` を超えるため）。ASCII だけの文字列は `wide` の走査を省く（`text.isascii()`）。1 MB で旧版の約 2.3〜2.8 倍（150〜200 ms）だが、パッカーは予算までしか数えない（8 KB で約 1.5 ms）ので許容する。
-  - 限界: 当てはめの標本は本リポジトリ（日本語コメントの Python が多い）に偏り、TS・Go・Rust・韓国語は未検証。`bench/run_bench.py` で較正を再実行し、種類別の合計誤差が ±10% を超えたら失敗にする。単体テスト（`tests/unit`）は tiktoken なしで、固定の文字列と基準トークン数との比が ±10% に入ることを確かめ、陽性対照に旧版の係数が落ちることも置く。再現は `bench/tokens/calibrate.py`。
-- 1 レコードの推定は `lines` の合計。ヘッダ・警告・トレーラも同じ推定器で数える。
+  - 誤差（ファイル単位の 2 分割交差検証の保持側）は、種類別の合計で ±3.3% 以内（標本が 1 つの base64 だけ標本内で −8.9%）。安全側にしたければ全係数を ×1.03 にしてよい（MAY。推定が実測より小さいと実測が `max_tokens` を超えるため）。**採用では見送り**（実装で確定 2026-10-29）: 合成 base64 が −8.3% で ±10% に近いので、M1 のベンチで再較正し、TS・Go・Rust・韓国語を標本に加える。ASCII だけの文字列は `wide` の走査を省く（`text.isascii()`）。1 MB で旧版の約 2.3〜2.8 倍（150〜200 ms）だが、パッカーは予算までしか数えない（8 KB で約 1.5 ms）ので許容する。
+  - 限界: 当てはめの標本は本リポジトリ（日本語コメントの Python が多い）に偏り、TS・Go・Rust・韓国語は未検証。`bench/run_bench.py` で較正を再実行し、種類別の合計誤差が ±10% を超えたら失敗にする。単体テスト（`tests/unit`）は tiktoken なしで、固定の文字列と基準トークン数との比が ±10% に入ることを確かめ、陽性対照に旧版の係数が落ちることも置く。実装は `tests/unit/test_core_tokens_calibration.py` が `bench/tokens/result.json`（`o200k_base` 基準）の種類ごとの合計・平均誤差 ±10% を検査し（結果: compact −0.8%、日本語 md −0.1%、spikes −2.9%、poly コード −1.1%、ipynb −3.6%、py_src +0.5%、合成 base64 −8.3%・hex +7.7%）、旧式が落ちる陽性対照を置く。速度は 1 MB で py_src 126 ms、日本語 md 148 ms、compact 188 ms。再現は `bench/tokens/calibrate.py`。
+- 1 レコードの推定は `lines` の各行 + 行末の改行の合計（実装で確定 2026-10-29: 改行の係数が 0.25 から 0.6 に上がったので、パッカーは各行の終端の改行も数える。レコード別の和が応答全体の推定以上になる）。縮退（`Record.shrink`）には終端の改行の分（1）を引いた予算を渡す。ツール側の縮退の見積もり（`tools/_services.py` の `estimate_tokens`）もパッカーと同じ推定器を使う。ヘッダ・警告・トレーラも同じ推定器で数える。
 
 ### 7.2.2 `Packer`
 
@@ -654,10 +654,11 @@ pack(out, budget, offset):
       if rec is None or t > remaining: break
       included.append(rec); remaining -= t
   rest = out.records[offset + len(included):]
-  if rest: next_cursor = CursorCodec.encode(tool, args_hash, offset + len(included), data_version)
+  unseen = max(0, out.total_estimate - len(out.records))       # ツールが具体化していない続き（BUG-0008。下の total_estimate の意味）
+  if rest or unseen: next_cursor = CursorCodec.encode(tool, args_hash, offset + len(included), data_version)
            summary = out.summarize(rest) or default_summary(rest)   # group ごとの件数
   meta: min confidence, breakdown, mixed  ← included から集計
-  return Page(included, next_cursor, summary, total_estimate=len(out.records))
+  return Page(included, next_cursor, summary, total_estimate=max(len(out.records), out.total_estimate))
 ```
 
 - 1 件も入らないときは `included = []`、`next_cursor` なし（進まないカーソルは出さない。BUG-0015）、`warnings` に理由と必要な `max_tokens` の目安（仕様書 §5.6 の 4）。トレーラは描かれないので `used` に数えない。`next_cursor` を返すページは必ず 1 件以上を含み、オフセットが進む。
@@ -2049,7 +2050,7 @@ build-backend = "hatchling.build"
 | S-9 | Python + SDK の往復オーバーヘッド: 何もしないツールと `get_file_skeleton`（キャッシュ済み）の p95 | 何もしないツールで p95 < 10 ms、骨格で p95 < 50 ms | JSON 直列化・pydantic 検証の最適化、ダメなら OD-1 (c) | **合格**（[docs/spikes/S-09.md](spikes/S-09.md)）。何もしないツールの往復 p95 1.08 ms（条件 10 ms）。骨格（T-02）の p95 < 50 ms は実装後に測る |
 | S-10 | Windows で `os.replace` の対象をエディタが開いているときの挙動と再試行の効果 | 5 回以内の再試行で成功するか、失敗を検知してロールバックできる | 一時ファイルに書いて内容をコピーする方式（原子性は劣る。仕様書に注記） | **合格**（[docs/spikes/S-10.md](spikes/S-10.md)）。失敗は `PermissionError`（winerror 5・32）で確実に検知でき target は無傷。50 ms の保持は 4 回目の試行で成功。再試行の条件と間隔を §7.7.5 で改版 |
 | S-11 | basedpyright / vtsls / rust-analyzer / gopls / clangd の `positionEncodings` 交渉結果 | 各サーバーの単位が分かり、`LineIndex` の変換で非 ASCII 行の位置が一致する | UTF-16 固定 | **合格**（[docs/spikes/S-11.md](spikes/S-11.md)）。basedpyright・vtsls・typescript-language-server は応答に `positionEncoding` が無く UTF-16、ruff だけが `utf-8` を返す。`LineIndex` の変換は 4 サーバーで全件一致。`position_encoding_default` を削除し、文字境界の列だけを送る規則を足した。rust-analyzer・gopls・clangd は未導入で未測定 |
-| S-12 | トークン推定の係数を `o200k_base` と比べて較正 | 仕様書 §14 のコーパスで誤差 ±10% | 係数表を文字種別にさらに分ける | **現行の係数は不合格、代替で合格見込み**（[docs/spikes/S-12.md](spikes/S-12.md)）。日本語 Markdown が −16〜−17%、compact 出力が −11%、base64 などが −43〜−63% で、いずれも過小。文字種別に分けるだけでは足りず、連の数を数える `lean_wide`（8 項）で種類別の合計誤差が ±3.3% 以内（交差検証の保持側）。§7.2.1 を改版し、`core/tokens.py` の置き換えを依頼 |
+| S-12 | トークン推定の係数を `o200k_base` と比べて較正 | 仕様書 §14 のコーパスで誤差 ±10% | 係数表を文字種別にさらに分ける | **現行の係数は不合格 → `lean_wide` に替えて合格**（[docs/spikes/S-12.md](spikes/S-12.md)）。日本語 Markdown が −16〜−17%、compact 出力が −11%、base64 などが −43〜−63% で、いずれも過小。文字種別に分けるだけでは足りず、連の数を数える `lean_wide`（8 項）で種類別の合計誤差が ±3.3% 以内（交差検証の保持側）。§7.2.1 を改版。`core/tokens.py` は 27e0821 で置き換え済み（回帰テスト `tests/unit/test_core_tokens_calibration.py` が全種類合格） |
 
 結果の欄は S-1〜S-12 のすべてを埋めた（反映の一覧は [docs/spikes/SYNC-1.md](spikes/SYNC-1.md)〔S-1・S-2・S-3・S-7・S-9・S-10〕と [docs/spikes/SYNC-2.md](spikes/SYNC-2.md)〔S-4・S-5・S-6・S-8・S-11・S-12 と構築の担当の報告〕）。
 
@@ -2092,7 +2093,7 @@ build-backend = "hatchling.build"
 | R-9 | 仕様書と設計の乖離 | 契約テストが仕様書の番号と合わない | 事後条件 → テスト名の対応を機械的に検査（§10.2） | 継続 |
 | R-10 | キャッシュディレクトリの肥大 | ディスク警告 | ジャーナル 50 件、ログ 7 日、構文木キャッシュの上限、`lucianke doctor` に使用量表示 | 継続 |
 | R-11 | `exact` の応答に LSP 往復が含まれ、NFR-PERF-1 が LSP の速度に左右される（§8.3 の 2 回目の呼び出し） | `definition` / `references` の p95 が LSP 待ちで 50 ms を超える | 結果を `relations` / `_hover_cache` に書いて 2 回目以降は PaaD から答える。S-9 で「LSP 待ちを含む p95」と「含まない p95」を分けて測り、仕様書 §14.4 の母集団定義（`exact` で応答した呼び出し）と照らす。超えるなら `WAIT_SHORT` の上限を下げて `structural` を先に返す | 継続（S-9 の往復は LSP 待ちを含まない値。LSP 待ちを含む p95 は実装後に測る） |
-| R-12 | トークン推定が実測より小さく、応答が `max_tokens` を超える（NFR-TOK の予算が守れない） | S-12 の種類別の合計誤差が ±10% を超える。`bench/run_bench.py` の較正が落ちる | `lean_wide`（§7.2.1）に替え、ベンチで較正を再実行する。必要なら係数を ×1.03 にして誤差を + 側へ寄せる | **縮小**（S-12: 旧係数は日本語で −16〜−17%、base64 で −43〜−63% と過小。`lean_wide` で ±3.3% 以内。TS・Go・Rust・韓国語は未検証） |
+| R-12 | トークン推定が実測より小さく、応答が `max_tokens` を超える（NFR-TOK の予算が守れない） | S-12 の種類別の合計誤差が ±10% を超える。`bench/run_bench.py` の較正が落ちる | `lean_wide`（§7.2.1）に替え、ベンチで較正を再実行する。必要なら係数を ×1.03 にして誤差を + 側へ寄せる | **縮小**（S-12: 旧係数は日本語で −16〜−17%、base64 で −43〜−63% と過小。`lean_wide` で ±3.3% 以内。27e0821 で採用済み〔回帰テストで種類ごと ±10%〕。残り: TS・Go・Rust・韓国語は未検証。合成 base64 が −8.3% で限界に近く、×1.03 は見送り） |
 
 ---
 

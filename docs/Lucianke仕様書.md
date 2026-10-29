@@ -482,7 +482,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 ## 5.6 ページネーションと切り詰め
 
 1. サーバーは `max_tokens` を超えない範囲でレコードを **先頭から順に** 詰める。レコード（1 シンボル、1 参照箇所、1 診断など）を途中で切ってはならない（MUST）。
-2. 次のレコードが入らなくなった時点で `next_cursor` を発行し、残りを `page.total_estimate` と `# summary:` 行（ファイル別の残件数）に要約する。
+2. 次のレコードが入らなくなった時点で `next_cursor` を発行し、残りを `page.total_estimate` と `# summary:` 行（ファイル別の残件数）に要約する。ツールが `limit` で打ち切った遅延列を渡し、`page.total_estimate` が渡した件数より大きいときは、渡された分が全部入っても `next_cursor` と `# more: … remaining≈N`（N は入らなかった分 + 渡されなかった分）を出す（BUG-0008、f0f328e）。
 3. `cursor` は不透明な文字列（base64url）で、同じセッション・同じ引数でのみ有効。基になるデータが変わっていれば `E_CURSOR_EXPIRED` を返す。
 4. ヘッダ・警告行・トレーラもトークン予算に含める。予算が小さすぎてレコードが 1 件も入らない場合は、レコード 0 件・`next_cursor` なし・`warnings` に理由と必要な `max_tokens` の目安を入れて成功応答とする（BUG-0015: オフセットが進まないカーソルは同じ呼び出しの繰り返しになるので出さない。`cursor` は `max_tokens` を含まない引数で結ばれているので、呼び出しに付けたカーソルは `max_tokens` を上げた呼び直しにそのまま使える）。`next_cursor` を返すページは必ず 1 件以上を含む。
 
@@ -1515,7 +1515,7 @@ json の `data`:
 
 **処理規約**:
 
-1. `symbols` テーブルを引く。`fuzzy` と `prefix` は FTS5 相当の索引、`exact` は `name` の等価比較、`regex` は索引を使わない走査で 200 ms を上限とし、超えたら部分結果付きの `E_TIMEOUT`。
+1. `symbols` テーブルを引く。`fuzzy` と `prefix` は FTS5 相当の索引、`exact` は `name`（最後の部分）の等価比較だけで、`Class.method` のような限定名では当てず、`regex` は索引を使わない走査で 200 ms を上限とし、超えたら部分結果付きの `E_TIMEOUT`。
 2. 順位は、完全一致 > 前方一致 > 部分一致の順、同順位内は `pagerank` 降順、さらにパスの辞書順とする。
 3. `type_signature_filter` は `->` で分けて、左側を `signature` の引数部、右側を `return_type` に対して部分文字列一致で適用する。
 4. 0 件かつ `fallback_grep: true` のとき、Tier 4 ファイルに対して `\bquery\b` と定義パターン（`query\s*[:=(]`）で内部 grep を実行し、`lex:` セレクタの URN で返す。このとき `is_degraded: true`、先頭に `! DEGRADED` 行（MUST）。
@@ -1881,11 +1881,12 @@ json の `data`:
 1. `paths` を §5.3 規則 5 で正規化する。省略時はワークスペースの索引済みファイル全体を対象とする。
 2. 診断は 2 系統から集める。(a) Tree-sitter の構文木にある `ERROR` / `MISSING` ノードを `source: "tree-sitter"`, `severity: "error"`, `code: "syntax"` の診断に変換する。(b) 稼働中の LSP が `textDocument/publishDiagnostics` で通知した最新の診断（サーバーが保持するキャッシュ）。同一位置・同一メッセージの重複は (b) を優先して 1 件にする。
 3. 対象言語の LSP が `ready` でない（`indexing` / `standby` / `unavailable`）場合、起動完了を待たずに (a) だけで応答し、`_resolution_meta.lsp_status` と `warnings` にその旨を書く（MUST）。LSP の起動は本ツールの呼び出しが契機になってよい（遅延起動、§12）。
-4. `revision` が `"WORKING_TREE"` 以外のときは (a) のみを返す（LSP は作業ツリーの状態しか持たない）。`lsp_status` は `"n/a"` とする。
-5. `include_code_actions: true` のとき、`severity` が `error` または `warning` の診断ごとに LSP の `textDocument/codeAction`（`only: ["quickfix"]`）を問い合わせ、得られた各アクションに **セッション内で一意な不透明 ID**（例 `qf_7a1c`）を割り当てて `code_action_id` とする。ID とアクションの対応はサーバーが保持し、対象ファイルの `sha256` が変わった時点で無効化する（MUST）。
+4. `revision` が `"WORKING_TREE"` 以外のときは、M1 では `E_UNSUPPORTED`（`details.reason: "revision_not_supported_until_M2"`。実装で確定 2026-10-29。過去断面の構文木診断は M1 の範囲外）。M2 では (a) のみを返す（LSP は作業ツリーの状態しか持たない）。`lsp_status` は `"n/a"` とする。
+5. `include_code_actions: true` のとき、`severity` が `error` または `warning` の診断ごとに LSP の `textDocument/codeAction`（`only: ["quickfix"]`）を問い合わせ、得られた各アクションに **セッション内で一意な不透明 ID**（例 `qf_7a1c`）を割り当てて `code_action_id` とする。ID とアクションの対応はサーバーが保持し、対象ファイルの `sha256` が変わった時点で無効化する（MUST）。実装は ID を `qf_` + 4 桁 16 進の連番（`qf_0001` から。例の `qf_7a1c` は形の見本）で発行し、クライアントは中身を解釈しない。問い合わせるのは、現在のページ（`cursor` 以降）の並びの先頭から数えて LSP 由来の `error` / `warning` の診断 100 件までで、それ以降の診断には `code_action_id` を付けない（実装で確定 2026-10-29）。
 6. 並び順は重大度の高い順 → パス → 行。1 レコード = 1 診断。予算を超えたら残りをファイル別・重大度別の件数に要約し、`# summary:` 行と `next_cursor` を出す。
 7. 各診断には、その位置を範囲に含む最も内側のシンボルの URN を `enclosing_urn` として付ける（シンボル外なら null）。
 8. 本ツールは子プロセス（ビルドツール、テストランナー、リンターの CLI）を新たに起動してはならない（MUST NOT）。起動してよいのは LSP サーバーのみ。
+9. `paths` を省略したワークスペース全体の呼び出しで LSP に開かせるファイルは 100 ファイルまで（`didOpen` の LRU 上限 200 の半分）。超えた分のファイルは構文エラーだけで応答し、`warnings` に書く（実装で確定 2026-10-29）。
 
 **出力**
 
@@ -1916,13 +1917,14 @@ json `data`:
 | `diagnostics[].code_actions[]` | object[] | `{ id, title, kind }`。`include_code_actions: false` なら空配列 |
 | `diagnostics[].confidence_level` | enum | `tree-sitter` 由来は `structural`、LSP 由来は `exact` |
 | `summary` | object | `{ files, by_severity: {error, warning, information, hint}, by_source: {<source>: n} }`（切り詰め前の総数） |
-| `lsp_sources[]` | object[] | `{ language, server, status, progress }`。対象ファイルの言語ごとの LSP 状態 |
+| `lsp_sources[]` | object[] | `{ language, role, server, status, progress }`。対象ファイルの言語 × 役（`role`: `types` / `lint`）ごとの LSP 状態 |
 
 **エラー**:
 
 - `E_INVALID_ARGUMENT`: `paths` がルート外、`paths` が 50 件超、`min_severity` が列挙外。
 - `E_WORKSPACE_NOT_CONFIGURED`: `workspace_id` 未登録、または `paths` からルートを解決できない。
 - `E_REVISION_NOT_FOUND`: `revision` を解決できない。
+- `E_UNSUPPORTED`: `revision` が `WORKING_TREE` 以外（M1。`details.reason: "revision_not_supported_until_M2"`）。
 - `E_CURSOR_EXPIRED`: `cursor` 発行後に対象ファイルのいずれかが変更された。
 - `E_TIMEOUT`: `include_code_actions` の問い合わせが合計 3,000 ms を超えた。得られた分は `data` に入れ、`details.partial: true`。
 
@@ -2094,7 +2096,7 @@ compact では、これらを `applied:` 行、`files_changed:` 行、`syntax_ch
 2. `replace_body` は定義ノード全体を `new_code` で置き換える（名前やシグネチャの変更を含んでよい）。`insert_before` / `insert_after` は定義ノードの直前・直後に、同じ親の兄弟として挿入する。`insert_member` は `target` が本体ブロックを持つノード（クラス・構造体・enum・impl・モジュール）であることを要し、そうでなければ `E_INVALID_ARGUMENT`。`delete_symbol` は定義ノードと、その直後の空行のうち言語慣習で余剰になる分を削除する。
 3. **構文検証（書き込み前）**: `new_code` を共通先頭空白を除いた形で対象ファイルの文法で解析する。`insert_member` では親と同種のダミー容器で包んで解析する。`new_code` 単体に `ERROR` / `MISSING` ノードがあれば `E_SYNTAX_INVALID`。続いて編集をメモリ上で適用して再解析し、編集前に存在しなかった `ERROR` / `MISSING` ノードが 1 つでも生じれば `E_SYNTAX_INVALID`（書き込まない）。`delete_symbol` で親の本体が空になり構文エラーになる場合も同様で、サーバーは `pass` 等を補ってはならない（MUST NOT）。`details.hint` に理由を書く。
 4. **インデント正規化**: (a) 対象ファイルのインデント単位は、行頭空白の増分を集計して多数派（タブ or スペース、幅 2/4/8）を採る。集計できなければ言語既定（Python 4 スペース、JavaScript/TypeScript 2 スペース、Rust 4 スペース、Go タブ）。(b) `new_code` の共通先頭空白を除き、`new_code` 内のインデント単位を同じ方法で推定して対象ファイルの単位に変換する。`new_code` がタブとスペースを混在させていれば `E_INVALID_ARGUMENT`（`details.param: "new_code"`）。(c) 基準列は、`replace_body` と `insert_before` / `insert_after` では元の定義ノードの先頭行の列、`insert_member` では既存メンバの先頭行の列（メンバが無ければ親の列 + 1 単位）。(d) 改行コードは対象ファイルの多数派（CRLF / LF）に合わせ、BOM と末尾改行の有無は保持する。(e) 挿入時の空行は言語慣習に従う（Python: モジュール直下 2 行・クラス内 1 行、それ以外: 1 行）。
-5. 前提検証・原子的書き込み・再索引・診断・応答は §10 の手順に従う。再索引後、置換・挿入したシンボルの新しい URN と範囲を `target_urn` / `new_range` に入れる。
+5. 前提検証・原子的書き込み・再索引・診断・応答は §10 の手順に従う。再索引後、置換・挿入したシンボルの新しい URN と範囲を `target_urn` / `new_range` に入れる。compact の `files_changed` の sha256 は先頭 12 桁 + `…` で示す（json の `sha256_before` / `sha256_after` は 64 桁。実装で確定 2026-10-29）。
 6. **Tier 2・3 の対象（M2。§8.6 の B2 編集・B4 置換。M1 では Tier 2〜3 への編集は `E_UNSUPPORTED`）**: `.ipynb` は仮想 Python セル（§8）上で同じ操作を行い、元の JSON の他セル・`outputs`・`metadata` を変更せずに書き戻す。XML / JSON / YAML / TOML はセレクタ（`xpath:`, `jsonpath:`, `jq:`, `toml:`, `yaml:`）で選んだ要素・値に対して `replace_body` と `delete_symbol` を提供し、書き込み前にそのフォーマットのパーサで再解析できることを確認する。`insert_*` は Tier 3 では `E_UNSUPPORTED`。
 7. 1 回の呼び出しで変更するファイルは常に 1 つである。
 
@@ -2124,7 +2126,7 @@ json `data`（共通フィールドに加えて）:
 
 **エラー**:
 
-- `E_INVALID_ARGUMENT`: `revision` が `WORKING_TREE` 以外、`operation` が列挙外、`new_code` 欠落、`insert_member` の対象が本体を持たない、`new_code` のタブ・スペース混在、`position` が列挙外。
+- `E_INVALID_ARGUMENT`: `revision` が `WORKING_TREE` 以外、`operation` が列挙外、`new_code` 欠落、`insert_member` の対象が本体を持たない、`new_code` のタブ・スペース混在、`position` が列挙外、`target` がシンボルを指さない（`path` だけで `symbol_name` も `line` も無い。`details.param: "target"`）、`lexical_fallback` の対象に `allow_heuristic_mutation: true` で実書き込み（`dry_run: false`）をするのに `expected_file_sha256` が無い（`details.param: "expected_file_sha256"`、`details.reason: "required_for_lexical_fallback"`）。
 - `E_TARGET_NOT_FOUND` / `E_TARGET_AMBIGUOUS`: §5.3。
 - `E_PRECONDITION_FAILED`: `expected_file_sha256` 不一致、または解決から書き込みまでの間に外部変更を検知（§10.4）。
 - `E_SYNTAX_INVALID`: 処理規約 3 のいずれか。
