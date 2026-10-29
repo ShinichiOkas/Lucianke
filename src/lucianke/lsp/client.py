@@ -30,6 +30,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Position, Range
 from lucianke.core.procs import ProcessRegistry
 from lucianke.core.textpos import LineIndex, Unit
@@ -69,14 +70,28 @@ class _FrameError(Exception):
 # --- 位置の変換（ADR-14） ---------------------------------------------------------------
 
 
-def to_lsp_position(line_index: LineIndex, pos: Position, encoding: Unit = Unit.UTF16) -> dict[str, int]:
+def to_lsp_position(
+    line_index: LineIndex,
+    pos: Position,
+    encoding: Unit = Unit.UTF16,
+    *,
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
     """内部の ``Position`` → LSP の ``{"line", "character"}``（``encoding`` 単位の列）。
 
-    行末を越える列・文字の途中の列は行末 / 直前の文字境界に丸める。範囲外の行は ``ValueError``。
+    **送る列は文字境界だけ**（設計書 §7.5.3 手順 3、S-11: ruff は文字の途中の列を増分 ``didChange`` で受けるとパニックして
+    終了し、UTF-16 の 3 サーバーは別のシンボルに当たる）。丸めが要る位置（行末を越える列・文字の途中の列）は丸めた値を返さず、
+    ``LuciankeError(E_LSP_UNAVAILABLE, details.reason="position_clamped")`` を上げる。呼び手はこれを降格として扱う。
+    ``details`` は例外の ``details`` に足す付随情報（``server`` / ``language`` など）。範囲外の行は ``ValueError``。
+    丸めを許すのは受信側（``from_lsp_position``）だけ。
     """
     (line, col), clamped = line_index.to_unit(pos, encoding)
     if clamped:
-        _log.debug("position %s was clamped when converting to %s", pos, encoding.value)
+        raise LuciankeError(
+            ErrorCode.E_LSP_UNAVAILABLE,
+            f"position {pos.line + 1}:{pos.col + 1} is not on a character boundary; the request was not sent",
+            details={**(details or {}), "reason": "position_clamped"},
+        )
     return {"line": line, "character": col}
 
 
@@ -100,11 +115,17 @@ def from_lsp_position(
     return pos
 
 
-def to_lsp_range(line_index: LineIndex, rng: Range, encoding: Unit = Unit.UTF16) -> dict[str, dict[str, int]]:
-    """内部の ``Range`` → LSP の ``{"start", "end"}``。"""
+def to_lsp_range(
+    line_index: LineIndex,
+    rng: Range,
+    encoding: Unit = Unit.UTF16,
+    *,
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, int]]:
+    """内部の ``Range`` → LSP の ``{"start", "end"}``。どちらかの端が丸めになるなら ``to_lsp_position`` と同じ例外。"""
     return {
-        "start": to_lsp_position(line_index, rng.start, encoding),
-        "end": to_lsp_position(line_index, rng.end, encoding),
+        "start": to_lsp_position(line_index, rng.start, encoding, details=details),
+        "end": to_lsp_position(line_index, rng.end, encoding, details=details),
     }
 
 
@@ -376,14 +397,18 @@ class LspClient:
 
     # --- 位置の変換（negotiated_encoding を使う） -------------------------------------
 
-    def to_lsp_position(self, line_index: LineIndex, pos: Position) -> dict[str, int]:
-        return to_lsp_position(line_index, pos, self.negotiated_encoding)
+    def to_lsp_position(
+        self, line_index: LineIndex, pos: Position, *, details: Mapping[str, Any] | None = None
+    ) -> dict[str, int]:
+        return to_lsp_position(line_index, pos, self.negotiated_encoding, details=details)
 
     def from_lsp_position(self, line_index: LineIndex, lsp_pos: Mapping[str, Any]) -> Position:
         return from_lsp_position(line_index, lsp_pos, self.negotiated_encoding)
 
-    def to_lsp_range(self, line_index: LineIndex, rng: Range) -> dict[str, dict[str, int]]:
-        return to_lsp_range(line_index, rng, self.negotiated_encoding)
+    def to_lsp_range(
+        self, line_index: LineIndex, rng: Range, *, details: Mapping[str, Any] | None = None
+    ) -> dict[str, dict[str, int]]:
+        return to_lsp_range(line_index, rng, self.negotiated_encoding, details=details)
 
     def from_lsp_range(self, line_index: LineIndex, lsp_range: Mapping[str, Any]) -> Range:
         return from_lsp_range(line_index, lsp_range, self.negotiated_encoding)

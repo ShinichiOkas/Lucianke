@@ -150,8 +150,12 @@ class CommandOutcome(NamedTuple):
 # --- 例外の作り方 -----------------------------------------------------------------------
 
 
+def _server_details(handle: LspHandle) -> dict[str, Any]:
+    return {"server": handle.server_name, "language": handle.language_id}
+
+
 def _unavailable(handle: LspHandle, reason: str, message: str | None = None, **extra: Any) -> LuciankeError:
-    details: dict[str, Any] = {"reason": reason, "server": handle.server_name, "language": handle.language_id}
+    details: dict[str, Any] = {"reason": reason, **_server_details(handle)}
     details.update(extra)
     return LuciankeError(
         ErrorCode.E_LSP_UNAVAILABLE,
@@ -349,20 +353,14 @@ def _lsp_position(handle: LspHandle, client: LspClient, index: LineIndex, pos: P
     """内部の位置 → LSP の位置。**文字境界の列だけ** を送る（S-11: ruff は文字の途中の列でパニックして終了し、
     UTF-16 の 3 サーバーは別のシンボルに当たる）。丸めが要る位置（文字の途中・行末を越える列）は送らずに
     ``E_LSP_UNAVAILABLE``（``details.reason="position_clamped"``）にする。呼び手はこれを降格として扱う。
+    変換と丸めの判定は ``LspClient.to_lsp_position`` の 1 か所（ここは範囲外の行を ``E_INVALID_ARGUMENT`` にするだけ）。
     """
     try:
-        (line, col), clamped = index.to_unit(pos, client.negotiated_encoding)
+        return client.to_lsp_position(index, pos, details=_server_details(handle))
     except ValueError as e:
         raise LuciankeError(
             ErrorCode.E_INVALID_ARGUMENT, f"position is outside the file: {e}", details={"param": "position"}
         ) from e
-    if clamped:
-        raise _unavailable(
-            handle,
-            "position_clamped",
-            f"position {pos.line + 1}:{pos.col + 1} is not on a character boundary; the request was not sent",
-        )
-    return {"line": line, "character": col}
 
 
 def _lsp_range(handle: LspHandle, client: LspClient, index: LineIndex, rng: Range) -> dict[str, Any]:

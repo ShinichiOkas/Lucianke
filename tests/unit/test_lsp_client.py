@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Position, Range
 from lucianke.core.procs import ProcessRegistry
 from lucianke.core.textpos import LineIndex, Unit
@@ -27,6 +28,7 @@ from lucianke.lsp.client import (
     LspError,
     from_lsp_position,
     to_lsp_position,
+    to_lsp_range,
 )
 from lucianke.lsp.servers import (
     SERVERS,
@@ -662,6 +664,87 @@ def test_from_lsp_position_clamps_like_the_lsp_spec():
         from_lsp_position(li, {"line": -1, "character": 0})
     with pytest.raises(ValueError):
         to_lsp_position(li, Position(99, 0))
+
+
+EMOJI_KANA = "a😀かな"  # 4 コードポイント: UTF-16 では 5 単位、UTF-8 では 1+4+3+3=11 バイト
+
+
+def emoji_kana_index() -> LineIndex:
+    return LineIndex((EMOJI_KANA + "\nsecond\n").encode("utf-8"))
+
+
+@pytest.mark.parametrize("encoding", [Unit.UTF16, Unit.UTF8, Unit.CODEPOINT])
+def test_to_lsp_position_refuses_a_clamped_column_instead_of_returning_the_rounded_one(encoding: Unit):
+    """BUG-0010: 送る列は文字境界だけ（設計書 §7.5.3 手順 3、S-11）。行末を越える列は丸めた値を返さず降格の例外にする。"""
+    li = emoji_kana_index()
+    with pytest.raises(LuciankeError) as e:
+        to_lsp_position(li, Position(0, 99), encoding)
+    assert e.value.code is ErrorCode.E_LSP_UNAVAILABLE
+    assert e.value.details == {"reason": "position_clamped"}
+    assert "1:100" in e.value.message and "not sent" in e.value.message
+    # 行末を 1 つ越えただけでも丸めになる（境界の隣は通り、その次は通らない）
+    to_lsp_position(li, Position(0, len(EMOJI_KANA)), encoding)
+    with pytest.raises(LuciankeError):
+        to_lsp_position(li, Position(0, len(EMOJI_KANA) + 1), encoding)
+
+
+@pytest.mark.parametrize("encoding", [Unit.UTF16, Unit.UTF8, Unit.CODEPOINT])
+def test_to_lsp_position_passes_every_boundary_column(encoding: Unit):
+    li = emoji_kana_index()
+    expected = {
+        Unit.UTF16: [0, 1, 3, 4, 5],
+        Unit.UTF8: [0, 1, 5, 8, 11],
+        Unit.CODEPOINT: [0, 1, 2, 3, 4],
+    }[encoding]
+    got = [to_lsp_position(li, Position(0, col), encoding) for col in range(len(EMOJI_KANA) + 1)]
+    assert got == [{"line": 0, "character": c} for c in expected]
+    # 次の行は丸めに巻き込まれない
+    assert to_lsp_position(li, Position(1, 6), encoding) == {"line": 1, "character": 6}
+
+
+def test_to_lsp_position_details_are_merged_and_reason_wins():
+    li = emoji_kana_index()
+    with pytest.raises(LuciankeError) as e:
+        to_lsp_position(
+            li, Position(0, 99), details={"server": "pyright", "language": "python", "reason": "x"}
+        )
+    assert e.value.details == {"reason": "position_clamped", "server": "pyright", "language": "python"}
+
+
+def test_to_lsp_position_keeps_value_error_for_a_line_outside_the_file():
+    with pytest.raises(ValueError):
+        to_lsp_position(emoji_kana_index(), Position(99, 0))
+
+
+@pytest.mark.parametrize("encoding", [Unit.UTF16, Unit.UTF8])
+def test_to_lsp_range_refuses_when_either_end_is_clamped(encoding: Unit):
+    li = emoji_kana_index()
+    ok = Range(Position(0, 1), Position(0, 3))
+    assert to_lsp_range(li, ok, encoding) == {
+        "start": to_lsp_position(li, ok.start, encoding),
+        "end": to_lsp_position(li, ok.end, encoding),
+    }
+    for bad in (Range(Position(0, 99), Position(1, 2)), Range(Position(0, 1), Position(0, 99))):
+        with pytest.raises(LuciankeError) as e:
+            to_lsp_range(li, bad, encoding, details={"server": "s"})
+        assert e.value.code is ErrorCode.E_LSP_UNAVAILABLE
+        assert e.value.details == {"reason": "position_clamped", "server": "s"}
+
+
+def test_client_methods_refuse_a_clamped_position_in_both_encodings():
+    li = emoji_kana_index()
+    client = LspClient("unstarted")
+    for encoding in (Unit.UTF16, Unit.UTF8):
+        client.negotiated_encoding = encoding
+        with pytest.raises(LuciankeError) as e:
+            client.to_lsp_position(li, Position(0, 99), details={"server": "unstarted"})
+        assert e.value.details == {"reason": "position_clamped", "server": "unstarted"}
+        with pytest.raises(LuciankeError):
+            client.to_lsp_range(li, Range(Position(0, 0), Position(0, 99)))
+        # 受信側（LSP → 内部）の丸めは許す（設計書どおり）
+        assert client.from_lsp_position(li, {"line": 0, "character": 2_147_483_647}) == Position(
+            0, len(EMOJI_KANA)
+        )
 
 
 def test_client_methods_use_the_negotiated_encoding_without_spawning():
