@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import stat
 import sys
-import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -375,6 +374,10 @@ if mode == "ok":
     assert args[-3:-1] == ["-f", "-"], args
     name = args[-1]
     assert os.path.basename(name) == name and os.path.isfile(name), (name, os.getcwd())
+    for a in args:  # 一時ファイルは呼び出し側が指定した置き場の直下の専用ディレクトリに作られている
+        if a.startswith("--stage-root="):
+            stage_root = a.split("=", 1)[1]
+            assert os.path.realpath(os.path.dirname(os.getcwd())) == os.path.realpath(stage_root), (os.getcwd(), stage_root)
     assert open(name, "rb").read().startswith(b"alpha"), "source was not staged"
     print('{"_type": "ptag", "name": "JSON_OUTPUT_VERSION", "path": "0.0"}')
     print('{"_type": "tag", "name": "alpha", "path": "%s", "line": 1, "kind": "function", "end": 3}' % name)
@@ -402,23 +405,26 @@ def fake_ctags(tmp_path: Path) -> list[str]:
     return [sys.executable, str(script)]
 
 
-def staged_dirs() -> set[str]:
-    return {p.name for p in Path(tempfile.gettempdir()).glob("lucianke-ctags-*")}
-
-
-async def test_outline_uses_ctags_through_a_child_process(fake_ctags: list[str]) -> None:
+async def test_outline_uses_ctags_through_a_child_process(fake_ctags: list[str], tmp_path: Path) -> None:
     # ブロック推定では何も取れない入力。ctags 経路を通った証拠になる。
     assert block_outline(ARRAY_SOURCE, rel=rel("d/f.unk"), workspace_id=WS)[1] is Confidence.LEXICAL_FALLBACK
-    before = staged_dirs()
+    # 一時物の置き場はこのテスト専用にする。共有の一時ディレクトリを数えると、同時に走る別のプロセスの一時物を拾って揺れる（BUG-0009）。
+    stage = tmp_path / "stage"
+    stage.mkdir()
     reg = ProcessRegistry()
     records, conf = await outline(
-        ARRAY_SOURCE, rel=rel("d/f.unk"), workspace_id=WS, ctags_cmd=[*fake_ctags, "ok"], registry=reg
+        ARRAY_SOURCE,
+        rel=rel("d/f.unk"),
+        workspace_id=WS,
+        ctags_cmd=[*fake_ctags, "ok", f"--stage-root={stage}"],
+        registry=reg,
+        staging_root=stage,
     )
     assert conf is Confidence.HEURISTIC
     assert spans(records) == {"alpha": (1, 3), "Beta": (5, 6)}
     assert str(records[0].urn) == "lk://app/d/f.unk#ctags:alpha@L1"
     assert reg.live() == []
-    assert staged_dirs() <= before, "一時ディレクトリが残った"
+    assert list(stage.iterdir()) == [], "一時ディレクトリが残った"
 
 
 async def test_outline_without_a_registry_owns_and_cleans_up_its_own(fake_ctags: list[str]) -> None:

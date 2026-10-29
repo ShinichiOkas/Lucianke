@@ -485,9 +485,10 @@ async def _ctags_outline(
     ctags_cmd: list[str],
     registry: ProcessRegistry,
     timeout_ms: int,
+    staging_root: Path | None = None,
 ) -> list[SymbolRecord]:
     """ctags で ``source`` のアウトラインを取る。失敗はすべて空（呼び出し側がブロック推定に降りる）。"""
-    tmp = Path(tempfile.mkdtemp(prefix="lucianke-ctags-"))
+    tmp = Path(tempfile.mkdtemp(prefix="lucianke-ctags-", dir=staging_root))
     try:
         # 言語の判定に拡張子・ファイル名を使うので、元のファイル名で一時ファイルを作る。``-f -`` が無いとカレントに ``tags`` を書く。
         name = PurePosixPath(str(rel)).name or "source"
@@ -513,11 +514,14 @@ async def outline(
     ctags_cmd: list[str] | None,
     registry: ProcessRegistry | None = None,
     timeout_ms: int = DEGRADED_GREP_MS,
+    staging_root: Path | None = None,
 ) -> tuple[list[SymbolRecord], Confidence]:
     """Tier 4 ファイルのアウトライン。
 
     ``ctags_cmd``（``find_ctags()`` の結果）があれば ctags を走らせ、無い・失敗・タイムアウト・0 件なら
     ``block_outline`` に降りる。``registry`` が無ければ一時の台帳を作って、終わりに必ず落とす。
+    ctags に渡す一時ファイルは ``staging_root`` の下の専用ディレクトリに置き、終わりに消す（既定は OS の一時ディレクトリ。
+    テストは自分専用のディレクトリを渡して、同時に走る別のプロセスの一時物と混ざらないようにする）。
     取れたら ``(records, heuristic)``、何も取れなければ ``([], lexical_fallback)``。
     """
     if ctags_cmd:
@@ -531,6 +535,7 @@ async def outline(
                 ctags_cmd=ctags_cmd,
                 registry=reg,
                 timeout_ms=timeout_ms,
+                staging_root=staging_root,
             )
         finally:
             if owned:
