@@ -316,7 +316,7 @@ Lucianke/
 │  │  ├─ client.py           #   JSON-RPC over pipes、要求・通知、タイムアウト、位置変換の境界（ADR-14）
 │  │  ├─ pool.py             #   言語 × ワークスペースごとの状態機械（standby/starting/indexing/ready/unavailable）
 │  │  ├─ documents.py        #   didOpen/didChange/didClose、版番号、LRU 200
-│  │  ├─ diagnostics.py      #   publishDiagnostics の受信・版待ち（DiagnosticsWaiter）・Index への反映
+│  │  ├─ diagnostics.py      #   DiagnosticsHub: publishDiagnostics の受信・版待ち（wait_for。編集層の DiagnosticsWaiter の土台）。Index への書き込みは呼び手（on_diagnostics）
 │  │  └─ features.py         #   definition / references / call_hierarchy / rename / code_actions / hover の呼び出しと PaaD への書き込み
 │  │
 │  ├─ index/                 # PaaD
@@ -985,19 +985,24 @@ Tier 4（`heuristic.py`）:
 ### 7.5.1 サーバー定義（servers.py）
 
 ```python
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class LspServerDef:
-    name: str                               # "basedpyright" / "ruff" / "vtsls" …
-    language_ids: tuple[str, ...]
-    role: Literal["types", "lint"]          # 同一言語に 2 役を並列してよい（仕様書 §12.3）
-    discover: tuple[Candidate, ...]         # 探索順: LUCIANKE_LSP_<サーバー名>_CMD（サーバー名単位。types と lint を別々に上書きできる）→ LUCIANKE_LSP_<LANG>_CMD → .venv/bin|Scripts, node_modules/.bin → PATH
-    args: tuple[str, ...]                   # 例: ("--stdio",)
-    init_options: Callable[[Workspace], dict]   # initialize の initializationOptions（tsls の tsserver.path など）
-    config_for: Callable[[Workspace, str], dict]   # workspace/configuration への返答（section ごと。basedpyright の python、vtsls の vtsls など）
-    locale: str | None                      # initialize の locale。basedpyright は "en"（診断を英語に固定。既定は OS のロケール＝日本語）
+    language_id: str                        # workspace.languages の言語 ID。TypeScript 系は typescript / tsx / javascript ごとに 1 件（実装で確定 2026-10-29）
+    name: str                               # "basedpyright" / "ruff" / "typescript-language-server" / "vtsls" …
+    argv_candidates: tuple[tuple[str, ...], ...]   # 起動コマンドの候補 (実行ファイル名, 引数...)。先に見つかったものを使う
+    initialization_options: Mapping[str, Any] | None = None   # initialize の initializationOptions
+    settings: Mapping[str, Any] = {}        # workspace/configuration の応答の元になる設定木（"." 区切りのセクション名で引く）
+    role: Literal["types", "lint"] = "types"   # 同一言語に 2 役を並列してよい（仕様書 §12.3）
+    lsp_language_id: str | None = None      # didOpen の languageId（tsx は "typescriptreact"）
+    best_effort: bool = False               # 実機未確認のサーバー。PATH に無ければ unavailable で済ませる
+    locale: str | None = None               # initialize の locale。basedpyright は "en"（診断を英語に固定。既定は OS のロケール＝日本語）
+    requests_m1: frozenset[str] = frozenset()   # ADR-15 の範囲でこのサーバーに送ってよい LSP の method
+    tsserver_via: Literal["initialization_options", "settings"] | None = None   # tsserver の所在の渡し方（S-5）
+    needs_workspace_tsserver: bool = False  # tsserver.js が無いと initialize が失敗する（tsls）
     # position_encoding_default は持たない（S-11: 応答に positionEncoding が無ければ全部 UTF-16 で足りる）
-    requests_m1: frozenset[str]             # ADR-15 の範囲でこのサーバーに送ってよいもの
 ```
+
+初版の想定（`language_ids` / `discover` / `args` / `init_options: Callable` / `config_for: Callable`）から、実装で上のとおりに変えた（実装で確定 2026-10-29）。探索の候補は `argv_candidates`、`initialize` の `initializationOptions` は静的な `initialization_options` に、実行時にしか決まらない値（Python のインタープリタ、tsserver の所在）は `build_initialization_options(defn, tsserver_path=…)` と `build_settings(defn, python_path=…, tsserver_path=…)` が重ねる。`config_for(ws, section)` に当たるのは、`build_settings` の結果を `LspClient.set_settings` に渡しておくと `LspClient` が `workspace/configuration` の section を引いて返す仕組み。
 
 M1 の定義（Python と TypeScript / JavaScript の起動コマンド・初期化・位置単位は S-4 / S-5 / S-11 で実機確認して固定した。ほかの言語は想定のまま）:
 
@@ -1008,14 +1013,14 @@ M1 の定義（Python と TypeScript / JavaScript の起動コマンド・初期
 | TypeScript / JavaScript | `typescript-language-server --stdio`（tsls） | `vtsls --stdio` | **既定は tsls**（S-5 で確認: 診断が常に最新で空配列も届く、診断が約 110 ms 速い、`definition` の範囲が名前になる）。vtsls は TypeScript を同梱するので、tsserver が見つからず tsls の `initialize` が失敗するとき（ワークスペースに TypeScript が無い、または npm の `typescript@7` のように `lib/tsserver.js` が無い）の代替にする。どちらも Node が要る。`positionEncoding` は応答に無い → UTF-16（S-11） |
 | Rust / Go / C,C++ / C# / Kotlin / Swift | `rust-analyzer` / `gopls` / `clangd` / `csharp-ls` / `kotlin-language-server` / `sourcekit-lsp` | — | best effort。PATH に無ければ `unavailable` |
 
-`initialize` では `positionEncodings: ["utf-8", "utf-16"]` を提示し、応答の `positionEncoding` を `LspClient` に設定する。応答に無い（交渉できない）サーバーは UTF-16（仕様書 §12.2）。未知の値（`utf-32` など）も UTF-16 に倒して警告ログに出す。**サーバーごとの既定値は持たない**: 旧版（と S-4 の提案）の `position_encoding_default` は削除した。実測した 4 サーバーのうち、basedpyright・vtsls・tsls は応答に無く UTF-16 で、`utf-8` を採るのは ruff だけ。上書きを持つと誤った値が黙って位置を壊す穴になる（S-11 で確認）。サーバーの更新で単位が変わったら落ちるよう、期待する単位を契約テスト（サーバー未導入なら skip）に持たせる。`utf-8` の経路は将来のサーバー（rust-analyzer・clangd など）でも通るので ruff で常時検査する。提示を `["utf-16"]` に絞る設定（`lsp.position_encodings`）を逃げ道に用意する（MAY）。
+`initialize` では `positionEncodings: ["utf-8", "utf-16"]` を提示し、応答の `positionEncoding` を `LspClient` に設定する。応答に無い（交渉できない）サーバーは UTF-16（仕様書 §12.2）。未知の値も UTF-16 に倒して警告ログに出す（実装は `Unit` の値〔`utf-8` / `utf-16` / `utf-32`〕を受け、それ以外を倒す。`utf-32` は提示していないので来ない。S-11 の推奨は `utf-32` も倒す案だったが、提示しない以上どちらでも実害は無い）。**サーバーごとの既定値は持たない**: 旧版（と S-4 の提案）の `position_encoding_default` は削除した。実測した 4 サーバーのうち、basedpyright・vtsls・tsls は応答に無く UTF-16 で、`utf-8` を採るのは ruff だけ。上書きを持つと誤った値が黙って位置を壊す穴になる（S-11 で確認）。サーバーの更新で単位が変わったら落ちるよう、期待する単位を契約テスト（サーバー未導入なら skip）に持たせる。`utf-8` の経路は将来のサーバー（rust-analyzer・clangd など）でも通るので ruff で常時検査する。提示を `["utf-16"]` に絞る設定（`lsp.position_encodings`）を逃げ道に用意する（MAY。**未実装**: 今は `lsp/client.py` の `default_client_capabilities()` に固定。期待する単位の契約テスト `tests/lsp_contract` も未作成）。
 
 **探索順と tsserver の所在**（S-4・S-5 で確認）:
 
-- サーバー: `LUCIANKE_LSP_<サーバー名>_CMD` → `LUCIANKE_LSP_<LANG>_CMD`（lint は `…_LINT_CMD`）→ `<root>/.venv/Scripts|bin/` → `<root>/node_modules/.bin/` → PATH（`shutil.which`。Windows は `.CMD` を返し、`create_subprocess_exec` にそのまま渡せる）。TypeScript は tsls → vtsls の順。
+- サーバー: `LUCIANKE_LSP_<サーバー名>_CMD` → `LUCIANKE_LSP_<LANG>_CMD`（lint は `…_LINT_CMD`）→ `<root>/.venv/Scripts|bin/` → `<root>/node_modules/.bin/` → PATH。探索は自前で行い `shutil.which` は使わない（Windows の `which` はカレントディレクトリを先に見るので、ワークスペース直下に置かれた実行ファイルを掴みかねない。`.exe` / `.cmd` / `.bat` を探し、`create_subprocess_exec` にそのまま渡す）。呼び手が Python 環境〔`venv`〕を渡したときは、その `Scripts|bin` を `.venv` より先に見る。環境変数の値はそのまま argv になる（存在確認はしない。起動に失敗すれば `init_failed`）。TypeScript は tsls → vtsls の順。
 - tsserver: 明示指定 → `<root>/node_modules/typescript/lib/tsserver.js`（存在確認。TypeScript 7 には無い）→ 無ければ vtsls に切り替える。tsls へは `initializationOptions.tsserver.path`、vtsls へは `workspace/configuration` の応答（`{"vtsls": {"autoUseWorkspaceTsdk": true}}`。返さないと同梱の TypeScript を使う）で渡す。
 
-**サーバーからの要求への返答**（`on_request`。S-4・S-5 で確認）: `workspace/configuration`（basedpyright は section `python` と `basedpyright`、vtsls は section `""`、tsls は `formattingOptions`。MUST。`config_for` が作る）、`window/workDoneProgress/create`・`client/registerCapability`・`client/unregisterCapability`（`None`）、`workspace/applyEdit`（M1 では適用しない: `{"applied": false}`。書くのは `EditTransaction` だけ。tsls の organizeImports は `only: source.removeUnusedImports.ts` で `edit` つきが返るのでそれを使い、`_typescript.organizeImports` 経由の `applyEdit` は使わない）、未知のメソッドは `-32601`。
+**サーバーからの要求への返答**（`on_request`。S-4・S-5 で確認）: `workspace/configuration`（basedpyright は section `python` と `basedpyright`、vtsls は section `""`、tsls は `formattingOptions`。MUST。`LspClient.set_settings` に渡した設定木から返す）、`window/workDoneProgress/create`・`client/registerCapability`・`client/unregisterCapability`（`None`）、`workspace/applyEdit`（M1 では適用しない: `{"applied": false}`。書くのは `EditTransaction` だけ。tsls の organizeImports は `only: source.removeUnusedImports.ts` で `edit` つきが返るのでそれを使い、`_typescript.organizeImports` 経由の `applyEdit` は使わない）、未知のメソッドは `-32601`。
 
 **サーバーごとの癖**（実測。`servers.py` に集約する）:
 
@@ -1035,14 +1040,24 @@ M1 の定義（Python と TypeScript / JavaScript の起動コマンド・初期
 ### 7.5.2 状態機械（pool.py）
 
 ```python
-class LspPool:
-    def get(self, language_id: str, ws: Workspace, *, start_if_needed: bool = True) -> LspHandle | None   # ブロックしない
-    def status(self, language_id, ws) -> LspStatus          # (state, progress, server_name, pid, reason)
-    async def ensure_started(self, language_id, ws) -> None # standby なら起動を投げて即戻る（待たない。§8.3）
-    async def notify_watched(self, changes) -> None          # workspace/didChangeWatchedFiles を稼働中の全 LSP へ
-    async def shutdown_all(self, grace_ms: int = 500) -> None # 終了手順（§6.5）: shutdown → exit → terminate → kill
-    def reset(self, language_id | None, ws) -> None          # reindex_scope: "lsp"
-    async def shutdown_all(self) -> None
+class LspPool:   # 言語 × ワークスペース × 役（types / lint）ごとに 1 つの LspHandle を持つ
+    def __init__(self, registry: ProcessRegistry, *, on_diagnostics: OnDiagnostics | None = None, …)
+        # OnDiagnostics = Callable[[RelPath, list[dict], int | None, str], Any]  → on_diagnostics(path, diags, version, source)
+        # 4 引数目の source はサーバー名（"basedpyright" / "ruff" …）。§7.5.5 の (file_id, source) 単位の全置換に要る
+    def get(self, language_id, ws, *, role="types", start_if_needed=True) -> LspHandle | None   # ready のときだけ返す。ブロックしない
+    def status(self, language_id, ws, role="types") -> PoolStatus       # (state, progress, server_name, pid, reason)
+    def handles(self, ws=None, language_id=None) -> list[LspHandle]
+    async def ensure_started(self, language_id, ws) -> None            # standby なら起動を投げて即戻る（待たない。§8.3）
+    async def wait_ready(self, language_id, ws, timeout_ms, *, role="types") -> bool
+    async def notify_watched(self, ws, changes: Iterable[tuple[RelPath, int]]) -> float
+        # workspace/didChangeWatchedFiles を稼働中（indexing / ready）の全 LSP へ。送信前の perf_counter を返す（DiagnosticsHub.wait_for の sent_at にそのまま渡せる）
+    async def reset(self, language_id: str | None, ws) -> None         # reindex_scope: "lsp"。停止の回収を待つので async
+    async def shutdown_all(self, grace_ms: int | None = None) -> None  # 終了手順（§6.5）: shutdown → exit → terminate（Windows は Job Object で孫ごと）。以後は起動しない
+    async def sweep_idle(self, now=None, idle_s=LSP_IDLE_SHUTDOWN_S) -> list[LspHandle]   # MAY: 30 分無要求の稼働中を止めて standby へ
+
+class LspHandle:   # 状態の読み取りと、機能呼び出しが使う client / documents / diagnostics
+    def record_ok(self) -> None             # 要求が時間内に答えた: 連続タイムアウトの数え直し
+    def record_timeout(self) -> bool        # 連続 3 回に達したらプロセスを落として unavailable（timeout_3x）にし True を返す
 ```
 
 | 状態 | 入る契機 | 動作 | 出る契機 |
@@ -1051,9 +1066,17 @@ class LspPool:
 | `starting` | 要求 | コマンド探索 → `ProcessRegistry.spawn` → `initialize` / `initialized` を送る。要求元には降格応答（待たない） | `initialize` 成功 → `indexing`。失敗 → 再試行判定 |
 | `indexing` | 初期化直後 | `$/progress` / `window/workDoneProgress` を `progress` に反映。取れないサーバーは最初の `publishDiagnostics` 受信で `ready`（basedpyright は単一文書では `$/progress` を出さない。`ready` は「`initialize` 応答後、最初に開いた文書の実診断を受信」または「`$/progress end`」の早い方。S-4 で確認） | 進捗完了 → `ready` |
 | `ready` | 索引完了 | 要求を通す | クラッシュ / 無応答（連続 3 回のタイムアウト）→ 再試行判定。`reset` → `standby` |
-| `unavailable` | 再試行上限 | `status.reason` に理由（`not_found` / `crashed_3x` / `init_failed`）。T-00 `status` に出す | `reset` → `standby` |
+| `unavailable` | 再試行上限 | `status.reason` に理由（`not_found` / `crashed_3x` / `init_failed` / `timeout_3x`）。T-00 `status` に出す | `reset` → `standby` |
 
-再試行は `LSP_RESTART_BACKOFF_S = (1, 2, 4)`、`LSP_RESTART_MAX = 3`。状態遷移は言語ごとの `asyncio.Lock` の下で行い、二重起動を防ぐ。`EngineSelector` は `status()` だけを見る。
+再試行は `LSP_RESTART_BACKOFF_S = (1, 2, 4)`、`LSP_RESTART_MAX = 3`。起動後 `stable_after_s`（60 s）以上動いていたクラッシュは数え直す。コマンドが見つからなければバックオフせず即 `unavailable`（`not_found`）。`EngineSelector` は `status()` だけを見る。
+
+実装との差（実装で確定 2026-10-29）:
+
+- 状態遷移は、ハンドルごとの監督タスク 1 本が行う。`standby` からの遷移は `await` なしの同期で 1 回だけなので、言語ごとのロックは要らず二重起動しない。
+- `indexing` → `ready` の合図は次の 3 つの早いもの: (1) `$/progress` の `begin` を見たサーバーは**すべての `end` が揃ったとき**、(2) 進捗中でなければ**最初の `publishDiagnostics`**、(3) どちらも来なければ `ready_fallback_s`（15 s）後（進捗が続いていても `indexing_max_s`〔300 s〕で打ち切り）。
+- **要求のタイムアウトはプールから見えない**。機能呼び出し側（`lsp/features.py`）が、時間内に答えたら `LspHandle.record_ok()`、`TimeoutError` なら `record_timeout()` を呼ぶ（連続 3 回で `timeout_3x`。降格は呼び手が `engine.selector.on_lsp_timeout` で行う）。
+- `reset` は停止の回収を待つので `async`。`unavailable` も解く（次の要求で再起動）。`shutdown_all` は 1 つだけ（初版の本書は 2 つ書いていた）。
+- `LspHandle.documents`（`DocumentSync`）と `.diagnostics`（`DiagnosticsHub`）はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。外へ出す `LspStatus` では `starting` を `indexing` に含める。
 
 `didOpen` 直後（解析中）の `definition` はサーバー内で約 0.6 s 待たされて正しい結果が返る（`null` は返さない。3 秒の `LSP_TIMEOUT_*` に収まる）ので、`indexing` 中の要求を `None` で返す設計（ADR-6 (b)）は安全側で変更不要（S-4 で確認）。
 
@@ -1069,60 +1092,78 @@ class LspPool:
 
 ```python
 class LspClient:
-    async def request(self, method: str, params: Any, *, timeout_ms: int) -> Any    # 超過で asyncio.TimeoutError → 呼び手が降格
-    def notify(self, method: str, params: Any) -> None
+    async def start(self, argv, *, cwd, env=None, registry: ProcessRegistry) -> None
+    async def initialize(self, *, root_uri, initialization_options=None, capabilities=None, locale=None, timeout_ms=60_000) -> dict
+        # initialize → initialized。応答の positionEncoding を negotiated_encoding に入れる
+    async def request(self, method: str, params: Any, *, timeout_ms: int | float) -> Any
+        # 超過で $/cancelRequest を送ってから TimeoutError（呼び手が降格）。エラー応答は LspError、切断は ConnectionError
+    def notify(self, method: str, params: Any = None) -> None
     def on_notification(self, method: str, handler) -> None
     def on_request(self, method: str, handler) -> None     # client/registerCapability, workspace/configuration, window/workDoneProgress/create
-    async def cancel(self, request_id: int) -> None        # $/cancelRequest
-    encoding: Unit                                         # 応答の positionEncoding。無い・未知なら UTF-16（S-11）
+    def set_settings(self, settings: Mapping[str, Any]) -> None   # workspace/configuration の応答の元（LspServerDef.settings + build_settings）
+    async def shutdown(self, grace_ms: int = 500) -> None
+    negotiated_encoding: Unit        # core.textpos.Unit。Unit(caps.get("positionEncoding", "utf-16"))。無い・未知なら UTF-16（S-11）
+    # to_lsp_position / from_lsp_position / to_lsp_range / from_lsp_range: negotiated_encoding で LineIndex を呼ぶ薄い包み
 ```
 
 1. フレーミングは `Content-Length` ヘッダ。読み取りタスク 1 本が応答を `id → Future` に配り、通知をハンドラへ回す。子の `stderr` は別タスクでログへ（`debug`）。`window/logMessage` / `showMessage` もログへ。
 2. タイムアウトは `core/limits.py` の定数: `LSP_TIMEOUT_DEFINITION_MS=3000`、`LSP_TIMEOUT_REFERENCES_MS=3000`、`LSP_TIMEOUT_HOVER_MS=3000`、`LSP_TIMEOUT_CALL_HIERARCHY_MS=5000`、`LSP_TIMEOUT_CODE_ACTION_MS=5000`、`LSP_TIMEOUT_RENAME_MS=10000`。超過時は `$/cancelRequest` を送ってから呼び手に返す。
-3. **位置変換はこの境界だけ**（MUST）。`to_lsp(pos: Position, line_text) -> {line, character}` と `from_lsp(...)` が `core/textpos.LineIndex` でコードポイント ↔ UTF-16 ↔ バイトを変換する。`Range` / `Location` / `TextEdit` を越境させる関数はここに閉じる。**サーバーへは文字境界の列だけを送る**（MUST）。`to_unit` の丸め（`clamped=True`）が出たら要求を送らず降格応答にする（UTF-16 の 3 サーバーは境界でない列だと黙って別のシンボルや `null` を返し、ruff は文字の途中を指す増分 `didChange` でパニックして終了する〔exit 101〕。S-11 で確認）。`didChange` は全文なので、位置を送るのは definition・references・hover・rename・codeAction の range だけ。増分 `didChange` を入れる（MAY）ときは境界検査を必須にする。`LineIndex` は 4 サーバーの全件で一致した（S-11）。
+3. **位置変換はこの境界だけ**（MUST）。`core/textpos.LineIndex` の `to_unit(pos, unit)`（コードポイント → 列）と `from_unit(line, col, unit)`（列 → コードポイント）が、`negotiated_encoding` の単位（UTF-8 / UTF-16）で変換する（バイトオフセットは Tree-sitter 用に `position_to_offset`）。`LineIndex` は `didOpen` / `didChange` に送った本文そのものから作る。`Range` / `Location` / `TextEdit` を越境させる関数はここに閉じる。**サーバーへは文字境界の列だけを送る**（MUST）。`to_unit` の丸め（`clamped=True`）が出たら要求を送らず降格応答にする（UTF-16 の 3 サーバーは境界でない列だと黙って別のシンボルや `null` を返し、ruff は文字の途中を指す増分 `didChange` でパニックして終了する〔exit 101〕。S-11 で確認）。`didChange` は全文なので、位置を送るのは definition・references・hover・rename・codeAction の range だけ。増分 `didChange` を入れる（MAY）ときは境界検査を必須にする。`LineIndex` は 4 サーバーの全件で一致した（S-11）。**実装の差**: `LspClient.to_lsp_position` は丸めて返し `debug` ログに残すだけで、受信側は丸めてよい（行末超過・文書末超過・文字の途中は直前の境界へ。TypeScript の `2147483647` もこれで足りる）。送信側の降格は `lsp/features.py` の `_lsp_position` が `to_unit` を直接呼び、`clamped` なら `E_LSP_UNAVAILABLE(details.reason="position_clamped")` を投げて行う。
 4. URI: 送信は realpath の絶対パスから `file://` を作る（Windows は `file:///S:/...`）。受信は先に正規化してから `confine` を通し、ルート外は外部シンボル扱い。正規化は `unquote` → 先頭の `/` を落とす（`/s:/work` → `s:/work`）→ `os.path.normcase(realpath)`。basedpyright・vtsls・tsls は小文字ドライブ＋`%3A`（`file:///s%3A/work/...`）で返す（S-4・S-5 で確認）。
 
 ### 7.5.4 文書同期（documents.py）
 
 ```python
-class DocumentSync:
-    async def ensure_open(self, path: RelPath) -> int                   # 版 1 で didOpen。開いていれば現在の版
-    async def on_edit(self, path, new_text: str) -> int                 # 全文 didChange。版 +1。送信時刻を記録
-    async def on_external_change(self, path) -> int | None              # 開いていれば再読込して didChange
-    async def close(self, path) -> None
+class DocumentSync:   # LSP サーバー 1 つ分の「開いている文書」の台帳。送信は notify 関数（LspClient.notify）を渡される。すべて同期関数
+    def did_open(self, path: RelPath, text: str, language_id: str) -> int     # 版 1 で didOpen
+    def did_change(self, path, text: str) -> int                             # 全文 didChange。版 +1。送信の直前に送信時刻を記録
+    def sync(self, path, text, language_id) -> int                           # 未オープンなら didOpen、本文が変わっていれば didChange、同じなら何もしない
+    def on_external_change(self, path, text) -> int | None                   # 開いていれば全文 didChange
+    def did_close(self, path) -> bool
+    def version_of(self, path) -> int | None
+    def sent_at_of(self, path) -> float | None                               # perf_counter。DiagnosticsHub.wait_for(sent_at=…) に渡す
+    def touch(self, path) -> None                                            # 要求で触れた文書を新しい側へ（LRU）
 ```
 
-開いている文書は `LSP_OPEN_DOCS_MAX`（200）の LRU。要求で初めて触れたファイルを開き、超えた分は `didClose`。`didChange` は全文（増分は MAY）。`revision != WORKING_TREE` の内容は開かない（LSP は作業ツリーしか知らない）。
+開いている文書は `LSP_OPEN_DOCS_MAX`（200）の LRU。要求で初めて触れたファイルを開き、超えたら使われたのが最も古い文書から `didClose`（いま開こうとしている文書は閉じない）。送信に失敗（`ConnectionError`）したら状態を変えずに送出し、サーバーの再起動では台帳ごと作り直す。ファイル内容は呼び手が渡す（`text`）。`didChange` は全文（増分は MAY）。`revision != WORKING_TREE` の内容は開かない（LSP は作業ツリーしか知らない）。
 
 ### 7.5.5 診断の受信と版待ち（diagnostics.py）
 
 ```python
-class DiagnosticsStore:
-    def on_publish(self, uri, version: int | None, items: list, received_at: float) -> None
-    async def wait_for(self, path: RelPath, min_version: int, timeout_ms: int) -> bool   # 揃えば True
+class DiagnosticsHub:   # LSP サーバー 1 つ分。attach(client) で textDocument/publishDiagnostics に結ぶ
+    def on_publish(self, params) -> None        # ファイルごとに最新の (version | None, received_at, diagnostics, seq) を持ち、on_diagnostics(path, diags, version) を呼ぶ
+    def get(self, path) -> DiagnosticsEntry | None
+    def is_provisional(self, path) -> bool      # 最初の受信が空で、まだ信用できない（(c)）
+    def settle_all(self) -> None                # $/progress end: 仮の空の診断を信用に切り替える
+    async def wait_for(self, path, *, min_version: int | None, sent_at: float, timeout_ms, settle_ms=0, min_publishes=1) -> bool   # 揃えば True
+        # sent_at は DocumentSync.sent_at_of。min_publishes は版を付けないサーバーで発行を数える (d)。settle_ms は依存元の静止 (b)
 ```
 
-1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
+1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。**`DiagnosticsHub` 自身は index に書かない**: 受信のたびに `on_diagnostics(path, diags, version)` を呼ぶだけで、`LspPool` がサーバー名を足した 4 引数 `on_diagnostics(path, diags, version, source)` を呼び手（Index 側）に渡す（実装で確定 2026-10-29）。`wait_for` は編集層の `DiagnosticsWaiter`（§7.7.6）の土台。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
 2. `wait_for` の条件（S-4・S-5 で確認）:
    - (a) 自分が `didChange` した文書は `version >= min_version`（`==` ではなく `>=`）。basedpyright は連続した変更を畳んで最後の版だけ、ruff は版ごとに届く。診断が変わらない変更（コメントだけ）でも basedpyright は毎回 1 件届く。想定の待ち時間は basedpyright が `didChange` から約 0.3 s、ruff が 1 ms 未満。
    - (b) 依存元の文書は、`version` が自分の旧い版のまま再送されるので、`workspace/didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止で「揃った」とする。
    - (c) 複数文書を続けて `didOpen` した直後の**空の診断は「きれい」と見なさない**（basedpyright は同じ版 1 の空の診断を先に送り、実診断は約 75 ms 後に `$/progress end` と同時に来る）。`$/progress end` または最初の受信から 300 ms の静止まで `unknown` とする。
    - (d) **`version` を付けないサーバー**（vtsls・tsls）は、publish を受けた＝現行とは言えない（vtsls は誤りを消したあとも古い診断〔n=1〕を返し、次の変更で正常化する。3 回の別実行で再現）。変更ごとの発行を数えて追い越しを検出する。診断の無いファイルを開いても何も届かない vtsls に備え、「届かない＝0 件」とみなす猶予時間（設計値: 2 s）を持つ。tsls は常に最新で、空配列も届く。
-   - (e) 受信 URI は §7.5.3 の正規化を通してから `DiagnosticsStore` に入れる。
+   - (e) 受信 URI は §7.5.3 の正規化を通してから `DiagnosticsHub` に入れる。
 3. Tree-sitter の構文エラーは LSP ではなく Indexer が `source: "tree-sitter"` で入れる（§7.6.2）。同一位置・同一メッセージの重複は T-08 が LSP 側を優先する。
 
 ### 7.5.6 機能呼び出しと PaaD への反映（features.py、ADR-6、ADR-15）
 
 ```python
-class LspFeatures:
-    async def definition(self, path, pos) -> list[Location] | None       # None = 今は答えられない（降格）
-    async def references(self, path, pos, include_decl) -> list[Location] | None
-    async def call_hierarchy(self, path, pos, direction) -> list[CallItem] | None
-    async def hover_signature(self, path, pos) -> str | None
-    async def rename(self, path, pos, new_name) -> Plan                  # prepareRename → rename → WorkspaceEdit → Plan
-    async def code_actions(self, path, range, only, diagnostics) -> list[CodeAction]
-    async def resolve_code_action(self, action) -> CodeAction            # edit が無ければ codeAction/resolve
+# lsp/features.py: LspHandle と作業ツリーの RelPath を受ける async 関数群（実装で確定 2026-10-29。クラスではない）
+async def definition(handle, rel, pos) -> list[Location]
+async def references(handle, rel, pos, *, include_declaration=False) -> list[RefLocation]
+async def hover(handle, rel, pos) -> str | None                      # 署名の文字列（markdown なら最初のコードフェンス）
+async def prepare_call_hierarchy(handle, rel, pos) -> list[CallItem]
+async def incoming_calls(handle, item) -> list[CallEdge]; async def outgoing_calls(handle, item) -> list[CallEdge]
+async def rename(handle, rel, pos, new_name) -> dict                 # prepareRename → rename → WorkspaceEdit（dict のまま。Plan への変換は edit.plan.from_workspace_edit）
+async def code_actions(handle, rel, rng, *, only=None, diagnostics=()) -> list[dict]   # edit が無ければ codeAction/resolve
+async def execute_command(handle, command, arguments=None) -> CommandOutcome            # tsls の _typescript.organizeImports など。applyEdit を捕まえる
+def to_exact_relations(source_urn, refs, *, locate, relation_kind="CALLS", …) -> list[RelationFact]   # confidence=exact。位置 → URN は呼び手が locate で渡す
 ```
+
+実装の差: `ready` でないとき、各関数は `None` ではなく `LuciankeError(E_LSP_UNAVAILABLE, details.reason="indexing" | "standby" | "unavailable" | "disconnected")` を投げる。読み取り系（definition・references・hover・callHierarchy）は呼び手が握って `structural` に降格し、`rename` / `code_actions` は下の表どおりそのまま上へ伝える。位置は送らずに降格する（`position_clamped`。§7.5.3）。時間切れは `TimeoutError` を上げ、`record_timeout()` / `record_ok()` を呼んだうえで呼び手が降格する。ワークスペース外の URI は `RelPath` にできないので `external_uri` として返す。`WorkspaceEdit` は `edit` を import できないので dict のまま返す。サーバーが `workspace/applyEdit` を**要求として**送ってくる経路（tsls の `_typescript.organizeImports`。S-5）は `execute_command` が受けて捕まえる（`applied: true` と答えるが、書き込みは `EditTransaction` の責任）。
 
 | 能力 | LSP が `ready` | `indexing` / `starting` | `standby` / `unavailable` |
 |---|---|---|---|
@@ -1135,7 +1176,7 @@ PaaD への反映:
 1. `definition` / `references` / `callHierarchy` の結果は `Location` → `symbols` の範囲包含で URN に写し（ワークスペース外は `_ext`）、`relations` に `exact` で書く。同じ `(source_urn, target_urn, relation_kind)` の `structural` 行は置き換える（仕様書 §9.4）。この書き込みは `data_version` を進める（結果集合が増えうるため。ADR-8 の規則どおり。親に報告）。
 2. `hover` の型文字列は内部テーブル `_hover_cache(urn, file_sha256, text)` に置き、T-04 の `signature_expanded` に使う。公開しない（`_` 接頭辞）。
 3. `rename` / `codeAction` の `WorkspaceEdit` は `edit/plan.py` の `Plan`（hunk 列）に変換して返すだけで、**書き込みは `EditTransaction`** が行う（ADR-11）。ファイルの作成・削除を含む `WorkspaceEdit` は `E_UNSUPPORTED`（実測ではどのサーバーも `resourceOperations` は 0 件）。`changes` と `documentChanges` の**両方の形**を変換する（サーバーごとの形は §7.5.1 の表。`textDocument.version` は `null`＝版検査なし。S-4・S-5 で確認）。開いたのが定義側 1 ファイルだけでも、basedpyright の `rename` は呼び元の編集も返す。
-- **Python の `codeAction`（quickfix・organizeImports・fixAll）は ruff に送る**（PaaD への反映ではなく送り先の規約）。`LspFeatures.code_actions` は Python では ruff に送り、basedpyright には送らない。`resolve_code_action` は ruff のためにある（`data` あり・`edit` 無しが返り、`codeAction/resolve` で `edit` が付く）。TypeScript の organizeImports は経路が違う（§7.5.1 の表）ため、サーバー定義ごとに持つ。
+- **Python の `codeAction`（quickfix・organizeImports・fixAll）は ruff に送る**（PaaD への反映ではなく送り先の規約）。`code_actions` は Python では ruff に送り、basedpyright には送らない。`resolve_code_action` は ruff のためにある（`data` あり・`edit` 無しが返り、`codeAction/resolve` で `edit` が付く）。TypeScript の organizeImports は経路が違う（§7.5.1 の表）ため、サーバー定義ごとに持つ。
 
 受入で確かめる点:
 
