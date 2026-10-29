@@ -15,3 +15,6 @@
   3. `lsp_sources` が `pyright: indexing` → `unavailable` になる（約 8 秒後）
 - 備考: 本体の作業ツリー側で同じことが起きるかは未確認（使い捨て側だけ見た）。
 - 調査はしていない（直す役の仕事）。
+
+## HEAD での再確認（dogfood-2、2026-10-29 15:21、42640ac の使い捨て作業ツリー）
+- HEAD でも再現する: pyright が init_failed のまま 3 回再起動して unavailable（log: ERROR lucianke.lsp.pool: LSP python/pyright: giving up after 3 restarts (init_failed)。ro・edit の両セッション）。

@@ -8,3 +8,6 @@
 - 期待: 同じ action は 1 件だけ列挙される。件数のメッセージは候補の数（重複を除いた数）と一致し、回によって変わらない。
 - 再現手順: F-POLY のコピーに `src/shop/models/lint_plain.py`（`import os, sys\n`）を足して `set_roots` → 10 秒待つ → 上の呼び出しを 2〜3 回。台本: `bench/dogfood/run_dogfood2.py --repo <作業ツリー> edit`（`obs2_t13.json` の `cands:*`）。
 - 調査はしていない（直す役の仕事）。
+
+## HEAD での再確認（dogfood-2、2026-10-29 15:21、42640ac の使い捨て作業ツリー）
+- HEAD でも再現する: lint_plain.py の候補に qf_0007 ×2（F401 Disable for this line）が出る。bom_lint.py は重複なし。

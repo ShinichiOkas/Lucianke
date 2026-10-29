@@ -8,3 +8,6 @@
 - 期待: `initialize` で roots を宣言していないクライアントには待たずに決める（または `set_roots` の呼び出しが決定として待ちを終える）。
 - 再現手順: `bench/dogfood/run_dogfood2.py --repo <作業ツリー> cfg`（`obs2_cfg.json` の `status_before_roots_ms`）。または SDK の `Client(StdioServerParameters(python -m lucianke))` で最初に `set_roots` を呼んで時間を測る。
 - 調査はしていない（直す役の仕事）。
+
+## HEAD での再確認（dogfood-2、2026-10-29 15:21、42640ac の使い捨て作業ツリー）
+- HEAD でも再現する: ro の最初の set_roots が 8,402 ms、cfg の最初の status が 11,705 ms。
