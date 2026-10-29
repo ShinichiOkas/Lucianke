@@ -43,17 +43,31 @@ _LEVELS = {c.value: c for c in Confidence}
 
 
 class QueryProjectDbArgs(CommonArgs):
-    query: str = Field(description="One SELECT or WITH ... SELECT statement over the public tables (see get_project_db_schema).")
-    query_language: Literal["sql", "datalog"] = Field(default="sql", description='"sql" only; "datalog" is reserved (E_UNSUPPORTED).')
-    params: dict[str, Any] | None = Field(default=None, description="Named binds: every :name in query needs a key, and every key must appear as :key.")
-    limit: int = Field(default=QUERY_ROWS_DEFAULT, ge=1, le=QUERY_ROWS_MAX, description="Max rows returned (1-2000).")
+    query: str = Field(
+        description="One SELECT or WITH ... SELECT statement over the public tables (see get_project_db_schema)."
+    )
+    query_language: Literal["sql", "datalog"] = Field(
+        default="sql", description='"sql" only; "datalog" is reserved (E_UNSUPPORTED).'
+    )
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description="Named binds: every :name in query needs a key, and every key must appear as :key.",
+    )
+    limit: int = Field(
+        default=QUERY_ROWS_DEFAULT, ge=1, le=QUERY_ROWS_MAX, description="Max rows returned (1-2000)."
+    )
     auto_fallback_grep_pattern: str | None = Field(
         default=None,
         description="Word-bounded regex. When set, matches are put in temp table temp_grep_matches(path, line, snippet, confidence_level) for the query.",
     )
-    grep_scope_paths: list[str] | None = Field(default=None, description="Restrict the grep to these workspace paths.")
+    grep_scope_paths: list[str] | None = Field(
+        default=None, description="Restrict the grep to these workspace paths."
+    )
     timeout_ms: int = Field(
-        default=QUERY_TIMEOUT_DEFAULT_MS, ge=QUERY_TIMEOUT_MIN_MS, le=QUERY_TIMEOUT_MAX_MS, description="Execution limit (50-5000 ms)."
+        default=QUERY_TIMEOUT_DEFAULT_MS,
+        ge=QUERY_TIMEOUT_MIN_MS,
+        le=QUERY_TIMEOUT_MAX_MS,
+        description="Execution limit (50-5000 ms).",
     )
     explain: bool = Field(default=False, description="Return EXPLAIN QUERY PLAN only; do not run the query.")
 
@@ -64,7 +78,9 @@ class QueryProjectDbArgs(CommonArgs):
 def _db_path(ctx: ToolContext) -> Path:
     raw = getattr(ctx.services, "db_path", None)
     if raw is None:
-        raise LuciankeError(ErrorCode.E_WORKSPACE_NOT_CONFIGURED, "the index database is not configured for this server")
+        raise LuciankeError(
+            ErrorCode.E_WORKSPACE_NOT_CONFIGURED, "the index database is not configured for this server"
+        )
     path = Path(raw)
     if not path.is_file():
         raise LuciankeError(
@@ -86,7 +102,9 @@ def _grep_spec(ctx: ToolContext, args: QueryProjectDbArgs) -> GrepSpec | None:
         return None
     workspace = getattr(ctx.services, "workspace", None)
     if workspace is None:
-        raise LuciankeError(ErrorCode.E_WORKSPACE_NOT_CONFIGURED, "no workspace is known, so there is nothing to grep")
+        raise LuciankeError(
+            ErrorCode.E_WORKSPACE_NOT_CONFIGURED, "no workspace is known, so there is nothing to grep"
+        )
     ws = workspace(args.workspace_id)
     root = Path(ws.root).resolve()
 
@@ -98,7 +116,10 @@ def _grep_spec(ctx: ToolContext, args: QueryProjectDbArgs) -> GrepSpec | None:
         return is_excluded(ws, RelPath(rel))
 
     return GrepSpec(
-        pattern=args.auto_fallback_grep_pattern, roots=[root], scope_paths=args.grep_scope_paths, exclude=exclude
+        pattern=args.auto_fallback_grep_pattern,
+        roots=[root],
+        scope_paths=args.grep_scope_paths,
+        exclude=exclude,
     )
 
 
@@ -139,7 +160,9 @@ def _grep_summary(result: QueryResult) -> str:
     return f"{grep['pattern']} matches={grep['matches']}{' truncated' if grep['truncated'] else ''}"
 
 
-def _graph(names: Sequence[str], rows: Sequence[Mapping[str, Any]], levels: Sequence[Confidence]) -> dict[str, Any]:
+def _graph(
+    names: Sequence[str], rows: Sequence[Mapping[str, Any]], levels: Sequence[Confidence]
+) -> dict[str, Any]:
     """``source_urn`` / ``target_urn`` 列から ``data_static["graph"]``（``mcp/render/graph.py`` の入力）を作る。"""
     edges: list[dict[str, Any]] = []
     for data, level in zip(rows, levels, strict=True):
@@ -167,7 +190,8 @@ def _lower_rows_exist(db_path: Path, tables: Sequence[str]) -> bool:
     con = open_reader(db_path)
     try:
         return any(
-            con.execute(f'SELECT 1 FROM "{t}" WHERE confidence_level <> \'exact\' LIMIT 1').fetchone() is not None  # noqa: S608
+            con.execute(f"SELECT 1 FROM \"{t}\" WHERE confidence_level <> 'exact' LIMIT 1").fetchone()
+            is not None  # noqa: S608
             for t in names
         )
     except sqlite3.Error:
@@ -189,7 +213,9 @@ def _build_output(
     has_level = any(n.lower() == "confidence_level" for n in names)
     row_dicts = [{n: _json_value(v) for n, v in zip(names, row, strict=True)} for row in result.rows]
     levels = [
-        Confidence.LEXICAL_FALLBACK if degraded_by_grep else (_row_level(d) if has_level else Confidence.EXACT)
+        Confidence.LEXICAL_FALLBACK
+        if degraded_by_grep
+        else (_row_level(d) if has_level else Confidence.EXACT)
         for d in row_dicts
     ]
     table = ctx.services.lines.table  # type: ignore[attr-defined]
@@ -199,17 +225,19 @@ def _build_output(
         cells = [_cell(v) for v in row]
         block = ([names] if i == start else []) + [cells]
         records.append(
-            Record(kind="row", key=f"row:{i}", priority=i, lines=tuple(table(block)), data=data, confidence=level)
+            Record(
+                kind="row", key=f"row:{i}", priority=i, lines=tuple(table(block)), data=data, confidence=level
+            )
         )
 
     shown = f"{result.row_count} (limit {args.limit}, {'truncated' if result.truncated else 'not truncated'})"
-    head: list[tuple[str, str]] = [("rows", f"{shown}  {result.elapsed_ms}ms  grep_fallback: {_grep_summary(result)}")]
+    head: list[tuple[str, str]] = [
+        ("rows", f"{shown}  {result.elapsed_ms}ms  grep_fallback: {_grep_summary(result)}")
+    ]
     if result.plan is not None:
         head += [("plan", f"{p['id']}|{p['parent']}  {p['detail']}") for p in result.plan]
     elif not records:
         head.append(("columns", ", ".join(names) if names else "-"))
-    if caution:
-        head.append(("caution", ACCURACY_CAUTION))
 
     static: dict[str, Any] = {
         "columns": [{"name": n, "decl_type": t} for n, t in result.columns],
@@ -233,6 +261,7 @@ def _build_output(
         engine=EngineChoice(engine="sqlite", confidence=floor),
         page_unit="row",
         total_estimate=len(records),
+        warnings=[ACCURACY_CAUTION] if caution else [],
     )
 
 
