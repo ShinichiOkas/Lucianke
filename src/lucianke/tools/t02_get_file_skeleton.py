@@ -14,9 +14,10 @@ from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import BATCH_MAX_ITEMS
 from lucianke.core.model import Confidence, EngineChoice, Tier
 from lucianke.core.records import Record, ToolOutput
+from lucianke.syntax.skeleton import build_file_record
+from lucianke.syntax.types import SkeletonOptions
 from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._services import analyze_file, batch_warnings, services_of
-from lucianke.tools._skeleton_fallback import SkeletonOpts, build_file_record
 
 
 class GetFileSkeletonArgs(CommonArgs):
@@ -54,11 +55,12 @@ async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
         )
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
-    opts = SkeletonOpts(
+    opts = SkeletonOptions(
         include_private=args.include_private,
         include_doc_summary=args.include_doc_summary,
         include_urns=args.include_urns,
         include_imports=args.include_imports,
+        max_depth=args.max_depth,
     )
     records: list[Record] = []
     errors: list[tuple[str, LuciankeError]] = []
@@ -67,7 +69,11 @@ async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
     for i, path in enumerate(args.paths):
         try:
             analysis = await analyze_file(svc, ws, path, param="paths")
-            records.append(build_file_record(svc, analysis, opts, i))
+            records.append(
+                build_file_record(
+                    analysis.parsed, list(analysis.symbols), rel=str(analysis.rel), opts=opts, priority=i
+                )
+            )
             if analysis.language_id not in languages:
                 languages.append(analysis.language_id)
             tier = max(tier, analysis.tier)

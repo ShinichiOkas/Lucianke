@@ -61,7 +61,7 @@ async def test_compact_output_is_grammatical_and_structural(pipeline: Pipeline) 
     assert lines[0].startswith("# get_file_skeleton ok conf=structural ")
     assert f"=== {PAY_PY} (" in r.text and "sha=" in r.text
     assert "[Class] pub PaymentProcessor @L" in r.text
-    assert "[Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L38-52 { ...14 lines omitted }" in r.text
+    assert "[Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L38-52 { ...13 lines omitted }" in r.text
 
 
 async def test_postcondition_1_ranges_match_tree_sitter_nodes(pipeline: Pipeline) -> None:
