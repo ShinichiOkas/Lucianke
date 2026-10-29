@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import lucianke.workspace.watcher as watcher_mod
-from lucianke.core.limits import INDEX_REFLECT_MS, WATCH_BURST_FILES
+from lucianke.core.limits import INDEX_REFLECT_MS, WATCH_BURST_FILES, WATCH_BURST_HINT
 from lucianke.core.model import RelPath
 from lucianke.workspace.types import Workspace
 from lucianke.workspace.watcher import Watcher
@@ -292,11 +292,45 @@ async def test_expected_deletion_is_dropped(tmp_path: Path) -> None:
 # --- バースト ------------------------------------------------------------------------------------
 
 
+async def test_windows_split_by_awatch_are_merged_into_one_rescan(tmp_path: Path) -> None:
+    """決定的版: 窓が割れて届いても、各窓が ``WATCH_BURST_HINT`` 以上なら合算して rescan 1 回（個別処理は 0 回）。"""
+    ws = make_ws(tmp_path)
+    sink = FakeSink()
+    q: asyncio.Queue[set[str] | None] = asyncio.Queue()
+    for k in range(5):
+        q.put_nowait({f"d{k}/f{i}.py" for i in range(WATCH_BURST_HINT + 20)})  # 5 窓 × 120 件 = 600 件
+    q.put_nowait(None)
+    await asyncio.wait_for(Watcher(ws, sink)._consume(q, asyncio.Event()), WAIT_S)  # type: ignore[arg-type]
+    assert [k for k, _, _ in sink.calls] == ["rescan"]
+
+
+async def test_small_windows_are_applied_immediately_without_waiting_for_a_burst(tmp_path: Path) -> None:
+    """決定的版: ``WATCH_BURST_HINT`` 未満の窓は合算の待ちに入らず、その場で個別に処理する（単発の遅延を増やさない）。"""
+    ws = make_ws(tmp_path)
+    for name in ("a.py", "b.py"):
+        put(ws.root, name)
+    sink = FakeSink()
+    q: asyncio.Queue[set[str] | None] = asyncio.Queue()
+    q.put_nowait({"a.py"})
+    q.put_nowait({"b.py"})
+    q.put_nowait(None)
+    await asyncio.wait_for(Watcher(ws, sink)._consume(q, asyncio.Event()), WAIT_S)  # type: ignore[arg-type]
+    assert sink.of("changed") == ["a.py", "b.py"]
+    assert "rescan" not in [k for k, _, _ in sink.calls]
+
+
 async def test_burst_of_600_files_triggers_one_rescan_and_no_individual_changes(tmp_path: Path) -> None:
+    """600 ファイルを続けて作ると rescan 1 回になる（実際の watchfiles で）。
+
+    窓が割れる（``awatch`` は 1 step 新しいパスが来ないと配信する）かどうかは、書く側のスレッドが負荷で止まるかに
+    左右される。``step=10`` のままだと 10 ms 止まるだけで先頭の数十件が小さい窓として個別に処理される（S-06 の
+    「小さい窓は待たず即処理」。仕様どおりの動きで、``changed`` は冪等なので索引は正しい）。このテストは合算の動きを
+    見たいので、書き込みの途中の停止に負けない粗い step で動かす（窓の割れ方の規則は次のテストが決定的に確かめる）。
+    """
     assert WATCH_BURST_FILES < 600
     ws = make_ws(tmp_path)
     sink = FakeSink()
-    async with running(ws, sink):
+    async with running(ws, sink, step_ms=400):
         for d in range(6):
             (ws.root / f"d{d}").mkdir()
         for i in range(600):
