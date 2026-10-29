@@ -144,7 +144,10 @@ class DocumentsLike(Protocol):
 
 
 class HubLike(Protocol):
-    """``lsp.diagnostics.DiagnosticsHub`` の一部。"""
+    """``lsp.diagnostics.DiagnosticsHub`` の一部。
+
+    ``wait_for`` が ``True`` で返ったとき、その診断の ``diagnostics`` 表への書き込みは終わっていること（EP-7）。
+    """
 
     async def wait_for(
         self,
@@ -337,7 +340,7 @@ class EditTransaction:
     Args:
         ws: 対象のワークスペース。
         locks: ワークスペース書き込みロック（``edit/lock.py``）。
-        writer_index: ``IndexWriter``（``anext_edit_id`` と、診断の書き込みが済んだことを確かめる ``asubmit``）。
+        writer_index: ``IndexWriter``（``anext_edit_id``）。
         journal_dir: ジャーナルの置き場（``<cache_root>/<ws_hash>/journal``）。
         indexer: 書き込んだファイルを取り込む（``index_file(rel)``）。``None`` なら取り込まない。
         watcher: 前提検証の前に ``drain()``、書き込み後に ``expect(rel, sha)``。``None`` なら何もしない。
@@ -907,15 +910,6 @@ class EditTransaction:
             _log.warning("could not take the diagnostics snapshot: %s", exc, exc_info=True)
             return Snapshot()
 
-    async def _barrier(self) -> None:
-        """診断の書き込み（``DiagnosticsHub`` の ``on_diagnostics`` → ``IndexWriter``）が終わるのを待つ（EP-7）。"""
-        submit = getattr(self._writer, "asubmit", None)
-        if submit is None:
-            return
-        await asyncio.sleep(0)  # 受信直後に積まれる書き込みジョブがキューに載るのを待つ
-        await asyncio.sleep(0)
-        await submit(lambda _conn: None, bumps_version=False, label="diag-barrier")
-
     async def _diagnose(
         self,
         snapshot: Snapshot,
@@ -994,6 +988,6 @@ class EditTransaction:
             return_exceptions=True,
         )
         fresh = {path: ok is True for path, ok in zip(waits, results, strict=True)}
-        await self._barrier()
+        # ``wait_for`` が ``True`` を返した時点で、その診断の index への書き込みは済んでいる（設計書 §7.7.6-4、EP-7）。
         after = await self._read_diagnostics([p for p, ok in fresh.items() if ok])
         return compute_delta(snapshot, after, fresh, confidence=confidence)

@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import os
 import shutil
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +28,9 @@ from lucianke.edit.verify import DiagDelta, Snapshot, compute_delta, structural_
 from lucianke.edit.writer import TMP_PREFIX
 from lucianke.index.queries import DiagnosticRow
 from lucianke.index.writer import IndexWriter
+from lucianke.lsp.diagnostics import DiagnosticsHub
 from lucianke.syntax.parsers import parse_source
+from lucianke.workspace.paths import to_file_uri
 from lucianke.workspace.types import Workspace
 
 POLY = Path(__file__).resolve().parents[1] / "fixtures" / "poly"
@@ -703,6 +706,73 @@ async def test_ep7_complete_delta_matches_the_diagnostics_table(
     assert str(ROUTES) in rig.documents.versions
     assert rig.hub is not None and {w[0] for w in rig.hub.waits} == {str(PAYMENT), str(ROUTES)}
     assert delta.added[0]["start_line"] == 13 and delta.added[0]["severity"] == "error"
+
+
+async def test_ep7_delta_waits_for_the_diagnostics_write_without_a_barrier(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """本物の ``DiagnosticsHub`` は、書き込みジョブがコミットしてから待ち手を起こす（BUG-0007）: トランザクションは追加の待ちをしない。"""
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    assert rig.documents is not None
+    gate = threading.Event()
+    old, new = diag(PAYMENT, "old"), diag(PAYMENT, "brand new", line=4)
+    db: dict[RelPath, list[DiagnosticRow]] = {PAYMENT: [old]}
+
+    def write_job(_conn: Any) -> None:
+        assert gate.wait(10)
+        db[PAYMENT] = [new]  # 書き込みのコミット（のつもり）
+
+    hub = DiagnosticsHub(
+        ws,
+        on_diagnostics=lambda *_: index_writer.submit(write_job, bumps_version=False, label="diag"),
+    )
+    rig.tx._hub = hub
+
+    sync = rig.documents.sync
+
+    def sync_and_publish(path: RelPath, text: str, language_id: str) -> int:
+        version = sync(path, text, language_id)
+        hub.on_publish({"uri": to_file_uri(ws, path), "version": version, "diagnostics": [{"message": "x"}]})
+        return version
+
+    monkeypatch.setattr(rig.documents, "sync", sync_and_publish)
+
+    async def read_diagnostics(paths):
+        return {p: list(db.get(p, [])) for p in paths}
+
+    async def no_referrers(urns, exclude):
+        return (), 0
+
+    monkeypatch.setattr(rig.tx, "_read_diagnostics", read_diagnostics)
+    monkeypatch.setattr(rig.tx, "_direct_referrers", no_referrers)
+
+    waiting = asyncio.Event()
+    real_wait_for = hub.wait_for
+
+    async def wait_for(*args: Any, **kwargs: Any) -> bool:
+        waiting.set()
+        return await real_wait_for(*args, **kwargs)
+
+    monkeypatch.setattr(hub, "wait_for", wait_for)
+
+    async def release() -> None:
+        await waiting.wait()  # トランザクションが診断を待ち始めた（書き込みジョブはゲートで止まっている）
+        for _ in range(50):  # 待ち手が書き込み前に起きていれば、その間に DB を読んでしまう
+            await asyncio.sleep(0)
+        gate.set()
+
+    releaser = asyncio.create_task(release())
+    try:
+        result = await rig.tx.run(
+            replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=10_000
+        )
+    finally:
+        gate.set()
+        await releaser
+    delta = result.new_diagnostics
+    assert delta.status == "complete"
+    assert {key_of(o) for o in delta.added} == {(str(PAYMENT), "pyright", "X1", "brand new", None)}
+    assert {key_of(o) for o in delta.resolved} == {(str(PAYMENT), "pyright", "X1", "old", None)}
 
 
 async def test_delta_is_pending_for_files_the_lsp_has_not_caught_up_on(
