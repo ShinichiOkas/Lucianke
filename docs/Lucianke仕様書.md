@@ -544,15 +544,15 @@ Compact DSL は、LLM が最小トークンで誤読なく読める行指向の�
 ```ebnf
 document     = header , { banner } , body , [ trailer ] ;
 
-header       = "# " , tool , " " , ( "ok" | "error " , code ) , { " " , kv } , NL ;
+header       = "# " , tool , " " , ( "ok" | "error " , code ) , { " " , kv } , [ " ~" , int , "/" , int , "tok" ] , NL ;   (* 成功ヘッダでは ~used/maxtok が必須 *)
 kv           = key , "=" , value ;
 banner       = "! " , text , NL ;
 
 body         = { block } ;
 block        = file-block | symbol-block | ref-line | diag-line
-             | tree-line | path-block | code-block | table | note | kv-line ;
+             | tree-line | path-block | code-block | table | note | kv-line | banner ;   (* banner は本文中にも置ける（§5.4.2・§5.4.4）*)
 
-kv-line      = key , ": " , text , NL ;        (* ツール固有の見出し行: target:, applied:, rows: など *)
+kv-line      = key , ":" , [ " " , text ] , NL ;   (* ツール固有の見出し行: target:, applied:, rows:, trace:, commits: など。値は空でもよい *)
 
 file-block   = "=== " , path , " (" , int , " lines" , [ ", " , int , " cells" ] ,
                [ ", skeleton: " , int , " lines" ] , [ ", sha=" , 12*12 HEXDIG ] , ")" , " ===" , NL ,
@@ -582,7 +582,7 @@ diag-line    = sev , " " , path , ":" , int , [ ":" , int ] , " " , [ "[" , sour
                message , [ "  fix=" , action-id ] , NL ;
 sev          = "E" | "W" | "I" | "H" ;
 
-tree-line    = indent , ( "<- " | "-> " ) , name , " @" , path , ":" , int ,
+tree-line    = indent , ( "<- " | "-> " ) , name , " @" , path , ":" , int , [ " (cycle)" ] ,
                [ "  when: " , text ] , [ "  conf=" , level ] , NL ;
 
 path-block   = "path " , int , " (" , int , " hops)" , NL , { indent , step-line } ;
@@ -592,8 +592,7 @@ code-block   = "```" , [ lang ] , NL , { [ "@L" , int , ": " ] , text , NL } , "
 table        = "| " , text , { " | " , text } , " |" , NL , { "| " , text , { " | " , text } , " |" , NL } ;
 note         = "- " , text , NL ;
 
-trailer      = "# more: cursor=" , token , [ " remaining≈" , int ] , NL
-             | "# summary: " , text , NL ;
+trailer      = [ "# summary: " , text , NL ] , [ "# more: cursor=" , token , [ " remaining≈" , int ] , NL ] ;   (* summary が先 *)
 
 range        = int , [ "-" , int ] ;
 level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
@@ -1663,7 +1662,7 @@ json の `data`:
 
 **出力**（compact）:
 
-```
+````
 # get_symbol_bodies ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~520/3000tok
 [Method] src/services/payment.py#PaymentProcessor._validate_limit @L116-140
   sha: 3f9c1a2b4c5d
@@ -1675,7 +1674,7 @@ json の `data`:
 @L120:             raise LimitExceeded(self.currency)
 ```
 - refs: lk://app/src/services/limits.py#LimitTable.get, lk://app/src/errors.py#LimitExceeded
-```
+````
 
 json の `data`:
 
@@ -2649,8 +2648,8 @@ post: return >= 0 ; return <= price  (2 given)
 violated: implicit_safety.division_by_zero @L54
 counterexample: price=100 rate=100
 trace:
-  1. @L50 if rate > 0 -> true  (rate=100)
-  2. @L54 factor = 100 / (100 - rate)  divisor=0
+- 1. @L50 if rate > 0 -> true  (rate=100)
+- 2. @L54 factor = 100 / (100 - rate)  divisor=0
 unmodeled_calls: [lk://app/src/pricing.py#round_half_up]
 ```
 
@@ -2743,9 +2742,10 @@ compact の例:
 ```
 # get_symbol_history ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~520/2000tok
 target: lk://app/src/pricing.py#apply_discount  first_seen=4c5b6a7 (2026-03-02)  commits=12
-a1b2c3d 2026-10-21 okas MODIFIED_BODY +4 -1  "fix: clamp discount rate to 0..100"
-9f8e7d6 2026-09-30 okas MODIFIED_SIG +6 -3  "feat: accept Decimal price"  was: (price: float, rate: int) -> float
-7d6c5b4 2026-07-11 okas MODIFIED_BODY +2 -2  "refactor: extract rounding"
+commits:
+- a1b2c3d 2026-10-21 okas MODIFIED_BODY +4 -1  "fix: clamp discount rate to 0..100"
+- 9f8e7d6 2026-09-30 okas MODIFIED_SIG +6 -3  "feat: accept Decimal price"  was: (price: float, rate: int) -> float
+- 7d6c5b4 2026-07-11 okas MODIFIED_BODY +2 -2  "refactor: extract rounding"
 co_changed_hotspots:
 - tests/test_pricing.py  0.92 (11/12)  last=a1b2c3d
 - config/limits.yaml  0.58 (7/12)  last=9f8e7d6

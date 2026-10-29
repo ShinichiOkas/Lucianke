@@ -826,12 +826,18 @@ class FormatAdapter(Protocol):                   # Tier 3〜4、および .ipynb
     tier: Tier
     extensions: tuple[str, ...]
     def skeleton(self, source: bytes, opts: SkeletonOptions) -> list[Record]
-    def select(self, source: bytes, selector: Selector) -> list[Match]        # xpath: / jsonpath: / jq: / toml: / yaml: / cell:
-    def replace(self, source: bytes, selector: Selector, new: bytes) -> bytes  # M2
+    def skeleton_record(self, source: bytes, opts: SkeletonOptions, *, rel: str, sha256: str,
+                        estimate: Callable[[str], int] | None = None,
+                        python_symbols: Callable[[bytes], Sequence[Any]] | None = None) -> Record   # T-02 の 1 ファイルぶん（file-block）。壊れたファイルは ValueError
+    def symbols(self, source: bytes, *, rel: str, workspace_id: str) -> list[SymbolRecord]          # 索引に出すシンボル。壊れたファイル・持たない形式は空
+    def select(self, source: bytes, selector: str) -> list[Match]        # selector は式の文字列（"jsonpath:$.a"）: xpath: / jsonpath: / jq: / toml: / yaml: / cell:
+    def replace(self, source: bytes, selector: str, new: bytes) -> bytes  # M2
 
 SUPPORT: dict[str, LanguageSupport]; ADAPTERS: dict[str, FormatAdapter]
 def get_support(language_id) -> LanguageSupport | FormatAdapter | None
 ```
+
+実装で確定（2026-10-29、a9e9818）: `selector` は `Selector` 型ではなく式の文字列（URN の `DataSel` なら `f"{sel.kind}:{sel.expr}"`）。`skeleton_record` は T-02 の入口で、`skeleton` が持てない `rel` と `sha256` を受ける（壊れたファイルは `ValueError` を投げ、呼び手が `E_UNSUPPORTED`〔`details.reason: "invalid_data_file"`〕にする。`E_SYNTAX_INVALID` は編集の検証用）。`symbols` は索引の入口で、**Tier 3 の索引は最上位の節だけをシンボルにする**: JSON / YAML / TOML は最上位のキー（`Key`）、XML は根と直下の子（`Tag`）。128 KiB（`MAX_SYMBOL_SOURCE_BYTES`）超、JSONL、根が配列、ipynb、壊れたファイルは `files` 行だけ（シンボルなし）。1 ファイル 500 件（`MAX_INDEX_SYMBOLS`）まで。URN は `lk://<ws>/<path>#jsonpath:$.service` / `#yaml:retry` / `#toml:project` / `#xpath:/testsuites/testsuite`（同じアダプタの `select` が解ける式）。
 
 M1 で登録するもの:
 
@@ -1253,7 +1259,7 @@ def replace_lsp_diagnostics(conn, …)                                   # (file
 - **バッチ**: 起動時の差分索引は 1 トランザクションに最大 `INGEST_BATCH_FILES`（50）ファイル。走査中は 1 バッチの書き込みを待たず次のバッチの解析へ進む（書き込みは常に 1 バッチだけ先行）。`data_version` はトランザクションごとに 1 回だけ進む。
 - **import 表から作った関係の後始末（`_settle_relations`）**: import の解決は定義元の存在を確かめずに URN を作る（走査の順序に依存させないため）。そこで、取り込み後に同じトランザクションの中で (1) `symbols` に無いシンボルを指す目標（`#` を含む URN）の行を消し、(2) `target_file_id` を目標のシンボルの持ち主で埋める（目標のファイルが後から取り込まれた場合に備える）。外部シンボル（`lk://_ext/`）は `ingest_file` が `symbols` に最小の行（`is_external`）を作る（`_ensure_external`）ので消えない。
 - **未解決の import は外部扱いにする（決定 2026-10-29）**: 解決できない import（標準ライブラリ・`site-packages` / `node_modules` の第三者・解決失敗）は、**捨てずに** `lk://_ext/<パッケージ>#<名前>`（`<パッケージ>` は import 先の最上位モジュール名。§7.4.3 項 9）を `target_urn` にして `relations` に残す。理由: T-06 / T-07 が外部ノードを必要とする（外部の呼び先を返す）。**現状の実装は捨てている**（`engine/indexer.py` の `_relations` が解決できない名前の関係を落とす）。実装は別の役（7j）が本書に合わせて直す。
-- **Tier 3**: `FormatAdapter` は M1 ではシンボルを返さず `files` 行だけを作る（`confidence = lexical_fallback`）。アダプタが `symbols(source, *, rel, workspace_id)` を持てばそのシンボルも入れる（任意。持てば `structural`）。
+- **Tier 3**: `FormatAdapter` は既定ではシンボルを返さず `files` 行だけを作る（`confidence = lexical_fallback`）。`symbols(source, *, rel, workspace_id)` が非空を返すアダプタ（JSON / YAML / TOML / XML。最上位の節だけ。§7.4.1）はそのシンボルも入れる（持てば `structural`）。
 - 秘密ファイル・バイナリ・`MAX_FILE_BYTES` 超過・タグクエリの無い言語は、`files` 行だけ（本文は解析しない）か Tier 4 の `heuristic.outline` に回す。
 
 並列度: 解析はスレッドプール（`READER_POOL_SIZE`=8 と同じ数）で行うが、Tree-sitter の解析は GIL を握るため並列化しない（ADR-13。S-2 で確認）。書き込みはキューで直列。バースト（`WATCH_BURST_FILES` 超）と起動時は `rescan` に切り替える。
