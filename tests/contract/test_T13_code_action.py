@@ -268,6 +268,36 @@ async def test_real_quickfix_by_kind_is_ambiguous_and_lists_candidate_ids(real: 
     assert "! candidate: qf_" in text
 
 
+MULTI_UNUSED_PY = "import os, sys\n\n\ndef main() -> int:\n    return 0\n"
+
+
+# 同じ 1 行の BOM + CRLF 版（BUG-0041 の台本は両方の版を使っていた）
+MULTI_UNUSED_BOM_CRLF_PY = "\ufeff" + MULTI_UNUSED_PY.replace("\n", "\r\n")
+
+
+@needs_ruff
+@pytest.mark.parametrize("text", [MULTI_UNUSED_PY, MULTI_UNUSED_BOM_CRLF_PY], ids=["lf", "bom_crlf"])
+async def test_real_quickfix_candidates_are_unique_and_stable_when_one_line_has_two_diagnostics(
+    real: Rig, text: str
+) -> None:
+    """BUG-0041: 1 行に同じ規則の診断が 2 つ（``import os, sys`` の F401 ×2）あっても、候補は同じ ID・タイトルを重ねず、
+    メッセージの件数は列挙した候補の数と一致し、何回呼んでも同じ（診断が揃ってから数える）。"""
+    real.write(FIXTURE, text)
+    before = real.snapshot()
+    seen: list[tuple[str, list[tuple[str, str]]]] = []
+    for _ in range(4):
+        err = await ambiguous_quickfix(real)
+        cands = err["candidates"]
+        ids = [c["id"] for c in cands]
+        keys = [(c["kind"], c["title"]) for c in cands]
+        assert len(set(ids)) == len(ids) and len(set(keys)) == len(keys), cands
+        assert err["message"].startswith(f"{len(cands)} code actions of kind"), err["message"]
+        seen.append((err["message"], [(c["id"], c["title"]) for c in cands]))
+    # 呼ぶたびに ID も並びも件数も同じ（台帳は同じ内容に同じ ID を返す）
+    assert all(x == seen[0] for x in seen), seen
+    assert real.snapshot() == before
+
+
 @needs_ruff
 async def test_real_apply_quickfix_by_id_postconditions_1_2_3(real: Rig) -> None:
     """事後条件 1・2・3（と EP-1）: 未使用 import の QuickFix を ID で適用する。"""

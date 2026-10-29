@@ -10,7 +10,8 @@
 3. **種別指定**: 言語の ``ready`` な LSP（Python は ``lint`` の ruff と ``types`` の basedpyright の両方）に ``textDocument/codeAction``
    （``only: [種別]``、範囲 ``line``〜``end_line``。QuickFix には範囲に重なる診断を ``context.diagnostics`` で渡す）を問い合わせる。
    0 件は ``E_TARGET_NOT_FOUND``、2 件以上は ``E_TARGET_AMBIGUOUS``（候補に新たに発番した ID を付ける。エージェントはその ID で呼び直す）。
-   候補は ``isPreferred`` → 供給元（lint → types）→ 種別 → タイトルの順に決定的に並べる。
+   候補は ``isPreferred`` → 供給元（lint → types）→ 種別 → タイトル → 編集の順に決定的に並べ、同じ供給元・種別・タイトルのものは
+   1 件にする（台帳は同じ範囲・種別・タイトルに同じ ID を返す。1 行に同じ規則の診断が複数あると、サーバーは同じアクションを診断の数だけ返す）。
 4. ``edit`` が無ければ ``codeAction/resolve``（``features.code_actions`` が行う）。それでも ``command`` しか無いアクションは
    ``E_UNSUPPORTED``（``details.reason="command_only"``）。**サーバー側で任意のコマンドを実行しない（MUST NOT）。**
 5. ``WorkspaceEdit`` を ``edit.workspace_edit.plan_from_workspace_edit`` で ``Plan`` に変換し、``EditTransaction``（第 10 章の 8 段）に渡す。
@@ -43,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -462,6 +464,34 @@ async def _re_resolve(handle: LspHandle, rel: RelPath, stored: Any, index: LineI
     return dict(stored.action)
 
 
+def _unique_candidates(found: Sequence[_Chosen]) -> list[_Chosen]:
+    """候補を決定的に並べ、同じ供給元・種別・タイトルのものを 1 件にする（BUG-0041）。
+
+    台帳（``CodeActionStore``）は同じ（ファイル・内容・供給元・範囲・種別・タイトル）に同じ ID を返すので、これが「同じアクション」。
+    1 行に同じ規則の診断が複数ある（``import os, sys`` の F401 が ``os`` と ``sys`` の 2 つ）と、サーバーは診断ごとに同じタイトルの
+    アクションを返すため、重複を除かないと同じ ID・タイトルの候補が並び、件数も重複の数だけ増える。並びはサーバーが診断を返す順に
+    依らないよう、最後に編集の中身で決める。先頭を残し、編集が違うものを落としたときはデバッグログに残す。
+    """
+    ordered = sorted(
+        found,
+        key=lambda c: (
+            not c.is_preferred,
+            _ROLE_RANK.get(c.handle.role, 2),
+            c.kind,
+            c.title,
+            _server_of(c.handle),
+            json.dumps(c.action.get("edit"), sort_keys=True, ensure_ascii=False, default=str),
+        ),
+    )
+    seen: dict[tuple[str, str, str], _Chosen] = {}
+    for c in ordered:
+        key = (_server_of(c.handle), c.kind, c.title)
+        kept = seen.setdefault(key, c)
+        if kept is not c and kept.action.get("edit") != c.action.get("edit"):
+            _log.debug("dropped a code action with the same title but a different edit: %r", c.title)
+    return list(seen.values())
+
+
 async def _choose_by_kind(
     store: Any, args: ApplyCodeActionArgs, rel: RelPath, data: bytes, sha: str, index: LineIndex, rng: Range,
     pool: Any, ws: Workspace, language_id: str,
@@ -503,7 +533,7 @@ async def _choose_by_kind(
             )
     if not answered and last_error is not None:
         raise last_error
-    found.sort(key=lambda c: (not c.is_preferred, _ROLE_RANK.get(c.handle.role, 2), c.kind, c.title))
+    found = _unique_candidates(found)
     if not found:
         raise LuciankeError(
             ErrorCode.E_TARGET_NOT_FOUND,
