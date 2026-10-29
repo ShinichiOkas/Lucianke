@@ -26,7 +26,7 @@
 - 副作用（知っておく点）: 取り込み直された import 元は、同じ内容でも `exact` の行を失い `structural` に戻る（ADR-8。次に LSP が答えたとき戻る）。`files_fingerprint`（`(path, sha256)` の指紋）は import 元の sha が変わらないので動かない。T-06 / T-07 が LSP の結果を「完全」と覚えている印を `files_fingerprint` で鮮度判定している場合、新規・削除ファイルでは指紋が変わるので印は外れる（この修正で挙動は変わらない）。
 - 範囲外として切り出したもの: 既存ファイルに **シンボルが増えた** だけ（b.py に後から `helper` を足した）ときは、a.py の行は捨てられたまま戻らない → BUG-0034。
 
-## 確認
+## 確認（コミット edb72e4）
 - `tests/unit/test_engine_indexer_relations.py` に 10 本（`stem_of` の表は 9 ケース。票の再現〔IMPORTS と CALLS が `pkg/b.py#helper` になり `target_file_id` も埋まる、`data_version` が +1〕、ファイル削除で `_ext` に戻る〔+1〕、改名、TS の相対 import〔作ると現れ、消すと消える〕、Python の相対 import、ディスクにあるが未索引の b.py、既存ファイルの編集で import 元を取り込み直さない、`__init__.py` を除外 remove しても蘇らない、差分走査で取り込まれない import 元が解ける〔作成・削除の両方〕、`_import_probes` の置換と CASCADE、`stem_of`）。`tests/unit/test_index_core.py` に `2 → 3` の移行（データが残る）、`1 → 3` の連鎖。`tests/unit/test_index_schema.py` の許可リストに内部表と索引を足した。
 - `tests/contract/test_T06_T07.py::test_real_file_created_after_its_importer_is_seen_by_t06_t07`: `hook.py` を先に、`audit.py` を後から `index_file` で取り込むと、T-07 の outgoing が外部ノード（`audit.record`）から実体（`record`、`is_external: false`）に変わり、incoming と T-06 の参照に `hook.py` の呼び出しが載る。
 - `tests/unit/test_engine_indexer.py`・`test_engine_indexer_relations.py`・`test_index_ingest.py`・`test_index_core.py`・`test_index_schema.py`・`test_import_graph.py`・`tests/contract/test_T06_T07.py` を 3 回続けて green（169 件）。`ruff check` / `ruff format --check` clean。
