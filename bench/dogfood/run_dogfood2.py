@@ -16,7 +16,6 @@ import hashlib
 import json
 import re
 import shutil
-import sqlite3
 import sys
 import time
 import warnings
@@ -836,7 +835,7 @@ async def obs_t11(s: Sess, root: Path, res: dict) -> None:
     r: dict[str, Any] = {}
     before = tree_hashes(root)
     old, new = "PaymentRequest", "PaymentReq"
-    exp = refs_by_ast(root, old)
+    refs_by_ast(root, old)
     d, _ = await s.j("find_references_and_implementations", {"target": tgt(PAY, old), "query_type": "references", "include_declaration": False, "max_tokens": BIG})
     nrefs = len((d.get("data") or {}).get("references") or [])
     r["t06_refs"] = nrefs
@@ -855,7 +854,6 @@ async def obs_t11(s: Sess, root: Path, res: dict) -> None:
         r.setdefault("errors", {})[label] = (dd.get("ok"), (dd.get("error") or {}).get("code"), (dd.get("data") or {}).get("applied"))
         if b2 != tree_hashes(root):
             note("t11", f"エラー系 {label} でファイルが変わった")
-            fresh = prep_poly  # 以降の比較のため before を取り直す
             before = tree_hashes(root)
         elif dd.get("ok") and (dd.get("data") or {}).get("applied"):
             note("t11", f"拒否すべき new_name {a['new_name']!r} が適用された")
@@ -966,7 +964,7 @@ async def obs_t13(s: Sess, root: Path, res: dict) -> None:
 async def run_cfg(root: Path) -> dict[str, Any]:
     r: dict[str, Any] = {}
     async with Sess() as s:
-        t0 = time.perf_counter()
+        time.perf_counter()
         d, dt = await s.j("configure_workspace", {"action": "status"})
         r["status_before_roots_ms"] = round(dt)
         r["status_before"] = {"ok": d.get("ok"), "err": d.get("error")}
@@ -1027,7 +1025,7 @@ async def run_cfg(root: Path) -> dict[str, Any]:
         d, _ = await s.j("configure_workspace", {"action": "set_excludes", "exclude_globs": []})
         # set_python_env（このリポジトリの .venv）
         py = (REPO / ".venv" / "Scripts" / "python.exe").as_posix()
-        t_call = time.time()
+        time.time()
         d, _ = await s.j("configure_workspace", {"action": "set_python_env", "python_interpreter": py})
         await asyncio.sleep(3)
         st4, _ = await s.j("configure_workspace", {"action": "status"})
@@ -1155,6 +1153,7 @@ async def run_self() -> dict[str, Any]:
 
 # ------------------------------------------------------------------ main
 async def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     want = ARGS.obs or ["ro", "edit", "cfg", "burst"]
     summary: dict[str, Any] = {}
     if "ro" in want:
