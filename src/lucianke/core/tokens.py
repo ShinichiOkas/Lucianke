@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import math
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from fractions import Fraction
 from typing import Final
@@ -71,10 +73,36 @@ _RE_WIDE: Final = re.compile(f"[{_WIDE_RANGES}]+")
 _RE_OTHER: Final = re.compile(f"[^\t\r\n -~{_WIDE_RANGES}]+")
 
 
+# 長い文字列の見積もりは 60 KB で 8〜14 ms かかり、1 回の呼び出しの中で同じ（か、前回の呼び出しと同じ）本文を何度も数える
+# （パッカーの詰め直し・``used_tokens_est`` の数え直し・縮退段の判定。BUG-0027）。結果は文字列だけで決まるので、
+# 長さと内容のハッシュをキーに直近の結果を覚える（本文は持たない）。
+_MEMO_MIN_CHARS: Final = 1024  # これより短い文字列は数える方が速い
+_MEMO_MAX_ENTRIES: Final = 512
+_memo: OrderedDict[tuple[int, int], int] = OrderedDict()
+_memo_lock = threading.Lock()
+
+
 class TokenEstimator:
     """``o200k_base`` 互換の近似（仕様書 §5.7）。文字種別と連の数の係数の合計を切り上げる（S-12 ``lean_wide``）。"""
 
     def count(self, text: str) -> int:
+        if len(text) < _MEMO_MIN_CHARS:
+            return self._count(text)
+        key = (len(text), hash(text))
+        with _memo_lock:
+            hit = _memo.get(key)
+            if hit is not None:
+                _memo.move_to_end(key)
+                return hit
+        value = self._count(text)
+        with _memo_lock:
+            _memo[key] = value
+            while len(_memo) > _MEMO_MAX_ENTRIES:
+                _memo.popitem(last=False)
+        return value
+
+    @staticmethod
+    def _count(text: str) -> int:
         if not text:
             return 0
         units = 0

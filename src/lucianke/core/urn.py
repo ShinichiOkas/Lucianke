@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 import string
@@ -297,6 +298,12 @@ class Urn:
         return format(self)
 
 
+# ``Urn`` は不変なので ``parse`` / ``format`` の結果を使い回してよい（検索・骨格が同じ URN を何度も作る。BUG-0027）
+_FORMAT_CACHE_SIZE = 16384
+_PARSE_CACHE_SIZE = 16384
+
+
+@functools.lru_cache(maxsize=_FORMAT_CACHE_SIZE)
 def format(urn: Urn) -> str:  # noqa: A001 - 仕様の名前（parse / format）に合わせる
     """``Urn`` を正準形の文字列にする。``parse(format(u)) == u``。"""
     out = f"{SCHEME}{urn.workspace_id}/{_quote_path(urn.path)}"
@@ -305,6 +312,7 @@ def format(urn: Urn) -> str:  # noqa: A001 - 仕様の名前（parse / format）
     return out
 
 
+@functools.lru_cache(maxsize=_PARSE_CACHE_SIZE)
 def parse(text: str) -> Urn:
     """URN 文字列を ``Urn`` にする。不正な入力は ``ValueError``。
 

@@ -38,6 +38,7 @@ from lucianke.core.compact_lines import (
 from lucianke.core.model import Confidence, Kind, SymbolRecord
 from lucianke.core.records import Record
 from lucianke.core.tokens import TokenEstimator
+from lucianke.syntax.memo import BoundedMemo, content_key
 from lucianke.syntax.support import SUPPORT
 from lucianke.syntax.types import ParsedFile, SkeletonOptions
 
@@ -364,8 +365,10 @@ def _emit(
     opts: SkeletonOptions,
     d: _Detail,
     out: list[str],
+    *,
+    want_json: bool = True,
 ) -> tuple[list[dict[str, Any]], list[_Entry], int]:
-    """``(json の symbols, 出した直下の Entry, 出した総数)``。"""
+    """``(json の symbols, 出した直下の Entry, 出した総数)``。``want_json=False`` なら json は作らない（縮退段の見積もり用）。"""
     jsons: list[dict[str, Any]] = []
     emitted: list[_Entry] = []
     total = 0
@@ -388,7 +391,9 @@ def _emit(
         child_entries: list[_Entry] = []
         child_total = 0
         if d.nested:
-            child_json, child_entries, child_total = _emit(e.children, depth + 1, opts, d, out)
+            child_json, child_entries, child_total = _emit(
+                e.children, depth + 1, opts, d, out, want_json=want_json
+            )
         fold = 0
         if sym.kind in _CALLABLE_KINDS:
             fold = (
@@ -405,7 +410,8 @@ def _emit(
             end_line=e.span[1],
             fold_lines=fold or None,
         )
-        jsons.append(_symbol_json(e, doc, fold, child_json))
+        if want_json:
+            jsons.append(_symbol_json(e, doc, fold, child_json))
         emitted.append(e)
         total += 1 + child_total
     return jsons, emitted, total
@@ -424,6 +430,9 @@ def _symbol_json(e: _Entry, doc: str | None, fold: int, children: list[dict[str,
     return base
 
 
+_RECORD_MEMO = BoundedMemo(max_entries=64, max_weight=40_000)  # 直近 64 ファイル・骨格の行 4 万行まで
+
+
 def build_file_record(
     parsed: ParsedFile,
     symbols: list[SymbolRecord],
@@ -438,22 +447,60 @@ def build_file_record(
     ``symbols`` は ``symbols.extract`` の結果（順不同でよい）。入れ子は範囲の包含で決める。``opts.include_private`` が
     偽なら非公開シンボル（とその子）は最初から含めない（予算による省略ではないので ``truncated`` には数えない）。
     ``estimate`` は ``shrink`` が使うトークン見積もり（既定は ``default_estimate`` = ``core`` の ``TokenEstimator``。パッカーと同じ）。
+
+    既定の見積もりのときは、同じ内容・同じ ``symbols``（同じオブジェクト）・同じ指定の呼び出しに直近の結果を使い回す（BUG-0027）。
+    返す ``Record`` は不変で、木（``ParsedFile``）を保持しない。
     """
+    memo_key: tuple[Any, ...] | None = None
+    if estimate is None and not parsed.has_errors:
+        # ``id`` は、覚えた Record が ``symbols`` のオブジェクトを握っている間（= 覚えている間）は他と重ならない
+        memo_key = (
+            content_key(parsed.source),
+            parsed.language_id,
+            rel,
+            opts,
+            priority,
+            tuple(map(id, symbols)),
+        )
+        cached = _RECORD_MEMO.get(memo_key)
+        if cached is not None:
+            return cached
+    record = _build_file_record(parsed, symbols, rel=rel, opts=opts, priority=priority, estimate=estimate)
+    if memo_key is not None:
+        _RECORD_MEMO.put(memo_key, record, weight=max(1, len(record.lines)))
+    return record
+
+
+def _build_file_record(
+    parsed: ParsedFile,
+    symbols: list[SymbolRecord],
+    *,
+    rel: str,
+    opts: SkeletonOptions,
+    priority: int,
+    estimate: Callable[[str], int] | None,
+) -> Record:
     est = estimate or default_estimate
     entries = _build_tree(parsed, symbols, include_private=opts.include_private)
     imports = extract_imports(parsed) if opts.include_imports else []
     spec = SUPPORT.get(parsed.language_id)
     tier = int(getattr(spec, "tier", 1))
     line_count = parsed.line_index.content_line_count
+    # 木（parsed）を握らないよう、描画に要る値だけを取り出す（覚えた Record の closure が木を保持しないように）
+    language_id = parsed.language_id
+    sha256 = parsed.sha256
     full = _Detail(doc=opts.include_doc_summary, urn=opts.include_urns != "none", private=True, nested=True)
     total_members = _count(entries)
 
-    def render(d: _Detail, shrinkable: bool) -> tuple[Record, tuple[str, ...]]:
-        """``(レコード, truncated の注を除いた本文)``。後者は縮退段の重複判定に使う。"""
+    def render(d: _Detail, shrinkable: bool, *, want_json: bool = True) -> tuple[Record, tuple[str, ...]]:
+        """``(レコード, truncated の注を除いた本文)``。後者は縮退段の重複判定に使う。
+
+        ``want_json=False`` は縮退段の見積もり用（行だけ作る。``data`` は空）。
+        """
         body: list[str] = []
         if imports:
             body.append(import_line(imports))
-        jsons, _, emitted = _emit(entries, 0, opts, d, body)
+        jsons, _, emitted = _emit(entries, 0, opts, d, body, want_json=want_json)
         core = tuple(body)
         omitted = total_members - emitted
         if d != full:
@@ -462,20 +509,24 @@ def build_file_record(
             ]
             suffix = f" ({', '.join(dropped)} omitted)" if dropped else ""
             body.append(note(f"truncated: {omitted} members omitted{suffix}"))
-        header = file_block_header(rel, lines=line_count, skeleton_lines=len(body), sha12=parsed.sha256[:12])
-        data = {
-            "ok": True,
-            "path": rel,
-            "language": parsed.language_id,
-            "tier": tier,
-            "line_count": line_count,
-            "skeleton_line_count": len(body),
-            "imports": list(imports),
-            "symbols": jsons,
-            "file_sha256": parsed.sha256,
-            "truncated_members": omitted if d != full else 0,
-            "confidence_level": Confidence.STRUCTURAL.value,
-        }
+        header = file_block_header(rel, lines=line_count, skeleton_lines=len(body), sha12=sha256[:12])
+        data = (
+            {
+                "ok": True,
+                "path": rel,
+                "language": language_id,
+                "tier": tier,
+                "line_count": line_count,
+                "skeleton_line_count": len(body),
+                "imports": list(imports),
+                "symbols": jsons,
+                "file_sha256": sha256,
+                "truncated_members": omitted if d != full else 0,
+                "confidence_level": Confidence.STRUCTURAL.value,
+            }
+            if want_json
+            else {}
+        )
         rec = Record(
             kind="file-block",
             key=rel,
@@ -494,16 +545,35 @@ def build_file_record(
         _Detail(doc=False, urn=False, private=False, nested=True),
         _Detail(doc=False, urn=False, private=False, nested=False),
     ]
+    plan: list[tuple[_Detail, int]] | None = (
+        None  # 縮退段（前の段と本文が同じものは除く）と、その行のトークン見積もり
+    )
+    shrunk: dict[_Detail, Record] = {}  # 選ばれた段の完全なレコード（json つき）。段ごとに 1 回だけ作る
+
+    def shrink_plan() -> list[tuple[_Detail, int]]:
+        nonlocal plan
+        if plan is None:
+            steps: list[tuple[_Detail, int]] = []
+            previous = full_core
+            for d in levels:
+                rec, core = render(d, False, want_json=False)
+                if core == previous:
+                    continue  # 前の段と同じ本文（すでに doc が無い、など）は飛ばす
+                previous = core
+                steps.append((d, est("\n".join(rec.lines))))
+            plan = steps
+        return plan
 
     def shrink(remaining_tokens: int) -> Record | None:
-        _, previous = render(full, False)
-        for d in levels:
-            rec, core = render(d, False)
-            if core == previous:
-                continue  # 前の段と同じ本文（すでに doc が無い、など）は飛ばす
-            previous = core
-            if est("\n".join(rec.lines)) <= remaining_tokens:
+        for d, tokens in shrink_plan():
+            if tokens <= remaining_tokens:
+                rec = shrunk.get(d)
+                if rec is None:
+                    rec = shrunk[d] = render(d, False)[0]
                 return rec
         return None
 
-    return render(full, True)[0]
+    full_record, full_core = render(
+        full, True
+    )  # shrink_plan は full_core を、呼ばれたとき（これより後）に読む
+    return full_record

@@ -33,6 +33,7 @@ from tree_sitter import Language, Node, Query, QueryCursor
 
 from lucianke.core.model import Confidence, Kind, Range, RelPath, SymbolRecord
 from lucianke.core.urn import CodeSel, Urn, normalize_signature, sighash
+from lucianke.syntax.memo import BoundedMemo, content_key
 from lucianke.syntax.types import ParsedFile
 
 __all__ = ["ExtractedSymbol", "Extraction", "extract", "extract_detailed", "load_query_source"]
@@ -109,6 +110,9 @@ def load_query_source(language_id: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+_EXTRACT_MEMO = BoundedMemo(max_entries=64, max_weight=60_000)  # 直近 64 ファイル・シンボル 6 万件まで
+
+
 @functools.lru_cache(maxsize=32)
 def _compile(language: Language, query_source: str) -> Query:
     return Query(language, query_source)
@@ -167,10 +171,28 @@ def extract_detailed(
     workspace_id: str,
     rel: RelPath,
 ) -> Extraction:
-    """タグクエリで定義を拾い、``SymbolRecord`` と ``body_sha256``・警告を返す。構文エラーがあっても拾えた分を返す。"""
+    """タグクエリで定義を拾い、``SymbolRecord`` と ``body_sha256``・警告を返す。構文エラーがあっても拾えた分を返す。
+
+    同じ内容（SHA-256）・言語・クエリ・ワークスペース・パスの呼び出しは、直近の結果を使い回す（BUG-0027。結果は不変の記録）。
+    構文エラーのある木（期限で打ち切った不完全な木を含む）の結果は覚えない。
+    """
     family = _FAMILIES.get(language_id)
     if family is None:
         raise ValueError(f"symbol extraction is not supported for language {language_id!r}")
+    memo_key = (content_key(parsed.source), language_id, language, query_source, workspace_id, str(rel))
+    if not parsed.has_errors:
+        cached = _EXTRACT_MEMO.get(memo_key)
+        if cached is not None:
+            return cached
+    result = _extract_uncached(parsed, family, language, query_source, workspace_id, rel)
+    if not parsed.has_errors:
+        _EXTRACT_MEMO.put(memo_key, result, weight=max(1, len(result.symbols)))
+    return result
+
+
+def _extract_uncached(
+    parsed: ParsedFile, family: str, language: Language, query_source: str, workspace_id: str, rel: RelPath
+) -> Extraction:
     ctx = _Ctx(parsed, family)
     root = parsed.tree.root_node
 
