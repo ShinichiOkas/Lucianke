@@ -82,7 +82,18 @@ _NOT_CONTAINERS = frozenset({Kind.VARIABLE, Kind.CONSTANT, Kind.FIELD})
 _CLASS_KINDS = frozenset({Kind.CLASS, Kind.INTERFACE, Kind.STRUCT, Kind.TRAIT, Kind.ENUM})
 _RECEIVER_SELF = frozenset({"self", "cls", "this"})
 _ANNOTATION_SKIP = frozenset(
-    {"Optional", "Union", "Final", "ClassVar", "Annotated", "Required", "NotRequired", "Literal", "None", "Self"}
+    {
+        "Optional",
+        "Union",
+        "Final",
+        "ClassVar",
+        "Annotated",
+        "Required",
+        "NotRequired",
+        "Literal",
+        "None",
+        "Self",
+    }
 )
 
 _PY_FUNCTIONS = frozenset({"function_definition", "lambda"})
@@ -100,7 +111,13 @@ _JS_FUNCTIONS = frozenset(
 _PY_CLASSES = frozenset({"class_definition"})
 _JS_CLASSES = frozenset({"class_declaration", "abstract_class_declaration", "class"})
 _PY_SKIP_ANCESTORS = frozenset(
-    {"import_statement", "import_from_statement", "future_import_statement", "global_statement", "nonlocal_statement"}
+    {
+        "import_statement",
+        "import_from_statement",
+        "future_import_statement",
+        "global_statement",
+        "nonlocal_statement",
+    }
 )
 _JS_SKIP_ANCESTORS = frozenset({"import_statement", "import_require_clause", "import_alias"})
 _CALL_NODES = frozenset({"call", "call_expression", "new_expression"})
@@ -333,7 +350,9 @@ class _Extractor:
 
     # --- 参照 1 件 ---
 
-    def _ref_candidate(self, ref: _Ref, position: Position, chain: list[SymbolRecord]) -> RelationCandidate | None:
+    def _ref_candidate(
+        self, ref: _Ref, position: Position, chain: list[SymbolRecord]
+    ) -> RelationCandidate | None:
         node = ref.node
         if (position.line, position.col) in self.by_selection:
             return None  # 定義の名前そのもの
@@ -371,7 +390,9 @@ class _Extractor:
             guard_condition=guard,
         )
 
-    def _import_candidate(self, imp: _Import, position: Position, chain: list[SymbolRecord]) -> RelationCandidate | None:
+    def _import_candidate(
+        self, imp: _Import, position: Position, chain: list[SymbolRecord]
+    ) -> RelationCandidate | None:
         node = imp.node
         name = _text(node)
         if not name:
@@ -437,7 +458,9 @@ class _Extractor:
         while node is not None and node.parent is not None:
             parent = node.parent
             if parent.type in _CALL_NODES:
-                fn = parent.child_by_field_name("constructor" if parent.type == "new_expression" else "function")
+                fn = parent.child_by_field_name(
+                    "constructor" if parent.type == "new_expression" else "function"
+                )
                 if fn is not None and fn.id == node.id:
                     return parent
                 return None
@@ -496,7 +519,9 @@ class _Extractor:
 
     # --- 属性アクセスの解決 ---
 
-    def _resolve_member(self, recv: Node | None, name: str, node: Node, chain: list[SymbolRecord]) -> str | None:
+    def _resolve_member(
+        self, recv: Node | None, name: str, node: Node, chain: list[SymbolRecord]
+    ) -> str | None:
         if recv is not None:
             ref = self._type_ref(recv, node, chain)
             if ref is not None:
@@ -557,7 +582,9 @@ class _Extractor:
                 return self._name_ref(tname, chain)
             if self._is_local(text, node):
                 return None  # 型の分からないローカル変数（同名の import を隠す）
-            return self._name_ref(text, chain)  # クラス名・モジュール名そのもの（``Foo.create()``、``mod.f()``）
+            return self._name_ref(
+                text, chain
+            )  # クラス名・モジュール名そのもの（``Foo.create()``、``mod.f()``）
         if t in _ATTRIBUTE_NODES:
             obj = recv.child_by_field_name("object")
             prop = recv.child_by_field_name("attribute" if t == "attribute" else "property")
@@ -649,7 +676,14 @@ class _Extractor:
             return
         if node.type == "identifier":
             yield node
-        elif node.type in ("pattern_list", "tuple_pattern", "list_pattern", "list_splat_pattern", "tuple", "list"):
+        elif node.type in (
+            "pattern_list",
+            "tuple_pattern",
+            "list_pattern",
+            "list_splat_pattern",
+            "tuple",
+            "list",
+        ):
             for c in node.named_children:
                 yield from self._py_targets(c)
 
@@ -791,14 +825,21 @@ class _Extractor:
             self._bind(left, fn)
             self._set_var_type(scope, _text(left), tname)
             if scope is not fn and cls is not None and scope.id == cls.id:
-                self._set_attr_type(cls, _text(left), tname)  # クラス直下の ``x: T``（dataclass のフィールドなど）
+                self._set_attr_type(
+                    cls, _text(left), tname
+                )  # クラス直下の ``x: T``（dataclass のフィールドなど）
         elif left.type in ("pattern_list", "tuple_pattern", "list_pattern"):
             for n in self._py_targets(left):
                 self._bind(n, fn)
         elif left.type == "attribute":
             obj = left.child_by_field_name("object")
             attr = left.child_by_field_name("attribute")
-            if obj is not None and attr is not None and obj.type == "identifier" and _text(obj) in _RECEIVER_SELF:
+            if (
+                obj is not None
+                and attr is not None
+                and obj.type == "identifier"
+                and _text(obj) in _RECEIVER_SELF
+            ):
                 self._set_attr_type(cls, _text(attr), tname)
 
     # TypeScript / JavaScript
@@ -897,7 +938,9 @@ class _Extractor:
                     obj = left.child_by_field_name("object")
                     prop = left.child_by_field_name("property")
                     if obj is not None and prop is not None and obj.type == "this":
-                        self._set_attr_type(cls, _text(prop), self._js_value_type(node.child_by_field_name("right"), fn))
+                        self._set_attr_type(
+                            cls, _text(prop), self._js_value_type(node.child_by_field_name("right"), fn)
+                        )
             elif t == "catch_clause":
                 for n in self._js_targets(node.child_by_field_name("parameter")):
                     self._bind(n, fn)
@@ -917,10 +960,12 @@ class _Extractor:
                 tname = self._js_ann_name(p.child_by_field_name("type"))
                 if pattern is not None and pattern.type == "identifier":
                     self._set_var_type(fn, _text(pattern), tname)
-                    if any(c.type in ("accessibility_modifier", "override_modifier") for c in p.children) or any(
-                        c.type == "readonly" for c in p.children
-                    ):
-                        self._set_attr_type(cls, _text(pattern), tname)  # コンストラクタのパラメータプロパティ
+                    if any(
+                        c.type in ("accessibility_modifier", "override_modifier") for c in p.children
+                    ) or any(c.type == "readonly" for c in p.children):
+                        self._set_attr_type(
+                            cls, _text(pattern), tname
+                        )  # コンストラクタのパラメータプロパティ
             else:
                 for n in self._js_targets(p):
                     self._bind(n, fn)

@@ -60,8 +60,16 @@
 (extends_type_clause
   type: (type_identifier) @base)
 
+(extends_type_clause
+  type: (generic_type
+    name: (type_identifier) @base))
+
 (implements_clause
   (type_identifier) @impl)
+
+(implements_clause
+  (generic_type
+    name: (type_identifier) @impl))
 
 ; --- 上のどれでもない参照 ---
 (identifier) @read
