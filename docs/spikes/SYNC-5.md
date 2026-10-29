@@ -12,7 +12,7 @@
 | 設計書 §7.5.2 | `LspPool.router(ws)`・`LspPool.rebind(ws)`・`LspHandle.rebind(ws)`・`LspHandle.started_at`（UTC ISO 8601、ミリ秒、起動のたびに更新、停止で `None`）をシグネチャと本文に。`rebind` は**ルートが変わったとき（言語を問わない）と Python 系でインタープリタが変わったとき**だけ再起動（`restarts` は増えない。`unavailable` は `standby` に戻す）。除外などは LSP の設定に出ないので再起動も `didChangeConfiguration` も不要。T-00 事後条件 3 の根拠 | 8a6f40f、c84b7a0（da81727）、BUG-0023。コミットは c613fb4 |
 | 設計書 §7.5.4 | `DocumentRouter` を新設: 言語の `ready` な全サーバー（`types` が先）へ `sync`、版と送信時刻をサーバーごとに記録、`wait_for` は全サーバーを**同時に**待って全部揃ったときだけ True（時間はサーバー数で増えない）、**版なしの待ち〔依存元〕は `lint` を待たない**（ruff は再発行しない）、版の検査は `WorkspaceEdit` を出したサーバーの `DocumentSync` に対して | 8a6f40f、BUG-0023。コミットは c613fb4 |
 | 設計書 §7.5.4・§4.1 の `documents.py`・§8.4 の 8 | `edit_transaction` は LSP プールが `router(ws)` を持てば口を常に `DocumentRouter` に（T-13 が `lsp=` に渡した `LspHandle` は「LSP で検証する」手がかり・状態を `READY` にするだけ）。ルーターを出せないプール（偽物）のときだけ 1 サーバー | 7b4fa68、68b6023。コミットは c613fb4 |
-| 設計書 §7.6.2 | 「import 元の解き直し」（`engine/reresolve.py`）: 取り込み時に import 解決で調べたパスの**語幹**を内部表 `_import_probes(file_id, stem)`（schema v3）へ。ファイル作成・削除で該当 import 元だけを同じトランザクションで取り込み直す（`data_version` は 1 回。`scan` は最後に別トランザクションで）。取り込み直した側は `exact` を失い `structural` に戻る。`symbols` の URN の集合が変わった編集も同じ扱い（BUG-0034）、本文だけの編集は触れない | edb72e4、BUG-0025・BUG-0034。コミットは c613fb4 |
+| 設計書 §7.6.2 | 「import 元の解き直し」（`engine/reresolve.py`）: 取り込み時に import 解決で調べたパスの**語幹**を内部表 `_import_probes(file_id, stem)`（schema v3）へ。ファイル作成・削除で該当 import 元だけを同じトランザクションで取り込み直す（`data_version` は 1 回。`scan` は最後に別トランザクションで）。取り込み直した側は `exact` を失い `structural` に戻る。`symbols` の URN の集合が変わった編集も同じ扱い（BUG-0034）、本文だけの編集は触れない | edb72e4・afb6717、BUG-0025・BUG-0034。コミットは c613fb4 |
 | 設計書 §7.6.2・§6.2・§7.6.5・§4.1 | PageRank（`index/rank.py`）: グラフの定義（`CALLS` / `REFERENCES` / `IMPORTS` / `INHERITS` / `IMPLEMENTS`、ワークスペース内のシンボルを指す辺だけ、重み 1、d=0.85、決定的）、`_symbol_rank(urn, workspace_id, score, fan_in)`（schema v2）、`files.pagerank_score`、`data_version` は進めない。デバウンス付きの再計算（`engine/rank_scheduler.py`: 約 1 秒おとなしくなってから 1 回、最中の更新は終わった後にもう一度、`aclose` で取り消し、走査の最後の計算を古い結果で上書きしない）。内部表一覧と `schema_version`（現在 3）、モジュール表・ディレクトリ図に `rank.py`・`reresolve.py`・`rank_scheduler.py` | 809eff4、bdacc4a、a4b1229。コミットは c613fb4 |
 | 仕様書 §9.4 | 更新規約の表: 差分索引の `files.pagerank_score`、ファイル監視で作成・削除したとき import している側の `relations` も解き直す、`files.pagerank_score` の再計算は約 1 秒後に 1 回（`data_version` を進めない） | edb72e4、a4b1229。コミットは c613fb4 |
 | 仕様書 T-03 処理規約 2 | 同じ一致の質ならコードのシンボルを `Key` / `Tag` より先、次にファイルの `pagerank`（`FileInfo.pagerank`、未計算は 0）降順、パスの辞書順。既定の `symbol_kinds` は全種別のまま | 73ee3fb、8139279。コミットは c613fb4 |
@@ -28,9 +28,25 @@
 | 設計書 §11.2 | `lucianke doctor` の実装（項目・必須と任意・しきい値〔キャッシュ 5 GiB、空き 1 GiB〕・終了コード 0/1/2・`--json` / `--strict` / `--no-selftest`・結果は `stderr` のみ）。`lucianke index` は**未実装**と明記 | 1a7c487 |
 | 設計書 §10.5・仕様書 §16.3 | `THIRD_PARTY_NOTICES.md` の生成（`tools/gen_notices.py`、`uv.lock` から、57 パッケージ、`--check`）、配布物の検査（`tools/check_dist.py`、`license-files`、sdist の許可リスト）、CI の license ジョブ。schema ジョブの許容リストに `_symbol_rank`・`_import_probes` | ec55f1b、f748e04 |
 | 設計書 §11.2 | サーバーの起動は開発時 `uv run --directory <repo> python -P -m lucianke`（`lucianke.exe` を握らない理由〔Windows は動いている exe を消せない、`os error 32`〕と `-P` の理由〔cwd を `sys.path` に足さない〕、`server_argv`、見張りのテスト）。`.mcp.json` の例を 2 通りに | 1734b29、251eeb3、BUG-0030 |
+| 設計書 §7.5.2 | `rebind` の再起動の責任は `LspPool.rebind` に一本化: T-00 の `set_python_env` のジョブは `rebind` が再起動したハンドルをもう一度止めず、起こさなかった分（同じインタープリタの指定し直し、`standby`）だけ `reset` + 起動する（1 回で二重に起動し直さない） | c613fb4（BUG-0035）、6e28093 |
 
 ## 確認だけで変えなかったもの
 
 | 項目 | 結果 |
 |---|---|
 | README.md | 開発メモに `uv run --directory <repo> python -P -m lucianke` と理由（BUG-0030）が既に入っている（1734b29・251eeb3）。他の記述も実装と食い違わないので変更なし |
+
+## 未決・宿題として残したもの
+
+| 項目 | 推奨 |
+|---|---|
+| **T-06 の `implementations` / `type_hierarchy` の LSP 版**（`textDocument/implementation`・`typeHierarchy`）は無い。`exact` の応答でも索引の継承関係（基底クラス名の一致）からの推定で、`warnings` に書いてある。仕様書 T-06 の事後条件 1（`references[]` の集合が LSP の参照検索結果と等しい）は参照だけを指すと読めば満たす | M1 は推定のままで合格とし、実装検索・型階層の LSP 化は M2 で判断（仕様書の `exact` の定義に「参照のみ」の注を足すかは師匠の判断） |
+| **設計書 §7.9.1 の `:memory:` の一時 `symbols`**（過去断面の `symbol_name` 解決用）は M1 では作らず `FileAnalysis.symbols` で解決している。M2 で `query_project_db` が `revision` を受けるときに足す | 設計書の 1・3 は M2 の記述として残した（実装との差を 4 に書いた） |
+| **`lucianke index` と `bench` のサブコマンド**は未実装（設計書 §11.2 に未実装と書いた）。`doctor` だけが動く | M1 の後半（M1-9 以降）で実装 |
+| **T-04 の `scip_symbol`** は未実装（SCIP 索引は無い。仕様書 T-04 の処理規約 2 に「あれば」とあるので仕様の範囲内） | 変更なし |
+| **T-11 の `structural` は Python の関数内ローカルだけ**。TypeScript の関数内ローカルは LSP が無いと `E_LSP_UNAVAILABLE` のまま（仕様書は MAY なので範囲内） | M2 で TypeScript のスコープ解析を足すか判断 |
+| **T-01 の `rank` は先頭のファイルを 1.00 とした相対値**。仕様書の例（0.91 / 0.84）は絶対値に見えたので 1.00 / 0.92 に直した。絶対値（PageRank の素の値）を出したい場合は仕様側の判断 | 相対値のまま（`ranking` が変わっても 0〜1 で比べられる） |
+| **PageRank の再計算のデバウンス 1 秒**（`RANK_DEBOUNCE_S`）は実装の定数。編集直後の T-01 / T-03 の並びは最大約 1 秒古い。大きなワークスペースでは計算（10 万シンボルで約 2.5 秒）の間も古い | 実装の定数を仕様にした。数字を変えるなら両方を直す |
+| **LSP の `exact` 書き戻しが `data_version` を進めない**ことで、LSP が書いた `exact` 行の追加ではカーソルが失効しない。`exact` 行が増えた直後の次のページで結果集合の一部が `structural` から `exact` に変わるが、集合は変わらない | 変更なし（結果集合は同じ。ADR-8 の「失効は安全側」の例外として本書に書いた） |
+| 他の役の作業ツリーの未コミット変更（`bench/`・`src/` の一部）は触っていない | — |
+
