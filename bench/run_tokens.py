@@ -29,6 +29,7 @@ tools/list のスキーマ記述のトークン（``tools_list_schema_tokens``�
 S4 は固定の注入（inject）を作業コピーに行ってから測り、終わりに ``git checkout`` で戻す。
 サーバーは fixture を cwd にして ``python -m lucianke`` で起動する（``server_command``。``tests/_server_cmd.py`` と同じ形。
 ``uv run ... lucianke`` は ``lucianke.exe`` を握って他の ``uv run`` の同期を壊すので使わない。BUG-0030）。``--server-cmd`` で差し替えられる。
+F-TS の S4・S2 は型 LSP（typescript-language-server）が PATH に要る。無いと ``lsp=unavailable``（構文木のみ）になり、S4 は測定不成立、S2 は参照が欠ける。
 ツールが未登録の手順があるシナリオの L は「skip: ツール未登録」とし、そこまでの呼び出しは記録する。落ちない。
 結果: bench/results/<日時>-<OS>-tokens.json（フィクスチャ SHA、Lucianke のコミット、機材、生データ、判定）。
 """

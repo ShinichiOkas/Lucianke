@@ -1,0 +1,260 @@
+{
+ "schema": "lucianke-bench-tokens/1",
+ "date": "2026-10-29T15:19:33+09:00",
+ "encoding": "o200k_base",
+ "threshold": 0.75,
+ "count_schema": true,
+ "server_argv": [
+  "C:\\Users\\shini\\AppData\\Local\\uv\\cache\\builds-v0\\.tmpOGqG5b\\Scripts\\python.exe",
+  "-P",
+  "-m",
+  "lucianke"
+ ],
+ "machine": {
+  "os": "Windows",
+  "os_release": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD64 Family 23 Model 49 Stepping 0, AuthenticAMD",
+  "cpu_count": 48,
+  "memory_gib": 63.9,
+  "python": "3.12.11",
+  "storage": "unrecorded"
+ },
+ "lucianke": {
+  "sha": "0f3e703ec698ab5eb0674b8be8fe9aaa4ab88bfc",
+  "src_dirty": false
+ },
+ "fixtures": {
+  "F-PY": {
+   "name": "httpx",
+   "url": "https://github.com/encode/httpx",
+   "sha": "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+  }
+ },
+ "scenarios": [
+  {
+   "fixture": "F-PY",
+   "scenario": "S1",
+   "title": "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る",
+   "B": {
+    "tokens": 34815,
+    "calls": 11,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bdef send\\b",
+      "input_tokens": 13,
+      "output_tokens": 54,
+      "input_chars": 36,
+      "output_chars": 187,
+      "hit_files": 2,
+      "hit_lines": 3
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_client.py",
+      "input_tokens": 6,
+      "output_tokens": 13796,
+      "input_chars": 21,
+      "output_chars": 67732
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_transports/asgi.py",
+      "input_tokens": 9,
+      "output_tokens": 1217,
+      "input_chars": 30,
+      "output_chars": 5688
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef build_request\\b",
+      "input_tokens": 14,
+      "output_tokens": 13,
+      "input_chars": 45,
+      "output_chars": 43,
+      "hit_files": 1,
+      "hit_lines": 1
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef raise_for_status\\b",
+      "input_tokens": 15,
+      "output_tokens": 18,
+      "input_chars": 48,
+      "output_chars": 64,
+      "hit_files": 1,
+      "hit_lines": 1
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_models.py",
+      "input_tokens": 6,
+      "output_tokens": 9494,
+      "input_chars": 21,
+      "output_chars": 45974
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef join\\b",
+      "input_tokens": 13,
+      "output_tokens": 22,
+      "input_chars": 36,
+      "output_chars": 61,
+      "hit_files": 1,
+      "hit_lines": 1
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_urls.py",
+      "input_tokens": 6,
+      "output_tokens": 5234,
+      "input_chars": 19,
+      "output_chars": 22156
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef request\\b",
+      "input_tokens": 13,
+      "output_tokens": 108,
+      "input_chars": 39,
+      "output_chars": 367,
+      "hit_files": 4,
+      "hit_lines": 7
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_api.py",
+      "input_tokens": 6,
+      "output_tokens": 2875,
+      "input_chars": 18,
+      "output_chars": 12181
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_exceptions.py",
+      "input_tokens": 6,
+      "output_tokens": 1877,
+      "input_chars": 25,
+      "output_chars": 8867
+     }
+    ]
+   },
+   "variant": "t04",
+   "L": {
+    "tokens_calls": 862,
+    "tokens_with_schema": 16154,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "resolve_symbols",
+      "input_tokens": 107,
+      "output_tokens": 755,
+      "input_chars": 364,
+      "output_chars": 2548,
+      "is_error": false,
+      "client_ms": 329.6,
+      "header": "# resolve_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=httpx ~639/3000tok",
+      "expect": "raise_for_status",
+      "expect_met": true,
+      "response": "# resolve_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=httpx ~639/3000tok\n[Method] httpx/_client.py#Client.send @L879-928\n  urn: lk://httpx/httpx/_client.py#Client.send\n  sig: (self, request: Request, *, stream: bool = False, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT) -> Response\n  type: Request=lk://httpx/httpx/_models.py#Request UseClientDefault=lk://httpx/httpx/_client.py#UseClientDefault Response=lk://httpx/httpx/_models.py#Response\n  doc: Send a request. (doc_lines=11)\n[Method] httpx/_client.py#BaseClient.build_request @L340-389\n  urn: lk://httpx/httpx/_client.py#BaseClient.build_request\n  sig: (self, method: str, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Request\n  type: URL=lk://httpx/httpx/_urls.py#URL UseClientDefault=lk://httpx/httpx/_client.py#UseClientDefault Request=lk://httpx/httpx/_models.py#Request\n  doc: Build and return a request instance. (doc_lines=9)\n[Method] httpx/_models.py#Response.raise_for_status @L794-829\n  urn: lk://httpx/httpx/_models.py#Response.raise_for_status\n  sig: (self) -> Response\n  type: Response=lk://httpx/httpx/_models.py#Response\n  doc: Raise the `HTTPStatusError` if one occurred. (doc_lines=1)\n[Method] httpx/_urls.py#URL.join @L354-366\n  urn: lk://httpx/httpx/_urls.py#URL.join\n  sig: (self, url: URL | str) -> URL\n  type: URL=lk://httpx/httpx/_urls.py#URL\n  doc: Return an absolute URL, using this URL as the base. (doc_lines=7)\n[Function] httpx/_api.py#request @L39-120\n  urn: lk://httpx/httpx/_api.py#request\n  sig: (method: str, url: URL | str, *, params: QueryParamTypes | None = None, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | None = None, proxy: ProxyTypes | None = None, timeout: TimeoutTypes = DEFAULT_TIMEOUT_CONFIG, follow_redirects: bool = False, verify: ssl.SSLContext | str | bool = True, trust_env: bool = True) -> Response\n  type: URL=lk://httpx/httpx/_urls.py#URL Response=lk://httpx/httpx/_models.py#Response\n  doc: Sends an HTTP request. (doc_lines=43)\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "analyze_change_impact",
+     "analyze_git_diff_symbols",
+     "apply_code_action",
+     "configure_workspace",
+     "edit_symbol_body",
+     "extract_code_contracts",
+     "find_code_paths",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_repo_map",
+     "get_symbol_bodies",
+     "get_symbol_history",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols",
+     "structural_search_replace",
+     "verify_contract"
+    ],
+    "warmup": {
+     "scan": {
+      "done": true,
+      "polls": 1,
+      "s": 0.3
+     },
+     "lsp": {
+      "ready": true,
+      "last": "ready",
+      "polls": 12,
+      "s": 17.7
+     },
+     "until": [],
+     "s": 18.1
+    },
+    "tools_list_schema_tokens": 15292,
+    "tools_list_schema_tokens_by_tool": {
+     "configure_workspace": 645,
+     "get_repo_map": 484,
+     "get_file_skeleton": 623,
+     "search_workspace_symbols": 621,
+     "resolve_symbols": 813,
+     "get_symbol_bodies": 827,
+     "find_references_and_implementations": 881,
+     "query_call_hierarchy": 833,
+     "get_diagnostics": 530,
+     "analyze_change_impact": 882,
+     "edit_symbol_body": 988,
+     "rename_symbol": 988,
+     "structural_search_replace": 671,
+     "apply_code_action": 759,
+     "find_code_paths": 909,
+     "extract_code_contracts": 484,
+     "verify_contract": 895,
+     "get_symbol_history": 847,
+     "analyze_git_diff_symbols": 560,
+     "get_project_db_schema": 399,
+     "query_project_db": 651
+    },
+    "wall_s": 0.73,
+    "tokens": 16154,
+    "tokens_basis": "with_schema"
+   },
+   "reduction_with_schema": 0.536,
+   "verdict_with_schema": "fail",
+   "reduction_without_schema": 0.9752,
+   "verdict_without_schema": "pass",
+   "reduction": 0.536,
+   "verdict": "fail",
+   "reduction_partial": 0.536
+  }
+ ],
+ "judgement": {
+  "pass": 0,
+  "fail": 1,
+  "skip": 0,
+  "error": 0,
+  "all_pass": false
+ },
+ "judgement_with_schema": {
+  "pass": 0,
+  "fail": 1,
+  "skip": 0,
+  "error": 0,
+  "all_pass": false
+ },
+ "judgement_without_schema": {
+  "pass": 1,
+  "fail": 0,
+  "skip": 0,
+  "error": 0,
+  "all_pass": true
+ }
+}

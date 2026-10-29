@@ -1,0 +1,480 @@
+{
+ "schema": "lucianke-bench-tokens/1",
+ "date": "2026-10-29T15:21:08+09:00",
+ "encoding": "o200k_base",
+ "threshold": 0.75,
+ "count_schema": true,
+ "server_argv": [
+  "C:\\Users\\shini\\AppData\\Local\\uv\\cache\\builds-v0\\.tmpdBSxfu\\Scripts\\python.exe",
+  "-P",
+  "-m",
+  "lucianke"
+ ],
+ "machine": {
+  "os": "Windows",
+  "os_release": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD64 Family 23 Model 49 Stepping 0, AuthenticAMD",
+  "cpu_count": 48,
+  "memory_gib": 63.9,
+  "python": "3.12.11",
+  "storage": "unrecorded"
+ },
+ "lucianke": {
+  "sha": "0f3e703ec698ab5eb0674b8be8fe9aaa4ab88bfc",
+  "src_dirty": false
+ },
+ "fixtures": {
+  "F-TS": {
+   "name": "ky",
+   "url": "https://github.com/sindresorhus/ky",
+   "sha": "3541888878c4d303a8bc2ad61815f4e048f55a5d"
+  }
+ },
+ "scenarios": [
+  {
+   "fixture": "F-TS",
+   "scenario": "S1",
+   "title": "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る",
+   "B": {
+    "tokens": 117094,
+    "calls": 13,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bvalidateAndMerge\\b",
+      "input_tokens": 15,
+      "output_tokens": 900,
+      "input_chars": 51,
+      "output_chars": 3020,
+      "hit_files": 4,
+      "hit_lines": 26
+     },
+     {
+      "kind": "read",
+      "label": "source/index.ts",
+      "input_tokens": 4,
+      "output_tokens": 1008,
+      "input_chars": 20,
+      "output_chars": 4250
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/merge.ts",
+      "input_tokens": 6,
+      "output_tokens": 5027,
+      "input_chars": 26,
+      "output_chars": 20603
+     },
+     {
+      "kind": "read",
+      "label": "test/merge.ts",
+      "input_tokens": 5,
+      "output_tokens": 3498,
+      "input_chars": 18,
+      "output_chars": 12908
+     },
+     {
+      "kind": "read",
+      "label": "test/retry.ts",
+      "input_tokens": 5,
+      "output_tokens": 39297,
+      "input_chars": 18,
+      "output_chars": 143638
+     },
+     {
+      "kind": "grep",
+      "label": "\\bmergeHeaders\\b",
+      "input_tokens": 14,
+      "output_tokens": 98,
+      "input_chars": 47,
+      "output_chars": 389,
+      "hit_files": 2,
+      "hit_lines": 4
+     },
+     {
+      "kind": "read",
+      "label": "source/core/Ky.ts",
+      "input_tokens": 6,
+      "output_tokens": 12694,
+      "input_chars": 22,
+      "output_chars": 53421
+     },
+     {
+      "kind": "grep",
+      "label": "\\bmergeHooks\\b",
+      "input_tokens": 14,
+      "output_tokens": 139,
+      "input_chars": 45,
+      "output_chars": 501,
+      "hit_files": 2,
+      "hit_lines": 6
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdeepMerge\\b",
+      "input_tokens": 14,
+      "output_tokens": 144,
+      "input_chars": 44,
+      "output_chars": 583,
+      "hit_files": 2,
+      "hit_lines": 4
+     },
+     {
+      "kind": "read",
+      "label": "test/hooks.ts",
+      "input_tokens": 4,
+      "output_tokens": 52218,
+      "input_chars": 18,
+      "output_chars": 195374
+     },
+     {
+      "kind": "grep",
+      "label": "\\bnormalizeRetryOptions\\b",
+      "input_tokens": 15,
+      "output_tokens": 401,
+      "input_chars": 56,
+      "output_chars": 1554,
+      "hit_files": 3,
+      "hit_lines": 17
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/normalize.ts",
+      "input_tokens": 6,
+      "output_tokens": 1073,
+      "input_chars": 30,
+      "output_chars": 4321
+     },
+     {
+      "kind": "read",
+      "label": "test/normalize.ts",
+      "input_tokens": 5,
+      "output_tokens": 484,
+      "input_chars": 22,
+      "output_chars": 1932
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens_calls": 604,
+    "tokens_with_schema": 15896,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "get_file_skeleton",
+      "input_tokens": 51,
+      "output_tokens": 553,
+      "input_chars": 180,
+      "output_chars": 2035,
+      "is_error": false,
+      "client_ms": 40.4,
+      "header": "# get_file_skeleton ok conf=structural lsp=n/a rev=WORKING_TREE ws=ky ~476/12000tok",
+      "expect": "validateAndMerge",
+      "expect_met": true,
+      "response": "# get_file_skeleton ok conf=structural lsp=n/a rev=WORKING_TREE ws=ky ~476/12000tok\n=== source/utils/merge.ts (501 lines, skeleton: 14 lines, sha=3df5d33022ce) ===\n[Function] pub export replaceOption(<T>(value: T): T) @L53-61 { ...8 lines omitted }\n  doc: Wraps a value so that `ky.extend()` will replace the parent value instead of merging with it. Works with hooks, headers, search parameters, context, and any other deep-merged option.\n[Function] pub export validateAndMerge(...sources: Array<Partial<Options> | undefined>): Partial<Options> @L63-71 { ...8 lines omitted }\n  raises: TypeError\n[Function] pub export mergeHeaders(source1: KyHeadersInit = {}, source2: KyHeadersInit = {}) @L73-86 { ...13 lines omitted }\n[Function] pub export cloneShallow(<T>(value: T): T) @L100-122 { ...22 lines omitted }\n[Function] pub export cloneSearchParameters(<T>(value: T): T) @L125-126\n[Function] pub export cloneDeep(<T>(value: T, seen: WeakMap<Record<string, unknown> | unknown[], unknown> = new WeakMap()): T) @L129-167 { ...38 lines omitted }\n[Function] pub export mergeHeaderContainers(source1: KyHeadersInit, source2: KyHeadersInit): Record<string, string | undefined> @L188-196 { ...8 lines omitted }\n[Function] pub export mergeHooks(original: Hooks = {}, incoming: Hooks = {}): NormalizedHooks @L218-231 { ...13 lines omitted }\n  raises: TypeError\n[Variable] pub export deletedParametersSymbol @L233\n[Type] pub export MarkedSearchParameters @L235\n[Function] pub export deepMerge(<T>(...sources: Array<Partial<T> | undefined>): T) @L500-501\n=== source/utils/normalize.ts (100 lines, skeleton: 5 lines, sha=d355eabbf311) ===\n[Function] pub export normalizeRequestMethod(input: string): string @L6-7\n[Function] pub export normalizeRetryMethod(method: string): string @L14-15\n  doc: Normalizes common methods for retry matching while preserving case-sensitive custom methods.\n[Function] pub export normalizeRetryOptions(retry: number | RetryOptions = {}): InternalRetryOptions @L37-100 { ...63 lines omitted }\n  raises: TypeError, Error\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "analyze_change_impact",
+     "analyze_git_diff_symbols",
+     "apply_code_action",
+     "configure_workspace",
+     "edit_symbol_body",
+     "extract_code_contracts",
+     "find_code_paths",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_repo_map",
+     "get_symbol_bodies",
+     "get_symbol_history",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols",
+     "structural_search_replace",
+     "verify_contract"
+    ],
+    "warmup": {
+     "scan": {
+      "done": true,
+      "polls": 1,
+      "s": 0.4
+     },
+     "lsp": {
+      "ready": true,
+      "last": "ready",
+      "polls": 12,
+      "s": 18.8
+     },
+     "until": [],
+     "s": 19.1
+    },
+    "tools_list_schema_tokens": 15292,
+    "tools_list_schema_tokens_by_tool": {
+     "configure_workspace": 645,
+     "get_repo_map": 484,
+     "get_file_skeleton": 623,
+     "search_workspace_symbols": 621,
+     "resolve_symbols": 813,
+     "get_symbol_bodies": 827,
+     "find_references_and_implementations": 881,
+     "query_call_hierarchy": 833,
+     "get_diagnostics": 530,
+     "analyze_change_impact": 882,
+     "edit_symbol_body": 988,
+     "rename_symbol": 988,
+     "structural_search_replace": 671,
+     "apply_code_action": 759,
+     "find_code_paths": 909,
+     "extract_code_contracts": 484,
+     "verify_contract": 895,
+     "get_symbol_history": 847,
+     "analyze_git_diff_symbols": 560,
+     "get_project_db_schema": 399,
+     "query_project_db": 651
+    },
+    "wall_s": 0.39,
+    "tokens": 15896,
+    "tokens_basis": "with_schema"
+   },
+   "reduction_with_schema": 0.8642,
+   "verdict_with_schema": "pass",
+   "reduction_without_schema": 0.9948,
+   "verdict_without_schema": "pass",
+   "reduction": 0.8642,
+   "verdict": "pass",
+   "reduction_partial": 0.8642
+  },
+  {
+   "fixture": "F-TS",
+   "scenario": "S2",
+   "title": "関数 isHTTPError の全呼び出し元と、それを呼ぶテストを列挙する",
+   "B": {
+    "tokens": 85465,
+    "calls": 11,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bisHTTPError\\b",
+      "input_tokens": 14,
+      "output_tokens": 738,
+      "input_chars": 46,
+      "output_chars": 2576,
+      "hit_files": 10,
+      "hit_lines": 40
+     },
+     {
+      "kind": "read",
+      "label": "source/core/Ky.ts",
+      "input_tokens": 6,
+      "output_tokens": 12694,
+      "input_chars": 22,
+      "output_chars": 53421
+     },
+     {
+      "kind": "read",
+      "label": "source/index.ts",
+      "input_tokens": 4,
+      "output_tokens": 1008,
+      "input_chars": 20,
+      "output_chars": 4250
+     },
+     {
+      "kind": "read",
+      "label": "source/types/hooks.ts",
+      "input_tokens": 5,
+      "output_tokens": 4117,
+      "input_chars": 26,
+      "output_chars": 17433
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/type-guards.ts",
+      "input_tokens": 7,
+      "output_tokens": 1063,
+      "input_chars": 32,
+      "output_chars": 4156
+     },
+     {
+      "kind": "read",
+      "label": "test/context.ts",
+      "input_tokens": 4,
+      "output_tokens": 2731,
+      "input_chars": 20,
+      "output_chars": 10161
+     },
+     {
+      "kind": "read",
+      "label": "test/errors.ts",
+      "input_tokens": 4,
+      "output_tokens": 2426,
+      "input_chars": 19,
+      "output_chars": 9620
+     },
+     {
+      "kind": "read",
+      "label": "test/hooks.ts",
+      "input_tokens": 4,
+      "output_tokens": 52218,
+      "input_chars": 18,
+      "output_chars": 195374
+     },
+     {
+      "kind": "read",
+      "label": "test/http-error.ts",
+      "input_tokens": 5,
+      "output_tokens": 7436,
+      "input_chars": 23,
+      "output_chars": 28593
+     },
+     {
+      "kind": "read",
+      "label": "test/type-guards.ts",
+      "input_tokens": 6,
+      "output_tokens": 796,
+      "input_chars": 24,
+      "output_chars": 3175
+     },
+     {
+      "kind": "read",
+      "label": "test-d/error-names.ts",
+      "input_tokens": 7,
+      "output_tokens": 172,
+      "input_chars": 26,
+      "output_chars": 649
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens_calls": 194,
+    "tokens_with_schema": 15486,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "find_references_and_implementations",
+      "input_tokens": 51,
+      "output_tokens": 143,
+      "input_chars": 188,
+      "output_chars": 448,
+      "is_error": false,
+      "client_ms": 12.2,
+      "header": "# find_references_and_implementations ok conf=exact lsp=ready rev=WORKING_TREE ws=ky ~66/6000tok",
+      "expect": "references: [1-9]\\d* files?, [1-9]\\d* sites?",
+      "expect_met": true,
+      "response": "# find_references_and_implementations ok conf=exact lsp=ready rev=WORKING_TREE ws=ky ~66/6000tok\ntarget: [Function] lk://ky/source/utils/type-guards.ts#isHTTPError\nreferences: 2 files, 3 sites (tests: 0)\nsource/core/Ky.ts:42:2  [import] isHTTPError, isNetworkError, isTimeoutError, isResponseSizeError, isForceRetryError,\nsource/core/Ky.ts:733:7  [call] in Ky.#calculateRetryDelay  if (isHTTPError(error)) {\nsource/index.ts:105:2  [r] isHTTPError,\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "analyze_change_impact",
+     "analyze_git_diff_symbols",
+     "apply_code_action",
+     "configure_workspace",
+     "edit_symbol_body",
+     "extract_code_contracts",
+     "find_code_paths",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_repo_map",
+     "get_symbol_bodies",
+     "get_symbol_history",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols",
+     "structural_search_replace",
+     "verify_contract"
+    ],
+    "warmup": {
+     "scan": {
+      "done": true,
+      "polls": 1,
+      "s": 0.3
+     },
+     "lsp": {
+      "ready": true,
+      "last": "ready",
+      "polls": 11,
+      "s": 17.3
+     },
+     "until": [
+      {
+       "tool": "find_references_and_implementations",
+       "pattern": "references: [1-9]\\d* files?, [1-9]\\d* sites?",
+       "matched": true,
+       "polls": 1,
+       "s": 0.6
+      }
+     ],
+     "s": 18.3
+    },
+    "tools_list_schema_tokens": 15292,
+    "tools_list_schema_tokens_by_tool": {
+     "configure_workspace": 645,
+     "get_repo_map": 484,
+     "get_file_skeleton": 623,
+     "search_workspace_symbols": 621,
+     "resolve_symbols": 813,
+     "get_symbol_bodies": 827,
+     "find_references_and_implementations": 881,
+     "query_call_hierarchy": 833,
+     "get_diagnostics": 530,
+     "analyze_change_impact": 882,
+     "edit_symbol_body": 988,
+     "rename_symbol": 988,
+     "structural_search_replace": 671,
+     "apply_code_action": 759,
+     "find_code_paths": 909,
+     "extract_code_contracts": 484,
+     "verify_contract": 895,
+     "get_symbol_history": 847,
+     "analyze_git_diff_symbols": 560,
+     "get_project_db_schema": 399,
+     "query_project_db": 651
+    },
+    "wall_s": 0.52,
+    "tokens": 15486,
+    "tokens_basis": "with_schema"
+   },
+   "reduction_with_schema": 0.8188,
+   "verdict_with_schema": "pass",
+   "reduction_without_schema": 0.9977,
+   "verdict_without_schema": "pass",
+   "reduction": 0.8188,
+   "verdict": "pass",
+   "reduction_partial": 0.8188
+  }
+ ],
+ "judgement": {
+  "pass": 2,
+  "fail": 0,
+  "skip": 0,
+  "error": 0,
+  "all_pass": true
+ },
+ "judgement_with_schema": {
+  "pass": 2,
+  "fail": 0,
+  "skip": 0,
+  "error": 0,
+  "all_pass": true
+ },
+ "judgement_without_schema": {
+  "pass": 2,
+  "fail": 0,
+  "skip": 0,
+  "error": 0,
+  "all_pass": true
+ }
+}

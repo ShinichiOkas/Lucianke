@@ -27,4 +27,12 @@ M1-4（NFR-TOK-1、S1・S2・S4）の L が測れない。run_tokens.py はこ�
 
 ## 確認
 tests/e2e/test_wired_index_stdio.py（3 回連続 green）と、実プロセスで T-03・T-06・T-08・T-10(dry_run) が is_error にならないこと（poly の複製、2026-10-29 14:36）。bench の S2・S4 は未実行（run_tokens.py の再実行は 18a が行う）。
+
+## 確認（18c、2026-10-29 15:22、push 済み 0f3e703 の使い捨て作業ツリー、`python -m lucianke`）
+S2・S4 が F-PY・F-TS の両方で成立した（is_error なし、事後条件 `expect` に一致）。測定前に走査 done と LSP ready を条件待ちしている。
+- F-PY S2: B 45,971 / L 1,039（削減 97.7%）、S4: B 5,632 / L 652（88.4%）。
+- F-TS S2: B 85,465 / L 194（99.8%）、S4: B 5,231 / L 778（85.1%）。F-TS は typescript-language-server を PATH に入れた場合（無いと `lsp=unavailable` で S4 は診断 0 件〈構文木のみ〉。測定不成立）。
+- 結果: bench/results/20261029-152200-Windows-tokens.json（統合）。
+- 付随して run_tokens.py の不具合を直した（B の edit が作業コピーを直してから L を測っていたため、L の最初の診断が 0 件・編集が no-op になっていた）。
+状態: 閉じる。
 注意: 起動から索引が育つまでの間（走査中）は T-03 などが 0 件を返す（降格応答。初回の重さは許容 §6.4）。
