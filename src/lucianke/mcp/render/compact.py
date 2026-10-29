@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from lucianke.mcp.types import RenderInput, Rendered
+from lucianke.mcp.types import Rendered, RenderInput
 
 
 def render(inp: RenderInput) -> Rendered:
