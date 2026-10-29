@@ -6,10 +6,12 @@ DB は ``tmp_path`` に作る。Windows では開いたままの接続がある�
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,7 @@ from lucianke.index.connection import (
     workspace_hash,
 )
 from lucianke.index.migrate import SchemaAction, current_schema_version, ensure_schema
+from lucianke.index.writer import IndexWriter, WriterClosedError, format_edit_id
 
 PUBLIC_TABLES = {
     "workspaces",
@@ -362,3 +365,327 @@ def test_pool_reads_while_writer_holds_an_open_write_transaction(
     conn.execute("COMMIT")
     with pool.reader() as c:
         assert c.execute("SELECT workspace_id FROM workspaces").fetchall() == [("pending",)]
+
+
+# --- IndexWriter -------------------------------------------------------------------------
+
+
+@pytest.fixture
+def writer(db_path: Path) -> Iterator[IndexWriter]:
+    w = IndexWriter(db_path)
+    try:
+        yield w
+    finally:
+        w.close()
+
+
+def gate_job(started: threading.Event, release: threading.Event) -> Callable[[sqlite3.Connection], None]:
+    """書き手スレッドを ``release`` が立つまで止めるジョブ。止まっている間もトランザクションは開いている。"""
+
+    def fn(c: sqlite3.Connection) -> None:
+        started.set()
+        assert release.wait(10), "テストが release を立てなかった"
+
+    return fn
+
+
+def test_writer_creates_schema_and_reports_action(writer: IndexWriter, db_path: Path) -> None:
+    assert writer.schema_action is SchemaAction.CREATED
+    assert writer.path == db_path
+    assert writer.data_version() == 0
+    writer.close()
+    again = IndexWriter(db_path)
+    try:
+        assert again.schema_action is SchemaAction.UNCHANGED
+    finally:
+        again.close()
+
+
+def test_writer_start_failure_raises_and_leaves_no_thread(tmp_path: Path) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(OSError):
+        IndexWriter(blocker / "sub" / DB_FILENAME)  # 親がディレクトリではない
+    assert not any(t.name == "lucianke-index-writer" and t.is_alive() for t in threading.enumerate())
+
+
+def test_100_concurrent_submits_run_one_at_a_time_on_the_writer_thread(writer: IndexWriter) -> None:
+    inside = threading.Event()
+    overlaps: list[str] = []
+    threads_seen: set[str] = set()
+    order: dict[int, list[int]] = {}
+
+    def make_job(tid: int, n: int) -> Callable[[sqlite3.Connection], int]:
+        def job(c: sqlite3.Connection) -> int:
+            if inside.is_set():
+                overlaps.append(f"{tid}-{n}")
+            inside.set()
+            threads_seen.add(threading.current_thread().name)
+            assert c.in_transaction  # BEGIN IMMEDIATE の中
+            c.execute(
+                "INSERT INTO workspaces (workspace_id, root_path) VALUES (?, ?)",
+                (f"w{tid}-{n}", f"/{tid}/{n}"),
+            )
+            time.sleep(0.0005)  # 重なる余地を作る
+            order.setdefault(tid, []).append(n)
+            inside.clear()
+            return tid * 100 + n
+
+        return job
+
+    futures: list[Future[int]] = []
+    futures_lock = threading.Lock()
+
+    def submitter(tid: int) -> None:
+        for n in range(10):
+            f = writer.submit(make_job(tid, n), bumps_version=True, label=f"job-{tid}-{n}")
+            with futures_lock:
+                futures.append(f)
+
+    threads = [threading.Thread(target=submitter, args=(tid,)) for tid in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(futures) == 100
+    results = sorted(f.result(timeout=20) for f in futures)
+    assert results == sorted(tid * 100 + n for tid in range(10) for n in range(10))
+    assert overlaps == []  # 同時に 2 つ走らない
+    assert threads_seen == {"lucianke-index-writer"}  # 全部、専用スレッドで
+    assert all(seq == list(range(10)) for seq in order.values())  # 同じ投入者のジョブは投入順
+    assert writer.data_version() == 100  # 1 ジョブ 1 回
+    check = open_reader(writer.path)
+    try:
+        assert check.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 100
+    finally:
+        check.close()
+
+
+def test_bumps_version_only_when_asked(writer: IndexWriter) -> None:
+    assert writer.data_version() == 0
+    writer.submit(lambda c: insert_workspace(c, "a"), bumps_version=True, label="a").result(5)
+    assert writer.data_version() == 1
+    writer.submit(lambda c: insert_workspace(c, "b"), bumps_version=False, label="diag").result(5)
+    assert writer.data_version() == 1  # diagnostics だけの更新では進めない
+    writer.submit(lambda c: None, bumps_version=True, label="noop").result(5)
+    assert writer.data_version() == 2
+
+
+def test_failed_job_is_rolled_back_and_later_jobs_proceed(
+    writer: IndexWriter, caplog: pytest.LogCaptureFixture
+) -> None:
+    def bad(c: sqlite3.Connection) -> None:
+        insert_workspace(c, "doomed")
+        raise ValueError("boom")
+
+    bad_future = writer.submit(bad, bumps_version=True, label="bad-job")
+    good_future = writer.submit(lambda c: insert_workspace(c, "kept"), bumps_version=True, label="good-job")
+    with pytest.raises(ValueError, match="boom"):
+        bad_future.result(5)
+    good_future.result(5)
+
+    rows = writer.submit(
+        lambda c: c.execute("SELECT workspace_id FROM workspaces").fetchall(),
+        bumps_version=False,
+        label="read",
+    ).result(5)
+    assert rows == [("kept",)]  # 失敗したジョブの書き込みは残らない
+    assert writer.data_version() == 1  # 失敗したジョブは data_version を進めない
+    assert any("bad-job" in r.getMessage() for r in caplog.records)  # label つきでログに残る
+
+
+def test_sql_error_inside_job_is_rolled_back_whole(writer: IndexWriter) -> None:
+    def half(c: sqlite3.Connection) -> None:
+        insert_workspace(c, "first")
+        c.execute("INSERT INTO files (workspace_id) VALUES ('first')")  # NOT NULL 違反
+
+    with pytest.raises(sqlite3.IntegrityError):
+        writer.submit(half, bumps_version=True, label="half").result(5)
+    count = writer.submit(
+        lambda c: c.execute("SELECT count(*) FROM workspaces").fetchone()[0], bumps_version=False, label="r"
+    ).result(5)
+    assert count == 0
+
+
+def test_job_that_ends_its_own_transaction_is_an_error(writer: IndexWriter) -> None:
+    f = writer.submit(lambda c: c.execute("COMMIT"), bumps_version=True, label="rude")
+    with pytest.raises(RuntimeError, match="ended the transaction"):
+        f.result(5)
+    writer.submit(lambda c: None, bumps_version=False, label="after").result(5)  # 書き手は生きている
+
+
+def test_next_edit_id_is_monotonic_and_survives_restart(db_path: Path) -> None:
+    w = IndexWriter(db_path)
+    try:
+        assert [w.next_edit_id() for _ in range(3)] == ["ed_0001", "ed_0002", "ed_0003"]
+        assert w.data_version() == 0  # 編集 ID の払い出しは data_version を進めない
+    finally:
+        w.close()
+    w2 = IndexWriter(db_path)
+    try:
+        assert w2.next_edit_id() == "ed_0004"
+        w2.submit(
+            lambda c: c.execute("UPDATE _meta SET edit_seq = 9999"), bumps_version=False, label="x"
+        ).result(5)
+        assert w2.next_edit_id() == "ed_10000"  # 4 桁を超えたら桁が増える
+    finally:
+        w2.close()
+
+
+def test_next_edit_id_concurrent_callers_get_unique_ids(writer: IndexWriter) -> None:
+    ids: list[str] = []
+    lock = threading.Lock()
+
+    def grab() -> None:
+        for _ in range(5):
+            i = writer.next_edit_id()
+            with lock:
+                ids.append(i)
+
+    threads = [threading.Thread(target=grab) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(ids) == 40
+    assert sorted(ids) == [format_edit_id(n) for n in range(1, 41)]
+
+
+def test_next_edit_id_from_writer_thread_is_rejected(writer: IndexWriter) -> None:
+    f = writer.submit(lambda c: writer.next_edit_id(), bumps_version=False, label="self-wait")
+    with pytest.raises(RuntimeError, match="writer thread"):
+        f.result(5)
+
+
+def test_close_drains_queue_then_rejects_new_submits(db_path: Path) -> None:
+    w = IndexWriter(db_path)
+    started, release = threading.Event(), threading.Event()
+    blocker = w.submit(gate_job(started, release), bumps_version=False, label="blocker")
+    assert started.wait(5)
+    queued = [
+        w.submit(lambda c, i=i: insert_workspace(c, f"q{i}"), bumps_version=True, label=f"q{i}")
+        for i in range(5)
+    ]
+    closer = threading.Thread(target=w.close)
+    closer.start()
+    closer.join(0.3)
+    assert closer.is_alive()  # キューが空になるまで止まらない
+    with pytest.raises(WriterClosedError):
+        w.submit(lambda c: None, bumps_version=False, label="late")
+    release.set()
+    closer.join(10)
+    assert not closer.is_alive()
+    assert blocker.done()
+    assert all(f.done() and f.exception() is None for f in queued)  # 積まれた分は全部実行された
+    with pytest.raises(WriterClosedError):
+        w.submit(lambda c: None, bumps_version=False, label="after-close")
+    with pytest.raises(WriterClosedError):
+        w.data_version()
+    w.close()  # 2 回目は何もしない
+    check = open_reader(db_path)
+    try:
+        assert check.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 5
+        assert read_data_version(check) == 5
+    finally:
+        check.close()
+
+
+def test_close_checkpoints_wal(db_path: Path) -> None:
+    w = IndexWriter(db_path)
+    for i in range(20):
+        w.submit(lambda c, i=i: insert_workspace(c, f"w{i}"), bumps_version=True, label=f"w{i}").result(5)
+    w.close()
+    wal = db_path.with_name(db_path.name + "-wal")
+    assert not wal.exists() or wal.stat().st_size == 0  # TRUNCATE 済み（最後の接続が閉じて消えることもある）
+    c = sqlite3.connect(db_path)
+    try:
+        assert c.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 20  # 本体に入っている
+    finally:
+        c.close()
+
+
+def test_cancelled_job_before_start_is_skipped(writer: IndexWriter) -> None:
+    started, release = threading.Event(), threading.Event()
+    blocker = writer.submit(gate_job(started, release), bumps_version=False, label="blocker")
+    assert started.wait(5)
+    ran: list[str] = []
+    victim = writer.submit(lambda c: ran.append("victim"), bumps_version=True, label="victim")
+    follower = writer.submit(lambda c: ran.append("follower"), bumps_version=True, label="follower")
+    assert victim.cancel()
+    release.set()
+    blocker.result(5)
+    follower.result(5)
+    assert ran == ["follower"]
+    assert writer.data_version() == 1
+
+
+def test_data_version_reflects_commits_visible_to_readers(writer: IndexWriter, db_path: Path) -> None:
+    pool = ReaderPool(db_path, size=1)
+    try:
+        writer.submit(lambda c: None, bumps_version=True, label="a").result(5)
+        with pool.reader() as r:
+            assert read_data_version(r) == writer.data_version() == 1
+    finally:
+        pool.close()
+
+
+async def test_asubmit_awaits_result_and_propagates_errors(writer: IndexWriter) -> None:
+    assert await writer.asubmit(lambda c: 6 * 7, bumps_version=False, label="answer") == 42
+
+    def bad(c: sqlite3.Connection) -> None:
+        raise KeyError("nope")
+
+    with pytest.raises(KeyError):
+        await writer.asubmit(bad, bumps_version=True, label="bad")
+    assert await writer.anext_edit_id() == "ed_0001"
+    results = await asyncio.gather(
+        *(writer.asubmit(lambda c, i=i: i, bumps_version=True, label=f"j{i}") for i in range(30))
+    )
+    assert results == list(range(30))
+    assert writer.data_version() == 30
+
+
+async def test_asubmit_does_not_block_event_loop_when_queue_is_full(db_path: Path) -> None:
+    w = IndexWriter(db_path, queue_max=2)
+    started, release = threading.Event(), threading.Event()
+    try:
+        blocker = w.submit(gate_job(started, release), bumps_version=False, label="blocker")
+        assert await asyncio.to_thread(started.wait, 5)
+        w.submit(lambda c: None, bumps_version=False, label="q1")
+        w.submit(lambda c: None, bumps_version=False, label="q2")  # キュー 2 件で満杯
+        task = asyncio.create_task(w.asubmit(lambda c: "done", bumps_version=False, label="waits"))
+        ticks = 0
+        for _ in range(5):  # 待っている間もイベントループは回る
+            await asyncio.sleep(0.05)
+            ticks += 1
+        assert ticks == 5
+        assert not task.done()
+        release.set()
+        assert await asyncio.wait_for(task, 10) == "done"
+        blocker.result(5)
+    finally:
+        release.set()
+        w.close()
+
+
+def test_submit_blocks_when_queue_is_full_until_space(db_path: Path) -> None:
+    w = IndexWriter(db_path, queue_max=1)
+    started, release = threading.Event(), threading.Event()
+    try:
+        w.submit(gate_job(started, release), bumps_version=False, label="blocker")
+        assert started.wait(5)
+        w.submit(lambda c: None, bumps_version=False, label="q1")
+        done: list[Future[None]] = []
+        t = threading.Thread(
+            target=lambda: done.append(w.submit(lambda c: None, bumps_version=False, label="q2"))
+        )
+        t.start()
+        t.join(0.3)
+        assert t.is_alive()  # 満杯なので待つ
+        release.set()
+        t.join(10)
+        assert not t.is_alive()
+        done[0].result(5)
+    finally:
+        release.set()
+        w.close()
