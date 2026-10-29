@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 from collections.abc import Sequence
@@ -45,8 +46,17 @@ WATCHER_STOP_TIMEOUT_S = 2.0
 STARTUP_WAIT_S = 10.0  # roots の待ち上限（5 s）と cwd への退避（8 s）より長く
 
 
+async def _maybe_await(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
 class IndexerSink:
-    """``Watcher`` の ``IngestSink``: 監視のイベントを ``Indexer`` に渡す（冪等。同じ内容なら ``index_file`` が何もしない）。"""
+    """``Watcher`` の ``IngestSink``: 監視のイベントを ``Indexer`` に渡す（冪等。同じ内容なら ``index_file`` が何もしない）。
+
+    索引に反映したら、同じ変更（作成・変更・削除）をそのワークスペースの起動中の LSP へ ``LspPool.notify_watched``
+    （``workspace/didChangeWatchedFiles``）で送る。basedpyright は作業ツリーで新しく作られたファイルを、これか ``didOpen`` を受けるまで
+    自分では見つけず、rename の参照に含めない（T-11 の実機の観察）。バースト（``rescan``）は前後の ``files`` の差から送る。
+    """
 
     def __init__(
         self, ws: Workspace, indexer: Indexer, readers: ReaderPool, lsp_pool: LspPool | None = None
@@ -63,15 +73,25 @@ class IndexerSink:
     async def changed(self, rel: RelPath) -> None:
         stats = await self._indexer.index_file(rel)
         if stats is not None:
-            await self._notify(rel, FileChangeType.CHANGED)
+            await self._notify([(rel, FileChangeType.CREATED if stats.file_created else FileChangeType.CHANGED)])
 
     async def removed(self, rel: RelPath) -> None:
         if await self._indexer.remove(rel):
-            await self._notify(rel, FileChangeType.DELETED)
+            await self._notify([(rel, FileChangeType.DELETED)])
 
     async def rescan(self) -> None:
         _log.info("watcher burst: switching to a differential rescan")
+        watching = self._lsp is not None and bool(self._lsp.handles(self._ws))
+        before = await asyncio.to_thread(self._snapshot) if watching else None
         await self._indexer.scan()
+        if before is not None:  # 起動中の LSP がある: 走査で増えた・変わった・消えたファイルを知らせる
+            after = await asyncio.to_thread(self._snapshot)
+            await self._notify(_file_changes(before, after))
+
+    def _snapshot(self) -> dict[str, str]:
+        with self._readers.reader() as conn:
+            rows = conn.execute("SELECT path, sha256 FROM files WHERE workspace_id = ?", (self._ws.workspace_id,)).fetchall()
+        return {str(path): str(sha) for path, sha in rows}
 
     def known_paths_under(self, prefix: str) -> list[RelPath]:
         like = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -82,13 +102,26 @@ class IndexerSink:
             ).fetchall()
         return [RelPath(r[0]) for r in rows]
 
-    async def _notify(self, rel: RelPath, kind: FileChangeType) -> None:
-        if self._lsp is None:
+    async def _notify(self, changes: Sequence[tuple[RelPath, FileChangeType]]) -> None:
+        if self._lsp is None or not changes:
             return
         try:
-            await self._lsp.notify_watched(self._ws, [(rel, kind)])
+            await self._lsp.notify_watched(self._ws, changes)
         except Exception:  # noqa: BLE001  LSP への通知の失敗で索引を止めない
-            _log.warning("didChangeWatchedFiles failed for %s", rel, exc_info=True)
+            _log.warning("didChangeWatchedFiles failed (%d paths, first %s)", len(changes), changes[0][0], exc_info=True)
+
+
+def _file_changes(before: dict[str, str], after: dict[str, str]) -> list[tuple[RelPath, FileChangeType]]:
+    """``files`` の ``{path: sha256}`` の前後の差。新規は CREATED、``sha256`` が違えば CHANGED、無くなれば DELETED（パス順）。"""
+    out: list[tuple[RelPath, FileChangeType]] = []
+    for path in sorted(before.keys() | after.keys()):
+        if path not in before:
+            out.append((RelPath(path), FileChangeType.CREATED))
+        elif path not in after:
+            out.append((RelPath(path), FileChangeType.DELETED))
+        elif before[path] != after[path]:
+            out.append((RelPath(path), FileChangeType.CHANGED))
+    return out
 
 
 @dataclass(slots=True)
@@ -337,23 +370,40 @@ class RuntimeHub:
         pool = self.lsp_pool
         if pool is None:
             return
+        try:
+            pool_rebind = getattr(pool, "rebind", None)
+            if pool_rebind is not None:  # ``LspPool.rebind``: ハンドルごとの差し替えと、Python 環境が変われば Python 系の再起動
+                await _maybe_await(pool_rebind(ws))
+                return
+        except Exception:  # noqa: BLE001  LSP 側の差し替えの失敗で設定の変更を止めない
+            _log.warning("could not rebind the LSP pool for %s", ws.workspace_id, exc_info=True)
+            return
         for handle in pool.handles(ws):
             rebind = getattr(handle, "rebind", None)
             if rebind is None:
                 _log.debug("LspHandle.rebind is not available; %s keeps its Workspace", handle.language_id)
                 continue
             try:
-                rebind(ws)
-            except Exception:  # noqa: BLE001  LSP 側の差し替えの失敗で設定の変更を止めない
+                await _maybe_await(rebind(ws))
+            except Exception:  # noqa: BLE001
                 _log.warning("could not rebind the LSP handle %s", handle.language_id, exc_info=True)
 
     # --- LSP の診断 → PaaD ---
 
     async def on_diagnostics(
-        self, path: RelPath, diags: list[dict[str, Any]], version: int | None, source: str
+        self,
+        path: RelPath,
+        diags: list[dict[str, Any]],
+        version: int | None,
+        source: str,
+        ws: Workspace | None = None,
     ) -> None:
-        """``LspPool`` の ``on_diagnostics``。アクティブなワークスペースの PaaD の ``source`` の行を置換する（``data_version`` は進めない）。"""
-        rt = self.runtime()
+        """``LspPool`` の ``on_diagnostics``。診断を送ってきたハンドルのワークスペース（``ws``）の束の PaaD に、``source`` の行を置換する。
+
+        ``data_version`` は進めない。書き込みが済むまで返らない（``DiagnosticsHub.wait_for`` が EP-7 の順序をそれで守る）。
+        ``ws`` が無い呼び手（4 引数）はアクティブなワークスペース。束が無い（開けなかった・畳まれた）ときは捨てる。
+        """
+        rt = self.runtime(None if ws is None else ws.workspace_id)
         if rt is None:
             return
         facts = _diagnostic_facts(diags, source)
@@ -449,10 +499,25 @@ class WiredServices(ToolServices):
         rt = self.runtime()
         return None if rt is None else rt.watcher
 
+    def _router_wiring(self, ws: Workspace) -> dict[str, Any]:
+        pool = self.lsp_pool
+        make_router = getattr(pool, "router", None)
+        if pool is None or make_router is None:
+            return {}  # LSP が無い（構文検証だけに降格する）
+        router = make_router(ws)
+
+        def lsp_status(language_id: str) -> LspStatus:
+            return pool.status(language_id, ws).status
+
+        return {"documents": router, "diagnostics_hub": router.diagnostics_hub, "lsp_status": lsp_status}
+
     def edit_transaction(self, ws: Workspace, *, lsp: Any = None, **overrides: Any) -> EditTransaction:
         """編集トランザクションを組む（T-10・T-11・T-13 が呼ぶ）。束の ``writer`` / ``indexer`` / ``watcher`` / ``readers`` と共有の ``trees``・``locks``。
 
-        ``lsp`` に ``LspHandle`` が渡ればその ``documents`` / ``diagnostics`` を使い、LSP の状態は READY とする。``overrides`` が最優先。
+        ``lsp`` に ``LspHandle`` が渡ればその ``documents`` / ``diagnostics`` を使い、LSP の状態は READY とする（T-13 は 1 つのサーバーに
+        絞って呼ぶ）。渡さないとき、LSP プールが ``router(ws)`` を持てば ``DocumentRouter`` を口にする（言語ごとに正しいハンドルへ文書を振り分け、
+        1 言語に複数のサーバーがあれば全部に同期して診断の待ちを合わせる。BUG-0023）。LSP の状態は言語ごとにプールの ``status``。
+        ``overrides`` が最優先。
         """
         rt = self.runtime(ws.workspace_id)
         if rt is None or self.hub is None:
@@ -472,6 +537,8 @@ class WiredServices(ToolServices):
         }
         if lsp is not None:
             kw.update(documents=lsp.documents, diagnostics_hub=lsp.diagnostics, lsp_status=lambda _lang: LspStatus.READY)
+        else:
+            kw.update(self._router_wiring(ws))
         kw.update({k: v for k, v in overrides.items() if v is not None})
         return EditTransaction(ws, **kw)
 
