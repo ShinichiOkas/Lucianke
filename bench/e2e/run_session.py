@@ -865,6 +865,7 @@ def report(result: dict[str, Any]) -> str:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--via", choices=["roots", "set_roots"], default=None, help="how the workspace root is pointed (default: session.toml)")
     ap.add_argument("--records-dir", type=Path, default=RECORDS)

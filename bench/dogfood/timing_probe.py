@@ -20,6 +20,7 @@ def pct(xs: list[float], p: float) -> float:
 
 
 async def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     for name, tool, args in CASES:
         async with Client(params(), mode="legacy", cache=None) as c:
             for _ in range(15):

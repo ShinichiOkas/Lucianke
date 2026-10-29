@@ -1174,6 +1174,7 @@ async def _sha_after(env: Env, op: Op) -> str | None:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     ap = argparse.ArgumentParser(description="編集の構文妥当性ベンチ（仕様書 §14.5）")
     ap.add_argument("--fixtures", default="F-PY,F-TS")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)

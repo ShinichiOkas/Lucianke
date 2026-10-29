@@ -8,6 +8,7 @@ import run_dogfood as r  # noqa: E402
 
 
 async def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     files = r.py_files()[:5]
     print(files, flush=True)
     rel = "src/lucianke/mcp/budget.py"

@@ -515,6 +515,7 @@ async def obs8(c: Client) -> None:
 
 
 async def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     want = [int(a) for a in sys.argv[1:]] or [1, 3, 4, 5, 6, 7, 8]
     async with Client(params(), mode="legacy", cache=None) as c:
         for n, fn in ((1, obs12), (3, obs3), (4, obs4), (5, obs5), (6, obs6), (7, obs7), (8, obs8)):

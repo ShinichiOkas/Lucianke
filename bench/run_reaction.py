@@ -217,6 +217,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # 応答の日本語や → を cp932 のパイプへ出して化けさせない（BUG-0038）
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--fixture", default="poly", help="poly | self は不可（書き換えるため）| F-PY | F-TS")
     ap.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
