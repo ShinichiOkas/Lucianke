@@ -30,6 +30,7 @@ from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.syntax.parsers import parse_source
 from lucianke.tools import register_tools
+from lucianke.tools._runtime import WiredServices
 from lucianke.tools._services import ToolServices
 from lucianke.tools.t10_edit_symbol_body import _diag_records  # pyright: ignore[reportPrivateUsage]
 
@@ -231,14 +232,38 @@ async def test_operations_without_a_builder_are_unsupported_and_write_nothing(
     assert snapshot(root) == before
 
 
-async def test_tool_without_wired_edit_services_says_so(root: Path) -> None:
+async def test_bare_tool_services_without_edit_services_says_so(root: Path) -> None:
+    """編集の依存（``locks`` / ``writer_index`` / ``journal_dir``）も ``edit_transaction`` も持たない素の ``ToolServices`` → ``edit_services_missing``。"""
+    base = build_services(lambda: [str(root)])
+    bare = ToolServices(roots=base.roots, trees=base.trees, lines=base.lines)
     registry = ToolRegistry()
     register_tools(registry)
-    pipe = Pipeline(registry, services=build_services(lambda: [str(root)]))
+    pipe = Pipeline(registry, services=bare)
+    before = snapshot(root)
     r = await edit(pipe, target=VALIDATE, operation="replace_body", new_code=NEW_VALIDATE)
     err = error_of(r)
     assert err["code"] == "E_UNSUPPORTED" and err["details"]["reason"] == "edit_services_missing"
     assert set(err["details"]["missing"]) == {"locks", "writer_index", "journal_dir"}
+    assert snapshot(root) == before
+
+
+async def test_wired_services_with_the_index_not_open_says_so(root: Path) -> None:
+    """結線済み（``WiredServices``）だが、このワークスペースの束が開いていない（束の表〈``hub``〉が無い、起動直後で開けていない）→ ``index_not_open``。
+
+    ``edit_services_missing``（そもそも編集サービスが無いビルド）とは別の理由。呼び出し側が「待てば直る」と「直らない」を区別できるように。
+    """
+    services = build_services(lambda: [str(root)])  # hub 無し = 束が 1 つも開いていない
+    assert isinstance(services, WiredServices) and services.hub is None
+    registry = ToolRegistry()
+    register_tools(registry)
+    pipe = Pipeline(registry, services=services)
+    before = snapshot(root)
+    r = await edit(pipe, target=VALIDATE, operation="replace_body", new_code=NEW_VALIDATE)
+    err = error_of(r)
+    assert err["code"] == "E_UNSUPPORTED" and err["details"]["reason"] == "index_not_open"
+    assert err["details"]["workspace_id"] == services.workspace().workspace_id
+    assert "missing" not in err["details"]
+    assert snapshot(root) == before
 
 
 # --- 事後条件 1: sha256_after・diff・EP-1 ------------------------------------------------------------
