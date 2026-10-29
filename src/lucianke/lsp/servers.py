@@ -157,7 +157,9 @@ def default_server(language_id: str, role: Role = "types") -> LspServerDef | Non
     return found[0] if found else None
 
 
-def build_settings(defn: LspServerDef, *, python_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+def build_settings(
+    defn: LspServerDef, *, python_path: str | os.PathLike[str] | None = None
+) -> dict[str, Any]:
     """``defn.settings`` の複製に、実行時にしか決まらない値を重ねる。
 
     ``python_path`` はワークスペースの Python インタープリタ（``python.pythonPath``）。basedpyright / pyright が
