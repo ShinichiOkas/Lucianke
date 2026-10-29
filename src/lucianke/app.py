@@ -18,19 +18,36 @@ from lucianke.config import Settings, load_settings
 from lucianke.logging_setup import setup_logging
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from lucianke.mcp.registry import ToolRegistry
+    from lucianke.tools._services import ToolServices
 
 
 def build_registry(settings: Settings) -> ToolRegistry:
     """ツール登録表を作る。開発用ツール（ping）は ``LUCIANKE_DEV_TOOLS=1`` のときだけ。実ツールは後でここに足す。"""
     from lucianke.mcp.registry import ToolRegistry
+    from lucianke.tools import register_tools
 
     registry = ToolRegistry()
+    register_tools(registry)
     if settings.dev_tools:
         from lucianke.tools import dev_ping
 
         registry.register(dev_ping.SPEC)
     return registry
+
+
+def build_services(roots: Callable[[], Sequence[str]]) -> ToolServices:
+    """ツールが使うサービスの入れ物を組み立てる。``roots`` は現在の作業ツリーの根（MCP の roots か cwd）を返す関数。
+
+    ``tools`` は ``mcp`` を import できないので、compact の行の組み立て関数（``mcp.render.compact``）はここで注入する。
+    """
+    from lucianke.mcp.render import compact
+    from lucianke.syntax.parsers import TreeCache
+    from lucianke.tools._services import ToolServices
+
+    return ToolServices(roots=roots, trees=TreeCache(), lines=compact)
 
 
 def run_stdio() -> int:
@@ -46,8 +63,8 @@ def run_stdio() -> int:
     from lucianke.mcp.server import RootsState, build_server
 
     registry = build_registry(settings)
-    pipeline = Pipeline(registry)
     roots = RootsState.from_cwd()
+    pipeline = Pipeline(registry, services=build_services(lambda: roots.paths))
     server = build_server(registry, pipeline, roots, version=__version__)
     log.info("lucianke %s starting (tools=%d)", __version__, len(registry), extra={"event": "startup"})
 
