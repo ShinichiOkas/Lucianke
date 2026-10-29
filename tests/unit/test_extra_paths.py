@@ -304,3 +304,20 @@ def test_only_the_python_type_server_gets_extra_paths(tmp_path: Path) -> None:
     assert others  # ruff や TypeScript 系の定義がある
     for defn in others:
         assert "extraPaths" not in str(build_settings(defn, extra_paths=[tmp_path / "src"])), defn.name
+
+
+# --- ワークスペースへの載り方（本番の経路） ------------------------------------------------------------------------
+
+
+def test_registering_a_src_layout_workspace_records_extra_paths_and_set_python_env_keeps_them(
+    tmp_path: Path,
+) -> None:
+    from lucianke.workspace.context import WorkspaceContext
+
+    proj = make(tmp_path / "proj", "src/shop/__init__.py", "tests/test_payment.py")
+    ctx = WorkspaceContext(cwd=tmp_path, env={"PATH": ""})
+    ws = ctx.register_roots([str(proj)])[0]
+    assert ws.python_env is not None and ws.python_env.extra_paths == ("src",)
+    ws2 = ctx.set_python_env(ws.workspace_id, sys.executable)
+    assert ws2.python_env is not None and ws2.python_env.manager == "explicit"
+    assert ws2.python_env.extra_paths == ("src",)
