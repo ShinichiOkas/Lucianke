@@ -1723,7 +1723,7 @@ host ◄─CallToolResult(content, structuredContent?, isError=false)─┘
 ```
 
 - NFR-PERF-1 は 2c がキャッシュヒットする定常状態で測る（仕様書 §14.4 のウォームアップ後）。ミス時の時間は別に記録する。
-- 失敗分岐: 一部の path が無い → `data.items[].error`、全体は `ok: true` と `warnings`（仕様書 §5.4.4）。全件失敗 → 最初の項目のコードで `ok: false`。`max_tokens` が小さく 1 件も入らない → レコード 0 件 + `next_cursor` + `warnings`。
+- 失敗分岐: 一部の path が無い → `data.items[].error`、全体は `ok: true` と `warnings`（仕様書 §5.4.4）。全件失敗 → 最初の項目のコードで `ok: false`。`max_tokens` が小さく 1 件も入らない → レコード 0 件 + `warnings`（`next_cursor` なし。BUG-0015、仕様書 §5.6 の 4）。
 
 ## 8.3 LSP の遅延起動と降格応答（resolve_symbols）
 

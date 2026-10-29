@@ -507,7 +507,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `E_QUERY_REJECTED` | `query_project_db` に SELECT / WITH 以外、または禁止関数を含む文 | 文を直す | `details.reason` |
 | `E_CURSOR_EXPIRED` | `cursor` が無効または基データが更新済み | 先頭から呼び直す | |
 | `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる | 範囲を狭める | `details.partial` |
-| `E_UNSUPPORTED` | 対象ティアではその操作を提供しない（例: Tier 3 への `rename_symbol`） | | `details.tier` |
+| `E_UNSUPPORTED` | 対象ティアではその操作を提供しない（例: Tier 3 への `rename_symbol`） | | `details.tier`、`details.reason`（`invalid_data_file`: 構文が壊れたデータファイル〔T-02〕、`revision_not_supported_until_M2`、`not_in_milestone`〔`details.milestone`〕、`file_too_large`、`secret_file`、`binary_file` など） |
 | `E_INTERNAL` | 上記以外の内部エラー。スタックはログにのみ出す | | `details.log_ref` |
 
 エラーオブジェクトの形:
@@ -569,7 +569,7 @@ kind         = "Module" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | 
 modifiers    = modifier , { " " , modifier } ;
 modifier     = "pub" | "priv" | "prot" | "static" | "async" | "abstract" | "export" ;
 sig-inline   = "(" , text , ")" , [ " -> " , text ] ;
-fold         = "{ ..." , int , ( " lines omitted }" | " nodes omitted }" ) ;   (* nodes は XML の max_depth 超過。T-02 の 4 *)
+fold         = "{ ..." , int , ( " lines" | " nodes" ) , " omitted }" ;   (* nodes は XML の max_depth 超過。T-02 の 4 *)
 attr-line    = attr-key , ": " , text , NL ;
 attr-key     = "sig" | "doc" | "urn" | "type" | "body" | "when" | "conf" | "scip" | "decorators" | "raises"
              | "refs" | "rank" | "sha" | "declared_in" | "change" ;
@@ -609,7 +609,7 @@ level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
 6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。
 7. `kind` の `File` は、シンボルに分解せずファイル全体を 1 要素として扱う場合（T-18 の Tier 3 / Tier 4 のファイルの変更要素。`modified_symbols[].kind`）に使う。`symbols` テーブルには格納しない。
 8. ツール固有の見出し行（`kv-line`: `target:`、`applied:`、`resolved:` など）はインデント 0 に置く。インデントされた `key: text` は `attr-line` で、キーは `attr-key` の語彙に限る。
-9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない（範囲 `@Ls-e` は、集約した最初の要素の開始行から最後の要素の終了行まで）。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
+9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない（範囲 `@Ls-e` は、集約した最初の要素の開始行から最後の要素の終了行まで）。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` と `{ ...N nodes omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
 
 ### 6.1.1 代表例
 
@@ -1479,6 +1479,7 @@ json の `data`:
 
 - `E_INVALID_ARGUMENT`: `paths` が 0 件または 21 件以上、ルート外のパス、`max_depth` が範囲外。
 - `E_TARGET_NOT_FOUND`: 項目のファイルが存在しない（全件なら全体のエラー）。
+- `E_UNSUPPORTED`: 項目のファイルが構文の壊れたデータファイル（JSON / YAML / TOML / XML。`details.reason: "invalid_data_file"`、`details.language_id`）、大きすぎる・バイナリ・秘密ファイル（`details.reason`）。項目単位。
 - `E_WORKSPACE_NOT_CONFIGURED`, `E_REVISION_NOT_FOUND`, `E_CURSOR_EXPIRED`: §5.8 のとおり。
 
 **精度と降格**: `exact` は `structural` の出力に、注釈の無い戻り値を LSP の推論で `-> <inferred: int>` と補う点だけが異なる。`structural` は宣言どおりのシグネチャと正確な行範囲を返す。`heuristic` はシンボル名と推定行範囲のみでシグネチャ・入れ子・`doc:` を返さない。`lexical_fallback` は定義パターンに一致した行だけを平坦に並べ、終了行を返さない。
@@ -1778,6 +1779,7 @@ json の `data`:
 - 各参照行の `use` は 7 値のいずれかである。
 - `include_tests: false` のとき `is_test: true` の行は 0 件である。
 - 全ページを通じて同じ `(path, line, col)` は 1 度しか現れない。
+- 解決できない `import` は外部シンボル `lk://_ext/<パッケージ名>#<名前>`（`is_external`）として索引に現れ、それを `target` にした `references` は `import` の使用箇所を返す。
 - `budget.used_tokens_est ≤ max_tokens`。
 
 ### T-07 `query_call_hierarchy`
@@ -1849,6 +1851,7 @@ json の `data`:
 - `exact` 水準のとき、`depth = 1` の incoming ノード集合は LSP の incoming calls の結果と等しい。
 - 各 `when:` の文字列は、その呼び出し箇所を囲む条件ノードのソーステキストだけから構成される（固定フィクスチャで期待文字列と一致）。
 - 同じ経路上で同じ URN が 2 回以上展開されない（`cycle: true` のノードは `children` を持たない）。
+- 解決できない `import` の呼び先は、`is_external: true` の葉ノード（`lk://_ext/<パッケージ名>#<名前>`。`children` を持たない）として `nodes[]` に現れる。
 - `budget.used_tokens_est ≤ max_tokens`。
 
 ---
@@ -2221,7 +2224,7 @@ json `data`（共通フィールドに加えて）:
 
 1. `applied: true` のとき、`files_changed[]` の各ファイルの SHA-256 は `sha256_after` に等しく、`files_changed[]` に無いファイルの SHA-256 は呼び出し前と同じである。
 2. `applied: true` かつ exact のとき、`urn_map` の各キーは呼び出し前の `symbols` に存在し、各値は呼び出し後の `symbols` に存在し、キーは呼び出し後の `symbols` に存在しない。
-3. `applied: true` かつ exact のとき、`edits_count` は、呼び出し前に `find_references_and_implementations`（`query_type: "references"`, `include_tests: true`）が返す参照件数 + 1（定義）に等しい。
+3. `applied: true` かつ exact のとき、`edits_count` は、呼び出し前の LSP の参照件数 + 1（定義）に等しい。T-06 の件数とは一致しなくてよい（basedpyright の `rename` は `tests/` の呼び出しを含めないことがあり、構造的に数える T-06 の件数とずれる。19b の観察）。
 4. `applied: false` のとき、ワークスペース内のどのファイルの SHA-256 も呼び出し前と同じである。
 
 ### T-12 `structural_search_replace`
@@ -3051,7 +3054,7 @@ json の `data`:
 
 ## 12.2 位置エンコーディング
 
-- LSP との `initialize` で `positionEncodings: ["utf-8", "utf-16"]` を提示し、サーバーが選んだ単位で内部変換する（MUST）。交渉できない LSP は UTF-16 とみなす。
+- LSP との `initialize` で `positionEncodings: ["utf-8", "utf-16"]` を提示し、サーバーが選んだ単位で内部変換する（MUST）。交渉できない LSP は UTF-16 とみなす。応答に `positionEncoding` が無ければ UTF-16 とし、サーバー別の上書きは持たない。LSP へ送る列は文字の境界だけで、丸めが要るときは要求を送らず降格する（S-11: ruff は文字の途中の列でパニックする。実測は basedpyright・vtsls・typescript-language-server が UTF-16、ruff が utf-8）。
 - 外部に出す行・列は §5.10（1 始まり、コードポイント単位）に統一する（NFR-OPS-4）。
 - 受入: 非 ASCII（全角文字、絵文字、結合文字）を含む行でのシンボル位置が、Tree-sitter の範囲と一致し、`rename_symbol` が正しい範囲を書き換える。
 
@@ -3061,13 +3064,13 @@ json の `data`:
 |---|---|
 | 起動 | 遅延起動（Lazy Spawn）。当該言語への最初の要求で非同期に起動し、その要求には降格応答を返す（NFR-OPS-3）。起動時に全言語を立ち上げてはならない（MUST NOT） |
 | 単位 | 言語 × ワークスペース ごとに 1 プロセス。同一ワークスペースの Python には型解決用（pyright 系）と Lint / Code Action 用（ruff 系）の 2 つを並列に持ってよい（MAY） |
-| 発見 | 実行ファイルの探索順: 環境変数 `LUCIANKE_LSP_<LANG>_CMD` → ワークスペースの `.venv/bin`・`node_modules/.bin` → `PATH`。見つからなければ `lsp_status: "unavailable"` とし、理由を `configure_workspace status` に出す |
+| 発見 | 実行ファイルの探索順: 環境変数 `LUCIANKE_LSP_<サーバー名>_CMD`（サーバー名単位。先）→ `LUCIANKE_LSP_<LANG>_CMD`（言語単位。lint 役は `…_LINT_CMD`）→ ワークスペースの `.venv/bin`・`node_modules/.bin` → `PATH`。見つからなければ `lsp_status: "unavailable"` とし、理由を `configure_workspace status` に出す |
 | 状態 | `standby`（未起動）→ `indexing`（起動済み・初期索引中。`$/progress` または `window/workDoneProgress` から進捗を取る。取れなければ最初の `publishDiagnostics` 受信まで）→ `ready` → `unavailable`（起動失敗・クラッシュ上限到達） |
 | 文書同期 | `textDocument/didOpen` は要求で初めて触れたファイルに送り、編集後は `didChange`（全文または増分）、外部変更は `workspace/didChangeWatchedFiles`。開いた文書は LRU で 200 件を上限とし、超えた分は `didClose` |
 | 要求のタイムアウト | 定義・参照・ホバー: 3,000 ms。`callHierarchy`: 5,000 ms。`codeAction`: 5,000 ms。`rename`: 10,000 ms。超過は段を 1 つ降りて応答し、`warnings[]` に記録する |
 | 再起動 | クラッシュ時は指数バックオフ（1 s, 2 s, 4 s）で最大 3 回再起動。超えたら `unavailable`。`configure_workspace reindex_scope: "lsp"` で手動リセット |
 | 待機解放 | 30 分間要求が無い LSP は `shutdown` → `exit` して `standby` に戻してよい（MAY） |
-| 候補サーバー | Python: pyright / basedpyright + ruff。TypeScript / JavaScript: vtsls または typescript-language-server。Rust: rust-analyzer。Go: gopls。C / C++: clangd。C#: csharp-ls または OmniSharp。Kotlin: kotlin-language-server。Swift: sourcekit-lsp。いずれも採用前に実機で `initialize` と主要要求を確かめる |
+| 候補サーバー | Python: pyright / basedpyright + ruff。TypeScript / JavaScript: typescript-language-server（既定）または vtsls（TypeScript が見つからず前者が起動できないときの代替）。Rust: rust-analyzer。Go: gopls。C / C++: clangd。C#: csharp-ls または OmniSharp。Kotlin: kotlin-language-server。Swift: sourcekit-lsp。いずれも採用前に実機で `initialize` と主要要求を確かめる |
 
 ## 12.4 ファイル監視と増分同期
 
@@ -3098,8 +3101,8 @@ json の `data`:
 
 | 手段 | 項目 |
 |---|---|
-| 環境変数 | `LUCIANKE_CACHE_DIR`、`LUCIANKE_LOG_LEVEL`、`LUCIANKE_LSP_<LANG>_CMD`（起動コマンドの上書き）、`LUCIANKE_DISABLE_LSP`（カンマ区切りの言語）、`LUCIANKE_MAX_FILE_BYTES` |
-| ワークスペース設定ファイル | ルートの `.lucianke.toml` を **読むだけ**（MAY。採否は §17 OD-13）。項目: `exclude_globs`、`python_interpreter`、`lsp.<lang>.cmd`、`test_globs`、`co_change_window` |
+| 環境変数 | `LUCIANKE_CACHE_DIR`、`LUCIANKE_LOG_LEVEL`、`LUCIANKE_LSP_<サーバー名>_CMD` / `LUCIANKE_LSP_<LANG>_CMD`（起動コマンドの上書き。サーバー名単位が先）、`LUCIANKE_DISABLE_LSP`（カンマ区切りの言語）、`LUCIANKE_MAX_FILE_BYTES` |
+| ワークスペース設定ファイル | ルートの `.lucianke.toml` を **読むだけ**（MAY。採否は §17 OD-13）。項目: `exclude_globs`、`python_interpreter`、`lsp.<lang>.cmd`、`lsp.position_encodings`（MAY。既定 `["utf-8", "utf-16"]`、`["utf-16"]` に絞る逃げ道。**未実装**）、`test_globs`、`co_change_window` |
 | ツール | `configure_workspace`（T-00）。セッション内の設定は PaaD の `workspaces` 行に保存し、次回起動でも使う |
 
 優先順位: ツールでの明示指定 > 環境変数 > `.lucianke.toml` > 自動検出。
@@ -3200,7 +3203,7 @@ json の `data`:
 ## 14.4 レイテンシ（NFR-PERF-1、NFR-PERF-2）
 
 1. **ウォームアップ**: 対象言語の LSP が `ready` になり、起動時の差分索引が終わるまで待つ。これを満たすまでの時間も記録する（合否には用いない）。**初回の索引が重く時間がかかることは許容する**（師匠 2026-10-29「初回分析はいずれにせよ重く時間がかかる可能性があるのは仕方ない」）。合否の対象は定常状態の応答であり、初回索引の所要は報告値にとどめる。起動時間も同様で、コールドスタート（プロセス起動 → `initialize` 応答）は約 1 秒（中央値 980 ms。MCP SDK の import が主因。S-1 で確認）であり、初回の重さとして許容し、報告値にとどめる。ただし索引中もツールは降格応答で答え続けなければならない（NFR-OPS-3）。
-2. **母集団**: ツールごとに、台本が F-PY / F-TS からランダムに選んだ対象で 200 回呼び出す。対象は Tier 1 のファイルに限り、精度水準 `exact` で応答した呼び出しだけを集計する（降格応答は別に集計して報告する）。
+2. **母集団**: ツールごとに、台本が F-PY / F-TS からランダムに選んだ対象で 200 回呼び出す。対象は Tier 1 のファイルに限り、成功し、かつ `is_degraded == false`（§5.5。そのツールの最高水準で応答した）呼び出しだけを集計する。T-02・T-03・T-05 は最高水準が `structural` なので、`exact` だけでは母集団が空になる。`exact` で応答した呼び出しだけの集計も併記する。降格応答（`is_degraded == true`）は別に集計して報告する。
 3. **計測**: サーバー内の `timing_ms`（受信から送信直前）と、クライアント側の往復時間の両方を記録する。合否はサーバー内時間で判定する。
 4. **判定**: Fast Path ツール（§3.2 の NFR-PERF-1 の一覧）は p95 < 50 ms。Verification Path ツールは p95 < 500 ms。`verify_contract` は `timeout_ms` で打ち切った呼び出しを母集団から除く。
 5. 編集ツールは `diagnostics_wait_ms: 0` で呼び、診断待ちを含めない時間で判定する。診断が揃うまでの時間は別途記録する。
