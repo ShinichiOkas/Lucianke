@@ -194,6 +194,19 @@ async def test_unresolvable_workspace_id_is_an_error_result_not_a_handler_call()
     assert h.capture.last.error is not None and h.capture.last.error.code is ErrorCode.E_WORKSPACE_NOT_CONFIGURED
 
 
+async def test_workspace_id_confirmed_by_the_handler_replaces_the_one_resolved_before_it():
+    """ワークスペースを作るツール（T-00 set_roots）は、登録後のアクティブをヘッダの ws= に出せる（BUG-0019）。"""
+    h = Harness(behavior=lambda ctx, args: dataclasses.replace(make_output(1), workspace_id="made-ws"))
+    p = Pipeline(h.registry, services=Services())  # 呼び出し前は解決できない（None のまま）
+    compact = await p.call_tool("echo_tool", {})
+    assert " ws=made-ws " in compact.text.splitlines()[0]
+    json_out = await p.call_tool("echo_tool", {"format": "json"})
+    assert json_out.structured is not None and json_out.structured["ok"] is True
+    plain = Harness()
+    await plain.pipeline().call_tool("echo_tool", {})
+    assert plain.capture.last.call.workspace_id is None  # 返さないツールは従来どおり
+
+
 async def test_services_without_workspaces_keep_the_argument_as_is():
     h = Harness()
     await h.pipeline().call_tool("echo_tool", {})

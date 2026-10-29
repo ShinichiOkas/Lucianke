@@ -663,6 +663,7 @@ async def test_compact_output_is_grammatical(tmp_path: Path, poly: Path) -> None
     try:
         r = await rig.call(fmt="compact", action="set_roots", root_paths=[str(poly)])
         assert not r.is_error and g.validate(r.text) == [], r.text
+        assert " ws=poly " in r.text.splitlines()[0]  # 登録後のアクティブ（BUG-0019）
         rig.hub.lsp_pool = FakePool(rig.hub.context.active())
         r = await rig.call(fmt="compact", action="status")
         assert not r.is_error and g.validate(r.text) == [], r.text

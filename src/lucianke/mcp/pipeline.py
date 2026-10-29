@@ -225,6 +225,9 @@ class Pipeline:
                           cursor_offset=cursor_offset)  # fmt: skip
         out = await spec.handler(ctx, args)
         warnings.extend(out.warnings)  # ハンドラの警告（§5.4.4 の失敗件数など）はパイプラインの警告の後ろへ
+        if out.workspace_id is not None and out.workspace_id != call.workspace_id:
+            call = dataclasses.replace(call, workspace_id=out.workspace_id)  # ハンドラが確定した ID（set_roots の登録後。BUG-0019）
+            state.call = call
 
         def cursor_factory(offset: int) -> str:
             return self.cursor_codec.encode(tool=spec.name, args=cursor_args, offset=offset,

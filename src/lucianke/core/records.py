@@ -59,6 +59,9 @@ class ToolOutput:
         engine: 代表のエンジン選択（``lsp_status``、``warning`` の元）。
         page_unit: 1 レコードの意味（事後条件の文言と一致させる）。
         summarize: 残りの要約文（``# summary:`` 行）を作る関数。
+        workspace_id: ハンドラが確定した ``workspace_id``。ワークスペースを作る・変えるツール（T-00 ``set_roots``）が、
+            ハンドラの前に解決した値（登録前なら ``None``）と違う値を返すとき、パイプラインが描画前に ``CallInfo.workspace_id`` を
+            これに差し替える（ヘッダの ``ws=`` が登録後のアクティブを指す。BUG-0019）。通常のツールは ``None`` のまま。
         warnings: ハンドラが応答に添える警告（仕様書 §5.4.4: バッチの一部失敗の件数など）。パイプラインが
             ``RenderInput.warnings`` へ流し、compact は ``! `` 行、json は ``warnings[]`` になる。
     """
@@ -76,6 +79,7 @@ class ToolOutput:
     # いない続き（遅延列。パッカーは全部入ってもカーソルを出す。設計書 §7.2.2）。``None`` または以下なら ``records`` が全体
     total_estimate: int | None = None
     warnings: Sequence[str] = ()
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

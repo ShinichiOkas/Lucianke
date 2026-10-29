@@ -623,6 +623,7 @@ async def _view(
         page_unit="workspace",
         total_estimate=len(records),
         warnings=warnings,
+        workspace_id=active_id,
     )
 
 
