@@ -373,26 +373,39 @@ def test_pack_shrink_result_that_still_does_not_fit_stops() -> None:
     assert page.used_tokens_est <= 100
 
 
-def test_pack_nothing_fits_gives_zero_records_cursor_and_warning() -> None:
+def test_pack_nothing_fits_gives_zero_records_and_warning_without_a_cursor() -> None:
+    """BUG-0015: 1 件も入らないとき、進まないカーソル（同じオフセット）は出さない。理由と必要な大きさを警告で返す。"""
     recs = [rec("huge", 1000), rec("next", 5)]
     page = Packer().pack(make_out(recs), max_tokens=200, reserved_tokens=30, cursor_factory=cursor_factory())
     assert page.records == ()
-    assert page.next_cursor is not None
-    assert decode_offset(page.next_cursor) == 0
+    assert page.next_cursor is None
+    assert page.summary is None
     assert page.truncated is True
     assert page.remaining == 2
     assert len(page.warnings) == 1
     assert "max_tokens" in page.warnings[0]
-    assert "1000" in page.warnings[0]  # 必要な大きさを知らせる
+    assert "~1000 tokens" in page.warnings[0] and "~1030 or more" in page.warnings[0]  # 必要な大きさ（予約の分も）
+    assert page.used_tokens_est == 30 + EST.count("! " + page.warnings[0] + "\n")  # トレーラは描かれないので数えない
     assert page.used_tokens_est <= 200
 
 
-def test_pack_nothing_fits_keeps_offset_in_cursor() -> None:
+def test_pack_nothing_fits_at_an_offset_gives_no_cursor_either() -> None:
     recs = [rec("a", 5), rec("b", 5), rec("huge", 1000)]
     page = Packer().pack(make_out(recs), max_tokens=200, offset=2, cursor_factory=cursor_factory())
     assert page.records == ()
-    assert decode_offset(page.next_cursor or "") == 2
+    assert page.next_cursor is None
+    assert page.remaining == 1 and page.truncated is True
     assert page.warnings
+
+
+def test_pack_nothing_fits_the_suggested_max_tokens_works() -> None:
+    """警告の目安（予約 + 次のレコード）まで上げれば、同じ引数でそのレコードが入る。"""
+    recs = [rec("huge", 300), rec("next", 300)]
+    small = Packer().pack(make_out(recs), max_tokens=200, reserved_tokens=40, cursor_factory=cursor_factory())
+    assert small.records == () and "~340 or more" in small.warnings[0]
+    page = Packer().pack(make_out(recs), max_tokens=340 + 60, reserved_tokens=40, cursor_factory=cursor_factory())
+    assert [r.key for r in page.records] == ["huge"]  # トレーラの分は余裕に含める
+    assert page.next_cursor is not None and decode_offset(page.next_cursor) == 1
 
 
 def test_pack_drops_summary_before_giving_up_on_records() -> None:
@@ -508,7 +521,8 @@ def test_used_tokens_never_exceed_max_tokens_random() -> None:
         tail = recs[offset:]
         assert len(page.records) + page.remaining == len(tail)
         assert page.truncated is (page.remaining > 0)
-        assert (page.next_cursor is not None) is page.truncated
+        # 続きがあって 1 件以上入ったときだけカーソルを出す。1 件も入らないページは進まないカーソルを出さない（BUG-0015）
+        assert (page.next_cursor is not None) is (page.truncated and bool(page.records))
         if not page.truncated:
             assert page.summary is None
         for i, r in enumerate(page.records):
@@ -520,7 +534,8 @@ def test_used_tokens_never_exceed_max_tokens_random() -> None:
         if page.truncated and not page.records:
             zero_pages += 1
             assert page.warnings
-        if page.truncated:
+            assert page.next_cursor is None and page.summary is None
+        if page.next_cursor is not None:
             state = CODEC.decode(
                 page.next_cursor or "", tool="t", args=args, data_version=version, workspace_id=ws
             )

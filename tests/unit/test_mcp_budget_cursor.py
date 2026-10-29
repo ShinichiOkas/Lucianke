@@ -244,3 +244,64 @@ def test_walk_pages_random() -> None:
         keys = [r.key for p in pages for r in p.records]
         assert keys == [r.key for r in everything], case
         assert pages[-1].next_cursor is None and pages[-1].remaining == 0
+
+
+# --- 1 件も入らないページはカーソルを出さない（BUG-0015） ------------------------------------------
+
+
+def test_a_page_with_a_cursor_always_advances_the_offset_random() -> None:
+    """どんな予算・予約・オフセットでも、next_cursor を返すページは 1 件以上を含み、オフセットが進む。"""
+    rng = random.Random(15)
+    zero = 0
+    for case in range(300):
+        n = rng.randint(1, 40)
+        everything = [rec(f"c{case}r{i}", size=rng.choice([1, 5, 40, 300])) for i in range(n)]
+        offset = rng.randint(0, n - 1)
+        limit = rng.randint(1, 10)
+        page = pack(
+            tool_window(everything, offset, limit),
+            max_tokens=rng.randint(MIN_MAX_TOKENS, 500),
+            offset=offset,
+            reserved=rng.randint(0, 150),
+        )
+        if page.next_cursor is not None:
+            assert page.records, case
+            assert offset_of(page.next_cursor) == offset + len(page.records), case
+        elif page.truncated:
+            zero += 1
+            assert page.records == () and page.warnings and page.summary is None, case
+    assert zero > 0  # 1 件も入らない経路を通っている
+
+
+async def test_pipeline_zero_record_page_has_no_cursor_and_a_larger_max_tokens_succeeds() -> None:
+    from lucianke.mcp.pipeline import Pipeline
+    from lucianke.mcp.registry import CommonArgs, ToolRegistry, ToolSpec
+
+    class Args(CommonArgs):
+        pass
+
+    big = rec("big", size=400)
+
+    async def handler(ctx: object, args: Args) -> ToolOutput:
+        return make_out([big, rec("small")], None)
+
+    spec = ToolSpec(
+        name="huge_tool",
+        tid="T-XX",
+        args_model=Args,
+        handler=handler,
+        default_max_tokens=1000,
+        records_key="things",
+    )
+    pipeline = Pipeline(ToolRegistry([spec]))
+
+    j = await pipeline.call_tool("huge_tool", {"format": "json", "max_tokens": 200})
+    assert not j.is_error, j.text
+    assert j.structured["page"]["next_cursor"] is None and j.structured["page"]["returned"] == 0
+    assert j.structured["budget"]["truncated"] is True and j.structured["budget"]["used_tokens_est"] <= 200
+    assert len(j.structured["warnings"]) == 1 and "raise max_tokens to ~" in j.structured["warnings"][0]
+    c = await pipeline.call_tool("huge_tool", {"format": "compact", "max_tokens": 200})
+    assert "# more:" not in c.text and "! no record fits in max_tokens=200" in c.text
+
+    ok = await pipeline.call_tool("huge_tool", {"format": "json", "max_tokens": 1000})
+    assert ok.structured["page"]["returned"] == 2 and ok.structured["page"]["next_cursor"] is None

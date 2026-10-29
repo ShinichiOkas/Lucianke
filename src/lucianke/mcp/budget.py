@@ -195,6 +195,11 @@ class Packer:
     契約: ``reserved_tokens``（ヘッダ・``head_kv``・呼び手が出す警告の分）は呼び手が数えて渡す。
     ``reserved_tokens`` とトレーラの最小形だけで ``max_tokens`` を超える（``MIN_MAX_TOKENS`` 未満の指定など）場合は
     保証できず、レコード 0 件で返す（``used_tokens_est`` は超過した実測値）。
+
+    レコードが 1 件も入らないとき（仕様書 §5.6-4）は、レコード 0 件・``warnings`` に理由と必要な ``max_tokens`` の目安の
+    成功応答で、``next_cursor`` は出さない（BUG-0015）。オフセットが進まないカーソルは同じ呼び出しの繰り返しで、辿る
+    クライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、呼び出しに付けたカーソルは
+    ``max_tokens`` を上げた呼び直しにそのまま使える。``next_cursor`` を返すページは必ず 1 件以上を含み、オフセットが進む。
     """
 
     def __init__(self, estimator: TokenEstimator | None = None) -> None:
@@ -399,22 +404,26 @@ class Packer:
         """先頭 ``m`` 件を入れた形から、トレーラ込みで収まるまで末尾の 1 件ずつ（まとめて）外す。"""
         est = self.estimator.count
         while True:
+            if m == 0:
+                # 1 件も入らない。カーソルは出さない（BUG-0015）: オフセットが進まないカーソルは、同じ呼び出しをもう一度
+                # するだけで、辿るクライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、
+                # 呼び出しに付けたカーソルはそのまま使える。``max_tokens`` を上げて同じ引数で呼び直させる。
+                # トレーラ（要約・``# more:``）も描かれないので数えない。
+                warning = (
+                    f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens;"
+                    f" raise max_tokens to ~{reserved + need_first} or more and call again with the same arguments"
+                )
+                used = reserved + est("! " + warning + "\n")
+                return _Fit(
+                    m=0, summary=None, cursor=None, warnings=(warning,), used=used, over=used > max_tokens
+                )
             next_off = start + m
             rest = records[next_off:]
             summary = self._summary(out, rest, unseen) if with_summary else None
             cursor = cursor_factory(next_off) if cursor_factory is not None else None
             used = reserved + sum(costs[:m]) + est(_trailer_text(summary, cursor, len(rest) + unseen))
-            warnings: tuple[str, ...] = ()
-            if m == 0:
-                warnings = (
-                    f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens;"
-                    " raise max_tokens",
-                )
-                used += est("! " + warnings[0] + "\n")
-            if used <= max_tokens or m == 0:
-                return _Fit(
-                    m=m, summary=summary, cursor=cursor, warnings=warnings, used=used, over=used > max_tokens
-                )
+            if used <= max_tokens:
+                return _Fit(m=m, summary=summary, cursor=cursor, warnings=(), used=used, over=False)
             deficit = used - max_tokens
             freed = 0
             while m > 0 and freed < deficit:  # 少なくとも 1 件は外れる（deficit > 0）
