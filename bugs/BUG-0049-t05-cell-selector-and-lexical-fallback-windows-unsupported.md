@@ -25,3 +25,4 @@
 - `tests/contract/test_T05_bodies.py`（42 件）・`test_revision_reads.py`・`tests/unit/test_import_graph.py` を HEAD に自分の差分だけを載せた使い捨ての作業ツリーで 3 回続けて green（70 件）。`ruff check` も通る。
 - `python -c` でパイプライン経由に `cell:1`（Markdown）・`cell:3`・`cell:4`、`legacy/calc.cob` の `COMPUTE-TAX`・`line: 10`・`lex:COMPUTE-TAX@L9` を呼び、compact が `tests/contract/compact_grammar.py` の検証を通ることと、`! DEGRADED: confidence=lexical_fallback engine=internal_ripgrep_word_boundary lang=cobol` が付くことを確認した。
 - 範囲外で見たこと: `xpath:` / `jsonpath:` / `jq:` / `toml:` / `yaml:` は今も `E_UNSUPPORTED`（`selector_not_supported`）。BUG-0056 に起票。
+- コミット: d9f53cb
