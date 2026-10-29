@@ -30,3 +30,8 @@
 
 - `tests/unit/test_t00_set_python_env_restart.py`（新規 3 本。実物の `RuntimeHub` + `LspPool` + `test_lsp_pool.FAKE_SERVER`、types と lint の 2 役。起動の試み〔`LspHandle.history` の STARTING の数〕とプロセスの起動回数を数える）: インタープリタ変更で各役 1 回だけ起こし直す／同じインタープリタの指定し直しも 1 回／使っていない Python 系は 1 回だけ起動する。直す前の木では 1 本目と 2 本目が落ちる（3 回起動）ことを確かめた。
 - `tests/contract/test_T00_configure.py`（32 件）・`tests/unit/test_tools_runtime.py`・`tests/unit/test_lsp_pool.py` は変更なしで通る。
+
+## コミット
+- `hub.workspace_changed` が再起動したハンドルを返す変更: 6e28093（別の役のコミットが同じファイルの変更として一緒に入れた）。
+- T-00 のジョブ・テスト 3 本・この票: c613fb4（このコミットには、別の役が index に載せていた docs〔仕様書・設計書・docs/spikes/SYNC-5.md〕の変更も入ってしまった。共有の index を `git commit` にパス指定なしで使ったため。内容はその役の変更のまま、履歴は書き換えていない）。
+- 回帰テスト 1 本の追加（BUG-0043）: ecc9632。
