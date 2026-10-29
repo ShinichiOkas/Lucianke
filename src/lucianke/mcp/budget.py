@@ -165,7 +165,14 @@ class CursorCodec:
 
 
 def _record_text(rec: Record) -> str:
-    return "\n".join(rec.lines)
+    """レコードが描かれるときの本文。各行の終端の改行も含める（改行は 1 文字 0.6 トークンで、レコードごとの数を足した和が
+    応答全体の推定以上になるようにする。行が無いレコードは何も描かれない）。"""
+    return "\n".join(rec.lines) + "\n" if rec.lines else ""
+
+
+def _trailer_text(summary: str | None, cursor: str | None, remaining: int) -> str:
+    """トレーラの本文（終端の改行を含む。``_record_text`` と同じ理由）。"""
+    return "\n".join(trailer_lines(summary, cursor, remaining)) + "\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,8 +248,10 @@ class Packer:
                 budget = left - (reserve if i < n - 1 else 0)
                 t = cost_of(i)
                 if t > budget and rec.shrink is not None:
-                    if budget > 0 and i not in shrunk:
-                        shrunk[i] = rec.shrink(budget)
+                    if budget > 1 and i not in shrunk:
+                        # 縮退は行の本文（終端の改行なし）で測って予算に収める。終端の改行は最大 1 トークンなので、
+                        # その分を引いて渡せば ``_record_text`` で数え直しても収まる
+                        shrunk[i] = rec.shrink(budget - 1)
                     small = shrunk.get(i)
                     if small is not None:
                         rec, t = small, est(_record_text(small))
@@ -343,7 +352,7 @@ class Packer:
         """詰める前のトレーラの見込み。実際の値は ``_fit`` が確かめるので、ここは大きめの近似でよい。"""
         summary = self._summary(out, out.records[start + 1 :]) if with_summary else None
         cursor = cursor_factory(n - 1) if cursor_factory is not None else None
-        return self.estimator.count("\n".join(trailer_lines(summary, cursor, n - start)))
+        return self.estimator.count(_trailer_text(summary, cursor, n - start))
 
     def _fit(
         self,
@@ -367,14 +376,14 @@ class Packer:
             rest = records[next_off:]
             summary = self._summary(out, rest) if with_summary else None
             cursor = cursor_factory(next_off) if cursor_factory is not None else None
-            used = reserved + sum(costs[:m]) + est("\n".join(trailer_lines(summary, cursor, len(rest))))
+            used = reserved + sum(costs[:m]) + est(_trailer_text(summary, cursor, len(rest)))
             warnings: tuple[str, ...] = ()
             if m == 0:
                 warnings = (
                     f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens;"
                     " raise max_tokens",
                 )
-                used += est("! " + warnings[0])
+                used += est("! " + warnings[0] + "\n")
             if used <= max_tokens or m == 0:
                 return _Fit(
                     m=m, summary=summary, cursor=cursor, warnings=warnings, used=used, over=used > max_tokens

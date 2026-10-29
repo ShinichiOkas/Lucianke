@@ -21,6 +21,7 @@ from types import ModuleType
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import RelPath, SymbolRecord, Tier
+from lucianke.core.tokens import TokenEstimator
 from lucianke.core.urn import workspace_id_from_dirname
 from lucianke.syntax.parsers import TreeCache
 from lucianke.syntax.support import get_support
@@ -158,7 +159,13 @@ async def analyze_file(svc: ToolServices, ws: Workspace, user_path: str, *, para
     )
 
 
+_TOKEN_ESTIMATOR = TokenEstimator()
+
+
 def estimate_tokens(text: str) -> int:
-    """縮退の判定に使う、やや多めの推定（パッカーの推定器は ``mcp`` にあり import できない。最終判定はパッカーが行う）。"""
-    ascii_chars = sum(1 for c in text if ord(c) < 128)
-    return -(-(ascii_chars * 10 + (len(text) - ascii_chars) * 9) // 30)
+    """縮退の判定に使う推定。パッカーと同じ ``core.tokens.TokenEstimator``（S-12 の ``lean_wide``）。
+
+    縮退が「収まる」と見積もった版を、パッカーも収まると数える。独自の粗い式だと、パッカーの数え直しで予算を超えて
+    レコードが 0 件になる（旧式は「やや多め」だったが、較正後の推定器より小さい場合がある）。
+    """
+    return _TOKEN_ESTIMATOR.count(text)

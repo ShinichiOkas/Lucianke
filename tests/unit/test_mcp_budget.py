@@ -33,7 +33,17 @@ CODEC = CursorCodec()
 
 
 def text_of(r: Record) -> str:
-    return "\n".join(r.lines)
+    """パッカーが数えるレコードの本文（各行の終端の改行を含む。``budget._record_text`` と同じ）。"""
+    return "\n".join(r.lines) + "\n" if r.lines else ""
+
+
+def words(tokens: int) -> str:
+    """終端の改行と合わせて、推定がちょうど ``tokens`` トークンになる 1 行。
+
+    英字 1 文字の語を空白で区切る。語 1 つ = 英字の連 1 個 = 0.85 トークン、改行 = 0.6 トークンなので、
+    語の数は ``floor((tokens - 0.6) / 0.85)``。
+    """
+    return " ".join("a" * ((20 * tokens - 12) // 17))
 
 
 def rec(
@@ -43,12 +53,12 @@ def rec(
     group: str | None = None,
     shrink: Callable[[int], Record | None] | None = None,
 ) -> Record:
-    """推定がちょうど ``tokens`` になるレコード（ASCII 英数字 4 文字 = 1 トークン）。"""
+    """パッカーの数えるコストがちょうど ``tokens`` になるレコード（``words`` 1 行）。"""
     return Record(
         kind="ref",
         key=key,
         priority=0,
-        lines=("x" * (tokens * 4),),
+        lines=(words(tokens),),
         data={"k": key},
         confidence=Confidence.EXACT,
         group=group,
@@ -67,18 +77,26 @@ def make_out(records: Sequence[Record], **kw: object) -> ToolOutput:
 
 
 def make_shrink(base: Record, log: list[int] | None = None) -> Callable[[int], Record | None]:
-    """予算 ``b`` トークンに収まる先頭だけを残す縮退版（収まる長さが無ければ ``None``）。"""
+    """予算 ``b`` トークンに収まる先頭だけを残す縮退版（収まる長さが無ければ ``None``）。
+
+    縮退の契約: 行の本文（終端の改行なし）を ``EST`` で数えて ``budget`` 以下にする。パッカーは終端の改行の分
+    （最大 1 トークン）を引いて ``budget`` を渡す。
+    """
 
     def shrink(budget: int) -> Record | None:
         if log is not None:
             log.append(budget)
-        full = text_of(base)
-        k = min(len(full) - 1, budget * 4)
-        while k > 0 and EST.count(full[:k]) > budget:
-            k -= 1
-        if k <= 0:
+        full = "\n".join(base.lines)
+        lo, hi = 0, len(full) - 1  # 収まる最長の接頭辞（二分探索。収まったときだけ lo を進める）
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if EST.count(full[:mid]) <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        if lo <= 0:
             return None
-        return dataclasses.replace(base, lines=(full[:k],), shrink=None)
+        return dataclasses.replace(base, lines=(full[:lo],), shrink=None)
 
     return shrink
 
@@ -104,23 +122,24 @@ def test_estimator_empty_is_zero() -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("a" * 4, 1),  # ASCII 英数字 1/4
-        ("a" * 5, 2),  # 端数は切り上げ
-        ("a" * 400, 100),
-        (" " * 8, 2),  # 空白も 1/4
-        ("a b\nc\t", 2),  # 6 文字 = 1.5
-        ("!" * 2, 1),  # ASCII 記号 1/2
-        ("!" * 3, 2),
-        ("{}();" * 10, 25),  # 50 文字 = 25
-        ("_" * 4, 2),  # アンダースコアは記号
-        ("あ" * 3, 2),  # かな 1/1.5
-        ("あ" * 4, 3),  # 2.67 → 3
-        ("漢" * 300, 200),
-        ("ＡＢＣ", 2),  # 全角英字
-        ("、。", 2),  # CJK の句読点（U+3001, U+3002）は全角扱い
-        ("é" * 2, 1),  # その他 1/2
-        ("\x00", 1),  # 制御文字はその他
-        ("𠮷" * 3, 2),  # CJK 拡張 B も全角扱い
+        ("a" * 4, 1),  # 英字の連は長さに依らず 1 個 = 0.85
+        ("a" * 39, 1),
+        ("a" * 40, 26),  # 40 文字以上の英数字は塊で 1 文字 0.63（25.2）
+        ("a b c d", 4),  # 連 4 個 = 3.4。単一の空白は 0
+        (" " * 8, 1),  # 2 個以上の空白は連 1 個 = 0.92
+        ("a b\nc\t", 4),  # 連 3 個 2.55 + 改行 0.6 = 3.15
+        ("1234", 4),  # 数字は 1 文字 0.9 = 3.6
+        ("!" * 3, 1),  # 記号の連 1 個 = 0.87
+        ("{}();" * 10, 1),  # 記号が続けば 1 個の連
+        ("_" * 4, 1),  # アンダースコアは記号
+        ("あ" * 3, 3),  # かな 1 文字 0.95 = 2.85
+        ("あ" * 4, 4),  # 3.8
+        ("漢" * 300, 285),  # ちょうど 285.0
+        ("ＡＢＣ", 3),  # 全角英字 = 2.85
+        ("、。", 2),  # CJK の句読点（U+3001, U+3002）は全角扱い = 1.9
+        ("é" * 2, 1),  # その他 1 文字 0.46 = 0.92
+        (chr(0), 1),  # 制御文字はその他
+        ("𠮷" * 3, 3),  # CJK 拡張 B も全角扱い
     ],
 )
 def test_estimator_char_classes(text: str, expected: int) -> None:
@@ -128,19 +147,21 @@ def test_estimator_char_classes(text: str, expected: int) -> None:
 
 
 def test_estimator_mixed_text() -> None:
-    # "ab"(2/4) + "!"(1/2) + "あ"(2/3) = 1.666… → 2
-    assert EST.count("ab!あ") == 2
-    # def f(x): (ASCII 8 英数字と空白 + 記号 3) + 日本語 6 文字
-    assert EST.count("def f(x):" + "日本語のコメ") == -(-(6 * 3 + 3 * 6 + 6 * 8) // 12)
+    # 英字の連 "ab"(0.85) + 記号 "!"(0.87) + "あ"(0.95) = 2.67 → 3
+    assert EST.count("ab!あ") == 3
+    # 英字の連 def・f・x の 3 個、記号の連 "("・"):" の 2 個、全角 6 文字（係数は 1/100 刻み、分母 100）
+    assert EST.count("def f(x):" + "日本語のコメ") == -(-(3 * 85 + 2 * 87 + 6 * 95) // 100)
 
 
-def test_estimator_is_subadditive_and_monotone() -> None:
+def test_estimator_is_nearly_subadditive_and_monotone() -> None:
     rng = random.Random(20261029)
     alphabet = "ab 0_!{}\n日本かなＡé😀\x01"
     for _ in range(300):
         a = "".join(rng.choices(alphabet, k=rng.randint(0, 40)))
         b = "".join(rng.choices(alphabet, k=rng.randint(0, 40)))
-        assert EST.count(a + b) <= EST.count(a) + EST.count(b)
+        # 連をまたぐ結合は推定を減らすだけだが、片側が単一の空白で終わり他方が空白で始まると、2 個以上の空白の連
+        # （0.92）が新しくできる。切り上げと合わせて +1 まで
+        assert EST.count(a + b) <= EST.count(a) + EST.count(b) + 1
         assert EST.count(a + b) >= EST.count(a)
 
 
@@ -153,7 +174,7 @@ def test_estimator_ten_thousand_chars_is_fast() -> None:
         t0 = time.perf_counter()
         EST.count(text)
         best = min(best, time.perf_counter() - t0)
-    assert best < 0.005  # 目安は 1 ms 未満。揺れないよう上限は緩くしてある
+    assert best < 0.02  # 目安は 2 ms 前後（1 MB で 150〜200 ms）。揺れないよう上限は緩くしてある
 
 
 # --- トレーラ・既定の要約 ---------------------------------------------------------------------
@@ -236,7 +257,7 @@ def test_pack_trailer_is_counted_in_used() -> None:
     recs = [rec(f"r{i}", 30) for i in range(10)]
     page = Packer().pack(make_out(recs), max_tokens=200, reserved_tokens=20, cursor_factory=cursor_factory())
     assert page.next_cursor is not None and page.summary is not None
-    trailer = EST.count("\n".join(trailer_lines(page.summary, page.next_cursor, page.remaining)))
+    trailer = EST.count("\n".join(trailer_lines(page.summary, page.next_cursor, page.remaining)) + "\n")
     assert page.used_tokens_est == 20 + 30 * len(page.records) + trailer
 
 
@@ -302,10 +323,10 @@ def test_pack_shrink_is_used_once_for_the_last_record() -> None:
     big = rec("big", 100)
     big = dataclasses.replace(big, shrink=make_shrink(big, log))
     page = Packer().pack(make_out([big]), max_tokens=200, reserved_tokens=150, cursor_factory=cursor_factory())
-    assert log == [50]  # 最後の 1 件はトレーラが要らないので、残りをそのまま渡す
+    assert log == [49]  # 最後の 1 件はトレーラが要らないので、残りから終端の改行の分（1）だけ引いて渡す
     assert len(page.records) == 1
-    assert page.records[0].tokens == 50
-    assert len(page.records[0].lines[0]) == 200
+    assert page.records[0].tokens == 50  # 本文 49 トークン（収まる最長）+ 終端の改行で 50
+    assert EST.count(page.records[0].lines[0]) == 49
     assert page.truncated is False
     assert page.next_cursor is None
     assert page.used_tokens_est == 200
@@ -320,7 +341,8 @@ def test_pack_shrink_for_a_middle_record_reserves_the_trailer() -> None:
     assert len(log) == 1
     assert log[0] < 100 - 10  # a の後の残りから、トレーラの見込み分が引かれている
     assert [r.key for r in page.records] == ["a", "big"]
-    assert page.records[1].tokens == log[0]
+    assert EST.count(page.records[1].lines[0]) <= log[0]  # 縮退は渡された予算に本文を収める
+    assert page.records[1].tokens == EST.count(text_of(page.records[1])) <= log[0] + 1  # 終端の改行の分だけ増える
     assert page.used_tokens_est <= 200
     assert page.next_cursor is not None
     assert decode_offset(page.next_cursor) == len(page.records)
@@ -344,7 +366,7 @@ def test_pack_shrink_returning_none_stops() -> None:
 
 def test_pack_shrink_result_that_still_does_not_fit_stops() -> None:
     big = rec("big", 100)
-    big = dataclasses.replace(big, shrink=lambda budget: rec("big", budget + 1))
+    big = dataclasses.replace(big, shrink=lambda budget: rec("big", budget + 2))  # 渡された予算より 1 大きい（改行の分）
     page = Packer().pack(make_out([rec("a", 5), big]), max_tokens=100, cursor_factory=cursor_factory())
     assert [r.key for r in page.records] == ["a"]
     assert page.used_tokens_est <= 100
@@ -417,7 +439,7 @@ def test_pack_fills_tokens_on_included_records() -> None:
         dataclasses.replace(rec("b", 3), lines=()),
     ]
     page = Packer().pack(make_out(recs), max_tokens=300)
-    assert page.records[0].tokens == EST.count("あいう\nabcd")
+    assert page.records[0].tokens == EST.count("あいう\nabcd\n")
     assert page.records[1].tokens == 0
 
 
