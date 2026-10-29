@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -143,3 +144,18 @@ async def test_a_standby_python_lsp_is_started_once(rig: Rig) -> None:
     await rig.ready()
     assert {role: starts_of(h) for role, h in rig.handles().items()} == {"types": 1, "lint": 1}
     assert (rig.launches("fakepy"), rig.launches("fakeruff")) == (1, 1)
+
+
+async def test_status_reports_started_at_of_the_python_daemons_after_set_python_env(rig: Rig) -> None:
+    """BUG-0043: ``lsp_daemons[].started_at`` は起動した Python 系で ``null`` にならず、呼び出し時刻より後（仕様書 T-00 事後条件 3）。"""
+    await rig.pool.ensure_started("python", rig.ws)
+    await rig.ready()
+    called_at = datetime.now(UTC)
+    await asyncio.sleep(0.05)  # Windows の時計は 15 ms 刻み
+    await rig.set_python_env(rig.shim("py-a"))
+    await rig.ready()
+    python = [d for d in t00._lsp_daemons(rig.pool, rig.ws, ["python"]) if d["language"] == "python"]
+    assert {d["role"] for d in python} == {"types", "lint"}
+    for d in python:
+        assert d["status"] == "ready" and d["pid"] is not None
+        assert d["started_at"] is not None and datetime.fromisoformat(d["started_at"]) > called_at
