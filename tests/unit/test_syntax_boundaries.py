@@ -304,7 +304,9 @@ def test_ts_member_decorators_are_siblings_in_class_body() -> None:
     assert cut(parsed, definition_range(n, parsed, language_id="typescript")) == (
         "/** d */\n  @dec()\n  @other\n  static async n() {}"
     )
-    field = next(x for x in walk(parsed.tree.root_node) if x.type == "public_field_definition" and b"name" in x.text)
+    field = next(
+        x for x in walk(parsed.tree.root_node) if x.type == "public_field_definition" and b"name" in x.text
+    )
     assert cut(parsed, definition_range(field, parsed, language_id="typescript")) == "@Input() name: string;"
 
 
@@ -328,7 +330,9 @@ def test_js_uses_same_rules() -> None:
 
 def test_ts_fixture_method_with_jsdoc_and_async() -> None:
     parsed = parse((POLY / "web/src/payment.ts").read_bytes(), "typescript")
-    charge = next(x for x in walk(parsed.tree.root_node) if x.type == "method_definition" and b"retries = 0" in x.text)
+    charge = next(
+        x for x in walk(parsed.tree.root_node) if x.type == "method_definition" and b"retries = 0" in x.text
+    )
     lines = cut(parsed, definition_range(charge, parsed, language_id="typescript")).split("\n")
     assert lines[0] == "/** 決済を要求する。amount は 0 より大きいこと。 */"
     assert lines[1] == "  async charge(req: PaymentRequest, retries = 0): Promise<string> {"
@@ -350,7 +354,9 @@ def test_unknown_language_gives_node_range_and_line_end() -> None:
     parsed = parse("fn f() { 1 } // t\n", "rust")
     node = next(x for x in walk(parsed.tree.root_node) if x.type == "function_item")
     rng = definition_range(node, parsed, language_id="no_such_language")
-    assert rng == Range(Position(0, 0), Position(0, len("fn f() { 1 } // t")))  # 既定は付帯要素なし。終了は行末
+    assert rng == Range(
+        Position(0, 0), Position(0, len("fn f() { 1 } // t"))
+    )  # 既定は付帯要素なし。終了は行末
 
 
 # --- insertion_point ---------------------------------------------------------------------
@@ -381,7 +387,9 @@ def test_insert_member_pass_only_body_is_replaced() -> None:
     assert a.replace == Range(Position(1, 4), Position(1, 8))
     assert a.position == a.replace.start
     b = insertion_point(find(parsed, "class_definition", "B"), parsed, position="start", language_id="python")
-    assert b.replace == Range(Position(4, 4), Position(4, len("    pass  # todo")))  # 同じ行の末尾コメントごと
+    assert b.replace == Range(
+        Position(4, 4), Position(4, len("    pass  # todo"))
+    )  # 同じ行の末尾コメントごと
 
 
 def test_insert_member_inline_pass_and_ellipsis_and_docstring() -> None:
@@ -425,9 +433,13 @@ def test_insert_member_ts_class() -> None:
     assert end.anchor == "after_member" and end.position == Position(2, len("  m() {} // t"))
     start = insertion_point(a, parsed, position="start", language_id="typescript")
     assert start.anchor == "before_member" and start.position == Position(1, 2)
-    e = insertion_point(find(parsed, "class_declaration", "E"), parsed, position="end", language_id="typescript")
+    e = insertion_point(
+        find(parsed, "class_declaration", "E"), parsed, position="end", language_id="typescript"
+    )
     assert e.anchor == "empty_body" and e.position == Position(4, len("class E {"))
-    f = insertion_point(find(parsed, "class_declaration", "F"), parsed, position="start", language_id="typescript")
+    f = insertion_point(
+        find(parsed, "class_declaration", "F"), parsed, position="start", language_id="typescript"
+    )
     assert f.anchor == "empty_body" and f.position == Position(5, len("class F {"))
 
 
