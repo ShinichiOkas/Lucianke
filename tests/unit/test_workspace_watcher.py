@@ -100,6 +100,20 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+async def move_dir(src: Path, dst: Path, timeout: float = WAIT_S) -> None:
+    """ディレクトリを移す。Windows では作ったばかりの大きなディレクトリを、ウイルス対策や索引作成が一時的に開いていて
+    ``PermissionError`` になることがあるので、上限つきで再試行する（テストの対象は監視で、移す操作ではない）。"""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise
+            await asyncio.sleep(0.02)
+
+
 @contextlib.asynccontextmanager
 async def running(ws: Workspace, sink: FakeSink, **kw: int) -> AsyncIterator[Watcher]:
     w = Watcher(ws, sink, **kw)
@@ -182,7 +196,7 @@ async def test_directory_rename_removes_old_children_and_changes_new(tmp_path: P
         put(ws.root, rel)
     sink = FakeSink({"pkg/a.py", "pkg/b.py", "pkg/sub/c.py"})
     async with running(ws, sink):
-        os.rename(ws.root / "pkg", ws.root / "lib")
+        await move_dir(ws.root / "pkg", ws.root / "lib")
         await until(lambda: sink.known == {"lib/a.py", "lib/b.py", "lib/sub/c.py"})
         await barrier(ws, sink)
         assert {"pkg/a.py", "pkg/b.py", "pkg/sub/c.py"} <= set(sink.of("removed"))
@@ -197,7 +211,7 @@ async def test_directory_moved_in_from_outside_is_expanded(tmp_path: Path) -> No
         put(outside, rel)
     sink = FakeSink()
     async with running(ws, sink):
-        os.rename(outside / "proj", ws.root / "proj")
+        await move_dir(outside / "proj", ws.root / "proj")
         await until(
             lambda: {"proj/src/a.py", "proj/src/deep/b.py", "proj/README.md"} <= set(sink.of("changed"))
         )
@@ -353,11 +367,16 @@ async def test_expansion_of_a_huge_moved_in_directory_becomes_a_rescan(tmp_path:
         ws.root
     )  # 本物の rescan と同じく、終わると索引にファイルが載る（同じディレクトリの続報を再展開しない）
     async with running(ws, sink):
-        os.rename(outside / "big", ws.root / "big")
+        await move_dir(outside / "big", ws.root / "big")
         await until(lambda: "rescan" in [k for k, _, _ in sink.calls])
         await barrier(ws, sink)
-        assert [k for k, _, _ in sink.calls].count("rescan") == 1
-        assert sink.of("changed") == ["zz_barrier.py"]
+        kinds = [k for k, _, _ in sink.calls]
+        assert kinds[0] == "rescan"  # 展開した 520 件を個別に流す前に、rescan に切り替えている
+        assert kinds.count("rescan") == 1
+        # 移した直後にウイルス対策や索引作成が子の属性を触ると、少数の changed が後から届くことがある（冪等で無害）。
+        # 大量の個別処理でないことだけを確かめる。
+        assert "zz_barrier.py" in sink.of("changed")
+        assert len(sink.of("changed")) < WATCH_BURST_HINT
 
 
 # --- drain ---------------------------------------------------------------------------------------
