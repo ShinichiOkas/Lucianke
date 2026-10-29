@@ -216,3 +216,128 @@ async def test_header_shows_the_resolved_workspace_id_when_omitted(pipeline: Pip
     r = await call(pipeline, targets=[{"path": PAY_PY, "symbol_name": "PaymentRequest"}])
     header = r.text.splitlines()[0]
     assert " ws=poly " in header and " ws=- " not in header
+
+
+# --- 予算に収まらない本体の続き（仕様書 §11 T-05 規約 7、BUG-0016） -------------------------------------
+
+
+async def _drain(pipeline: Pipeline, targets: list[dict[str, Any]], max_tokens: int, **extra: Any) -> list[list[dict[str, Any]]]:
+    """``next_cursor`` を辿って全ページの items を集める。各ページで予算・カーソルと truncated の整合を検める。"""
+    pages: list[list[dict[str, Any]]] = []
+    cursor: str | None = None
+    for _ in range(120):
+        args: dict[str, Any] = {"targets": targets, "max_tokens": max_tokens, **extra}
+        if cursor is not None:
+            args["cursor"] = cursor
+        r = await call(pipeline, "json", **args)
+        assert not r.is_error, r.text
+        s = r.structured
+        assert s["budget"]["used_tokens_est"] <= max_tokens
+        items = s["data"]["items"]
+        assert items, "進まないページ"
+        pages.append(items)
+        cursor = s["page"]["next_cursor"]
+        assert (cursor is not None) is s["budget"]["truncated"], "続きがあるのに budget.truncated / next_cursor が揃わない"
+        if items[-1].get("truncated"):
+            assert cursor is not None, "本体を切ったのに next_cursor が無い"
+        if cursor is None:
+            return pages
+    raise AssertionError("ページが終わらない")
+
+
+async def _full(pipeline: Pipeline, ref: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    r = await call(pipeline, "json", targets=[ref], max_tokens=20000, **extra)
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["truncated"] is False
+    return item
+
+
+def _assert_contiguous(parts: list[dict[str, Any]], full: dict[str, Any]) -> None:
+    """切れ切れの項目が、重複も隙間もなく本体全体になる（行番号が連続し、連結が全体とバイト一致する）。"""
+    assert parts[0]["range_returned"]["start_line"] == full["range_returned"]["start_line"]
+    for prev, nxt in zip(parts, parts[1:], strict=False):
+        assert prev["truncated"] is True
+        assert prev["truncated_at_line"] == prev["range_returned"]["end_line"] + 1
+        assert nxt["range_returned"]["start_line"] == prev["range_returned"]["end_line"] + 1
+        assert nxt["context_before_lines"] == 0  # 続きに前置きは付かない
+    assert parts[-1]["truncated"] is False
+    assert parts[-1]["range_returned"]["end_line"] == full["range_returned"]["end_line"]
+    assert "\n".join(p["code"] for p in parts) == full["code"]
+
+
+@pytest.mark.parametrize("context_lines", [0, 2])
+@pytest.mark.parametrize("max_tokens", [260, 300, 450])
+async def test_cursor_continues_a_truncated_body_without_overlap_or_gap(
+    pipeline: Pipeline, max_tokens: int, context_lines: int
+) -> None:
+    """予算を変えて切り詰め → next_cursor で続きを取る → 連結すると本体全体とバイト一致（重複も隙間もない）。"""
+    ref = {"path": PAY_PY, "symbol_name": "PaymentProcessor"}
+    full = await _full(pipeline, ref, context_lines=context_lines)
+    pages = await _drain(pipeline, [ref], max_tokens, context_lines=context_lines)
+    assert len(pages) >= 2, "この予算では切り詰めが起きない（テストの前提）"
+    assert all(len(items) == 1 for items in pages)
+    _assert_contiguous([items[0] for items in pages], full)
+
+
+async def test_truncation_never_lands_inside_the_context_lines(tmp_path: Path) -> None:
+    """前置き（context_lines）の途中では切らない: 切った版には本体の先頭の行が必ず含まれる（続きに隙間ができない）。"""
+    src = [f"CONST_{i} = {i}" for i in range(20)] + ["def big(x):"]  # 前置きの 20 行（空行でない）が本体の直前に付く
+    src += [f"    value_{i} = x + {i}  # 本体の {i} 行目" for i in range(60)] + ["    return x"]
+    (tmp_path / "m.py").write_text("\n".join(src) + "\n", encoding="utf-8")
+    registry = ToolRegistry()
+    register_tools(registry)
+    pipeline = Pipeline(registry, services=build_services(lambda: [str(tmp_path)]))
+    ref = {"path": "m.py", "symbol_name": "big"}
+    full = await _full(pipeline, ref, context_lines=20)
+    assert full["context_before_lines"] == 20 and full["range_returned"]["start_line"] == 1
+    checked = 0
+    for max_tokens in range(200, 520, 17):  # 切り口が前置きの中に落ちうる小さな予算まで
+        r = await call(pipeline, "json", targets=[ref], max_tokens=max_tokens, context_lines=20)
+        assert not r.is_error, r.text
+        items = r.structured["data"]["items"]
+        if not items:  # 1 行も入らない予算（BUG-0015 の領分）
+            continue
+        if items[0]["truncated"]:
+            checked += 1
+            assert items[0]["range_returned"]["end_line"] >= 21, f"本体の先頭の行が無い: max_tokens={max_tokens}"
+            pages = await _drain(pipeline, [ref], max_tokens, context_lines=20)
+            _assert_contiguous([p[0] for p in pages], full)
+    assert checked >= 5
+
+
+async def test_continue_with_line_range_gets_the_rest_and_the_note_says_how(pipeline: Pipeline) -> None:
+    """続きの取り方が応答にある: json は continue_with.line_range、compact は注記と `# more: cursor=`。それで続きが取れる。"""
+    ref = {"path": PAY_PY, "symbol_name": "PaymentProcessor"}
+    full = await _full(pipeline, ref, context_lines=0)
+    first = (await call(pipeline, "json", targets=[ref], max_tokens=300, context_lines=0)).structured["data"]["items"][0]
+    assert first["truncated"] is True
+    hint = first["continue_with"]["line_range"]
+    assert hint == {"start": first["truncated_at_line"], "end": full["range_returned"]["end_line"]}
+    rest = (await call(pipeline, "json", targets=[ref], max_tokens=20000, line_range=hint)).structured["data"]["items"][0]
+    assert rest["truncated"] is False and rest["range_returned"]["start_line"] == hint["start"]
+    assert first["code"] + "\n" + rest["code"] == full["code"]
+    text = (await call(pipeline, targets=[ref], max_tokens=300, context_lines=0)).text
+    assert g.validate(text) == []
+    assert f"line_range {hint['start']}-{hint['end']}" in text
+    assert "# more: cursor=" in text
+
+
+async def test_truncated_target_is_not_followed_by_the_next_target_until_it_is_complete(pipeline: Pipeline) -> None:
+    """複数対象: 切った対象の後ろに次の対象を詰めない。続きを辿ると対象ごとに本体全体になる。"""
+    refs = [
+        {"path": PAY_PY, "symbol_name": "PaymentProcessor"},
+        {"path": PAY_PY, "symbol_name": "PaymentRequest"},
+        {"path": PAY_TS, "symbol_name": "PaymentClient"},
+    ]
+    fulls = [await _full(pipeline, ref, context_lines=0) for ref in refs]
+    pages = await _drain(pipeline, refs, 300, context_lines=0)
+    flat = [item for items in pages for item in items]
+    for items in pages:
+        assert all(not it["truncated"] for it in items[:-1]), "切った対象の後ろに別の対象が詰まっている"
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for item in flat:
+        by_symbol.setdefault(item["symbol"]["qualified_name"], []).append(item)
+    assert list(by_symbol) == [f["symbol"]["qualified_name"] for f in fulls]  # 対象の順を保つ
+    for parts, full in zip(by_symbol.values(), fulls, strict=True):
+        _assert_contiguous(parts, full)

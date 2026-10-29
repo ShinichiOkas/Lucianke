@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.records import Record, ToolOutput
+from lucianke.core.records import Record, ToolOutput, join_offset, split_offset
 from lucianke.core.tokens import TOKENS_PER_CHAR as TOKENS_PER_CHAR  # 再公開（bench/tokens が使う）
 from lucianke.core.tokens import TokenEstimator
 from lucianke.mcp.types import Page
@@ -187,6 +187,7 @@ class _Fit:
     warnings: tuple[str, ...]
     used: int
     over: bool  # m = 0 まで減らしても ``max_tokens`` を超える（``reserved_tokens`` が大きすぎる呼び出し側の誤り）
+    remaining: int | None = None  # 最後の 1 件が途中で切れている（``Record.resume``）ときの残り。None なら添字から数える
 
 
 class Packer:
@@ -219,7 +220,7 @@ class Packer:
         est = self.estimator.count
         records = out.records
         n = len(records)
-        start = max(offset, 0)
+        start, _ = split_offset(max(offset, 0))  # 上位ビットは同じレコードの再開位置（ツールが読む。``Record.resume``）
         # ``total_estimate`` が ``len(records)`` を超えるとき、ツールは先頭の ``n`` 件だけを渡し（``limit`` で打ち切った遅延列）、
         # 残り ``unseen`` 件を具体化していない。それも「続き」なので、渡された分が全部入ってもカーソルとトレーラが要る
         # （BUG-0008）。``total_estimate`` が ``len(records)`` 以下なら無視する。
@@ -256,7 +257,7 @@ class Packer:
         #    （具体化していない続きがあれば、最後の 1 件にも要る）
         shrunk: dict[int, Record | None] = {}  # 縮退は 1 レコードにつき一度だけ呼ぶ（2 周目は結果を使い回す）
 
-        def greedy(reserve: int) -> tuple[list[Record], list[int]]:
+        def greedy(reserve: int, *, with_summary: bool = True) -> tuple[list[Record], list[int]]:
             included: list[Record] = []
             costs: list[int] = []
             left = avail
@@ -264,23 +265,35 @@ class Packer:
                 rec = records[i]
                 budget = left - (reserve if i < n - 1 or unseen else 0)
                 t = cost_of(i)
+                hold = 0  # 途中で切れた縮退のために取り分けるトレーラの見込み
                 if t > budget and rec.shrink is not None:
                     if budget > 1 and i not in shrunk:
                         # 縮退は行の本文（終端の改行なし）で測って予算に収める。終端の改行は最大 1 トークンなので、
                         # その分を引いて渡せば ``_record_text`` で数え直しても収まる
                         shrunk[i] = rec.shrink(budget - 1)
                     small = shrunk.get(i)
+                    if small is not None and small.resume is not None:
+                        # 途中で切れた縮退は、最後の 1 件でも続きのトレーラ（同じレコードの再開カーソルと要約）が要る。
+                        # そのカーソルは再開位置の分だけ長いので、実際の形で見込み直して収まるまで詰め直す
+                        hold = self._resume_reserve(out, records, i, small.resume, n, unseen, cursor_factory, with_summary)
+                        if est(_record_text(small)) > left - hold:
+                            small = rec.shrink(left - hold - 1) if left - hold > 1 else None
+                            shrunk[i] = small
                     if small is not None:
                         rec, t = small, est(_record_text(small))
+                        if rec.resume is not None:
+                            budget = min(budget, left - hold)
                 if t > budget:
                     break  # 飛ばして後ろを詰めない（優先順位の順を保つ）
                 included.append(rec.with_tokens(t))
                 costs.append(t)
                 left -= t
+                if rec.resume is not None:
+                    break  # 途中で切れたレコードの後ろは詰めない（続きは同じレコードから。順を保つ）
             return included, costs
 
         included, costs = greedy(self._trailer_reserve(out, start, n, unseen, cursor_factory))
-        if start + len(included) >= n and not unseen:  # 縮退で全部入った
+        if start + len(included) >= n and not unseen and not (included and included[-1].resume is not None):  # 縮退で全部入った
             return self._page(
                 tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
             )
@@ -300,13 +313,14 @@ class Packer:
             unseen=unseen,
             with_summary=True,
             need_first=need_first,
+            resumes=[r.resume for r in included],
         )
         if fit.m == 0:
             # 要約（SHOULD）を省けばレコードが入るかもしれない。要約の見込みを引かずに詰め直す
             included, costs = greedy(
-                self._trailer_reserve(out, start, n, unseen, cursor_factory, with_summary=False)
+                self._trailer_reserve(out, start, n, unseen, cursor_factory, with_summary=False), with_summary=False
             )
-            if start + len(included) >= n and not unseen:
+            if start + len(included) >= n and not unseen and not (included and included[-1].resume is not None):
                 return self._page(
                     tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
                 )
@@ -323,6 +337,7 @@ class Packer:
                 unseen=unseen,
                 with_summary=False,
                 need_first=need_first,
+                resumes=[r.resume for r in included],
             )
             if alt.m > fit.m or fit.over:
                 fit = alt
@@ -332,7 +347,7 @@ class Packer:
             fit.used,
             max_tokens,
             total,
-            n - (start + fit.m) + unseen,
+            fit.remaining if fit.remaining is not None else n - (start + fit.m) + unseen,
             fit.cursor,
             fit.summary,
             fit.warnings,
@@ -385,6 +400,23 @@ class Packer:
         cursor = cursor_factory(n - 1) if cursor_factory is not None else None
         return self.estimator.count(_trailer_text(summary, cursor, n - start + unseen))
 
+    def _resume_reserve(
+        self,
+        out: ToolOutput,
+        records: Sequence[Record],
+        i: int,
+        resume: int,
+        n: int,
+        unseen: int,
+        cursor_factory: Callable[[int], str] | None,
+        with_summary: bool,
+    ) -> int:
+        """``records[i]`` を途中で切って入れるとき（``Record.resume``）のトレーラの見込み。続きは同じレコードの再開位置から。"""
+        rest = records[i:]
+        summary = self._summary(out, rest, unseen) if with_summary else None
+        cursor = cursor_factory(join_offset(i, resume)) if cursor_factory is not None else None
+        return self.estimator.count(_trailer_text(summary, cursor, len(rest) + unseen)) + 1  # 数え誤りの余裕 1 トークン
+
     def _fit(
         self,
         out: ToolOutput,
@@ -400,6 +432,7 @@ class Packer:
         unseen: int,
         with_summary: bool,
         need_first: int,
+        resumes: Sequence[int | None] = (),
     ) -> _Fit:
         """先頭 ``m`` 件を入れた形から、トレーラ込みで収まるまで末尾の 1 件ずつ（まとめて）外す。"""
         est = self.estimator.count
@@ -417,13 +450,16 @@ class Packer:
                 return _Fit(
                     m=0, summary=None, cursor=None, warnings=(warning,), used=used, over=used > max_tokens
                 )
-            next_off = start + m
+            # 最後に入れた 1 件が途中で切れているとき（``Record.resume``）、続きは同じレコードの再開位置から
+            resume = resumes[m - 1] if m <= len(resumes) else None
+            next_off = start + m - 1 if resume is not None else start + m
             rest = records[next_off:]
             summary = self._summary(out, rest, unseen) if with_summary else None
-            cursor = cursor_factory(next_off) if cursor_factory is not None else None
+            cursor = cursor_factory(join_offset(next_off, resume)) if cursor_factory is not None else None
             used = reserved + sum(costs[:m]) + est(_trailer_text(summary, cursor, len(rest) + unseen))
             if used <= max_tokens:
-                return _Fit(m=m, summary=summary, cursor=cursor, warnings=(), used=used, over=False)
+                return _Fit(m=m, summary=summary, cursor=cursor, warnings=(), used=used, over=False,
+                            remaining=len(rest) + unseen if resume is not None else None)
             deficit = used - max_tokens
             freed = 0
             while m > 0 and freed < deficit:  # 少なくとも 1 件は外れる（deficit > 0）

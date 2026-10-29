@@ -5,8 +5,9 @@
 索引が無いので ``refs:`` を出さない。``revision`` は ``WORKING_TREE`` のみ。
 
 返す範囲は ``syntax.boundaries.definition_range``（デコレータ・直前の Doc コメントを含む）の前に ``context_lines`` 行を足したもの。
-1 対象が残り予算に収まらないときは ``Record.shrink`` が先頭から詰めた版を返し、``truncated_at_line`` を記録する
-（続きは ``line_range`` で取る）。
+1 対象が残り予算に収まらないときは ``Record.shrink`` が先頭から詰めた版を返し、``truncated_at_line`` を記録する。
+続きは ``next_cursor``（同じ対象を ``truncated_at_line`` から。``Record.resume`` とパッカー）か、``line_range`` で取る
+（応答の ``continue_with`` と注記に ``start`` / ``end`` を書く）。前置き（``context_lines``）の途中では切らない。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import BATCH_MAX_ITEMS, CANDIDATES_MAX
 from lucianke.core.model import Confidence, EngineChoice, SymbolRecord, Tier
-from lucianke.core.records import Record, ToolOutput
+from lucianke.core.records import Record, ToolOutput, split_offset
 from lucianke.core.urn import CodeSel, Urn, parse, relax
 from lucianke.syntax.boundaries import definition_range
 from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
@@ -208,7 +209,7 @@ def _record(
     lines = [head, L.attr_line("sha", an.sha256[:12], indent=0)]
     lines += L.code_block(code_rows, lang=an.language_id, start_line=first, with_line_numbers=args.with_line_numbers)
     if cut_at is not None:
-        lines.append(L.note(f"truncated at line {cut_at}: pass line_range to continue"))
+        lines.append(L.note(f"truncated at line {cut_at} of {last}: continue with the cursor, or line_range {cut_at}-{last}"))
     item = {
         "ok": True,
         "request": request,
@@ -223,12 +224,14 @@ def _record(
     }
     if cut_at is not None:
         item["truncated_at_line"] = cut_at
+        item["continue_with"] = {"line_range": {"start": cut_at, "end": last}}
     shrink = None
-    if cut_at is None and stop > first:
+    body_first = first + context_before  # 前置き（context_lines）の行は、本体の先頭が入らないなら切らない（続きに隙間ができる）
+    if cut_at is None and stop > body_first:
 
         def shrink(budget: int) -> Record | None:
-            """先頭から詰める。1 行も入らなければ ``None``（次のページへ）。"""
-            lo, hi, best = first, stop - 1, None
+            """先頭から詰める（本体を最低 1 行）。入らなければ ``None``（次のページへ）。"""
+            lo, hi, best = body_first, stop - 1, None
             while lo <= hi:  # 入る最大の行数を二分探索
                 mid = (lo + hi) // 2
                 rec = _record(svc, an, sym, args, request, priority, first=first, last=last,
@@ -248,11 +251,13 @@ def _record(
         confidence=Confidence.STRUCTURAL,
         group=rel,
         shrink=shrink,
+        resume=cut_at,
     )
 
 
 def build_record(svc: ToolServices, an: FileAnalysis, sym: SymbolRecord, args: GetSymbolBodiesArgs,
-                 request: dict[str, Any], priority: int) -> Record:  # fmt: skip
+                 request: dict[str, Any], priority: int, resume: int | None = None) -> Record:  # fmt: skip
+    """``resume`` はカーソルが持つ再開行（前のページが切った行の次。``Record.resume``）。その行から本体の終わりまで。"""
     first, last = body_lines(an, sym)
     context_before = 0
     if args.line_range is not None:
@@ -269,6 +274,13 @@ def build_record(svc: ToolServices, an: FileAnalysis, sym: SymbolRecord, args: G
         while context_before and not an.parsed.line_index.line_text(first - context_before - 1).strip():
             context_before -= 1  # 前置きの先頭の空行は価値が低いので付けない
         first -= context_before
+    if resume is not None:  # 続き: 前のページが返した行の次から。前置きは付けない
+        if not first < resume <= last:
+            raise LuciankeError(
+                ErrorCode.E_CURSOR_EXPIRED,
+                f"the body of {sym.qualified_name} changed since the cursor was issued; call again from the first page",
+            )
+        first, context_before = resume, 0
     return _record(svc, an, sym, args, request, priority, first=first, last=last, context_before=context_before)
 
 
@@ -286,12 +298,13 @@ async def handler(ctx: ToolContext, args: GetSymbolBodiesArgs) -> ToolOutput:
     errors: list[tuple[str, LuciankeError]] = []
     languages: list[str] = []
     tier = Tier.T1
+    resume_index, resume_line = split_offset(ctx.cursor_offset)  # カーソルが途中で切った対象と、その続きの行
     for i, ref in enumerate(args.targets):
         request = ref.model_dump(exclude_none=True)
         label = ref.urn or (f"{ref.path}#{ref.symbol_name}" if ref.symbol_name else f"{ref.path}:{ref.line}")
         try:
             an, sym = await _resolve(svc, ws, ref, cache)
-            records.append(build_record(svc, an, sym, args, request, i))
+            records.append(build_record(svc, an, sym, args, request, i, resume_line if i == resume_index else None))
             if an.language_id not in languages:
                 languages.append(an.language_id)
             tier = max(tier, an.tier)

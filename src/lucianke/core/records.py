@@ -31,6 +31,10 @@ class Record:
         tokens: パッカーが推定して埋める。
         shrink: 任意。残り予算（トークン）で収まる縮退版（T-02 の ``doc:`` → ``urn:`` → 非公開 → 入れ子の順の省略）を返す。
             収められなければ ``None``。パッカーは「入らないレコード」にこれがあれば一度だけ呼ぶ。
+        resume: 縮退版が **1 レコードの途中で切れている** ときの、続きの位置（ツールが決める 1 以上の整数。T-05 は続きの
+            先頭行番号）。縮退してもレコード全体が入る（T-02 の省略など）なら ``None``。これがあるレコードは、パッカーが
+            ``next_cursor`` を「同じレコードの ``resume`` から」にして返す（``join_offset``）。続きを呼ぶと、ツールは
+            ``split_offset(ctx.cursor_offset)`` で取り出した ``resume`` から同じレコードを作り直す（仕様書 §11 T-05 規約 7）。
     """
 
     kind: str
@@ -42,9 +46,25 @@ class Record:
     group: str | None = None
     tokens: int | None = None
     shrink: Callable[[int], Record | None] | None = None
+    resume: int | None = None
 
     def with_tokens(self, tokens: int) -> Record:
         return dataclasses.replace(self, tokens=tokens)
+
+
+RESUME_SHIFT = 32  # カーソルのオフセットの上位ビット = レコード内の再開位置（``Record.resume``）。下位 32 ビット = レコードの添字
+
+
+def join_offset(index: int, resume: int | None) -> int:
+    """レコードの添字と、そのレコード内の再開位置を 1 つのカーソルのオフセットにする（``resume`` が無ければ添字のまま）。"""
+    return index if resume is None else (resume << RESUME_SHIFT) | index
+
+
+def split_offset(offset: int) -> tuple[int, int | None]:
+    """``join_offset`` の逆。``(レコードの添字, 再開位置または None)``。再開位置の無いオフセット（既存の全ツール）は添字のまま。"""
+    index = offset & ((1 << RESUME_SHIFT) - 1)
+    resume = offset >> RESUME_SHIFT
+    return index, (resume or None)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
