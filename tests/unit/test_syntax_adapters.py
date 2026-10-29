@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lucianke.syntax.adapters import (
     ADAPTERS,
@@ -30,6 +31,14 @@ import compact_grammar as grammar  # noqa: E402
 
 POLY = Path(__file__).resolve().parents[1] / "fixtures" / "poly"
 OPTS = SkeletonOptions()
+
+
+@pytest.fixture(params=["libyaml", "pure"])
+def yaml_loader(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """YAML の位置は libyaml（CSafeLoader）と純 Python の SafeLoader の両方で同じになる。"""
+    if request.param == "pure":
+        monkeypatch.setattr(yaml, "CSafeLoader", yaml.SafeLoader, raising=False)
+    return request.param
 
 
 def read(rel: str) -> bytes:
@@ -71,7 +80,7 @@ def test_json_skeleton_fixture() -> None:
     assert "[Key] features @L20-25" in lines
 
 
-def test_yaml_skeleton_fixture() -> None:
+def test_yaml_skeleton_fixture(yaml_loader: str) -> None:
     src = read("conf/app.yaml")
     lines = skel(yaml_, src, "conf/app.yaml")
     assert lines[0].startswith("=== conf/app.yaml (6 lines, skeleton: 7 lines, sha=")
@@ -271,7 +280,7 @@ def test_json_string_escapes_do_not_confuse_positions() -> None:
     assert starts(json_.select(src, "jsonpath:$.b.c")) == [0]
 
 
-def test_yaml_ranges_for_block_scalar_flow_and_comments() -> None:
+def test_yaml_ranges_for_block_scalar_flow_and_comments(yaml_loader: str) -> None:
     src = b"""# header comment
 a:
   b: 1
@@ -303,7 +312,7 @@ e:
     assert [(m.range.start.line, m.range.end.line) for m in yaml_.select(src, "yaml:e[1]")] == [(13, 13)]
 
 
-def test_yaml_multi_document_note_and_empty() -> None:
+def test_yaml_multi_document_note_and_empty(yaml_loader: str) -> None:
     lines = skel(yaml_, b"a: 1\n---\nb: 2\n", "x.yaml")
     assert "- note: multi-document YAML: only the first document is shown" in lines
     assert "[Key] a @L1" in lines
@@ -311,7 +320,7 @@ def test_yaml_multi_document_note_and_empty() -> None:
     assert yaml_.select(b"", "yaml:a") == []
 
 
-def test_yaml_alias_and_custom_tags_do_not_break() -> None:
+def test_yaml_alias_and_custom_tags_do_not_break(yaml_loader: str) -> None:
     src = b"base: &b\n  k: 1\nuse:\n  <<: *b\n  z: !Custom x\n"
     lines = skel(yaml_, src, "x.yaml")
     assert "[Key] base @L1-2" in lines
@@ -386,7 +395,7 @@ def test_select_jsonpath() -> None:
     assert (whole.range.start.line, whole.range.end.line) == (0, 25)
 
 
-def test_select_yaml() -> None:
+def test_select_yaml(yaml_loader: str) -> None:
     src = read("conf/app.yaml")
     m = yaml_.select(src, "yaml:retry.backoff_ms")
     assert [(x.name, x.data["path"]) for x in m] == [("backoff_ms", "retry.backoff_ms")]

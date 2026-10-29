@@ -54,9 +54,10 @@ _PREFIX = "tag:yaml.org,2002:"
 _MAX_CONVERT_DEPTH = 8
 
 
-def _compose(text: str, large: bool) -> tuple[Node | None, bool]:
+def _compose(text: str) -> tuple[Node | None, bool]:
     """``(先頭の文書のルート, 2 つ目以降の文書があるか)``。値は作らない（独自タグがあっても落ちない）。"""
-    cls: Any = getattr(yaml, "CSafeLoader", yaml.SafeLoader) if large else yaml.SafeLoader
+    # libyaml があれば常に使う（純 Python の SafeLoader は 3 MB で 20 秒を超える）。マークの位置はテストで両者を確かめてある
+    cls: Any = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
     try:
         loader = cls(text)
     except yaml.YAMLError as e:
@@ -151,7 +152,7 @@ def skeleton(
     """YAML の骨格 1 ファイルブロック。"""
     text = decode_text(source)
     large = len(source) > STREAM_BYTES
-    root, more = _compose(text, large)
+    root, more = _compose(text)
     lm = TextLines(text)
     notes: list[str] = []
     sample: int | None = None
@@ -187,7 +188,7 @@ def select(source: bytes, selector: str) -> list[Match]:
     expr = split_selector(selector, accepts=("yaml",))
     comps = parse_key_path(expr)
     text = decode_text(source)
-    root, _ = _compose(text, len(source) > STREAM_BYTES)
+    root, _ = _compose(text)
     if root is None:
         return []
     lm = TextLines(text)
