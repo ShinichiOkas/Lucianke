@@ -23,13 +23,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from lucianke.core.compact_lines import attr_line, file_block_header, one_line
 from lucianke.core.model import Confidence, Range, Tier
 from lucianke.core.records import Record
 from lucianke.syntax.types import Match, SkeletonOptions
 
 __all__ = ["ADAPTER", "CellInfo", "CellMap", "IpynbAdapter", "select", "skeleton", "to_virtual_python"]
 
-_LINE_LIMIT = 200  # compact 規約 6（1 行の上限。doc: はこれを超えたら末尾を … にする）
 _MODIFIERS = frozenset({"pub", "priv", "prot", "static", "async", "abstract", "export"})
 _FOLDABLE = frozenset({"Function", "Method", "Constructor"})
 _SELECTOR_RE = re.compile(r"cell:(\d+)")
@@ -203,16 +203,6 @@ def _first_heading(text: str) -> str | None:
     return None
 
 
-def _one_line(text: str) -> str:
-    return " ".join(p.strip() for p in text.splitlines() if p.strip())
-
-
-def _fit(prefix: str, text: str) -> str:
-    if len(prefix) + len(text) <= _LINE_LIMIT:
-        return text
-    return text[: max(_LINE_LIMIT - len(prefix) - 1, 0)].rstrip() + "…"
-
-
 def _span_text(start: int, end: int) -> str:
     return f"{start}" if end == start else f"{start}-{end}"
 
@@ -264,13 +254,12 @@ def _symbol_lines(node: _Node, indent: int, opts: SkeletonOptions, out: list[str
     kind = str(getattr(sym.kind, "value", sym.kind))
     mods = "".join(f"{m} " for m in getattr(sym, "modifiers", ()) if m in _MODIFIERS)
     signature = getattr(sym, "signature", None)
-    head = f"{pad}[{kind}] {mods}{sym.name}{_one_line(signature) if signature else ''} @L{_span_text(node.start, node.end)}"
+    head = f"{pad}[{kind}] {mods}{sym.name}{one_line(signature) if signature else ''} @L{_span_text(node.start, node.end)}"
     slot = len(out)
     out.append(head)
     doc = getattr(sym, "doc_summary", None)
     if opts.include_doc_summary and doc:
-        prefix = f"{pad}  doc: "
-        out.append(prefix + _fit(prefix, _one_line(doc)))
+        out.append(attr_line("doc", doc, indent=indent))
     children: list[dict[str, Any]] = []
     for child in node.children:
         item = _symbol_lines(child, indent + 1, opts, out)
@@ -322,8 +311,7 @@ def skeleton(
         if cell.kind == "markdown" and opts.include_doc_summary:
             heading = _first_heading(raw[cell.number].source)
             if heading:
-                prefix = "  doc: "
-                body.append(prefix + _fit(prefix, _one_line(heading)))
+                body.append(attr_line("doc", heading, indent=0))
         for node in nested.get(cell.number, []):
             sym_item = _symbol_lines(node, 1, opts, body)
             if sym_item is not None:
@@ -331,9 +319,8 @@ def skeleton(
         cell_items.append(item)
 
     line_count = cmap.line_count
-    header = (
-        f"=== {_one_line(rel)} ({line_count} lines, {len(cmap.cells)} cells, "
-        f"skeleton: {len(body)} lines, sha={sha256[:12].lower()}) ==="
+    header = file_block_header(
+        rel, lines=line_count, cells=len(cmap.cells), skeleton_lines=len(body), sha12=sha256
     )
     data: Mapping[str, Any] = {
         "path": rel,
