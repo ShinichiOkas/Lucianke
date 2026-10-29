@@ -1,8 +1,10 @@
 """個別の呼び出しを 1 回ずつ確かめる補助。使い方: uv run --quiet python bench/dogfood/probe.py  （結果は bench/dogfood/out/probe.txt、UTF-8）"""
-import asyncio, json, sys
+import asyncio
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
-from run_dogfood import Client, params, call, OUT  # noqa: E402
+from run_dogfood import OUT, Client, call, params  # noqa: E402
 
 CASES = [
     ("skel_partial_compact", "get_file_skeleton", {"paths": ["src/lucianke/core/urn.py", "no/such.py"], "max_tokens": 300}),

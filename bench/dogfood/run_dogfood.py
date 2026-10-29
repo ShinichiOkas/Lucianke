@@ -12,7 +12,6 @@ import hashlib
 import json
 import random
 import re
-import statistics
 import sys
 import time
 import warnings
@@ -26,6 +25,7 @@ REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "bench" / "dogfood" / "out"
 sys.path.insert(0, str(REPO / "tests" / "contract"))
 import compact_grammar as g  # noqa: E402
+
 from lucianke.mcp.budget import TokenEstimator  # noqa: E402
 
 EST = TokenEstimator()
@@ -47,7 +47,7 @@ async def call(c: Client, tool: str, args: dict[str, Any]) -> tuple[bool, str, A
     t = time.perf_counter()
     try:
         r = await asyncio.wait_for(c.call_tool(tool, args), 25)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return True, "TIMEOUT>25s " + json.dumps(args, ensure_ascii=False)[:200], None, 25000.0
     dt = (time.perf_counter() - t) * 1000
     text = r.content[0].text if r.content else ""
@@ -205,7 +205,7 @@ async def obs3(c: Client) -> None:
         res[f"bigfile_{mt}"] = {"path": big[0], "bytes": (REPO / big[0]).stat().st_size, "pages_tried": len(trace), "trace": trace}
     _, full_text, _, _ = await call(c, "get_file_skeleton", {"paths": cand, "max_tokens": BIG})
     res["full_used_header"] = full_text.splitlines()[0]
-    full_blocks = full_text.split("\n=== ")
+    full_text.split("\n=== ")
     for mt in (200, 500, 2000):
         pages = []
         cursor = None
@@ -470,7 +470,7 @@ async def obs7(c: Client) -> None:
         ("bodies_5", "get_symbol_bodies", {"targets": [{"path": rel, "symbol_name": s} for s in ("Packer.pack", "CursorCodec.decode", "trailer_lines", "default_summary", "CursorState")]}),
     ):
         rt, srv = [], []
-        for i in range(100):
+        for _i in range(100):
             e, t, sc, dt = await call(c, tool, args)
             rt.append(dt)
             e2, d, dt2 = await jcall(c, tool, args)
@@ -497,7 +497,6 @@ async def obs8(c: Client) -> None:
     for sym in ("PaymentClient.charge", "charge", "PaymentClient", "PaymentRequest", "PaymentClient.constructor"):
         e, t, sc, _ = await call(c, "get_symbol_bodies", {"targets": [{"path": ts[1], "symbol_name": sym}]})
         res[f"body:{sym}"] = {"is_error": e, "text": t[:1800], "grammar": g.validate(t)[:3]}
-    app_syms = []
     e, t, sc, _ = await call(c, "get_file_skeleton", {"paths": [ts[0]]})
     res["app_src"] = (REPO / ts[0]).read_text(encoding="utf-8")
     # 各 app.ts のシンボルを本体で取って範囲を見る
