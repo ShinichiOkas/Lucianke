@@ -523,11 +523,17 @@ async def test_edit_transaction_goes_through_the_document_router_when_the_pool_h
             documents = object()
             diagnostics = object()
 
-        tx = svc.edit_transaction(ws, lsp=Handle())  # ハンドルを渡す呼び手（T-13）が優先
-        assert tx._documents is Handle.documents and tx._hub is Handle.diagnostics
+        # ハンドルを渡す呼び手（T-13）: ハンドルは「LSP で検証する」手がかりで、口は 1 サーバー分でなくルーター（BUG-0023）。状態は READY
+        tx = svc.edit_transaction(ws, lsp=Handle())
+        assert tx._documents is router and tx._hub is router.diagnostics_hub
         assert tx._lsp_status("go") is LspStatus.READY
         tx = svc.edit_transaction(ws, documents="mine")  # overrides が最優先
         assert tx._documents == "mine"
+
+        hub.lsp_pool = object()  # type: ignore[assignment]  # ルーターを出せないプール: 渡されたハンドルの 1 サーバー
+        tx = svc.edit_transaction(ws, lsp=Handle())
+        assert tx._documents is Handle.documents and tx._hub is Handle.diagnostics
+        assert tx._lsp_status("go") is LspStatus.READY
     finally:
         await _shut(hub)
 

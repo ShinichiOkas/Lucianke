@@ -514,10 +514,10 @@ class WiredServices(ToolServices):
     def edit_transaction(self, ws: Workspace, *, lsp: Any = None, **overrides: Any) -> EditTransaction:
         """編集トランザクションを組む（T-10・T-11・T-13 が呼ぶ）。束の ``writer`` / ``indexer`` / ``watcher`` / ``readers`` と共有の ``trees``・``locks``。
 
-        ``lsp`` に ``LspHandle`` が渡ればその ``documents`` / ``diagnostics`` を使い、LSP の状態は READY とする（T-13 は 1 つのサーバーに
-        絞って呼ぶ）。渡さないとき、LSP プールが ``router(ws)`` を持てば ``DocumentRouter`` を口にする（言語ごとに正しいハンドルへ文書を振り分け、
-        1 言語に複数のサーバーがあれば全部に同期して診断の待ちを合わせる。BUG-0023）。LSP の状態は言語ごとにプールの ``status``。
-        ``overrides`` が最優先。
+        LSP プールが ``router(ws)`` を持てば ``DocumentRouter`` を口にする（言語ごとに正しいハンドルへ文書を振り分け、1 言語に複数の
+        サーバーがあれば全部に同期して診断の待ちを合わせる。BUG-0023）。``lsp`` に ``LspHandle`` が渡る（T-13）ときも口は同じ ``DocumentRouter``
+        で、``lsp`` は「LSP で検証する」手がかりにとどまり、LSP の状態は READY とする。ルーターを出せないプールのときだけ、その
+        ハンドルの ``documents`` / ``diagnostics``。``lsp`` が無いときの LSP の状態は言語ごとにプールの ``status``。``overrides`` が最優先。
         """
         rt = self.runtime(ws.workspace_id)
         if rt is None or self.hub is None:
@@ -535,10 +535,17 @@ class WiredServices(ToolServices):
             "reader_pool": rt.readers,
             "trees": self.trees,
         }
+        wiring = self._router_wiring(ws)
         if lsp is not None:
-            kw.update(documents=lsp.documents, diagnostics_hub=lsp.diagnostics, lsp_status=lambda _lang: LspStatus.READY)
+            # ``lsp``（T-13 が QuickFix を供給したサーバー）は「LSP で検証する」の手がかり。口は 1 サーバー分ではなく ``DocumentRouter``:
+            # 書き込み後の ``didChange`` と診断の待ちを、その言語の動いている全サーバー（basedpyright と ruff）へ届ける（BUG-0023）。
+            if wiring:
+                kw.update(wiring)
+            else:  # ルーターを出せないプール（偽物など）: 渡されたハンドルの 1 サーバー
+                kw.update(documents=lsp.documents, diagnostics_hub=lsp.diagnostics)
+            kw["lsp_status"] = lambda _lang: LspStatus.READY
         else:
-            kw.update(self._router_wiring(ws))
+            kw.update(wiring)
         kw.update({k: v for k, v in overrides.items() if v is not None})
         return EditTransaction(ws, **kw)
 
