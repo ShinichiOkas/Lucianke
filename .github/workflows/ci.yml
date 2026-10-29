@@ -3,6 +3,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 出口条件（exit-criteria・cross-os）は重いので push では走らせない。手動の起動と夜間（03:00 JST）だけ
+  workflow_dispatch:
+  schedule:
+    - cron: "0 18 * * *"
+
+# 続けて push したときは、同じ ref の古い実行を取り消す（実行時間を使い過ぎない）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -39,6 +48,7 @@ jobs:
   # （3 OS で入れ方を揃えられないと、差が製品の差か入れ方の差か分からなくなる）。無い LSP の試験は skip になり、
   # その件数と理由が結果 JSON と .pair-agent/acceptance/M1-exit-*.md に残る。
   exit-criteria:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +84,7 @@ jobs:
 
   cross-os:
     needs: exit-criteria
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
