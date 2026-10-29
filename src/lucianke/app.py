@@ -11,20 +11,23 @@ import の順序が要: このモジュールの先頭では標準ライブラ�
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lucianke.bootstrap_io import bootstrap_io, open_transport_streams
 from lucianke.config import Settings, load_settings
 from lucianke.logging_setup import setup_logging
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    import logging
+    from collections.abc import Callable, Mapping, Sequence
 
     from lucianke.core.procs import ProcessRegistry
     from lucianke.lifecycle import Lifecycle
     from lucianke.lsp.pool import LspPool
     from lucianke.mcp.registry import ToolRegistry
+    from lucianke.mcp.server import RootsState
     from lucianke.syntax.parsers import TreeCache
     from lucianke.tools._runtime import RuntimeHub
     from lucianke.tools._services import ToolServices
@@ -60,7 +63,57 @@ def build_services(
 
 
 ROOTS_FALLBACK_S = 8.0  # ``notifications/initialized`` が来ないホストでも、この秒数の後に cwd で索引を始める（roots の待ち上限 5 s より長く）
+ROOTS_FALLBACK_ENV = "LUCIANKE_ROOTS_FALLBACK_S"  # 上の秒数の上書き（試験用。e2e が「待ち切った後でも set_roots が残る」を短い時間で確かめる）
 EDIT_DRAIN_POLL_S = 0.05
+
+
+def roots_fallback_seconds(env: Mapping[str, str] | None = None) -> float:
+    raw = (os.environ if env is None else env).get(ROOTS_FALLBACK_ENV)
+    try:
+        value = float(raw) if raw else ROOTS_FALLBACK_S
+    except ValueError:
+        return ROOTS_FALLBACK_S
+    return value if value > 0 else ROOTS_FALLBACK_S
+
+
+class RootsDecision:
+    """ワークスペースの根をいつ・何に決めるか（設計書 §6.5 手順 7。BUG-0042）。
+
+    決める筋は 3 つ。どれも ``hub.sync_roots`` に行き着き、**最初の 1 つが勝つ**（cwd は既定にすぎない）:
+
+    * ``roots/list`` の結果（``notifications/initialized`` の後。``on_roots``）。取れなければ cwd。
+    * roots を渡せない相手（roots 能力なし・2026-07-28 版）の最初の呼び出し: cwd を待たずに既定にする（``gate``）。
+      ただし T-00 ``set_roots`` は決定そのもの: 待たず、cwd の索引も始めない（根が決まるのを待つのは循環）。
+    * ``initialized`` が来ないホストの退避: ``fallback_s`` 秒の後に cwd。
+    """
+
+    def __init__(self, hub: RuntimeHub, roots: RootsState, log: logging.Logger) -> None:
+        self.hub = hub
+        self.roots = roots
+        self.log = log
+        self.settled = False
+
+    async def on_roots(self, state: RootsState) -> None:
+        """``roots/list`` の結果（か、取れなかった結果）が出た。"""
+        self.settled = True
+        if state.source == "cwd" and self.hub.started:
+            return  # cwd は既定。すでに誰か（T-00 ``set_roots`` など）が決めたものを cwd で上書きしない
+        await self.hub.sync_roots(state.paths)
+
+    async def fallback(self, fallback_s: float) -> None:
+        await asyncio.sleep(fallback_s)
+        if not self.settled and not self.hub.started:
+            self.log.warning("no roots decision after %.0f s; indexing the cwd", fallback_s)
+            await self.on_roots(self.roots)
+
+    async def gate(self, tool: str, arguments: Mapping[str, Any]) -> None:
+        """``tools/call`` の入口。根が決まるまで待つ（上限つき）。roots を渡せない相手には待たずに決める。"""
+        if self.roots.client_can_list is False:  # roots の決定は来ない。待つ相手がいない
+            if tool == "configure_workspace" and arguments.get("action") == "set_roots":
+                return  # このツールが根を決める。cwd の索引は始めない
+            if not self.settled and not self.hub.started:
+                await self.on_roots(self.roots)
+        await self.hub.wait_started()
 
 
 def register_shutdown_steps(lifecycle: Lifecycle, hub: RuntimeHub, pool: LspPool, procs: ProcessRegistry) -> None:
@@ -116,6 +169,7 @@ def run_stdio() -> int:
     hub = RuntimeHub(settings.cache_root, trees)
     pool = LspPool(procs, on_diagnostics=hub.on_diagnostics)
     hub.lsp_pool = pool
+    decision = RootsDecision(hub, roots, log)
     lifecycle = Lifecycle()
     register_shutdown_steps(lifecycle, hub, pool, procs)
     pipeline = Pipeline(
@@ -123,7 +177,7 @@ def run_stdio() -> int:
         services=build_services(lambda: roots.paths, trees=trees, hub=hub),
         data_version_provider=hub.data_version,
         shutdown_guard=make_shutdown_guard(lifecycle),
-        ready_gate=hub.wait_started,
+        ready_gate=decision.gate,
     )
     server = build_server(registry, pipeline, roots, version=__version__, list_planned=settings.list_planned_tools)
     log.info("lucianke %s starting (tools=%d)", __version__, len(registry), extra={"event": "startup"})
@@ -131,21 +185,10 @@ def run_stdio() -> int:
     async def serve() -> None:
         from mcp.server.stdio import stdio_server
 
-        settled = False
-
-        async def on_roots(state: RootsState) -> None:  # roots/list の結果（か、取れなかった結果）が出た
-            nonlocal settled
-            settled = True
-            await hub.sync_roots(state.paths)
-
-        async def roots_fallback() -> None:  # initialized が来ないホスト向け
-            await asyncio.sleep(ROOTS_FALLBACK_S)
-            if not settled:
-                log.warning("no roots decision after %.0f s; indexing the cwd", ROOTS_FALLBACK_S)
-                await on_roots(roots)
-
-        roots.listeners.append(on_roots)
-        fallback = asyncio.get_running_loop().create_task(roots_fallback(), name="lucianke-roots-fallback")
+        roots.listeners.append(decision.on_roots)
+        fallback = asyncio.get_running_loop().create_task(
+            decision.fallback(roots_fallback_seconds()), name="lucianke-roots-fallback"
+        )  # initialized が来ないホスト向け
         watch = install_signal_handlers(asyncio.get_running_loop(), lifecycle)
         stdin, stdout = open_transport_streams(fds)
 

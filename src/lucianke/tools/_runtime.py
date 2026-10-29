@@ -257,6 +257,11 @@ class RuntimeHub:
         self._applied: tuple[str, ...] | None = None
         self._started = asyncio.Event()  # 最初の sync_roots が終わった（束が開いた・開けなかった、のどちらでも）
 
+    @property
+    def started(self) -> bool:
+        """最初の ``sync_roots`` が終わっている（根が 1 度決まった。cwd・``roots/list``・T-00 ``set_roots`` のどれでも）。"""
+        return self._started.is_set()
+
     async def wait_started(self, timeout: float = STARTUP_WAIT_S) -> bool:
         """最初の ``sync_roots`` が終わるまで待つ（``tools/call`` の入口が呼ぶ。起動直後の呼び出しが束の準備より先に着く競合を埋める）。"""
         if self._started.is_set():
@@ -449,13 +454,18 @@ class WiredServices(ToolServices):
         return ToolServices.workspace(self, workspace_id)  # slots の dataclass では引数なしの super() が使えない
 
     def resolve_workspace_id(self, workspace_id: str | None) -> str | None:
-        """省略を実在の ID にする。ルートが 1 つも無い間は ``None`` を素通しする（T-00 ``set_roots`` の最初の呼び出しを通すため）。
+        """省略を実在の ID にする。ルートが 1 つも登録されていない間は ``None`` を素通しする（T-00 ``set_roots`` の最初の呼び出しを通すため）。
 
+        束（``hub``）があるときは、``roots()``（cwd が常にある）ではなく **登録の有無** で決める。登録前に cwd 由来の ID を返すと、
+        T-00 が「未登録の ID」で失敗する（BUG-0042: roots を渡せない相手の最初の ``set_roots``）。束が無いときは ``roots()`` が空のとき。
         他のツールはこの後、``workspace()`` / ``db_path`` で ``E_WORKSPACE_NOT_CONFIGURED`` になる。明示した ID は従来どおり検査する。
         """
         hub = self.hub
-        if workspace_id is None and (hub is None or not hub.has_workspaces()) and not list(self.roots()):
-            return None
+        if workspace_id is None:
+            if hub is not None and not hub.has_workspaces():
+                return None
+            if hub is None and not list(self.roots()):
+                return None
         return self.workspace(workspace_id).workspace_id
 
     def runtime(self, workspace_id: str | None = None) -> WorkspaceRuntime | None:

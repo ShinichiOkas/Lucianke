@@ -43,33 +43,26 @@ _LEVELS = {c.value: c for c in Confidence}
 
 
 class QueryProjectDbArgs(CommonArgs):
-    query: str = Field(
-        description="One SELECT or WITH ... SELECT statement over the public tables (see get_project_db_schema)."
-    )
+    query: str
     query_language: Literal["sql", "datalog"] = Field(
-        default="sql", description='"sql" only; "datalog" is reserved (E_UNSUPPORTED).'
+        default="sql", description='"sql" only; "datalog" is reserved.'
     )
     params: dict[str, Any] | None = Field(
         default=None,
-        description="Named binds: every :name in query needs a key, and every key must appear as :key.",
+        description="Named binds: each :name needs a key and vice versa.",
     )
-    limit: int = Field(
-        default=QUERY_ROWS_DEFAULT, ge=1, le=QUERY_ROWS_MAX, description="Max rows returned (1-2000)."
-    )
+    limit: int = Field(default=QUERY_ROWS_DEFAULT, ge=1, le=QUERY_ROWS_MAX)
     auto_fallback_grep_pattern: str | None = Field(
         default=None,
-        description="Word-bounded regex. When set, matches are put in temp table temp_grep_matches(path, line, snippet, confidence_level) for the query.",
+        description="Word-bounded regex; matches go to temp table temp_grep_matches.",
     )
-    grep_scope_paths: list[str] | None = Field(
-        default=None, description="Restrict the grep to these workspace paths."
-    )
+    grep_scope_paths: list[str] | None = Field(default=None)
     timeout_ms: int = Field(
         default=QUERY_TIMEOUT_DEFAULT_MS,
         ge=QUERY_TIMEOUT_MIN_MS,
         le=QUERY_TIMEOUT_MAX_MS,
-        description="Execution limit (50-5000 ms).",
     )
-    explain: bool = Field(default=False, description="Return EXPLAIN QUERY PLAN only; do not run the query.")
+    explain: bool = Field(default=False)
 
 
 # --- 部品 -------------------------------------------------------------------------------------
@@ -314,11 +307,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2000,
     description=(
-        "Run one read-only SQL SELECT / WITH statement over the project knowledge DB (tables: workspaces, files, symbols, "
-        "relations, dataflows, diagnostics, contracts, git_commits, git_symbol_changes, git_co_changes, symbols_fts; call "
-        "get_project_db_schema first). Use :name binds with params, limit (<=2000), timeout_ms (50-5000), explain. "
-        "Select the confidence_level column to see per-row accuracy. format dot/mermaid needs source_urn and target_urn columns. "
-        "Writes, ATTACH, PRAGMA and non-public tables are rejected (E_QUERY_REJECTED)."
+        "Run one read-only SQL SELECT / WITH over the project knowledge DB (call get_project_db_schema first for tables and columns). :name binds come from params. Select confidence_level for per-row accuracy. dot/mermaid need source_urn and target_urn columns. Writes, ATTACH, PRAGMA and non-public tables are rejected (E_QUERY_REJECTED)."
     ),
     allows_graph=True,
     max_confidence=Confidence.EXACT,

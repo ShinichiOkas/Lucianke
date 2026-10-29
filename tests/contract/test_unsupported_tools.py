@@ -1,6 +1,8 @@
 """M2・M3 のツールの入口（T-09・T-12・T-14〜T-18。設計書 §12.2 の注、``tools/_unsupported.py``）の契約テスト。
 
-* 7 本が自動登録で ``tools/list`` に載り、入力スキーマが仕様書の必須引数・範囲・既定値を持つ。
+* 7 本は自動登録で登録表に載り、入力スキーマが仕様書の必須引数・範囲・既定値を持つ。``tools/list`` には**既定では載らない**
+  （M1 では呼べない入口が約 4,000 トークンの固定費になるため。23a）。設定 ``LUCIANKE_LIST_PLANNED_TOOLS=1`` で載せる。
+  載せなくても呼べば ``E_UNSUPPORTED``。
 * 既定のパイプライン（M1）は、ハンドラの前に ``E_UNSUPPORTED``（``details.reason: "not_in_milestone"``, ``details.milestone``）を返す。
 * ``current_milestone`` を進めたパイプラインでは入口のハンドラが動き、``details.hint``（M1 の代わりのツール）を足して同じ
   ``E_UNSUPPORTED`` を返す。引数の検証（スキーマ）はその前に効く。
@@ -60,8 +62,8 @@ def schema_of(registry: ToolRegistry, name: str) -> dict[str, Any]:
 # --- tools/list ---------------------------------------------------------------------------------
 
 
-def test_the_seven_planned_tools_are_listed(registry: ToolRegistry) -> None:
-    listed = {d.name: d for d in registry.descriptors()}
+def test_the_seven_planned_tools_are_listed_when_asked(registry: ToolRegistry) -> None:
+    listed = {d.name: d for d in registry.descriptors(include_planned=True)}
     assert set(NAMES) <= set(listed)  # 件数は決め打ちしない（ツールは増えていく）
     for name, (tid, milestone, _req, _min, hint_tool) in PLANNED.items():
         spec = registry.get(name)
@@ -74,6 +76,21 @@ def test_the_seven_planned_tools_are_listed(registry: ToolRegistry) -> None:
             else "Meanwhile" not in description
         )
         assert listed[name].read_only is (name != "structural_search_replace")  # 書き込みは T-12 だけ
+
+
+def test_planned_tools_are_left_out_of_the_default_listing(registry: ToolRegistry) -> None:
+    default = {d.name for d in registry.descriptors(include_planned=False)}
+    assert not (set(NAMES) & default)  # 7 本は載らない
+    m1 = {s.name for s in registry if s.milestone == "M1"}
+    assert m1 and m1 <= default  # M1 のツールは全部載る
+    assert default == m1
+    for name in NAMES:
+        assert name in registry and registry.get(name) is not None  # 登録表には残る（呼べば E_UNSUPPORTED）
+    # マイルストーンが進んだパイプラインなら、先のツールではなくなるので載る
+    assert set(NAMES) <= {d.name for d in registry.descriptors(include_planned=False, current_milestone="M3")}
+    assert {d.name for d in registry.descriptors(include_planned=False, current_milestone="M2")} == default | {
+        n for n in NAMES if PLANNED[n][1] == "M2"
+    }
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -256,9 +273,12 @@ async def test_calling_does_not_write_to_stdout(
 class _Raw:
     """最小の生 JSON-RPC クライアント（SDK を通さず、stdout の全行を記録する）。"""
 
-    def __init__(self, cache: Path) -> None:
+    def __init__(self, cache: Path, *, list_planned: bool = False) -> None:
         env = {**os.environ, "LUCIANKE_CACHE_DIR": str(cache), "PYTHONUTF8": "1"}
         env.pop("LUCIANKE_DEV_TOOLS", None)
+        env.pop("LUCIANKE_LIST_PLANNED_TOOLS", None)
+        if list_planned:
+            env["LUCIANKE_LIST_PLANNED_TOOLS"] = "1"
         self.proc = subprocess.Popen(  # noqa: S603
             [sys.executable, "-m", "lucianke"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
@@ -315,8 +335,9 @@ class _Raw:
                 t.join(timeout=5)
 
 
-def test_stdio_server_lists_and_answers_the_planned_tools_with_a_pure_stdout(tmp_path: Path) -> None:
-    raw = _Raw(tmp_path / "cache")
+def _stdio_session(tmp_path: Path, *, list_planned: bool) -> tuple[dict[str, Any], int, list[bytes]]:
+    """実プロセスで ``tools/list`` と 7 本の呼び出しを通す。``(tools/list の名前→定義, 終了コード, stdout の全行)``。"""
+    raw = _Raw(tmp_path / "cache", list_planned=list_planned)
     try:
         init = raw.request(
             "initialize",
@@ -329,19 +350,35 @@ def test_stdio_server_lists_and_answers_the_planned_tools_with_a_pure_stdout(tmp
         assert init["result"]["serverInfo"]["name"] == "lucianke"
         raw.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         listed = {t["name"]: t for t in raw.request("tools/list", {})["result"]["tools"]}
-        assert set(NAMES) <= set(listed)
-        for name in NAMES:
-            assert listed[name]["inputSchema"]["additionalProperties"] is False
-            assert set(listed[name]["inputSchema"].get("required", [])) == PLANNED[name][2]
-        for name in NAMES:
+        for name in NAMES:  # 載せていなくても、呼べば E_UNSUPPORTED（未知のツールではない）
             res = raw.request("tools/call", {"name": name, "arguments": dict(PLANNED[name][3])})["result"]
             assert res["isError"] is True, name
             assert "E_UNSUPPORTED" in res["content"][0]["text"], res
     finally:
         rc = raw.close()
+    return listed, rc, raw.lines
+
+
+def _assert_pure_stdout(rc: int, lines: list[bytes]) -> None:
     assert rc == 0
-    assert raw.lines, "server wrote nothing to stdout"
-    for line in raw.lines:
+    assert lines, "server wrote nothing to stdout"
+    for line in lines:
         assert line.endswith(b"\n") and not line.endswith(b"\r\n"), line
         msg = json.loads(line)
         assert msg.get("jsonrpc") == "2.0" and ("method" in msg or "result" in msg or "error" in msg), line
+
+
+def test_stdio_server_leaves_the_planned_tools_out_of_tools_list_but_still_answers_them(tmp_path: Path) -> None:
+    listed, rc, lines = _stdio_session(tmp_path, list_planned=False)
+    assert not (set(NAMES) & set(listed)), sorted(set(NAMES) & set(listed))
+    assert {"get_file_skeleton", "edit_symbol_body", "rename_symbol"} <= set(listed)  # M1 は載る
+    _assert_pure_stdout(rc, lines)
+
+
+def test_stdio_server_lists_the_planned_tools_with_the_setting(tmp_path: Path) -> None:
+    listed, rc, lines = _stdio_session(tmp_path, list_planned=True)
+    assert set(NAMES) <= set(listed)
+    for name in NAMES:
+        assert listed[name]["inputSchema"]["additionalProperties"] is False
+        assert set(listed[name]["inputSchema"].get("required", [])) == PLANNED[name][2]
+    _assert_pure_stdout(rc, lines)

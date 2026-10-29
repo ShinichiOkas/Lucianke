@@ -30,13 +30,15 @@ class GetFileSkeletonArgs(CommonArgs):
     paths: list[str] = Field(
         min_length=1,
         max_length=BATCH_MAX_ITEMS,
-        description="1-20 file paths (workspace-relative with '/', or absolute inside the workspace).",
+        description="Workspace-relative or absolute.",
     )
-    include_private: bool = Field(default=True, description="Include private members (_name, private, non-export).")
-    include_doc_summary: bool = Field(default=True, description="Add the first line of the doc comment as 'doc:'.")
-    include_urns: Literal["public", "all", "none"] = Field(default="public", description="Which symbols get a 'urn:' line.")
-    include_imports: bool = Field(default=True, description="Add the 'imports:' line.")
-    max_depth: int = Field(default=4, ge=1, le=10, description="Depth for data files (Tier 3). Unused for code.")
+    include_private: bool = Field(default=True)
+    include_doc_summary: bool = Field(default=True)
+    include_urns: Literal["public", "all", "none"] = Field(
+        default="public", description="Symbols that get a urn: line."
+    )
+    include_imports: bool = Field(default=True)
+    max_depth: int = Field(default=4, ge=1, le=10, description="Data files only.")
 
 
 def failure_record(path: str, err: LuciankeError, priority: int, banner: Any) -> Record:
@@ -55,7 +57,9 @@ def failure_record(path: str, err: LuciankeError, priority: int, banner: Any) ->
 async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
-    view = await open_revision(ws, args.revision)  # 解決できなければ E_REVISION_NOT_FOUND（作業ツリーは Git に触れない）
+    view = await open_revision(
+        ws, args.revision
+    )  # 解決できなければ E_REVISION_NOT_FOUND（作業ツリーは Git に触れない）
     opts = SkeletonOptions(
         include_private=args.include_private,
         include_doc_summary=args.include_doc_summary,
@@ -107,13 +111,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2000,
     description=(
-        "Return a skeleton of 1-20 files: imports, class/function signatures with line ranges, and the first "
-        "line of each doc comment, with bodies folded. Use it instead of reading whole files. Python/TypeScript/JavaScript "
-        "(syntax tree only); data files (JSON/JSONL/YAML/TOML/XML) as a key/tag tree with array types, folded at max_depth; "
-        ".ipynb as cells (outputs are never shown); Markdown/reStructuredText as a heading tree; other files (unknown "
-        "language, no extension) as a heuristic outline marked DEGRADED. Reads any revision (HEAD, HEAD~N, branch, tag, SHA, "
-        "STAGED) from Git without touching the working tree. Each file block carries sha= for edit preconditions; a failed "
-        "path is reported as '! path: CODE msg'."
+        "Skeleton of 1-20 files: imports, class/function signatures with line ranges, first doc line; bodies folded. Use instead of reading whole files. Python/TS/JS (syntax tree); JSON/YAML/TOML/XML key trees; .ipynb cells; Markdown/rst headings; other files a heuristic outline (DEGRADED). Reads any revision from Git. Each file block has sha= for edit preconditions."
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

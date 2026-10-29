@@ -59,16 +59,12 @@ Ranking = Literal["pagerank", "fan_in", "alpha"]
 class GetRepoMapArgs(CommonArgs):
     scope_paths: list[str] | None = Field(
         default=None,
-        description="Workspace-relative directories or globs to map. Default: the whole workspace.",
+        description="Directories or globs.",
     )
-    include_signatures: bool = Field(
-        default=True, description="Show parameters and return types, not just names."
-    )
-    max_symbols_per_file: int = Field(
-        default=5, ge=1, le=50, description="Public symbols shown per file (1-50)."
-    )
-    ranking: Ranking = Field(default="pagerank", description='"pagerank" | "fan_in" | "alpha" (path order).')
-    include_tests: bool = Field(default=False, description="Include test files.")
+    include_signatures: bool = Field(default=True)
+    max_symbols_per_file: int = Field(default=5, ge=1, le=50)
+    ranking: Ranking = Field(default="pagerank", description="alpha = path order.")
+    include_tests: bool = Field(default=False)
 
 
 # --- 範囲 -----------------------------------------------------------------------------------
@@ -475,11 +471,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Map an unfamiliar repository within a token budget: top-level directory counts, then files ordered by "
-        "importance (PageRank over calls/references/imports/inheritance), each with its top public symbols and "
-        "signatures. The first call to make in a new codebase. Test files are hidden unless include_tests=true. "
-        "Falls back to path order (ranking=alpha) until the reference graph is built. Pass next_cursor for the "
-        "next page."
+        "Map an unfamiliar repository within a token budget: directory counts, then files ranked by importance (PageRank), each with its top public symbols and signatures. First call in a new codebase. Test files are hidden unless include_tests=true."
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

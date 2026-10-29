@@ -34,14 +34,12 @@ class CommonArgs(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    workspace_id: str | None = Field(default=None, description="Workspace id. Default: the active workspace.")
-    revision: str = Field(
-        default=WORKING_TREE,
-        description='"WORKING_TREE" | "STAGED" | "HEAD" | branch | tag | commit SHA. Edit tools accept only WORKING_TREE.',
-    )
-    format: FormatName = Field(default="compact", description="Output format. dot/mermaid only for graph-capable tools.")
-    max_tokens: int | None = Field(default=None, description="Upper bound of the whole response (min 200).")
-    cursor: str | None = Field(default=None, description="Continuation token from a previous page (next_cursor).")
+    # tools/list のトークンを抑えるため、説明は最小（名前と型・enum・既定値で足りるものは付けない。tests/unit/test_schema_budget.py）
+    workspace_id: str | None = Field(default=None)
+    revision: str = Field(default=WORKING_TREE, description="Git ref or WORKING_TREE.")
+    format: FormatName = Field(default="compact")
+    max_tokens: int | None = Field(default=None)
+    cursor: str | None = Field(default=None)
 
 
 class CallView(Protocol):

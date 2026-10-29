@@ -144,15 +144,11 @@ ORDER BY files DESC""",
 class GetProjectDbSchemaArgs(CommonArgs):
     tables: list[str] | None = Field(
         default=None,
-        description="Only these tables (default: the 10 public tables). symbols_fts only when named.",
+        description="Default: the 10 public tables.",
     )
-    include_stats: bool = Field(
-        default=True, description="Add row counts and the confidence_level composition."
-    )
-    include_sample_queries: bool = Field(
-        default=True, description="Add up to 5 ready-to-run SQL examples for query_project_db."
-    )
-    include_indexes: bool = Field(default=False, description="Add the indexes of each table.")
+    include_stats: bool = Field(default=True)
+    include_sample_queries: bool = Field(default=True)
+    include_indexes: bool = Field(default=False)
 
 
 # --- DDL のコメント ---------------------------------------------------------------------------
@@ -433,9 +429,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2500,
     description=(
-        "Describe the project knowledge DB for query_project_db: the 10 public tables (columns, types, nullability, PK/FK, "
-        "one-line meanings), row counts, the confidence_level composition (coverage), and up to 5 ready-to-run sample SQL "
-        "statements with params. Call it once before writing SQL. include_indexes adds the indexes; tables narrows the list."
+        "Describe the project knowledge DB used by query_project_db: the 10 public tables (columns, types, PK/FK, meanings), row counts, confidence_level composition, and up to 5 ready-to-run sample SQL statements. Call it once before writing SQL."
     ),
     max_confidence=Confidence.EXACT,
     milestone="M1",

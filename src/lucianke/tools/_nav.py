@@ -47,15 +47,11 @@ class TargetRefArg(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    urn: str | None = Field(default=None, description='e.g. "lk://app/src/a.py#Cls.method"')
-    path: str | None = Field(default=None, description="Workspace-relative path with '/'.")
-    symbol_name: str | None = Field(
-        default=None, description='"name", "Outer.name" (suffix match on qualified_name).'
-    )
-    line: int | None = Field(
-        default=None, ge=1, description="1-based line; selects the innermost symbol containing it."
-    )
-    character: int | None = Field(default=None, ge=1, description="1-based column (optional with line).")
+    urn: str | None = Field(default=None, description="From another tool's output.")
+    path: str | None = Field(default=None)
+    symbol_name: str | None = Field(default=None, description='"name" or "Outer.name".')
+    line: int | None = Field(default=None, ge=1)
+    character: int | None = Field(default=None, ge=1)
 
 
 def db_path_of(ctx: ToolContext) -> Path:

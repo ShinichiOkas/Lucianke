@@ -100,22 +100,19 @@ class GetDiagnosticsArgs(CommonArgs):
         default=None,
         min_length=1,
         max_length=PATHS_MAX,
-        description=(
-            "Files or directories (workspace-relative with '/', or absolute inside the workspace), up to 50. "
-            "Default: every indexed file of the workspace."
-        ),
+        description=("Default: all indexed files."),
     )
     min_severity: Severity = Field(
         default="warning",
-        description='"error" | "warning" | "information" | "hint": this severity and above.',
+        description="This severity and above.",
     )
     include_code_actions: bool = Field(
         default=True,
-        description="Ask the LSP for QuickFix candidates of errors/warnings and add their code_action_id.",
+        description="Add fix=qf_... ids.",
     )
     sources: list[str] | None = Field(
         default=None,
-        description='Only these diagnostic sources (e.g. ["pyright"], ["tree-sitter"]). Default: all.',
+        description='Only these sources, e.g. ["pyright"]. Default: all.',
     )
 
 
@@ -934,12 +931,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2000,
     description=(
-        "Return the latest syntax, type and lint diagnostics (errors, warnings) of files or the whole workspace without "
-        "running a build or linter. Each line is 'E|W|I|H path:line:col [source:code] message'; a diagnostic with a "
-        "QuickFix carries fix=qf_... (pass it to apply_code_action). min_severity filters (default warning); sources filters "
-        "by server (pyright, ruff, tree-sitter). When the type server is starting or unavailable, only lint (ruff) "
-        "diagnostics and syntax errors are returned; when no language server is ready, only syntax errors. "
-        "The response says which."
+        "Latest syntax, type and lint diagnostics of files or the whole workspace, without a build or linter run. Lines: 'E|W|I|H path:line:col [source:code] message'; fix=qf_... is accepted by apply_code_action. While the type server starts, only lint and syntax errors are returned; the response says which."
     ),
     max_confidence=Confidence.EXACT,
     milestone="M1",

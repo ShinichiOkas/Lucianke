@@ -75,23 +75,19 @@ ACCURACY_WARNING = (
 
 
 class QueryCallHierarchyArgs(CommonArgs):
-    target: TargetRefArg = Field(
-        description="The function/method/class (urn, or path + symbol_name, or path + line)."
-    )
-    direction: Literal["incoming", "outgoing", "both"] = Field(
-        description="incoming = callers, outgoing = callees."
-    )
-    depth: int = Field(default=2, ge=1, le=DEPTH_MAX, description="1-5.")
+    target: TargetRefArg
+    direction: Literal["incoming", "outgoing", "both"]
+    depth: int = Field(default=2, ge=1, le=DEPTH_MAX)
     include_guard_conditions: bool = Field(
-        default=True, description="Add 'when:' (the condition around each call)."
+        default=True
     )
     exclude_external: bool = Field(
         default=True,
-        description="Hide language builtins (print, ValueError...); other stdlib/package callees stay '(external)' leaves.",
+        description="Show stdlib/package functions as '(external)' leaves.",
     )
-    include_tests: bool = Field(default=True, description="Include callers/callees in test files.")
+    include_tests: bool = Field(default=True)
     max_children: int = Field(
-        default=20, ge=1, le=500, description="Children per node; the rest is summarised."
+        default=20, ge=1, le=500
     )
 
 
@@ -546,10 +542,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2000,
     description=(
-        "Show who calls a function/method (incoming) or what it calls (outgoing) as a tree up to depth 1-5, with the "
-        "condition around each call ('when:'). Cycles are shown once as '(cycle)'. Target by urn, or path + "
-        "symbol_name, or path + line. dot/mermaid draw the call graph. Syntax-tree resolution: dynamic dispatch and "
-        "same-name methods are not told apart."
+        "Who calls a function/method (incoming) or what it calls (outgoing), as a tree up to depth 5, with the condition around each call ('when:'). dot/mermaid draw the call graph. Syntax-tree resolution: dynamic dispatch and same-name methods are not told apart."
     ),
     allows_graph=True,
     max_confidence=Confidence.EXACT,

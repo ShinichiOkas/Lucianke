@@ -96,22 +96,22 @@ ACCURACY_WARNING = (
 
 
 class FindReferencesArgs(CommonArgs):
-    target: TargetRefArg = Field(description="The symbol (urn, or path + symbol_name, or path + line).")
+    target: TargetRefArg
     query_type: Literal["references", "implementations", "type_hierarchy", "all"] = Field(
-        default="all", description="What to list."
+        default="all"
     )
-    include_tests: bool = Field(default=True, description="Include references from test files.")
-    include_declaration: bool = Field(default=False, description="Include the declaration site itself.")
+    include_tests: bool = Field(default=True)
+    include_declaration: bool = Field(default=False)
     context_snippet: bool = Field(
-        default=True, description="Add the code of the reference line (cut at 200 chars)."
+        default=True, description="Add the code of the reference line."
     )
     use_kinds: list[UseName] | None = Field(
-        default=None, description="Only these uses: r w rw call type import impl."
+        default=None
     )
-    scope_paths: list[str] | None = Field(default=None, description="Only references in these paths/globs.")
+    scope_paths: list[str] | None = Field(default=None)
     include_lexical_in_other_files: bool = Field(
         default=False,
-        description="Also grep the name (word boundary) in Tier 3-4 files (config/templates/unknown) as lexical refs.",
+        description="Also grep the name in non-code files as lexical refs.",
     )
 
 
@@ -711,10 +711,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2000,
     description=(
-        "List every reference to one symbol (with the use: r w rw call type import impl, the enclosing function and the "
-        "code of the line), plus its implementations and type hierarchy. Target by urn, or path + symbol_name, or "
-        "path + line. dot/mermaid draw enclosing-function -> target edges. Syntax-tree resolution: same-name symbols "
-        "are not told apart."
+        "All references to one symbol (use, enclosing function, code of the line), plus implementations and type hierarchy. Syntax-tree resolution: same-name symbols are not told apart."
     ),
     allows_graph=True,
     max_confidence=Confidence.EXACT,

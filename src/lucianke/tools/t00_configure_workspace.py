@@ -66,29 +66,24 @@ PYTHON_LANGUAGE = "python"
 class ConfigureWorkspaceArgs(CommonArgs):
     action: Action = Field(
         default="status",
-        description='"status" (default, read-only) | "set_roots" | "set_python_env" | "set_excludes" | "reindex".',
     )
     root_paths: list[str] | None = Field(
         default=None,
-        description="set_roots: absolute paths (or relative to the active root). All must be existing directories, "
-        "otherwise nothing changes. The first becomes the active workspace; the list replaces the registered roots.",
+        description="set_roots: absolute or root-relative paths; all must exist, else nothing changes.",
     )
     python_interpreter: str | None = Field(
-        default=None, description="set_python_env: a Python executable or a virtual environment directory."
+        default=None, description="set_python_env: interpreter or venv directory."
     )
     exclude_globs: list[str] | None = Field(
         default=None,
-        description="set_excludes: globs excluded in addition to .gitignore. Replaces the previous list ([] clears).",
+        description="set_excludes: globs added to .gitignore; replaces the list ([] clears).",
     )
     default_base_ref: str | None = Field(
         default=None,
-        description='Default comparison base for change-impact tools (default "HEAD"). Applied with set_roots / '
-        "set_python_env / set_excludes.",
+        description="Default: HEAD.",
     )
-    reindex_scope: ReindexScope = Field(
-        default="all", description='reindex: "all" | "symbols" | "git" | "lsp".'
-    )
-    job_id: str | None = Field(default=None, description="status: only this job in jobs[].")
+    reindex_scope: ReindexScope = Field(default="all")
+    job_id: str | None = Field(default=None, description="status: only this job.")
 
 
 # --- 時刻・小道具 ---------------------------------------------------------------------------------
@@ -743,7 +738,9 @@ async def _set_python_env(
             handle.ws = new_ws  # rebind を持たないハブ・プールでも、新しい環境で上がるよう差し替える（rebind 済みなら同じ値）
         if not did_restart:
             await pool.reset(PYTHON_LANGUAGE, new_ws)
-        await pool.ensure_started(PYTHON_LANGUAGE, new_ws)  # standby だけ起動する（rebind が起こした starting 以降は何もしない）
+        await pool.ensure_started(
+            PYTHON_LANGUAGE, new_ws
+        )  # standby だけ起動する（rebind が起こした starting 以降は何もしない）
 
     if pool is None:
         warnings.append(f"{ws.workspace_id}: no LSP pool is running; nothing to restart")
@@ -869,11 +866,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Inspect and configure the analysis target: action status (default, read-only) reports registered workspaces "
-        "(languages by tier, Python env, git branch/dirty), LSP daemons, cache size and background jobs; set_roots registers "
-        "project roots (replaces the list; the first becomes active; nothing changes if any path is missing); set_python_env "
-        "restarts the Python LSP on another interpreter; set_excludes replaces the extra exclude globs and rescans; reindex "
-        "starts a background job and returns its job_id at once. Call it at session start and when switching targets."
+        "Inspect and configure the analysis target. action: status (default, read-only: workspaces, LSP daemons, cache, jobs) | set_roots | set_python_env | set_excludes | reindex (background job, returns job_id). Call it at session start and when switching targets."
     ),
     writes=False,
     max_confidence=Confidence.EXACT,

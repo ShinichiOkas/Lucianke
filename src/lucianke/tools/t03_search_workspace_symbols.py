@@ -66,25 +66,21 @@ _DATA_KINDS = frozenset({Kind.KEY, Kind.TAG})
 
 
 class SearchWorkspaceSymbolsArgs(CommonArgs):
-    query: str = Field(min_length=1, description="Name (or regex with match=regex). Empty is an error.")
-    match: Literal["fuzzy", "prefix", "exact", "regex"] = Field(default="fuzzy", description="Match mode.")
+    query: str = Field(min_length=1, description="Name, or regex with match=regex.")
+    match: Literal["fuzzy", "prefix", "exact", "regex"] = Field(default="fuzzy")
     symbol_kinds: list[str] | None = Field(
-        default=None, description='Lower-case kinds, e.g. ["method", "class"]. Default: all kinds.'
+        default=None, description='Lower-case kinds, e.g. ["method","class"]. Default: all.'
     )
     type_signature_filter: str | None = Field(
         default=None,
-        description='"A -> B" (parameters contain A and the return type contains B) or "A" (either contains A). '
-        "Case-insensitive substring match.",
+        description="Case-insensitive substring.",
     )
     scope_paths: list[str] | None = Field(
         default=None,
-        description="Workspace-relative files, directories or globs to search in. Default: everywhere.",
     )
-    include_tests: bool = Field(default=True, description="Include symbols in test files.")
-    limit: int = Field(default=30, ge=1, le=200, description="Maximum symbols in this page (1-200).")
-    fallback_grep: bool = Field(
-        default=True, description="With 0 hits, grep Tier 4 files by word boundary (degraded, lex: URNs)."
-    )
+    include_tests: bool = Field(default=True)
+    limit: int = Field(default=30, ge=1, le=200)
+    fallback_grep: bool = Field(default=True)
 
 
 # --- サービス（T-04 も使う） -----------------------------------------------------------------
@@ -528,10 +524,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Find symbols across the workspace by name (match: fuzzy | prefix | exact | regex), kind, and type signature "
-        '("A -> B": parameters contain A, return type contains B). Returns URNs with signatures and line ranges, '
-        "ranked exact > prefix > partial. Use it before resolve_symbols when you only know part of a name. "
-        "With 0 hits it greps non-code (Tier 4) files by word boundary and marks the result degraded."
+        'Find symbols by name (match: fuzzy | prefix | exact | regex), kind and type signature ("A -> B": parameters contain A, return type contains B). Use before resolve_symbols when you know only part of a name. With 0 hits it greps non-code files (degraded).'
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

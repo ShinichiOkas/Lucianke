@@ -22,6 +22,10 @@ class Settings:
     cache_root: Path
     log_level: str = DEFAULT_LOG_LEVEL  # "error" | "warn" | "info" | "debug"
     dev_tools: bool = False  # LUCIANKE_DEV_TOOLS=1: 開発用ツール（ping）を tools/list に載せる
+    list_planned_tools: bool = False
+    """LUCIANKE_LIST_PLANNED_TOOLS=1: 現在のマイルストーンより先のツール（M1 では T-09・T-12・T-14〜T-18 の入口）も tools/list に載せる。
+    既定は載せない（スキーマが約 4,000 トークンあり、M1 では呼ぶと E_UNSUPPORTED なので、ホストが毎セッション読む固定費になる）。
+    載せなくても呼べば E_UNSUPPORTED（not_in_milestone）を返す。"""
     log_keep_days: int = LOG_KEEP_DAYS
 
     @property
@@ -69,4 +73,5 @@ def load_settings(env: Mapping[str, str] | None = None, platform: str | None = N
         cache_root=default_cache_root(env, platform),
         log_level=normalize_log_level(env.get("LUCIANKE_LOG_LEVEL")),
         dev_tools=_truthy(env.get("LUCIANKE_DEV_TOOLS")),
+        list_planned_tools=_truthy(env.get("LUCIANKE_LIST_PLANNED_TOOLS")),
     )

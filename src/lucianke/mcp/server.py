@@ -53,6 +53,9 @@ class RootsState:
     source: str = "cwd"  # "cwd" | "client"
     listeners: list[Callable[[RootsState], Awaitable[None] | None]] = field(default_factory=list)
     """``roots/list`` の取得が済んだ（取れた・取れない・要求しない、のどれでも）たびに呼ぶ。合成ルートがワークスペースの登録に使う。"""
+    client_can_list: bool | None = None
+    """接続の相手が ``roots/list`` に答えられるか。**要求を受けるたびに**更新する（``None`` は最初の要求の前）。偽なら roots の決定は来ない
+    （roots 能力を宣言していない・サーバー起点の要求ができない 2026-07-28 版）ので、待たずに cwd を既定にしてよい（BUG-0042）。"""
 
     @classmethod
     def from_cwd(cls) -> RootsState:
@@ -72,6 +75,16 @@ class RootsState:
         paths = [p for u in uris if (p := file_uri_to_path(u))]
         if paths:  # 空の応答なら cwd のまま
             self.paths, self.uris, self.source = paths, list(uris), "client"
+
+
+def client_can_list_roots(ctx: ServerRequestContext) -> bool:
+    """この接続で ``roots/list`` を要求でき、相手が roots 能力を宣言しているか。
+
+    2026-07-28 版では ``initialize`` も ``notifications/initialized`` も無く、サーバー起点の要求ができない（``can_send_request`` が偽）。
+    roots 能力の宣言があっても、その版では要求できない。
+    """
+    caps = ctx.session.client_capabilities
+    return caps is not None and caps.roots is not None and ctx.session.can_send_request
 
 
 def file_uri_to_path(uri: str) -> str | None:
@@ -132,6 +145,7 @@ def build_server(
         )
 
     async def on_call_tool(ctx: ServerRequestContext, params: types.CallToolRequestParams) -> types.CallToolResult:
+        roots.client_can_list = client_can_list_roots(ctx)  # パイプラインの入口（ready_gate）が見る
         try:
             rendered = await pipeline.call_tool(params.name, params.arguments)
             return to_call_tool_result(rendered)

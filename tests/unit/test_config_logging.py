@@ -40,6 +40,12 @@ def test_load_settings_reads_dev_tools_flag():
     assert s.dev_tools is True and s.log_level == "debug" and s.log_dir == Path("/c/logs")
 
 
+def test_load_settings_reads_list_planned_tools_flag():
+    assert load_settings({"LUCIANKE_CACHE_DIR": "/c"}).list_planned_tools is False  # 既定は載せない（23a）
+    assert load_settings({"LUCIANKE_CACHE_DIR": "/c", "LUCIANKE_LIST_PLANNED_TOOLS": "1"}).list_planned_tools is True
+    assert load_settings({"LUCIANKE_CACHE_DIR": "/c", "LUCIANKE_LIST_PLANNED_TOOLS": "0"}).list_planned_tools is False
+
+
 @pytest.fixture
 def names():
     """グローバルなロガー（lucianke / mcp）を汚さない専用の名前。"""

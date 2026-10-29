@@ -81,20 +81,16 @@ _JS_CLASS_NODES = frozenset({"class_declaration", "abstract_class_declaration", 
 
 
 class ResolveSymbolsArgs(CommonArgs):
-    targets: list[TargetRefArg] = Field(
-        min_length=1, max_length=BATCH_MAX_ITEMS, description="1-20 TargetRefs."
-    )
+    targets: list[TargetRefArg] = Field(min_length=1, max_length=BATCH_MAX_ITEMS)
     resolve_type_definitions: bool = Field(
         default=True,
-        description="Resolve user-defined types in the signature to URNs (one level, up to 10 per target).",
+        description="Resolve user-defined types in the signature to URNs (one level).",
     )
     include_doc_full: bool = Field(
         default=True,
-        description="Put the full doc comment in json. compact shows only the first line and doc_lines=N.",
+        description="Full doc comment in json (compact: first line).",
     )
-    follow_aliases: bool = Field(
-        default=True, description="Follow imports, import aliases and re-exports to the original definition."
-    )
+    follow_aliases: bool = Field(default=True)
 
 
 # --- 道具 -----------------------------------------------------------------------------------
@@ -726,13 +722,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=2000,
     description=(
-        "Resolve 1-20 TargetRefs (urn, or path + symbol_name, or path + line) to their definition: path and line range, "
-        "signature, doc comment, decorators, and URNs of the user-defined types in the signature. Follows imports, "
-        "aliases and re-exports to the original definition inside the workspace; a name imported from an external "
-        "package returns definition null with a warning. Python/TypeScript/JavaScript. When the language server is "
-        "ready (or a previous exact answer is cached) the item is exact and signature_expanded is the hover type; "
-        "otherwise it falls back to the syntax tree and index (structural) without waiting for the server. "
-        "A failed or ambiguous item is reported on its own (ambiguous items list up to 10 candidates)."
+        "Resolve 1-20 TargetRefs to their definition: path, line range, signature, doc, decorators, URNs of user-defined types in the signature. Follows imports, aliases and re-exports; external packages give definition null with a warning. Python/TS/JS. Exact (hover type) when the language server is ready, else structural."
     ),
     max_confidence=Confidence.EXACT,
     milestone="M1",

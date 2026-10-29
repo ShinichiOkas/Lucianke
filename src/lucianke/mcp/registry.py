@@ -92,7 +92,13 @@ class ToolRegistry:
         """``tools/list`` で返す ``inputSchema``（登録時に生成して保持。呼び出しごとにコピーを返す）。"""
         return copy.deepcopy(self._schemas[name])
 
-    def descriptors(self) -> list[ToolDescriptor]:
+    def descriptors(self, *, include_planned: bool = True, current_milestone: str = "M1") -> list[ToolDescriptor]:
+        """``tools/list`` の中身。``include_planned=False`` なら ``current_milestone`` より先のマイルストーンのツールを除く。
+
+        除いたツールも登録表には残る（呼ばれたらパイプラインが ``E_UNSUPPORTED`` を返す）。載せるかどうかは
+        サーバー（``mcp/server.py``）が設定 ``list_planned_tools`` で決める。
+        """
+        now = MILESTONES.index(current_milestone)
         return [
             ToolDescriptor(
                 name=s.name,
@@ -101,6 +107,7 @@ class ToolRegistry:
                 read_only=not s.writes,
             )
             for s in self._specs.values()
+            if include_planned or MILESTONES.index(s.milestone) <= now
         ]
 
 
@@ -123,6 +130,16 @@ def _strip_titles(schema: Any) -> None:
         _strip_titles(sub)
 
 
+def _unwrap_nested(schema: Any) -> None:
+    """入れ子の引数モデル（``$defs``）の省略可能な項目にも ``_unwrap_optional`` を掛ける。モデル自身の docstring 由来の
+    ``description`` は消す（仕様書の言い換えで、トークンの無駄。項目ごとの ``description`` は残す）。"""
+    for model in schema.get("$defs", {}).values():
+        model.pop("description", None)
+        props = model.get("properties", {})
+        for name, prop in list(props.items()):
+            props[name] = _unwrap_optional(prop)
+
+
 def _unwrap_optional(prop: dict[str, Any]) -> dict[str, Any]:
     """``anyOf: [X, null]`` かつ ``default: null`` を ``X`` にする（省略可能は ``required`` に入れないことで表す）。"""
     options = prop.get("anyOf")
@@ -142,17 +159,14 @@ def build_input_schema(spec: ToolSpec) -> dict[str, Any]:
     _strip_titles(schema)
     schema["type"] = "object"
     schema["additionalProperties"] = False
+    schema.pop("description", None)
     props: dict[str, Any] = schema.setdefault("properties", {})
     for name, prop in list(props.items()):
         props[name] = _unwrap_optional(prop)
-    props["max_tokens"] = {
-        "type": "integer",
-        "minimum": MIN_MAX_TOKENS,
-        "default": spec.default_max_tokens,
-        "description": f"Upper bound of the whole response in tokens (min {MIN_MAX_TOKENS}).",
-    }
+    _unwrap_nested(schema)
+    props["max_tokens"] = {"type": "integer", "minimum": MIN_MAX_TOKENS, "default": spec.default_max_tokens}
     formats = ["compact", "json", *(GRAPH_FORMATS if spec.allows_graph else ())]
     props["format"] = {**props["format"], "enum": formats}
     if not spec.accepts_revision:
-        props["revision"] = {**props["revision"], "description": "Ignored by this tool (a warning is returned)."}
+        props["revision"] = {**props["revision"], "description": "Ignored by this tool."}
     return schema
