@@ -1,0 +1,2 @@
+tree-sitter
+# Other dependencies will be added as we progress
