@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -388,6 +389,25 @@ def _analyse(
             )
 
 
+def _ensure_unmodified_since(ws: Workspace, paths: Sequence[RelPath], started_ns: int) -> None:
+    """要求の開始より後に更新されたファイルがあれば ``E_PRECONDITION_FAILED``（best-effort）。
+
+    LSP は自分の見ている内容で位置を決める。LSP の応答のあとで読んだ内容は、LSP が見た内容とは限らない（外部の保存が
+    要求の途中に入ると、位置が別の場所を指す）。更新時刻が要求の開始より後なら、位置を信用せずに失敗する。
+    """
+    for path in paths:
+        try:
+            mtime = to_abs(ws, path).stat().st_mtime_ns
+        except OSError:
+            continue
+        if mtime > started_ns:
+            raise LuciankeError(
+                ErrorCode.E_PRECONDITION_FAILED,
+                f"file changed while the language server computed the rename: {path}",
+                details={"path": str(path), "reason": "modified_during_rename"},
+            )
+
+
 def _rename_builder(
     ws: Workspace, handle: LspHandle, target: TargetRef, args: RenameSymbolArgs, seen: _Seen
 ) -> PlanBuilder:
@@ -403,6 +423,7 @@ def _rename_builder(
         seen.old_name = old_name
         if old_name == args.new_name:
             raise _invalid("new_name is the same as the current name", param="new_name", reason="same_name")
+        started_ns = time.time_ns()
         try:
             we = await features.rename(handle, ctx.path, name_pos, args.new_name)
         except TimeoutError:
@@ -416,6 +437,7 @@ def _rename_builder(
         plan = await plan_from_workspace_edit(
             ws, we, encoding=encoding, documents=handle.documents, target_urns=(str(ctx.symbol.urn),)
         )
+        await asyncio.to_thread(_ensure_unmodified_since, ws, plan.touched_paths, started_ns)
         if not plan.hunks:
             raise LuciankeError(
                 ErrorCode.E_LSP_UNAVAILABLE,
@@ -591,7 +613,12 @@ async def handler(ctx: ToolContext, args: RenameSymbolArgs) -> ToolOutput:
         ) from None
     det = detect(rel, head)
     spec = get_support(det.language_id)
-    if not det.index_content or spec is None or not callable(getattr(spec, "grammar", None)):
+    if (
+        not det.index_content
+        or det.tier > Tier.T2
+        or spec is None
+        or not callable(getattr(spec, "grammar", None))
+    ):
         raise LuciankeError(
             ErrorCode.E_UNSUPPORTED,
             f"rename_symbol supports code files with a grammar and a language server; {rel} is {det.language_id!r} "
