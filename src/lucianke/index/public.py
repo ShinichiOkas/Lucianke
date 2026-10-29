@@ -362,7 +362,6 @@ class PublicConnection(sqlite3.Connection):
 def open_public(
     db_path: Path,
     *,
-    timeout_ms: int = QUERY_TIMEOUT_DEFAULT_MS,
     setup: Callable[[sqlite3.Connection], None] | None = None,
     layers: frozenset[str] = ALL_LAYERS,
 ) -> PublicConnection:
@@ -717,7 +716,7 @@ def run_query(
     bind = _check_params(params, analysis)
     scan = scan_grep(grep) if grep is not None else None
     setup = None if scan is None else (lambda con: _install_grep(con, scan.rows))
-    con = open_public(db_path, timeout_ms=timeout_ms, setup=setup)
+    con = open_public(db_path, setup=setup)
     try:
         result = _execute(
             con, ("EXPLAIN QUERY PLAN " + sql) if explain else sql, bind, limit, timeout_ms, explain

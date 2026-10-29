@@ -338,7 +338,7 @@ def test_timeout_keeps_rows_fetched_so_far(db: Path):
 
 
 def test_connection_is_reusable_after_interrupt(db: Path):
-    con = open_public(db, timeout_ms=100)
+    con = open_public(db)
     try:
         con.guard.deadline = time.perf_counter() + 0.1
         with pytest.raises(sqlite3.OperationalError):
