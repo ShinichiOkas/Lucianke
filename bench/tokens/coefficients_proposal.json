@@ -2,361 +2,389 @@
  "spike": "S-12",
  "status": "proposal (budget.py は未変更)",
  "basis": "o200k_base",
- "model": "split_chars",
+ "model": "lean_min",
  "rounding": "ceil（整数演算: units = sum(係数 × 数) / DEN の切り上げ）",
  "den": 100,
  "terms": [
   {
-   "name": "letters_chars",
-   "tokens_per_unit": "21/100",
-   "unit": "文字数",
+   "name": "letters_runs",
+   "tokens_per_unit": "21/25",
+   "unit": "連の数",
    "regex": "[A-Za-z]+"
   },
   {
    "name": "digits_chars",
-   "tokens_per_unit": "121/100",
+   "tokens_per_unit": "43/50",
    "unit": "文字数",
    "regex": "[0-9]+"
   },
   {
-   "name": "space_chars",
-   "tokens_per_unit": "7/50",
-   "unit": "文字数",
+   "name": "space_runs_multi",
+   "tokens_per_unit": "19/20",
+   "unit": "2 文字以上の連の数",
    "regex": "[ \\t]+"
   },
   {
    "name": "nl_chars",
-   "tokens_per_unit": "47/100",
+   "tokens_per_unit": "57/100",
    "unit": "文字数",
    "regex": "[\\r\\n]+"
   },
   {
-   "name": "symbol_chars",
-   "tokens_per_unit": "9/20",
-   "unit": "文字数",
+   "name": "symbol_runs",
+   "tokens_per_unit": "89/100",
+   "unit": "連の数",
    "regex": "[!-/:-@\\[-`{-~]+"
   },
   {
    "name": "kana",
-   "tokens_per_unit": "93/100",
+   "tokens_per_unit": "39/50",
    "unit": "文字数",
    "regex": "[぀-ヿㇰ-ㇿ]+"
   },
   {
    "name": "kanji",
-   "tokens_per_unit": "16/25",
+   "tokens_per_unit": "39/50",
    "unit": "文字数",
-   "regex": "[㐀-䶿一-鿿豈-﫿𠀀-𯨟]+"
+   "regex": "[㐀-䶿一-鿿豈-﫿𠀀-𯨟]+"
   },
   {
    "name": "cjkpunct",
-   "tokens_per_unit": "177/100",
+   "tokens_per_unit": "231/100",
    "unit": "文字数",
    "regex": "[　-〿＀-￯]+"
   },
   {
-   "name": "hangul",
-   "tokens_per_unit": "2689/100",
+   "name": "other",
+   "tokens_per_unit": "11/25",
    "unit": "文字数",
-   "regex": "[가-힯]+"
+   "regex": "(合計 - 上記の文字の和)"
   },
   {
-   "name": "other",
-   "tokens_per_unit": "37/100",
+   "name": "blob_chars",
+   "tokens_per_unit": "63/100",
    "unit": "文字数",
    "regex": "(合計 - 上記の文字の和)"
   }
  ],
  "expected_error_cv": {
   "py_src": {
-   "files": 43,
-   "files_ref_ge_min": 42,
-   "ref_tokens": 125704,
-   "est_tokens": 129058,
-   "agg_err": 0.026681728505059565,
-   "mean_abs_err": 0.039003526023480825,
-   "max_abs_err": 0.12325830653804926,
+   "files": 62,
+   "files_ref_ge_min": 61,
+   "ref_tokens": 200650,
+   "est_tokens": 203119,
+   "agg_err": 0.01230500872165452,
+   "mean_abs_err": 0.028650418710160854,
+   "max_abs_err": 0.10278333636529013,
    "worst": {
-    "name": "src/lucianke/core/limits.py",
-    "ref": 1866,
-    "est": 2096
+    "name": "src/lucianke/edit/writer.py",
+    "ref": 5497,
+    "est": 6062
    }
   },
   "py_tests": {
-   "files": 30,
-   "files_ref_ge_min": 30,
-   "ref_tokens": 117967,
-   "est_tokens": 117632,
-   "agg_err": -0.0028397772258343945,
-   "mean_abs_err": 0.034370696476918434,
-   "max_abs_err": 0.12891456369717236,
+   "files": 42,
+   "files_ref_ge_min": 42,
+   "ref_tokens": 184249,
+   "est_tokens": 186782,
+   "agg_err": 0.013747700123202922,
+   "mean_abs_err": 0.028598863131392573,
+   "max_abs_err": 0.1159420289855072,
    "worst": {
-    "name": "tests/unit/test_syntax_guards.py",
-    "ref": 3289,
-    "est": 2865
+    "name": "tests/unit/test_smoke.py",
+    "ref": 138,
+    "est": 122
    }
   },
   "md_ja": {
    "files": 3,
    "files_ref_ge_min": 3,
-   "ref_tokens": 183502,
-   "est_tokens": 176878,
-   "agg_err": -0.036097699207638057,
-   "mean_abs_err": 0.04680881109739191,
-   "max_abs_err": 0.06378969668574686,
+   "ref_tokens": 188719,
+   "est_tokens": 185880,
+   "agg_err": -0.01504353032815986,
+   "mean_abs_err": 0.023782637480061042,
+   "max_abs_err": 0.027243754497789707,
    "worst": {
-    "name": "docs/Lucianke仕様書.md",
-    "ref": 98182,
-    "est": 91919
+    "name": "docs/決定論的コード・仕様統合論理解析および高効率LSP-MCPサーバー完全仕様書 (v3.0).md",
+    "ref": 29181,
+    "est": 29976
    }
   },
   "md_spikes": {
-   "files": 6,
-   "files_ref_ge_min": 6,
-   "ref_tokens": 22380,
-   "est_tokens": 22147,
-   "agg_err": -0.010411081322609483,
-   "mean_abs_err": 0.023542064778771427,
-   "max_abs_err": 0.03748125937031488,
+   "files": 9,
+   "files_ref_ge_min": 9,
+   "ref_tokens": 34299,
+   "est_tokens": 33938,
+   "agg_err": -0.010525088194991095,
+   "mean_abs_err": 0.02494137243913957,
+   "max_abs_err": 0.06635944700460827,
    "worst": {
-    "name": "docs/spikes/S-09.md",
-    "ref": 2668,
-    "est": 2768
+    "name": "docs/spikes/S-05.md",
+    "ref": 3255,
+    "est": 3039
    }
   },
   "poly_data": {
    "files": 7,
    "files_ref_ge_min": 3,
    "ref_tokens": 1327,
-   "est_tokens": 1436,
-   "agg_err": 0.0821401657874905,
-   "mean_abs_err": 0.08441331425567193,
-   "max_abs_err": 0.12524461839530332,
+   "est_tokens": 1335,
+   "agg_err": 0.006028636021100153,
+   "mean_abs_err": 0.031378826159576025,
+   "max_abs_err": 0.05084745762711873,
    "worst": {
-    "name": "tests/fixtures/poly/reports/junit.xml",
-    "ref": 1022,
-    "est": 1150
+    "name": "tests/fixtures/poly/conf/settings.json",
+    "ref": 118,
+    "est": 124
    }
   },
   "poly_code": {
    "files": 12,
    "files_ref_ge_min": 11,
    "ref_tokens": 1624,
-   "est_tokens": 1704,
-   "agg_err": 0.049261083743842304,
-   "mean_abs_err": 0.08941988569723582,
-   "max_abs_err": 0.1875,
+   "est_tokens": 1602,
+   "agg_err": -0.013546798029556606,
+   "mean_abs_err": 0.04707572163576373,
+   "max_abs_err": 0.11475409836065575,
    "worst": {
-    "name": "tests/fixtures/poly/tests/test_payment.py",
-    "ref": 80,
-    "est": 95
+    "name": "tests/fixtures/poly/legacy/calc.cob",
+    "ref": 122,
+    "est": 108
    }
   },
   "poly_doc": {
    "files": 5,
    "files_ref_ge_min": 4,
    "ref_tokens": 714,
-   "est_tokens": 690,
-   "agg_err": -0.03361344537815125,
-   "mean_abs_err": 0.0973888098203167,
-   "max_abs_err": 0.2545454545454545,
+   "est_tokens": 728,
+   "agg_err": 0.019607843137254832,
+   "mean_abs_err": 0.043743254462432574,
+   "max_abs_err": 0.09090909090909094,
    "worst": {
     "name": "tests/fixtures/poly/docs/flow.mmd",
     "ref": 55,
-    "est": 41
+    "est": 50
    }
   },
   "poly_ipynb": {
    "files": 1,
    "files_ref_ge_min": 1,
    "ref_tokens": 13336,
-   "est_tokens": 9598,
-   "agg_err": -0.28029394121175766,
-   "mean_abs_err": 0.28029394121175766,
-   "max_abs_err": 0.28029394121175766,
+   "est_tokens": 12862,
+   "agg_err": -0.03554289142171563,
+   "mean_abs_err": 0.03554289142171563,
+   "max_abs_err": 0.03554289142171563,
    "worst": {
     "name": "tests/fixtures/poly/notebooks/eda.ipynb",
     "ref": 13336,
-    "est": 9598
+    "est": 12862
    }
   },
   "spec_json_sql": {
    "files": 11,
    "files_ref_ge_min": 9,
    "ref_tokens": 3359,
-   "est_tokens": 3302,
-   "agg_err": -0.01696933611193807,
-   "mean_abs_err": 0.08701276858260022,
-   "max_abs_err": 0.25,
+   "est_tokens": 3251,
+   "agg_err": -0.032152426317356375,
+   "mean_abs_err": 0.05561634571809461,
+   "max_abs_err": 0.125,
    "worst": {
     "name": "spec#block41:sql",
     "ref": 120,
-    "est": 90
+    "est": 105
    }
   },
   "compact": {
    "files": 26,
    "files_ref_ge_min": 26,
    "ref_tokens": 4607,
-   "est_tokens": 4527,
-   "agg_err": -0.017364879531148292,
-   "mean_abs_err": 0.0391846381743126,
-   "max_abs_err": 0.12244897959183676,
+   "est_tokens": 4528,
+   "agg_err": -0.017147818537008863,
+   "mean_abs_err": 0.05845906102994121,
+   "max_abs_err": 0.16176470588235292,
    "worst": {
-    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
-    "ref": 196,
-    "est": 172
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 57
+   }
+  },
+  "syn_base64": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 5559,
+   "est_tokens": 5066,
+   "agg_err": -0.08868501529051986,
+   "mean_abs_err": 0.08868501529051986,
+   "max_abs_err": 0.08868501529051986,
+   "worst": {
+    "name": "synthetic:base64 8000 chars",
+    "ref": 5559,
+    "est": 5066
+   }
+  },
+  "syn_hex": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 2279,
+   "est_tokens": 2437,
+   "agg_err": 0.06932865291794643,
+   "mean_abs_err": 0.06932865291794643,
+   "max_abs_err": 0.06932865291794643,
+   "worst": {
+    "name": "synthetic:sha256 hex x60",
+    "ref": 2279,
+    "est": 2437
    }
   },
   "ALL": {
-   "files": 144,
-   "files_ref_ge_min": 135,
-   "ref_tokens": 474520,
-   "est_tokens": 466972,
-   "agg_err": -0.01590660035404201,
-   "mean_abs_err": 0.049330156925657155,
-   "max_abs_err": 0.28029394121175766,
+   "files": 180,
+   "files_ref_ge_min": 171,
+   "ref_tokens": 640722,
+   "est_tokens": 641528,
+   "agg_err": 0.0012579558685357206,
+   "mean_abs_err": 0.0365241505814275,
+   "max_abs_err": 0.16176470588235292,
    "worst": {
-    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
-    "ref": 13336,
-    "est": 9598
+    "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+    "ref": 68,
+    "est": 57
    }
   }
  },
  "expected_error_fit": {
   "py_src": {
-   "files": 43,
-   "files_ref_ge_min": 42,
-   "ref_tokens": 125704,
-   "est_tokens": 129059,
-   "agg_err": 0.026689683701393685,
-   "mean_abs_err": 0.03978663426908467,
-   "max_abs_err": 0.12260419835716463,
+   "files": 62,
+   "files_ref_ge_min": 61,
+   "ref_tokens": 200650,
+   "est_tokens": 202516,
+   "agg_err": 0.009299775728881077,
+   "mean_abs_err": 0.026632050751893094,
+   "max_abs_err": 0.0882299436056031,
    "worst": {
-    "name": "src/lucianke/index/writer.py",
-    "ref": 3287,
-    "est": 3690
+    "name": "src/lucianke/edit/writer.py",
+    "ref": 5497,
+    "est": 5982
    }
   },
   "py_tests": {
-   "files": 30,
-   "files_ref_ge_min": 30,
-   "ref_tokens": 117967,
-   "est_tokens": 116343,
-   "agg_err": -0.013766561835089508,
-   "mean_abs_err": 0.03596138272480944,
-   "max_abs_err": 0.13317117664943756,
+   "files": 42,
+   "files_ref_ge_min": 42,
+   "ref_tokens": 184249,
+   "est_tokens": 186533,
+   "agg_err": 0.012396268093721075,
+   "mean_abs_err": 0.02939041268332453,
+   "max_abs_err": 0.10869565217391308,
    "worst": {
-    "name": "tests/unit/test_syntax_guards.py",
-    "ref": 3289,
-    "est": 2851
+    "name": "tests/unit/test_smoke.py",
+    "ref": 138,
+    "est": 123
    }
   },
   "md_ja": {
    "files": 3,
    "files_ref_ge_min": 3,
-   "ref_tokens": 183502,
-   "est_tokens": 177442,
-   "agg_err": -0.033024163224379066,
-   "mean_abs_err": 0.0362222990296582,
-   "max_abs_err": 0.04451936200118145,
+   "ref_tokens": 188719,
+   "est_tokens": 186306,
+   "agg_err": -0.012786205946407114,
+   "mean_abs_err": 0.015751152770618854,
+   "max_abs_err": 0.019484223177364535,
    "worst": {
     "name": "docs/Lucianke仕様書.md",
     "ref": 98182,
-    "est": 93811
+    "est": 96269
    }
   },
   "md_spikes": {
-   "files": 6,
-   "files_ref_ge_min": 6,
-   "ref_tokens": 22380,
-   "est_tokens": 22095,
-   "agg_err": -0.012734584450402098,
-   "mean_abs_err": 0.019701151087650876,
-   "max_abs_err": 0.037259959873889414,
+   "files": 9,
+   "files_ref_ge_min": 9,
+   "ref_tokens": 34299,
+   "est_tokens": 33855,
+   "agg_err": -0.012944983818770184,
+   "mean_abs_err": 0.021253427857196663,
+   "max_abs_err": 0.05433479824210952,
    "worst": {
-    "name": "docs/spikes/S-03.md",
-    "ref": 3489,
-    "est": 3359
+    "name": "docs/spikes/S-04.md",
+    "ref": 5006,
+    "est": 4734
    }
   },
   "poly_data": {
    "files": 7,
    "files_ref_ge_min": 3,
    "ref_tokens": 1327,
-   "est_tokens": 1394,
-   "agg_err": 0.05048982667671442,
-   "mean_abs_err": 0.06149038320403303,
-   "max_abs_err": 0.08219178082191791,
+   "est_tokens": 1337,
+   "agg_err": 0.007535795026375247,
+   "mean_abs_err": 0.01846175489322573,
+   "max_abs_err": 0.025423728813559254,
    "worst": {
-    "name": "tests/fixtures/poly/reports/junit.xml",
-    "ref": 1022,
-    "est": 1106
+    "name": "tests/fixtures/poly/conf/settings.json",
+    "ref": 118,
+    "est": 121
    }
   },
   "poly_code": {
    "files": 12,
    "files_ref_ge_min": 11,
    "ref_tokens": 1624,
-   "est_tokens": 1684,
-   "agg_err": 0.03694581280788167,
-   "mean_abs_err": 0.07281221931358471,
-   "max_abs_err": 0.1499999999999999,
+   "est_tokens": 1604,
+   "agg_err": -0.012315270935960632,
+   "mean_abs_err": 0.035506166839951364,
+   "max_abs_err": 0.12295081967213117,
    "worst": {
-    "name": "tests/fixtures/poly/tests/test_payment.py",
-    "ref": 80,
-    "est": 92
+    "name": "tests/fixtures/poly/legacy/calc.cob",
+    "ref": 122,
+    "est": 107
    }
   },
   "poly_doc": {
    "files": 5,
    "files_ref_ge_min": 4,
    "ref_tokens": 714,
-   "est_tokens": 693,
-   "agg_err": -0.02941176470588236,
-   "mean_abs_err": 0.08059612761667556,
-   "max_abs_err": 0.23636363636363633,
+   "est_tokens": 726,
+   "agg_err": 0.01680672268907557,
+   "mean_abs_err": 0.0492671825891004,
+   "max_abs_err": 0.10909090909090913,
    "worst": {
     "name": "tests/fixtures/poly/docs/flow.mmd",
     "ref": 55,
-    "est": 42
+    "est": 49
    }
   },
   "poly_ipynb": {
    "files": 1,
    "files_ref_ge_min": 1,
    "ref_tokens": 13336,
-   "est_tokens": 9305,
-   "agg_err": -0.3022645470905819,
-   "mean_abs_err": 0.3022645470905819,
-   "max_abs_err": 0.3022645470905819,
+   "est_tokens": 12838,
+   "agg_err": -0.03734253149370126,
+   "mean_abs_err": 0.03734253149370126,
+   "max_abs_err": 0.03734253149370126,
    "worst": {
     "name": "tests/fixtures/poly/notebooks/eda.ipynb",
     "ref": 13336,
-    "est": 9305
+    "est": 12838
    }
   },
   "spec_json_sql": {
    "files": 11,
    "files_ref_ge_min": 9,
    "ref_tokens": 3359,
-   "est_tokens": 3317,
-   "agg_err": -0.012503721345638596,
-   "mean_abs_err": 0.0909104747878818,
-   "max_abs_err": 0.2666666666666667,
+   "est_tokens": 3248,
+   "agg_err": -0.033045549270616204,
+   "mean_abs_err": 0.05033067098289898,
+   "max_abs_err": 0.125,
    "worst": {
     "name": "spec#block41:sql",
     "ref": 120,
-    "est": 88
+    "est": 105
    }
   },
   "compact": {
    "files": 26,
    "files_ref_ge_min": 26,
    "ref_tokens": 4607,
-   "est_tokens": 4443,
-   "agg_err": -0.035598003038853965,
-   "mean_abs_err": 0.047867529150606006,
+   "est_tokens": 4521,
+   "agg_err": -0.01866724549598442,
+   "mean_abs_err": 0.054270104407885184,
    "max_abs_err": 0.14795918367346939,
    "worst": {
     "name": "spec#block31:# extract_code_contracts ok conf=exact l",
@@ -364,18 +392,46 @@
     "est": 167
    }
   },
-  "ALL": {
-   "files": 144,
-   "files_ref_ge_min": 135,
-   "ref_tokens": 474520,
-   "est_tokens": 465775,
-   "agg_err": -0.018429149456292704,
-   "mean_abs_err": 0.04925598944656464,
-   "max_abs_err": 0.3022645470905819,
+  "syn_base64": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 5559,
+   "est_tokens": 5095,
+   "agg_err": -0.08346824968519517,
+   "mean_abs_err": 0.08346824968519517,
+   "max_abs_err": 0.08346824968519517,
    "worst": {
-    "name": "tests/fixtures/poly/notebooks/eda.ipynb",
-    "ref": 13336,
-    "est": 9305
+    "name": "synthetic:base64 8000 chars",
+    "ref": 5559,
+    "est": 5095
+   }
+  },
+  "syn_hex": {
+   "files": 1,
+   "files_ref_ge_min": 1,
+   "ref_tokens": 2279,
+   "est_tokens": 2453,
+   "agg_err": 0.07634927599824493,
+   "mean_abs_err": 0.07634927599824493,
+   "max_abs_err": 0.07634927599824493,
+   "worst": {
+    "name": "synthetic:sha256 hex x60",
+    "ref": 2279,
+    "est": 2453
+   }
+  },
+  "ALL": {
+   "files": 180,
+   "files_ref_ge_min": 171,
+   "ref_tokens": 640722,
+   "est_tokens": 641032,
+   "agg_err": 0.00048382918020606347,
+   "mean_abs_err": 0.03392787940640658,
+   "max_abs_err": 0.14795918367346939,
+   "worst": {
+    "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+    "ref": 196,
+    "est": 167
    }
   }
  }
