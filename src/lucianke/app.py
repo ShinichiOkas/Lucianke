@@ -79,7 +79,7 @@ def register_shutdown_steps(lifecycle: Lifecycle, hub: RuntimeHub, pool: LspPool
 
     add = lifecycle.add_shutdown_step
     add("edits", drain_edits, order=ShutdownOrder.DRAIN_EDITS, timeout_ms=t(ShutdownOrder.DRAIN_EDITS))
-    add("watchers", hub.stop_watchers, order=ShutdownOrder.STOP_WATCHER, timeout_ms=t(ShutdownOrder.STOP_WATCHER))
+    add("watchers", hub.stop_watchers, order=ShutdownOrder.STOP_WATCHER, timeout_ms=3000)  # 取り込み中の束を待つ（束側の上限 2 s）
     add("indexers", hub.stop_indexers, order=ShutdownOrder.STOP_WATCHER + 5, timeout_ms=t(ShutdownOrder.STOP_WATCHER))
     add("lsp", pool.shutdown_all, order=ShutdownOrder.LSP, timeout_ms=t(ShutdownOrder.LSP))
     add("children", make_terminate_children_step(procs), order=ShutdownOrder.KILL_CHILDREN,
