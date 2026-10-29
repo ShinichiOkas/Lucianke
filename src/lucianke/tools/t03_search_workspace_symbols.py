@@ -3,7 +3,9 @@
 ``structural`` 版: PaaD の ``symbols``（Tree-sitter 由来。ctags 由来の ``heuristic`` も同じ表に入る）を
 ``index.queries`` で引くだけで、LSP は使わない（``exact`` と ``structural`` は同じ結果を返す。仕様書 T-03「精度と降格」）。
 
-* 一致の順位は 完全一致 > 前方一致 > 部分一致、同順位は ``pagerank`` 降順（``FileInfo`` に載ったら使う。無ければ 0）、パスの辞書順。
+* 一致の順位は 完全一致 > 前方一致 > 部分一致、同順位は コードのシンボル > データファイルの Key / Tag、``pagerank`` 降順（``FileInfo`` に載ったら使う。無ければ 0）、パスの辞書順。
+  データファイルの Key / Tag（Tier 3）は名前検索の対象だが、同じ一致の質ならコードのシンボルを先に出す
+  （``symbol_kinds`` を渡さない既定では全種別が混ざるので、設定ファイルのキーがコードの定義を押しのけない。Key / Tag だけが欲しいときは ``symbol_kinds`` で指定する）。
   FTS5 の ``bm25`` 順は使わず、広めに取った候補を Python で並べ直す。
 * ``limit`` はこの 1 ページに返す最大件数。カーソルで次のページを取るときは、先頭からの ``cursor_offset + limit`` 件を
   レコードとして返し、パッカーが ``cursor_offset`` から詰める（``ToolOutput.total_estimate`` に総数）。
@@ -59,6 +61,8 @@ CANDIDATE_CAP = 2000
 
 _GLOB_CHARS = frozenset("*?[")
 _SCORE_BASE = {0: 1.0, 1: 0.75, 2: 0.5}
+_DATA_KINDS = frozenset({Kind.KEY, Kind.TAG})
+"""データファイル（Tier 3: JSON / YAML / TOML / XML）のシンボルの種別。同じ一致の質ならコードのシンボルより後ろに並べる。"""
 
 
 class SearchWorkspaceSymbolsArgs(CommonArgs):
@@ -241,6 +245,7 @@ def _pagerank(info: FileInfo | None) -> float:
 def _sort_key(h: _Hit) -> tuple[Any, ...]:
     return (
         h.tier,
+        h.sym.kind in _DATA_KINDS,  # False（コード）が先
         -h.pagerank,
         str(h.sym.path),
         h.sym.range.start.line,

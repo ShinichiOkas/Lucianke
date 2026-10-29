@@ -25,6 +25,7 @@ from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.mcp.render import compact
 from lucianke.syntax.parsers import TreeCache
+from lucianke.syntax.support import get_adapter
 from lucianke.tools import t03_search_workspace_symbols as t03
 from lucianke.tools import t04_resolve_symbols as t04
 from lucianke.tools import t05_get_symbol_bodies as t05
@@ -45,7 +46,8 @@ class _Svc(ToolServices):
     reader_pool: ReaderPool | None = None
 
 
-async def _ingest_poly(svc: ToolServices, db: Path) -> None:
+async def _ingest_poly(svc: ToolServices, db: Path, *, data_symbols: bool = False) -> None:
+    """``data_symbols`` は Tier 3 のデータファイルの Key / Tag も索引に入れる（``Indexer`` と同じく ``get_adapter(...).symbols``）。"""
     ws = svc.workspace()
     conn = open_writer(db)
     ensure_schema(conn)
@@ -62,6 +64,8 @@ async def _ingest_poly(svc: ToolServices, db: Path) -> None:
         if det.language_id in SYMBOL_LANGUAGES:
             an = await analyze_file(svc, ws, rel)
             symbols = an.symbols
+        elif data_symbols and (adapter := get_adapter(det.language_id)) is not None:
+            symbols = tuple(adapter.symbols(data, rel=rel, workspace_id=ws.workspace_id))
         ingest = FileFacts(
             workspace_id=ws.workspace_id,
             path=RelPath(rel),
@@ -81,11 +85,10 @@ async def _ingest_poly(svc: ToolServices, db: Path) -> None:
     conn.close()
 
 
-@pytest.fixture(scope="module")
-def pipeline(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Pipeline]:
+def _make_pipeline(tmp_path_factory: pytest.TempPathFactory, *, data_symbols: bool) -> Iterator[Pipeline]:
     db = tmp_path_factory.mktemp("paad") / "paad.sqlite"
     svc = _Svc(roots=lambda: [str(POLY)], trees=TreeCache(), lines=compact)
-    asyncio.run(_ingest_poly(svc, db))
+    asyncio.run(_ingest_poly(svc, db, data_symbols=data_symbols))
     pool = ReaderPool(db)
     svc.reader_pool = pool
     registry = ToolRegistry()
@@ -94,6 +97,17 @@ def pipeline(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Pipeline]:
     registry.register(t05.SPEC)
     yield Pipeline(registry, services=svc)
     pool.close()
+
+
+@pytest.fixture(scope="module")
+def pipeline(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Pipeline]:
+    yield from _make_pipeline(tmp_path_factory, data_symbols=False)
+
+
+@pytest.fixture(scope="module")
+def pipeline_with_data(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Pipeline]:
+    """``pipeline`` に、データファイル（json / yaml / toml / xml）の Key / Tag も入れたもの。"""
+    yield from _make_pipeline(tmp_path_factory, data_symbols=True)
 
 
 async def search(pipeline: Pipeline, fmt: str = "json", **args: Any):
@@ -609,3 +623,28 @@ async def test_t03_over_limit_issues_next_cursor_and_pages_do_not_overlap(pipeli
     compact_first = await search(pipeline, "compact", query="pay", limit=2)
     assert g.validate(compact_first.text) == [], compact_first.text
     assert f"remaining≈{total - 2}" in compact_first.text and "# more: cursor=" in compact_first.text
+
+
+async def test_t03_code_symbols_come_before_data_keys_of_the_same_match_quality(
+    pipeline_with_data: Pipeline,
+) -> None:
+    """データファイルの Key / Tag は名前検索の対象だが、同じ一致の質ならコードのシンボルの後ろに並ぶ（``conf/`` は ``src/`` より辞書順で先でも）。"""
+    r = await search(pipeline_with_data, query="retry", match="exact")
+    assert not r.is_error, r.text
+    got = [(s["kind"], s["path"]) for s in r.structured["data"]["symbols"]]
+    assert got == [("Function", "src/shop/services/limits.py"), ("Key", "conf/app.yaml")]
+
+    # Key / Tag は symbol_kinds で明示すれば出る。既定（全種別）の順位は決定的で、同じ呼び出しは同じ順序を返す
+    only_keys = await search(pipeline_with_data, query="retry", match="exact", symbol_kinds=["key"])
+    assert [s["path"] for s in only_keys.structured["data"]["symbols"]] == ["conf/app.yaml"]
+    again = await search(pipeline_with_data, query="retry", match="exact")
+    assert urns(again) == urns(r)
+
+    # 一致の質（完全 > 前方 > 部分）が先で、その中でだけコード > データ。どの query でも「データのあとにコード」は同順位内に現れない
+    for query in ("service", "limits", "test", "ruff"):
+        res = await search(pipeline_with_data, query=query, limit=200)
+        assert not res.is_error, res.text
+        syms = res.structured["data"]["symbols"]
+        for tier_score in {s["score"] for s in syms}:
+            kinds = [s["kind"] in ("Key", "Tag") for s in syms if s["score"] == tier_score]
+            assert kinds == sorted(kinds), (query, tier_score, [s["qualified_name"] for s in syms])
