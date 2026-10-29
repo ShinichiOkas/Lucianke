@@ -284,9 +284,9 @@ class Packer:
                 budget = left - (reserve if i < n - 1 else 0)
                 t = cost_of(i)
                 if t > budget and rec.shrink is not None:
-                    if i not in shrunk:
-                        shrunk[i] = rec.shrink(budget) if budget > 0 else None
-                    small = shrunk[i]
+                    if budget > 0 and i not in shrunk:
+                        shrunk[i] = rec.shrink(budget)
+                    small = shrunk.get(i)
                     if small is not None:
                         rec, t = small, est(_record_text(small))
                 if t > budget:
