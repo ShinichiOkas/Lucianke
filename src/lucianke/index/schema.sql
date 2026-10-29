@@ -1,4 +1,4 @@
--- schema_version: 1
+-- schema_version: 2
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -204,6 +204,14 @@ CREATE TABLE _hover_cache (
   hover_text TEXT NOT NULL,
   cached_at  TEXT NOT NULL,
   PRIMARY KEY (urn, sha256)
+);
+
+-- シンボル単位の重要度（index/rank.py。T-01 get_repo_map が読む。公開 DDL に列を足さないための内部表）
+CREATE TABLE _symbol_rank (
+  urn          TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  score        REAL NOT NULL,                 -- PageRank を最大 1.0 に正規化した値
+  fan_in       INTEGER NOT NULL DEFAULT 0     -- 別ファイルからの辺の本数
 );
 
 -- ===== symbols_fts を symbols に追従させるトリガ（外部コンテンツ FTS5） =====

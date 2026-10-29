@@ -50,7 +50,16 @@ class SchemaAction(StrEnum):
 
 # 前方向の移行。キーは「移行元の版」、値は N → N+1 にする関数（呼び出し側のトランザクションの中で実行）。
 # ``_meta.schema_version`` の更新は ``ensure_schema`` がやる。移行を書いたら schema.sql の版も上げること。
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {}
+def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
+    """v2: シンボル単位の重要度の内部表 ``_symbol_rank``（``index/rank.py``。値は次の差分索引の後に入る）。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _symbol_rank ("
+        " urn TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, score REAL NOT NULL,"
+        " fan_in INTEGER NOT NULL DEFAULT 0)"
+    )
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_1_to_2}
 
 
 def schema_sql() -> str:

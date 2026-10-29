@@ -1,7 +1,7 @@
 """``index/schema.sql`` の公開部分が仕様書 §9.2 の DDL と一致することを守る（設計書 §10.5 の schema ジョブ）。
 
 比較するのは ``CREATE TABLE`` / ``CREATE INDEX`` / ``CREATE VIRTUAL TABLE`` の文の集合（空白とコメントは無視）。
-``schema.sql`` だけが持ってよいもの（許容リスト）は、内部テーブル ``_meta`` / ``_hover_cache`` と、
+``schema.sql`` だけが持ってよいもの（許容リスト）は、内部テーブル ``_meta`` / ``_hover_cache`` / ``_symbol_rank`` と、
 ``symbols_fts`` を ``symbols`` に追従させるトリガ 3 本。仕様書側の ``PRAGMA`` は文の集合に入れない。
 """
 
@@ -22,7 +22,7 @@ CREATE_NAME = re.compile(
 )
 
 # schema.sql だけが持ってよいもの（設計書 §6.2、§7.6.5）
-ALLOWED_INTERNAL_TABLES = {"_meta", "_hover_cache"}
+ALLOWED_INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank"}
 ALLOWED_TRIGGERS = {"symbols_ai", "symbols_ad", "symbols_au"}
 
 
@@ -102,7 +102,7 @@ def test_public_ddl_matches_spec_9_2() -> None:
 
 
 def test_schema_sql_extras_are_on_the_allow_list() -> None:
-    """schema.sql が仕様書に無いものを持つなら、内部テーブル 2 つとトリガ 3 本だけ。"""
+    """schema.sql が仕様書に無いものを持つなら、内部テーブル 3 つとトリガ 3 本だけ。"""
     statements = _statements(SCHEMA.read_text(encoding="utf-8"))
     public = set(_public(statements))
     extras = [s for s in statements if s not in public]

@@ -43,7 +43,7 @@ PUBLIC_TABLES = {
     "git_symbol_changes",
     "git_co_changes",
 }
-INTERNAL_TABLES = {"_meta", "_hover_cache"}
+INTERNAL_TABLES = {"_meta", "_hover_cache", "_symbol_rank"}
 
 
 @pytest.fixture
@@ -157,7 +157,7 @@ def test_ensure_schema_creates_public_internal_tables_and_meta(conn: sqlite3.Con
 
 
 def test_schema_version_is_read_from_schema_sql() -> None:
-    assert current_schema_version() == 1
+    assert current_schema_version() == 2
     assert migrate.parse_schema_version("-- schema_version: 7\nCREATE TABLE t (a);") == 7
     with pytest.raises(ValueError):
         migrate.parse_schema_version("CREATE TABLE t (a);")
@@ -229,11 +229,23 @@ def test_ensure_schema_applies_forward_migrations(
     insert_workspace(conn)
     conn.execute("UPDATE _meta SET schema_version = 0")
     calls: list[int] = []
-    monkeypatch.setattr(migrate, "MIGRATIONS", {0: lambda c: calls.append(0)})
+    monkeypatch.setattr(migrate, "MIGRATIONS", {0: lambda c: calls.append(0), 1: lambda c: calls.append(1)})
     assert ensure_schema(conn) is SchemaAction.MIGRATED
-    assert calls == [0]
+    assert calls == [0, 1]
     assert meta(conn)[0] == current_schema_version()
     assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 1  # 移行ではデータを残す
+
+
+def test_ensure_schema_migrates_v1_to_v2_keeps_data(conn: sqlite3.Connection) -> None:
+    """v1 の DB（``_symbol_rank`` なし）は作り直さず、表を足すだけで v2 になる（データは残る）。"""
+    ensure_schema(conn)
+    insert_workspace(conn)
+    conn.execute("DROP TABLE _symbol_rank")
+    conn.execute("UPDATE _meta SET schema_version = 1")
+    assert ensure_schema(conn) is SchemaAction.MIGRATED
+    assert meta(conn)[0] == 2
+    assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM _symbol_rank").fetchone()[0] == 0
 
 
 def test_ensure_schema_rolls_back_when_creation_fails(
