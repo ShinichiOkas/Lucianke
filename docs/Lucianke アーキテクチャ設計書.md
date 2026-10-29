@@ -1175,31 +1175,35 @@ class PublicQueryEngine:
 
 手順:
 
-1. 長さ ≤ `QUERY_LENGTH_MAX`（64 KB）。コメントを除いた先頭トークンが `SELECT` または `WITH` でなければ `E_QUERY_REJECTED(not_select)`。禁止語（`ATTACH`, `DETACH`, `PRAGMA`, `VACUUM`, `load_extension`, `readfile`, `writefile`, `fts5` の書き込みコマンド）を含めば `E_QUERY_REJECTED(forbidden_keyword)`。
-2. 接続を `file:<paad.sqlite>?mode=ro` の URI で開き、`PRAGMA query_only = ON`、`set_authorizer(authorize)`、`set_progress_handler(check_deadline, 1000)` を設定する（Python 標準の `sqlite3` にこれらがある想定。S-7 で確認。**WAL の DB を `mode=ro` で開くには `-shm` への書き込みが要る**ため、同じディレクトリに書き込み権限があることと、`immutable=1` を使わないことを S-7 の確認項目に入れる）。
-3. `grep` があれば、接続ローカルの `CREATE TEMP TABLE temp_grep_matches(path TEXT, line INTEGER, snippet TEXT, confidence_level TEXT)` を作り、単語境界つき正規表現で走査した結果（上限 `GREP_MATCHES_MAX`=10,000）を入れる。この間だけ authorizer のフラグ `setup_phase=True` で TEMP への INSERT を許す。
+1. 長さ ≤ `QUERY_LENGTH_MAX`（64 KB）。**末尾の `;` とコメントを除いてから**、先頭トークンが `SELECT` または `WITH` でなければ `E_QUERY_REJECTED(not_select)`（`SELECT 1;;` は複文扱い。素の `EXPLAIN` もここで拒否し、`explain=True` のときだけアプリが `EXPLAIN QUERY PLAN ` を前置する）。禁止語（`ATTACH`, `DETACH`, `PRAGMA`, `VACUUM`, `load_extension`, `readfile`, `writefile`, `fts5` の書き込みコマンド）を含めば `E_QUERY_REJECTED(forbidden_keyword)`。**この検査は省かない**（下の注記）。
+2. 接続を `Path.as_uri()` に `?mode=ro` を付けた URI（`file:<paad.sqlite>?mode=ro`）で開く（`uri=True`、`isolation_level=None`、`timeout=1.0`。空白・日本語・`#` を含むパスも開ける）。**設定は次の順で行う**: (a) 手順 3 の `temp_grep_matches` の作成と投入（`grep` があるときだけ）→ (b) `PRAGMA query_only = ON` → (c) `setlimit(SQLITE_LIMIT_LENGTH, 16 MiB)` と `setlimit(SQLITE_LIMIT_SQL_LENGTH, 64 KiB)` → (d) 非公開名の写し `hidden`（`sqlite_master` と `sqlite_temp_master` の名前から公開名を除いたもの）→ (e) `set_authorizer(authorize)` → (f) `set_progress_handler(check_deadline, 1000)`。Python 標準の `sqlite3` にこれらが揃っていることを S-7 で確認した（合格。[`docs/spikes/S-07.md`](spikes/S-07.md)）。WAL の DB を別接続から `mode=ro` で読めることも確認した（書き手が開いている／閉じているの両方。書き手が 3 秒連続コミット中に新規接続 239 回でエラー 0）。**`immutable=1` は書き手の新しい行を見ないので使わない**。読み手は `-shm` を作る／開くため、キャッシュディレクトリに書き込み権限が要る（ディレクトリが作成不可で `-shm` が無いと `unable to open database file`）。`IndexWriter` は起動時にキャッシュディレクトリの書き込み権限を確認する。
+3. `grep` があれば（2 の (a)）、接続ローカルの `CREATE TEMP TABLE temp_grep_matches(path TEXT, line INTEGER, snippet TEXT, confidence_level TEXT)` を作り、単語境界つき正規表現で走査した結果（上限 `GREP_MATCHES_MAX`=10,000）を入れる。`query_only=ON` の下では TEMP TABLE も作れない（`attempt to write a readonly database`）ので、**作成と投入を `query_only` と authorizer の設定より前に済ませる**（1 万行の投入込みで 23 ms。済ませたあとは読めて、書き込みは拒否される）。したがって authorizer に `setup_phase` フラグは要らない。
 4. `explain=True` なら `EXPLAIN QUERY PLAN` を実行して `plan[]` を返し、本体は実行しない。
-5. `params` の名前と `:name` の一致を検査（`E_INVALID_ARGUMENT`）。`execute(sql, params)`。Python の `sqlite3` は複文を拒否するので、その例外は `E_QUERY_REJECTED(multiple_statements)` に写す。構文エラーは `E_QUERY_REJECTED(syntax_error)` に `details.sqlite_message`。
-6. `fetchmany(limit + 1)`。`limit + 1` 行目があれば `truncated=True`。期限超過は progress handler が中断し `E_TIMEOUT`（取得済みの行を部分結果に）。
-7. 接続を閉じる（1 要求 1 接続。開く費用が大きければプール化。S-9）。
+5. `params` の名前と `:name` の一致を検査（`E_INVALID_ARGUMENT`）。`execute(sql, params)`。Python の `sqlite3` は複文を拒否する（`ProgrammingError: You can only execute one statement at a time.`）ので、その例外は `E_QUERY_REJECTED(multiple_statements)` に写す。構文エラーは `E_QUERY_REJECTED(syntax_error)` に `details.sqlite_message`。`params` に余分なキーがあっても `sqlite3` は黙って受理するので、名前の突き合わせはアプリ側で行う。
+6. `fetchmany(limit + 1)`。`limit + 1` 行目があれば `truncated=True`。期限超過は progress handler が中断し `E_TIMEOUT`（取得済みの行を部分結果に）。期限は **`time.perf_counter()`** で判定する（`time.monotonic()` は Windows の CPython 3.12 で分解能 15.6 ms あり、300 ms の期限が 310 ms にずれる）。中断は `OperationalError: interrupted` で、`guard.timed_out` により `E_TIMEOUT` に分ける。中断後も同じ接続を再利用でき、期限 300 ms に対し 300.05 ms で止まる。**再帰 CTE の深さ上限は SQLite に機構が無く実装できない**ので設けず、時間（`timeout_ms`、既定 300 ms）で止める（決定的な上限が要るなら progress handler で命令数を数える。MAY）。progress handler は SQL の命令単位でしか効かず、`hex(zeroblob(4e8))` のような単発の C 関数は止められない（1.2 秒・1.1 GB）ので、巨大値は 2 の `SQLITE_LIMIT_LENGTH`（16 MiB）で 0 ms の即エラーにする（12 MiB の `doc_full` は読め、20 MiB は `string or blob too big`）。初期の試走で p95≈300 ms の停止が出て原因は未特定なので、期限の設計には 1 要求ごとに最大 300 ms の余裕を見る（S-7 で確認）。
+7. 接続を閉じる（1 要求 1 接続で足りる。開く費用は p50 1.3 ms。S-7 で確認）。接続は自動コミットで使い、使い終わったら `BEGIN` を持ち越さない（読み取りトランザクションを保持した接続は `wal_checkpoint(TRUNCATE)` を妨げる）。
 
 authorizer の判定表（`sqlite3` の定数名）:
 
 | 操作 | 判定 |
 |---|---|
 | `SQLITE_SELECT`, `SQLITE_RECURSIVE` | 許可 |
-| `SQLITE_READ(table, column)` | `table` が公開 10 テーブル・`symbols_fts`・`temp_grep_matches` なら許可。それ以外（`_` 始まりの内部テーブル、`sqlite_master` を含む）は拒否 |
+| `SQLITE_READ(table, column)` | `table` が公開 10 テーブル・`symbols_fts` とその影テーブル（`symbols_fts_config` / `_data` / `_docsize` / `_idx`。FTS5 の内部クエリにも authorizer が呼ばれる）・`json_each` / `json_tree`・`temp_grep_matches` なら許可。列を読まない参照（`count(*)`、CTE・サブクエリの別名）は `READ(名, '', None)` で届くので、DB に実在する非公開名（`_` 始まり、`sqlite_`、`pragma_`、起動時の `sqlite_master` の写し）だけ拒否し、それ以外は別名として通す（副作用: `WITH _meta AS (SELECT 1) SELECT count(*) FROM _meta` も拒否される。許容）。それ以外（`_` 始まりの内部テーブル、`sqlite_master` を含む）は拒否 |
 | `SQLITE_FUNCTION(name)` | 組み込みの集計・文字列・日付・JSON・FTS5 関数と Lucianke 登録の読み取り専用関数なら許可。`load_extension`, `readfile`, `writefile`, `edit`, `fts5` の書き込み系は拒否 |
-| `SQLITE_CREATE_TEMP_TABLE`, `SQLITE_INSERT(temp_grep_matches)` | `setup_phase` のときだけ許可 |
-| それ以外（INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / ATTACH / DETACH / PRAGMA / TRANSACTION …） | 拒否 |
+| `SQLITE_PRAGMA(data_version)`（引数なし） | 許可（FTS5 の `MATCH` が内部で読む。拒否すると `authorization denied` で失敗する） |
+| それ以外（INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / ATTACH / DETACH / PRAGMA（`data_version` を除く）/ TRANSACTION …） | 拒否。`ATTACH`（24）は `SQLITE_FORMAT` と数値が衝突するので名前で扱う |
 
-拒否は `E_QUERY_REJECTED(non_public_object)` または `(forbidden_keyword)` に写す。`mode=ro`・`query_only`・authorizer の 3 重は **どれか 1 つが欠けても他が効く**（MUST。テストでは 1 つずつ外して書き込み文が通らないことを確かめる）。
+FTS5 の内部読み取りと利用者の `SELECT * FROM symbols_fts_data` は authorizer で区別できない（内容は公開列から導出した索引なので害は無い）。
+
+拒否は `E_QUERY_REJECTED(non_public_object)` または `(forbidden_keyword)` に写す。例外は `sqlite3.DatabaseError` 1 本で受け（`OperationalError` はその子）、`guard.denied`（`non_public_object` / `forbidden_keyword`）と `guard.timed_out`（`E_TIMEOUT`）で分ける。`ProgrammingError` は `multiple_statements`、または bind 不足の `E_INVALID_ARGUMENT`。
+
+`mode=ro`・`query_only`・authorizer の 3 重は、**DB 本体への書き込みについて、どれか 1 つが欠けても他が効く**（MUST。テストでは 1 つずつ外して書き込み文が通らないことを確かめる。S-7 で 25 種の書き込み系の文 × 層の 8 通りを DB ファイルの前後比較で確認）。ただし副作用は別で、次を既知として明記する: ① `ATTACH` は `mode=ro` + `query_only` でも**任意パスに 0 バイトのファイルを作り**（`mode=ro` だけなら ATTACH 先へ書ける）、② `query_only` 単独は `PRAGMA journal_mode` で DB を変更でき、`PRAGMA query_only=OFF` で自分を外せる（`mode=ro` は外しても拒否のまま）。副作用を止められるのは authorizer と手順 1 の禁止語検査だけなので、**禁止語検査は省かない**。テストには「層を 1 つ外す」ことに加え、「authorizer を外した状態では `ATTACH` が 0 バイトのファイルを作る」ことを既知の挙動として書く。
 
 受入で確かめる点:
 
 - `INSERT` / `UPDATE` / `DELETE` / `CREATE` / `DROP` / `ALTER` / `ATTACH` / `PRAGMA` を先頭に持つ文、複文、`_meta` を参照する文が `E_QUERY_REJECTED` で返り、DB ファイルの `sha256` が変わらない。
 - 無限再帰の CTE が `timeout_ms` 以内に `E_TIMEOUT` で返る。
-- 3 重防御のうち任意の 1 つを無効化したビルドでも、書き込み文が拒否される。
+- 3 重防御のうち任意の 1 つを無効化したビルドでも、DB 本体への書き込み文が拒否される（`ATTACH` による空ファイルの作成は authorizer と禁止語検査で止める。上の注記）。
 
 ### 7.6.5 スキーマ版管理と起動時の差分索引
 
@@ -1339,7 +1343,7 @@ class Plan:
 2. BOM を外したテキストに hunk を後ろから適用し、適用後のテキストと **適用後座標での編集範囲** を得る（`LineIndex.shift` で前方の hunk による行ずれを加算）。
 3. `syntax/parsers.py` のプールから Parser を借り、**`TreeCache` を経由せず** 一時解析する。得られた構文木と新しいバイト列は `SyntaxCheckResult` に抱え、Written 成功後に Reindexed が新しいキー `(ws, path, sha_after)` で `TreeCache` に登録する（二重解析を避ける）。
 4. エラーノードの集合を取る: 走査して `is_error` または `is_missing` のノードを `(start_line, end_line, kind, node_type)` で集める。編集前の集合は `TreeCache` にある元の木から同じ方法で取る。
-5. 判定: `had_errors_before == False` ならファイル全体で新集合が空であること。そうでなければ、編集範囲（適用後座標）の前後 1 行を含む区間に、編集前の集合に無いエラーノードが無いこと。
+5. 判定: `had_errors_before == False` ならファイル全体で新集合が空であること。そうでなければ、編集範囲（適用後座標）の前後 1 行を含む区間に、編集前の集合に無いエラーノードが無いこと。Python は構文が壊れると位置の粗い 1 個の大きな ERROR になるので、位置による判定は参考にとどめ、ERROR / MISSING の**個数の前後比較**を主な判定にする（S-2 で確認）。
 6. 違反は `E_SYNTAX_INVALID`。`details.errors[]` は `{path, line, col, kind: "ERROR" | "MISSING", node_type, snippet}` を最大 10 件（`snippet` は該当行 200 文字）。`operation == "replace_body"` で `new_code` の先頭行が定義の開始語（`def` / `class` / `async def` / `function` / `fn` / `pub fn` / `impl` / `struct` / `enum` / `interface` / `type` / `export`）で始まらないときは `details.hint` に「`replace_body` はシグネチャを含む定義全体を渡す」を入れる。
 7. 恒等判定: 適用後のバイト列（改行・BOM を戻した形）が元と同一なら `identical: true`。
 
@@ -1360,12 +1364,16 @@ class Plan:
 
 1. **直前照合**: 各対象ファイルをディスクから読み直して sha を計算し、`resolved_shas` と比べる。不一致なら何も書かずに `E_PRECONDITION_FAILED`。読んだバイト列から改行コード（CRLF / LF / CR の多数派。混在時は先頭行）、BOM の有無、末尾改行の有無、モード（`st_mode`）を記録する（Resolved で記録済みの値と一致するはず。違えば同じく前提不一致）。
 2. **符号化**: `"\n"` 区切りの本文を元の改行コードに変換し、BOM があれば先頭に付け、末尾改行は元に合わせる（元が改行で終わっていれば 1 つ、終わっていなければ無し）。UTF-8 で書く（元が UTF-8 以外なら Resolved の時点で `E_UNSUPPORTED`、`details.reason: "non_utf8_file"`）。
-3. **段階 A（一時ファイル）**: 各ファイルについて同じディレクトリに `.lucianke-tmp-<edit_id>-<乱数 6 桁>` を作り、書き込み → `flush` → `os.fsync`。POSIX ではモードを元に合わせる（`os.chmod`）。Windows では読み取り専用属性を元に合わせる。
+3. **段階 A（一時ファイル）**: 各ファイルについて同じディレクトリに `.lucianke-tmp-<edit_id>-<乱数 6 桁>` を作り、**バイナリで**（`open(path, "wb")`。テキストモードの `"w"` は `\n` を `\r\n` に変える）書き込み → `flush` → `os.fsync(f.fileno())` → **close してから**段階 B へ進む（tmp を開いたままだと改名が winerror=32 で失敗する）。POSIX ではモードを元に合わせる（`os.chmod`）。Windows では tmp に読み取り専用属性を付けない（改名で target に移る）。対象が読み取り専用属性を持つ場合は、Resolved 段で `st_file_attributes & FILE_ATTRIBUTE_READONLY` を検査して `E_MUTATION_BLOCKED`（`details.reason: "read_only_file"`）とし、何も書かずに返す（利用者が付けた保護を黙って外さない。読み取り専用は再試行では直らず、ハンドルを開かれている場合と同じ winerror=5 になる）。
 4. **段階 B（改名）**: すべての一時ファイルが書けてから、`os.replace(tmp, path)` を順に行う。`renames` はテキストの改名が終わったあとに `os.replace(old, new)`。
-5. **Windows の共有違反**: `os.replace` が `PermissionError`（共有違反・アクセス拒否）を返したら 20 ms 待って再試行、最大 5 回（S-10 で挙動を確認）。それでも失敗なら 6 へ。
+5. **Windows の共有違反**: `os.replace` が `PermissionError` を返し、かつ `e.winerror in {5, 32}` のとき（5 = アクセス拒否: target のハンドル保持、32 = 共有違反: tmp 側のハンドル保持。Windows のみ。他の `OSError` は即失敗）、**10, 20, 40, 80, 160 ms**（合計 310 ms）の間隔で再試行する（初回＋再試行 5 回の最大 6 試行。費用は失敗時だけで、書き込みロックの保持が最大 310 ms 延びる）。複数ファイルの改名全体では上限 1 s で打ち切ってロールバックする。それでも失敗なら 6 へ。20 ms × 5 回（約 100 ms）では、相手が 50 ms 保持するなら成功するが 90 ms では 3/5 に落ちる。10〜160 ms の間隔なら 200 ms の保持まで 5/5 で成功する。`os.replace` は、相手が共有 DELETE を許していても、ハンドルが 1 つでも在れば失敗する（S-10 で確認）。
 6. **ロールバック**: 段階 B で失敗したら、改名済みのファイルを `pre/` から同じ手順（一時ファイル → 改名）で戻し、残った一時ファイルを消し、`manifest.state = "rolled_back"` とする。`E_INTERNAL`（`details.rolled_back: true`, `details.log_ref`）。戻し自体に失敗したら `details.rolled_back: false` と `details.journal: <manifest のパス>` を返し、ログに `error` で残す。
 7. **確定**: 全改名が終わったら各ファイルの sha を再計算して返し、`manifest.state = "committed"`。
-8. POSIX ではディレクトリの `fsync` を行ってもよい（MAY）。
+8. POSIX ではディレクトリの `fsync` を行ってもよい（MAY）。Windows では行わない（ディレクトリを `os.open` で開けず `PermissionError` になる。`CreateFileW` + `FlushFileBuffers` なら可能だが、得られる保証が小さい。S-10 で確認）。
+
+- 任意（MAY）: 再試行を使い切っても失敗し、相手が共有 DELETE を許す型（Node.js 系のエディタなど）なら、POSIX 意味論の改名（`SetFileInformationByHandle(FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS)`、Windows 10 1709 以降）を 1 回だけ試す。`os.replace` はこの相手に勝てない。M1 では入れない。
+- 改名方式で**保持されないもの**: mtime は tmp の書き込み時刻になり、NTFS の作成時刻・明示 ACE・代替データストリームは失われる（tmp が親から継承した ACL になる）。保持するのは改行コード・BOM・末尾改行・（POSIX の）実行ビット（仕様書 §10.6）。
+- テスト（§10.1 unit の `writer`）: `CreateFileW` の共有 0 でハンドルを保持して `Timer` で閉じる（S-10 の `run.py` 項目 8 と同じ型）ことで、再試行成功・再試行切れ・target 無傷を決定的に再現できる。Windows 以外は skip。
 
 ### 7.7.6 診断差分（verify.py）
 
@@ -1755,7 +1763,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 |---|---|
 | 仕様書 §13.1 パス封じ込め | `workspace/paths.py` の `confine(ws, raw) -> RelPath`。すべてのファイルアクセスはこの戻り値だけを受け取る型（`RelPath`）にする。生の `str` を受け取る I/O 関数を置かない |
 | 仕様書 §13.2 DB 読み取り専用 | `index/public.py`（3 重防御）。`tests/invariants/test_public_db_readonly.py` が書き込み文の全パターンを投げて拒否と DB ハッシュ不変を確かめる |
-| 仕様書 §13.3 子プロセス | `lifecycle.ProcessRegistry.spawn(argv, cwd, env)`。`shell=True` を使う箇所をコードベースから静的に禁止（lint） |
+| 仕様書 §13.3 子プロセス | `core/procs.py` の `ProcessRegistry.spawn(argv, cwd, env)`。`shell=True` を使う箇所をコードベースから静的に禁止（lint） |
 | 仕様書 §13.5 秘密ファイル | `languages.py` が秘密パターンに一致したファイルを `tier=4, language="secret"` にし、`FormatAdapter` を割り当てない。骨格・本体は `E_UNSUPPORTED`（`details.reason: "secret_file"`） |
 | 仕様書 §13.6 入力検証 | pydantic（`extra="forbid"`）、正規表現は `re` のタイムアウトが無いため、長さ上限（1,000 文字）と `regex` パターンの事前検査（ネストした量化子の拒否）＋スレッドでの評価時間監視（`REGEX_TIMEOUT_MS`）で代替する |
 | 仕様書 §13.7 外部通信禁止 | 依存のうち実行時に外へ出るものを入れない（L-6）。`tests/invariants/test_no_network.py` が全ツールを実行中に `socket.socket` をモンキーパッチして外向き接続が無いことを確かめる |
@@ -1766,9 +1774,9 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 |---|---|
 | パス | 内部は常に `/` 区切りの相対パス。大文字小文字を区別しないファイルシステムでは、実体パスの大文字小文字を正とし、`confine` で正規化する |
 | 改行 | ファイルの多数派を検出して保持（`core/textpos.py`）。`git` の `autocrlf` に依存しない |
-| 原子的改名 | `os.replace`。Windows で共有違反なら再試行（S-10） |
+| 原子的改名 | `os.replace`。Windows で `winerror` 5・32 なら 10〜160 ms の指数間隔で再試行（合計 310 ms）。読み取り専用属性の対象は書かずに `E_MUTATION_BLOCKED`（§7.7.5。S-10 で確認） |
 | シグナル | `SIGINT` / `SIGTERM`（POSIX）、`SIGBREAK` と `stdin` EOF（Windows）。`loop.add_signal_handler` が無い環境では `signal.signal` + フラグ |
-| 子プロセス | Windows では `CREATE_NEW_PROCESS_GROUP`。終了は `terminate` → `kill`。POSIX では `SIGTERM` → `SIGKILL` |
+| 子プロセス | Windows では `CREATE_NEW_PROCESS_GROUP` で起動して Job Object（`KILL_ON_JOB_CLOSE`）に入れ、孫まで落とす。終了は `CTRL_BREAK` → `terminate` → `kill`。POSIX では `start_new_session=True` で起動し、`killpg` の `SIGTERM` → `SIGKILL`（ADR-12） |
 | ファイル監視 | `watchfiles`（Rust 製バックエンド。Windows 対応の記述あり。S-6 で挙動確認）。利用不可ならポーリング（仕様書 §12.4 の 6） |
 | 実行ビット | POSIX のみ保持。Windows では無視 |
 | Python 環境 | `.venv/Scripts/python.exe`（Windows）と `.venv/bin/python`（POSIX）の両方を探索 |
@@ -1777,7 +1785,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 ## 9.6 文字コードとエンコーディング
 
 - ファイルは UTF-8 として読む。BOM があれば記録して保持する。UTF-8 として読めないファイルは `files.language = "binary"`、`tier = 4` とし、骨格・本体は `E_UNSUPPORTED`。
-- Tree-sitter はバイト列で解析し、ノード範囲はバイトオフセットで返る。`LineIndex` がバイト → コードポイントに変換する（ADR-14）。
+- Tree-sitter はバイト列で解析し、ノード範囲はバイトオフセットで返る。`LineIndex` がバイト → コードポイントに変換する（ADR-14）。列は行頭からのバイト数で、行は `\n` だけで切る（S-2 で確認）。
 - JSON 出力は `ensure_ascii=False`。
 
 ---
@@ -1842,9 +1850,9 @@ name = "lucianke"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-  "mcp",                 # MCP SDK（版は S-1 のあと固定）
+  "mcp>=2.3,<2.4",                 # MCP SDK。低水準 API の形と暫定 API を避ける前提が 2.3 系の実測に依る（S-1）
   "pydantic",
-  "tree-sitter",
+  "tree-sitter>=0.26,<0.27",   # ABI 14 の文法が 9 言語あり、0.26 の範囲（13〜15）に収まる（S-2）
   "tree-sitter-python", "tree-sitter-typescript", "tree-sitter-javascript",
   "tree-sitter-json", "tree-sitter-yaml", "tree-sitter-toml", "tree-sitter-xml", "tree-sitter-markdown",
   "watchfiles",
@@ -1869,7 +1877,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 ```
 
-- 依存の版は M1 着手時に固定し、`uv.lock` をリポジトリに置く。
+- 依存の版は M1 着手時に固定し、`uv.lock` をリポジトリに置く。`mcp` は `>=2.3,<2.4`、`tree-sitter` は `>=0.26,<0.27` に絞る（S-1・S-2）。ロック更新時は S-2 の `run_grammars.py`（18 言語の読み込みと ABI）を CI の煙試験として回す。
 - `jq`（PyPI）は M2 の `jq:` セレクタを採用する場合にだけ `[xml]` 相当の extras に加える（仕様書 §16.2.1）。
 
 ## 11.2 導入と起動
@@ -1904,20 +1912,22 @@ build-backend = "hatchling.build"
 
 各スパイクは「何を確かめるか・合格条件・不合格時の代替」を持つ。結果は `docs/spikes/S-nn.md` に 1 画面で残し、本書の該当箇所を改版する。
 
-| ID | 確かめること | 合格条件 | 不合格時の代替 |
-|---|---|---|---|
-| S-1 | `mcp` 2.x の低水準サーバーで、`tools/list` のスキーマを自前 JSON で返せるか、`tools/call` の結果に `structuredContent` と `isError` を載せられるか、`roots/list` を要求できるか、トランスポートに任意のバイナリストリーム（退避 fd）を渡せるか。あわせて、HTTP 系の依存（starlette / uvicorn 等）が extras で外せるか、外せないなら stdio 起動時に import されないか | 4 点とも可能で、SDK クライアントから往復できる | 高水準 API へ切替（スキーマは後処理で `additionalProperties: false` を付ける）。ストリームが渡せなければ `sys.stdout` を退避 fd のラッパに戻す |
-| S-2 | `tree-sitter` 0.26 の API（`Language(mod.language())`、`Query` / `QueryCursor`）と、2024 年で更新が止まった文法（typescript / cpp / json / xml / toml）の ABI 互換 | 対象 7 文法で解析・タグクエリが通る | 互換しない文法は版を下げるか、`tree-sitter-language-pack` を避けて個別に再ビルド（ライセンス再確認） |
-| S-3 | `ast-grep-py` でパターン検索と書き換え案（メタ変数展開）が得られるか | `print($MSG)` → `logger.info($MSG)` の一致と置換テキストが取れる | M2 まで保留。自前の Tree-sitter クエリで検索のみ |
-| S-4 | `basedpyright` を pip で入れ、`basedpyright-langserver --stdio` 相当で起動し、`initialize` → `didOpen` → `publishDiagnostics` → `definition` が通るか。`positionEncodings` に `utf-8` を返すか | Windows / macOS / Linux で通る | `pyright` + Node を利用者の環境に求める |
-| S-5 | `vtsls` または `typescript-language-server` の探索・起動・`definition` / `references` / `rename` | 1 つ以上で通る | TS は best effort に格下げ（OD-7 の改版） |
-| S-6 | `watchfiles` の Windows での検知遅延・デバウンス・ネットワークドライブの挙動 | 単一ファイル変更をイベントまで 100 ms 以内で受ける | ポーリング（仕様書 §12.4 の 6） |
-| S-7 | `sqlite3` の `set_authorizer` / `set_progress_handler` / `mode=ro` URI が WAL の DB で動くか（`-shm` の扱い含む）、`query_only` が書き込みを拒否するか | 書き込み文が 3 重のどの層でも拒否される | `mode=ro` を外して `query_only` + authorizer の 2 重にする（その旨を仕様書に反映） |
-| S-8 | `dulwich` で参照解決・blob 取得・ツリー差分・改名追跡が F-PY 規模で何 ms か | `HEAD~3` の blob 取得が 50 ms 以内、`log --follow` 相当が 500 ms 以内 | `pygit2`（L-3 の手続き）または `git` 子プロセス |
-| S-9 | Python + SDK の往復オーバーヘッド: 何もしないツールと `get_file_skeleton`（キャッシュ済み）の p95 | 何もしないツールで p95 < 10 ms、骨格で p95 < 50 ms | JSON 直列化・pydantic 検証の最適化、ダメなら OD-1 (c) |
-| S-10 | Windows で `os.replace` の対象をエディタが開いているときの挙動と再試行の効果 | 5 回以内の再試行で成功するか、失敗を検知してロールバックできる | 一時ファイルに書いて内容をコピーする方式（原子性は劣る。仕様書に注記） |
-| S-11 | basedpyright / vtsls / rust-analyzer / gopls / clangd の `positionEncodings` 交渉結果 | 各サーバーの単位が分かり、`LineIndex` の変換で非 ASCII 行の位置が一致する | UTF-16 固定 |
-| S-12 | トークン推定の係数を `o200k_base` と比べて較正 | 仕様書 §14 のコーパスで誤差 ±10% | 係数表を文字種別にさらに分ける |
+| ID | 確かめること | 合格条件 | 不合格時の代替 | 結果 |
+|---|---|---|---|---|
+| S-1 | `mcp` 2.x の低水準サーバーで、`tools/list` のスキーマを自前 JSON で返せるか、`tools/call` の結果に `structuredContent` と `isError` を載せられるか、`roots/list` を要求できるか、トランスポートに任意のバイナリストリーム（退避 fd）を渡せるか。あわせて、HTTP 系の依存（starlette / uvicorn 等）が extras で外せるか、外せないなら stdio 起動時に import されないか | 4 点とも可能で、SDK クライアントから往復できる | 高水準 API へ切替（スキーマは後処理で `additionalProperties: false` を付ける）。ストリームが渡せなければ `sys.stdout` を退避 fd のラッパに戻す | **合格**（[docs/spikes/S-01.md](spikes/S-01.md)）。4 点とも可で、SDK クライアントから往復できた。HTTP 系の依存は extras で外せず stdio でも import される（起動 +約 190 ms、コールドスタート約 1.0 s）。ADR-2 は維持、ADR-3 は文言を修正 |
+| S-2 | `tree-sitter` 0.26 の API（`Language(mod.language())`、`Query` / `QueryCursor`）と、2024 年で更新が止まった文法（typescript / cpp / json / xml / toml）の ABI 互換 | 対象 7 文法で解析・タグクエリが通る | 互換しない文法は版を下げるか、`tree-sitter-language-pack` を避けて個別に再ビルド（ライセンス再確認） | **合格**（[docs/spikes/S-02.md](spikes/S-02.md)）。対象 7 文法を含む全 18 言語で解析・タグクエリが通る（ABI 14 / 15）。GIL とメモリ量（ソースの約 20〜26 倍）が前提と違い、ADR-13・§7.4.2 を改版 |
+| S-3 | `ast-grep-py` でパターン検索と書き換え案（メタ変数展開）が得られるか | `print($MSG)` → `logger.info($MSG)` の一致と置換テキストが取れる | M2 まで保留。自前の Tree-sitter クエリで検索のみ | **合格**（[docs/spikes/S-03.md](spikes/S-03.md)）。`print($MSG)` → `logger.info($MSG)` の一致と置換テキストが Python・TS・TSX・JS で取れた。`replace` はメタ変数を展開しないので展開は自前（代替は不要） |
+| S-4 | `basedpyright` を pip で入れ、`basedpyright-langserver --stdio` 相当で起動し、`initialize` → `didOpen` → `publishDiagnostics` → `definition` が通るか。`positionEncodings` に `utf-8` を返すか | Windows / macOS / Linux で通る | `pyright` + Node を利用者の環境に求める | 未反映（報告書の作成中。完了後に反映） |
+| S-5 | `vtsls` または `typescript-language-server` の探索・起動・`definition` / `references` / `rename` | 1 つ以上で通る | TS は best effort に格下げ（OD-7 の改版） | 未反映（報告書の作成中。完了後に反映） |
+| S-6 | `watchfiles` の Windows での検知遅延・デバウンス・ネットワークドライブの挙動 | 単一ファイル変更をイベントまで 100 ms 以内で受ける | ポーリング（仕様書 §12.4 の 6） | 未反映（報告書の作成中。完了後に反映） |
+| S-7 | `sqlite3` の `set_authorizer` / `set_progress_handler` / `mode=ro` URI が WAL の DB で動くか（`-shm` の扱い含む）、`query_only` が書き込みを拒否するか | 書き込み文が 3 重のどの層でも拒否される | `mode=ro` を外して `query_only` + authorizer の 2 重にする（その旨を仕様書に反映） | **合格**（[docs/spikes/S-07.md](spikes/S-07.md)）。DB 本体への書き込み文は 3 層のどの 1 層でも拒否される。ただし `ATTACH` の空ファイル作成と `PRAGMA journal_mode` は authorizer と禁止語検査でのみ止まる。§7.6.4 を改版 |
+| S-8 | `dulwich` で参照解決・blob 取得・ツリー差分・改名追跡が F-PY 規模で何 ms か | `HEAD~3` の blob 取得が 50 ms 以内、`log --follow` 相当が 500 ms 以内 | `pygit2`（L-3 の手続き）または `git` 子プロセス | 未反映（報告書の作成中。完了後に反映） |
+| S-9 | Python + SDK の往復オーバーヘッド: 何もしないツールと `get_file_skeleton`（キャッシュ済み）の p95 | 何もしないツールで p95 < 10 ms、骨格で p95 < 50 ms | JSON 直列化・pydantic 検証の最適化、ダメなら OD-1 (c) | **合格**（[docs/spikes/S-09.md](spikes/S-09.md)）。何もしないツールの往復 p95 1.08 ms（条件 10 ms）。骨格（T-02）の p95 < 50 ms は実装後に測る |
+| S-10 | Windows で `os.replace` の対象をエディタが開いているときの挙動と再試行の効果 | 5 回以内の再試行で成功するか、失敗を検知してロールバックできる | 一時ファイルに書いて内容をコピーする方式（原子性は劣る。仕様書に注記） | **合格**（[docs/spikes/S-10.md](spikes/S-10.md)）。失敗は `PermissionError`（winerror 5・32）で確実に検知でき target は無傷。50 ms の保持は 4 回目の試行で成功。再試行の条件と間隔を §7.7.5 で改版 |
+| S-11 | basedpyright / vtsls / rust-analyzer / gopls / clangd の `positionEncodings` 交渉結果 | 各サーバーの単位が分かり、`LineIndex` の変換で非 ASCII 行の位置が一致する | UTF-16 固定 | 未反映（報告書の作成中。完了後に反映） |
+| S-12 | トークン推定の係数を `o200k_base` と比べて較正 | 仕様書 §14 のコーパスで誤差 ±10% | 係数表を文字種別にさらに分ける | 未反映（報告書の作成中。完了後に反映） |
+
+結果の欄は反映済みのスパイクだけを埋めた。S-4・S-5・S-6・S-8・S-11・S-12 は報告書の作成中で、完了後に反映する（反映の一覧は [docs/spikes/SYNC-1.md](spikes/SYNC-1.md)）。
 
 ## 12.2 M1 の着手順（最初の 12 タスク）
 
@@ -1925,10 +1935,10 @@ build-backend = "hatchling.build"
 
 | # | タスク | 成果物 | 確かめ方 | 依存 |
 |---|---|---|---|---|
-| 1 | S-1、S-2、S-7、S-9 のスパイク | `docs/spikes/` | 各合格条件 | なし（並列） |
+| 1 | S-1、S-2、S-7、S-9 のスパイク（S-3・S-10 も実施済み。結果は §12.1） | `docs/spikes/` | 各合格条件 | なし（並列） |
 | 2 | リポジトリ骨格: `pyproject.toml`、`src/lucianke` の空パッケージ、`core/`、CI（lint / test / license） | ビルドとテストが空で通る | CI 緑、`pip-licenses` 緑 | なし |
 | 3 | `core`（model / urn / errors / records / textpos / limits） | 単体テスト | `urn` の往復、`LineIndex` の非 ASCII | 2 |
-| 4 | `mcp`（server / registry / pipeline / envelope / budget / render.compact / render.json） | 何もしないツール `ping`（開発時だけ登録し `tools/list` に載せない）が SDK クライアントから往復 | S-9 の計測、compact 文法パーサ | 1, 3 |
+| 4 | `mcp`（server / registry / pipeline / envelope / budget / render.compact / render.json） | 何もしないツール `ping`（開発時だけ登録し `tools/list` に載せない）が SDK クライアントから往復 | S-9 の型（`spikes/s01_mcp/bench.py`）を `bench/` へ移して回帰の基準にする（実ツールでも同じ 500 回計測の p95 を CI に記録）、compact 文法パーサ | 1, 3 |
 | 5 | `workspace`（context / paths / languages / settings_file） | T-00 `configure_workspace`（`status` / `set_roots` / `set_excludes`） | T-00 の事後条件 | 3 |
 | 6 | `index`（schema / connection / writer / ingest / queries） | 起動時の差分索引が F-POLY で通る | `data_version` の増加、行数 | 3, 5 |
 | 7 | `syntax`（parsers / symbols / skeleton / boundaries / support: Python, TS/JS, JSON, YAML, TOML, XML, Markdown） | T-01 / T-02 / T-03 / T-05 | 各事後条件、`sha=` | 6 |
@@ -1945,19 +1955,19 @@ build-backend = "hatchling.build"
 
 # 13. リスクと対策
 
-| # | リスク | 兆候 | 対策 |
-|---|---|---|---|
-| R-1 | Python の往復オーバーヘッドで NFR-PERF-1 を満たせない | S-9 で p95 > 50 ms | 直列化と検証の削減、レコードの遅延生成、骨格の事前計算。最後に OD-1 (c) |
-| R-2 | `mcp` SDK 2.x の API が想定と違う | S-1 不合格 | ADR-2 の代替。SDK の版を固定し、境界を `mcp/server.py` に閉じ込めてあるので影響は 1 ファイル |
-| R-3 | 更新が止まった Tree-sitter 文法が 0.26 と合わない | S-2 不合格 | 版の固定、個別再ビルド、または当該言語を `structural` 不可の Tier 4 扱いに一時格下げ |
-| R-4 | LSP サーバーごとの差（位置単位、`publishDiagnostics` の `version` 無し、`callHierarchy` 未対応） | e2e で位置ずれ・診断待ちのタイムアウト | `servers.py` にサーバー別の癖を集約。`FakeLsp` の録画で回帰を固定 |
-| R-5 | Windows での共有違反・改行・大文字小文字 | EP-6 / EP-9 が Windows でだけ落ちる | CI を 3 OS で回す。`writer.py` の再試行とロールバック |
-| R-6 | GIL により初回索引が遅い | 1 万ファイルの索引に分単位 | 許容する方針（師匠 2026-10-29）。索引中も降格応答で答え続けることと、`configure_workspace status` の進捗表示を優先する。プロセスプールや `lucianke index` の事前実行は、利用者が困ったときの手段として M2 以降 |
-| R-7 | `dulwich` の性能 | S-8 不合格 | OD-20 の (b) または (c) |
-| R-8 | ライセンスの許可リスト外が依存木に紛れ込む | CI の license ジョブが赤 | L-8 の検査を必須ジョブに。extras ごとに検査 |
-| R-9 | 仕様書と設計の乖離 | 契約テストが仕様書の番号と合わない | 事後条件 → テスト名の対応を機械的に検査（§10.2） |
-| R-10 | キャッシュディレクトリの肥大 | ディスク警告 | ジャーナル 50 件、ログ 7 日、構文木キャッシュの上限、`lucianke doctor` に使用量表示 |
-| R-11 | `exact` の応答に LSP 往復が含まれ、NFR-PERF-1 が LSP の速度に左右される（§8.3 の 2 回目の呼び出し） | `definition` / `references` の p95 が LSP 待ちで 50 ms を超える | 結果を `relations` / `_hover_cache` に書いて 2 回目以降は PaaD から答える。S-9 で「LSP 待ちを含む p95」と「含まない p95」を分けて測り、仕様書 §14.4 の母集団定義（`exact` で応答した呼び出し）と照らす。超えるなら `WAIT_SHORT` の上限を下げて `structural` を先に返す |
+| # | リスク | 兆候 | 対策 | 状態 |
+|---|---|---|---|---|
+| R-1 | Python の往復オーバーヘッドで NFR-PERF-1 を満たせない | S-9 で p95 > 50 ms | 直列化と検証の削減、レコードの遅延生成、骨格の事前計算。最後に OD-1 (c) | **縮小**（S-9: 何もしないツールの往復は p95 1.08 ms で、JSON 直列化・pydantic 検証の最適化は不要。T-02 の p95 は実装後に測る） |
+| R-2 | `mcp` SDK 2.x の API が想定と違う | S-1 不合格 | ADR-2 の代替。SDK の版を固定し、境界を `mcp/server.py` に閉じ込めてあるので影響は 1 ファイル | **解消**（S-1 合格。維持する前提は ADR-2） |
+| R-3 | 更新が止まった Tree-sitter 文法が 0.26 と合わない | S-2 不合格 | 版の固定、個別再ビルド、または当該言語を `structural` 不可の Tier 4 扱いに一時格下げ | **解消**（S-2: 読めない文法は無かった。18 言語すべて読み込み・クエリ可） |
+| R-4 | LSP サーバーごとの差（位置単位、`publishDiagnostics` の `version` 無し、`callHierarchy` 未対応） | e2e で位置ずれ・診断待ちのタイムアウト | `servers.py` にサーバー別の癖を集約。`FakeLsp` の録画で回帰を固定 | 継続（S-4・S-5・S-11 の反映待ち） |
+| R-5 | Windows での共有違反・改行・大文字小文字 | EP-6 / EP-9 が Windows でだけ落ちる | CI を 3 OS で回す。`writer.py` の再試行とロールバック | **縮小**（S-10: 失敗は winerror 5・32 で確実に検知でき target は無傷。310 ms の再試行で 200 ms までの保持に勝てる。3 OS の CI は継続） |
+| R-6 | GIL により初回索引が遅い | 1 万ファイルの索引に分単位 | 許容する方針（師匠 2026-10-29）。索引中も降格応答で答え続けることと、`configure_workspace status` の進捗表示を優先する。プロセスプールや `lucianke index` の事前実行は、利用者が困ったときの手段として M2 以降（別プロセス 4 本で約 4 倍に伸びる。S-2） | 継続（S-2: スレッドプールは並列化しない） |
+| R-7 | `dulwich` の性能 | S-8 不合格 | OD-20 の (b) または (c) | 継続（S-8 の反映待ち） |
+| R-8 | ライセンスの許可リスト外が依存木に紛れ込む | CI の license ジョブが赤 | L-8 の検査を必須ジョブに。extras ごとに検査 | 継続 |
+| R-9 | 仕様書と設計の乖離 | 契約テストが仕様書の番号と合わない | 事後条件 → テスト名の対応を機械的に検査（§10.2） | 継続 |
+| R-10 | キャッシュディレクトリの肥大 | ディスク警告 | ジャーナル 50 件、ログ 7 日、構文木キャッシュの上限、`lucianke doctor` に使用量表示 | 継続 |
+| R-11 | `exact` の応答に LSP 往復が含まれ、NFR-PERF-1 が LSP の速度に左右される（§8.3 の 2 回目の呼び出し） | `definition` / `references` の p95 が LSP 待ちで 50 ms を超える | 結果を `relations` / `_hover_cache` に書いて 2 回目以降は PaaD から答える。S-9 で「LSP 待ちを含む p95」と「含まない p95」を分けて測り、仕様書 §14.4 の母集団定義（`exact` で応答した呼び出し）と照らす。超えるなら `WAIT_SHORT` の上限を下げて `structural` を先に返す | 継続（S-9 の往復は LSP 待ちを含まない値。LSP 待ちを含む p95 は実装後に測る） |
 
 ---
 
@@ -1969,24 +1979,24 @@ PyPI JSON API（`https://pypi.org/pypi/<name>/json`）から取得した。ラ�
 
 | 名前 | 最新版 | 公開日 | requires_python | wheel | 種別 | 主要依存 / 備考 |
 |---|---|---|---|---|---|---|
-| mcp | 2.3.0 | 2026-10-02 | >=3.10 | any | 純 Python | anyio, httpx2, jsonschema, mcp-types, pydantic>=2.12, starlette, uvicorn, pyjwt[crypto], opentelemetry-api, pywin32（Windows）。**依存が重い**（§A.3） |
+| mcp | 2.3.0 | 2026-10-02 | >=3.10 | any | 純 Python | anyio, httpx2, jsonschema, mcp-types, pydantic>=2.12, starlette, uvicorn, pyjwt[crypto], opentelemetry-api, pywin32（Windows）。**依存が重い**（無条件依存で extras では外せない。§A.3） |
 | tree-sitter | 0.26.0 | 2026-06-30 | >=3.10 | win / mac / linux（cp310〜） | ネイティブ | `Language(mod.language())` 形式 |
 | tree-sitter-python | 0.25.0 | 2025-09-11 | >=3.10 | abi3（win_amd64 / win_arm64 含む） | ネイティブ | |
-| tree-sitter-typescript | 0.23.2 | **2024-11-11** | >=3.9 | abi3 | ネイティブ | 更新停止気味。S-2 で ABI 互換を確認 |
+| tree-sitter-typescript | 0.23.2 | **2024-11-11** | >=3.9 | abi3 | ネイティブ | 更新停止気味。ABI 14 で本体の範囲に収まる（S-2 で確認） |
 | tree-sitter-javascript | 0.25.0 | 2025-09-01 | >=3.10 | abi3 | ネイティブ | |
 | tree-sitter-rust | 0.24.2 | 2026-03-27 | >=3.9 | abi3 | ネイティブ | |
 | tree-sitter-go | 0.25.0 | 2025-08-29 | >=3.10 | abi3 | ネイティブ | |
 | tree-sitter-c | 0.24.2 | 2026-04-22 | >=3.10 | abi3 | ネイティブ | |
-| tree-sitter-cpp | 0.23.4 | **2024-11-11** | >=3.9 | abi3 | ネイティブ | 更新停止気味。S-2 |
+| tree-sitter-cpp | 0.23.4 | **2024-11-11** | >=3.9 | abi3 | ネイティブ | 更新停止気味。ABI 14 で互換（S-2 で確認） |
 | tree-sitter-c-sharp | 0.23.5 | 2026-04-14 | >=3.9 | abi3 | ネイティブ | |
-| tree-sitter-json | 0.24.8 | **2024-11-11** | >=3.9 | abi3 | ネイティブ | 更新停止気味。S-2 |
+| tree-sitter-json | 0.24.8 | **2024-11-11** | >=3.9 | abi3 | ネイティブ | 更新停止気味。ABI 14 で互換（S-2 で確認） |
 | tree-sitter-yaml | 0.7.2 | 2025-10-07 | >=3.10 | abi3 | ネイティブ | |
-| tree-sitter-toml | 0.7.0 | **2024-12-03** | >=3.9 | abi3 | ネイティブ | 更新停止気味。S-2 |
-| tree-sitter-xml | 0.7.0 | **2024-11-13** | >=3.9 | abi3 | ネイティブ | 更新停止気味。S-2 |
+| tree-sitter-toml | 0.7.0 | **2024-12-03** | >=3.9 | abi3 | ネイティブ | 更新停止気味。ABI 14 で互換（S-2 で確認） |
+| tree-sitter-xml | 0.7.0 | **2024-11-13** | >=3.9 | abi3 | ネイティブ | 更新停止気味。ABI 14 で互換（S-2 で確認） |
 | tree-sitter-markdown | 0.5.4 | 2026-10-24 | >=3.10 | abi3 | ネイティブ | |
 | tree-sitter-rst | 0.2.0 | 2025-02-24 | >=3.10 | abi3 | ネイティブ | |
 | tree-sitter-sql | 0.3.11 | 2025-10-01 | >=3.10 | abi3 | ネイティブ | M2 |
-| ast-grep-py | 0.51.0 | 2026-10-15 | >=3.8 | win / mac / linux | ネイティブ | M2。rewrite API の有無は description に記述なし（S-3） |
+| ast-grep-py | 0.51.0 | 2026-10-15 | >=3.8 | win / mac / linux | ネイティブ | M2。`replace` / `commit_edits` はあるがメタ変数を展開しない（S-3 で確認） |
 | z3-solver | 5.3.2.0 | 2026-10-25 | なし | py3-none-win / mac / linux | ネイティブ | M3 |
 | dulwich | 1.2.20 | 2026-10-26 | >=3.10 | any + win / mac / linux | 純 Python + 任意の C 拡張 | urllib3, typing_extensions。S-8 |
 | watchfiles | 1.3.0 | 2026-09-21 | >=3.10 | abi3（win32 / win_amd64 / win_arm64 含む） | ネイティブ | anyio。Windows 対応の記述あり。S-6 |
@@ -2007,16 +2017,16 @@ PyPI JSON API（`https://pypi.org/pypi/<name>/json`）から取得した。ラ�
 
 1. `tree-sitter` 0.26.0 の言語読み込みは `Language(tree_sitter_python.language())` 形式（PyPI の description のサンプル）。
 2. `basedpyright` は `requires_dist` に `nodejs-wheel-binaries>=20.13.1` を持つ。Node.js は pip の依存として入る。
-3. `mcp` 2.3.0 の description に `structuredContent` と `roots` の記述は無い（クライアント側の `result.structured_content` の例のみ）。サーバー側の対応は S-1 で確かめる。
+3. `mcp` 2.3.0 の description に `structuredContent` と `roots` の記述は無い（クライアント側の `result.structured_content` の例のみ）。サーバー側の対応は S-1 で確かめ、`structuredContent`・`isError`・`roots/list` とも可と分かった（S-1 で確認）。
 4. `watchfiles` の description に "Binaries are available for most architectures on Linux, MacOS and Windows" の記述あり。
-5. `ast-grep-py` の description に rewrite / replace の記述は無い。S-3 で確かめる。
+5. `ast-grep-py` の description に rewrite / replace の記述は無い。S-3 で確かめ、`replace` と `commit_edits` はあるが、`replace` はメタ変数を展開しないと分かった（S-3 で確認）。
 
 ## A.3 設計への含意
 
 - **Windows wheel が無いパッケージは無い。** NFR-PORT-2 の障害にならない。
 - **`requires_python` の下限は 3.12 で全部満たす**（最も厳しいのは jsonpath-ng の >=3.11）。
-- **`mcp` 2.x は依存が重い**（HTTP サーバー系・OpenTelemetry・JWT・Windows では pywin32）。起動時間と import 時間に効く。S-9 でコールドスタートも測り、必要なら stdio だけに必要な部分を遅延 import する。依存木のライセンス検査（L-8）はこの重さも対象にする。
-- **Tree-sitter の 5 文法（typescript / cpp / json / xml / toml）は 2024 年で更新が止まっている。** 本体 0.26 との ABI 互換を S-2 で確かめ、合わなければ版を固定するか個別に対処する（R-3）。
+- **`mcp` 2.x は依存が重い**（HTTP サーバー系・OpenTelemetry・JWT・Windows では pywin32）。起動時間と import 時間に効く。コールドスタートは S-1 で測った: 中央値 980 ms（959〜1030 ms、n=7。素の `python -c pass` は 57 ms）で、import 全体が約 890 ms（累積で重なりあり: `mcp_types` 約 440、pydantic 約 120、starlette 約 95、sse_starlette 約 70、uvicorn 約 65、httpx2 約 45）。HTTP 系 9 パッケージを空スタブにすると 980 → 793 ms（−190 ms）で stdio は動くが、SDK 内部の import 構造への依存が強いので遅延 import は採用しない。初回の重さとして許容する（仕様書 §14.4）。重くなったら SDK 側への提案を先に検討する。依存木のライセンス検査（L-8）はこの重さも対象にする。
+- **Tree-sitter の 5 文法（typescript / cpp / json / xml / toml）は 2024 年で更新が止まっている。** 本体 0.26 との ABI 互換を S-2 で確かめた結果、5 パッケージとも ABI 14 で範囲（13〜15）に収まり、読めない文法は無かった（R-3 は解消。S-2 で確認）。`tree-sitter>=0.26,<0.27` に固定してロック更新時に回帰を確かめる（§11.1）。
 - **basedpyright を Python 系 LSP の既定にする理由**: pip だけで Node ごと入り、Windows の利用者に Node の別途導入を求めない。`pyright`（PyPI）は実行時に Node を取得する方式で、仕様書 L-6 の趣旨に反する。
 - **nbformat は採らない。** `.ipynb` は JSON であり、標準の `json` で読み書きできる。依存を 4 つ増やす価値が無い。
 - **`z3-solver` は requires_python が無指定。** M3 で採用時に動作確認する。
@@ -2070,7 +2080,7 @@ PyPI JSON API（`https://pypi.org/pypi/<name>/json`）から取得した。ラ�
 | NFR-SAFE-3 | `workspace/paths.py` | unit paths, invariants |
 | NFR-SAFE-4 | `edit/writer.py` | unit edit（EP-9） |
 | NFR-OPS-1 | `bootstrap_io.py` | invariants（stdout 純度） |
-| NFR-OPS-2 | `lifecycle.py`（ProcessRegistry） | invariants（子プロセス 0） |
+| NFR-OPS-2 | `core/procs.py`（ProcessRegistry）, `lifecycle.py`（終了手順） | invariants（子プロセス 0） |
 | NFR-OPS-3 | `engine/selector.py`, `lsp/pool.py` | contract T-04 / T-08（indexing 中） |
 | NFR-OPS-4 | `core/textpos.py`, `lsp/client.py` | unit textpos |
 | NFR-PORT-1 | `pyproject.toml`（§11.1） | CI license / build |
