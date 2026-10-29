@@ -1,7 +1,7 @@
 """合成ルート（設計書 §2.2、§6.5）。設定 → ログ → ツール登録表 → パイプライン → MCP サーバー。
 
-起動順（§6.5）の 1〜4 と 6〜7: ``bootstrap_io`` → ログ → 設定 → MCP サーバー（``initialize`` 受付、``roots/list``）。
-索引・監視（5・8・9）は後続のタスクで足す。
+起動順（§6.5）: ``bootstrap_io`` → ログ → 設定 → MCP サーバー（``initialize`` 受付、``roots/list``）→ ワークスペースの登録と
+``IndexWriter`` の起動・スキーマ移行 → 差分索引の背景ジョブ → 監視（``tools._runtime.RuntimeHub``）。終了は ``lifecycle.py`` の段。
 
 import の順序が要: このモジュールの先頭では標準ライブラリと軽い自前モジュール（``bootstrap_io`` / ``config`` /
 ``logging_setup``）だけを import する。SDK（``mcp``・``anyio``）や pydantic は ``bootstrap_io()`` の **後で**、関数の中で import する
@@ -10,6 +10,7 @@ import の順序が要: このモジュールの先頭では標準ライブラ�
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,12 @@ from lucianke.logging_setup import setup_logging
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from lucianke.core.procs import ProcessRegistry
+    from lucianke.lifecycle import Lifecycle
+    from lucianke.lsp.pool import LspPool
     from lucianke.mcp.registry import ToolRegistry
+    from lucianke.syntax.parsers import TreeCache
+    from lucianke.tools._runtime import RuntimeHub
     from lucianke.tools._services import ToolServices
 
 
@@ -38,20 +44,56 @@ def build_registry(settings: Settings) -> ToolRegistry:
     return registry
 
 
-def build_services(roots: Callable[[], Sequence[str]]) -> ToolServices:
+def build_services(
+    roots: Callable[[], Sequence[str]], *, trees: TreeCache | None = None, hub: RuntimeHub | None = None
+) -> ToolServices:
     """ツールが使うサービスの入れ物を組み立てる。``roots`` は現在の作業ツリーの根（MCP の roots か cwd）を返す関数。
 
+    ``hub`` があればワークスペース・索引・LSP・編集ロックはそこから（``tools._runtime.WiredServices``）。無ければ ``roots`` の先頭だけ。
     ``tools`` は ``mcp`` を import できないので、compact の行の組み立て関数（``mcp.render.compact``）はここで注入する。
     """
     from lucianke.mcp.render import compact
     from lucianke.syntax.parsers import TreeCache
-    from lucianke.tools._services import ToolServices
+    from lucianke.tools._runtime import WiredServices
 
-    return ToolServices(roots=roots, trees=TreeCache(), lines=compact)
+    return WiredServices(roots=roots, trees=trees if trees is not None else TreeCache(), lines=compact, hub=hub)
+
+
+ROOTS_FALLBACK_S = 8.0  # ``notifications/initialized`` が来ないホストでも、この秒数の後に cwd で索引を始める（roots の待ち上限 5 s より長く）
+EDIT_DRAIN_POLL_S = 0.05
+
+
+def register_shutdown_steps(lifecycle: Lifecycle, hub: RuntimeHub, pool: LspPool, procs: ProcessRegistry) -> None:
+    """終了の段（設計書 §6.5）: 編集の完了待ち → 監視停止 → 索引器の停止 → LSP → 残った子プロセス → 書き手の close。
+
+    段の本体は ``hub`` の **現在の** 束を回る（後から増えたルートも含む）。
+    """
+    from lucianke.lifecycle import DEFAULT_TIMEOUT_MS, ShutdownOrder, make_terminate_children_step
+
+    async def drain_edits() -> None:
+        while any(hub.locks.is_locked(ws_id) for ws_id in hub.runtimes):
+            await asyncio.sleep(EDIT_DRAIN_POLL_S)
+
+    def t(order: ShutdownOrder) -> int:
+        return DEFAULT_TIMEOUT_MS[order]
+
+    add = lifecycle.add_shutdown_step
+    add("edits", drain_edits, order=ShutdownOrder.DRAIN_EDITS, timeout_ms=t(ShutdownOrder.DRAIN_EDITS))
+    add("watchers", hub.stop_watchers, order=ShutdownOrder.STOP_WATCHER, timeout_ms=t(ShutdownOrder.STOP_WATCHER))
+    add("indexers", hub.stop_indexers, order=ShutdownOrder.STOP_WATCHER + 5, timeout_ms=t(ShutdownOrder.STOP_WATCHER))
+    add("lsp", pool.shutdown_all, order=ShutdownOrder.LSP, timeout_ms=t(ShutdownOrder.LSP))
+    add("children", make_terminate_children_step(procs), order=ShutdownOrder.KILL_CHILDREN,
+        timeout_ms=t(ShutdownOrder.KILL_CHILDREN))  # fmt: skip
+    add("index_close", hub.close_storage, order=ShutdownOrder.INDEX_CLOSE, timeout_ms=t(ShutdownOrder.INDEX_CLOSE))
 
 
 def run_stdio() -> int:
-    """ホストから子プロセスとして起動され、stdio で MCP を話す。``stdin`` の EOF で終わり、終了コード 0（ADR-16）。"""
+    """ホストから子プロセスとして起動され、stdio で MCP を話す。``stdin`` の EOF で終わり、終了コード 0（ADR-16）。
+
+    起動（設計書 §6.5）: ``bootstrap_io`` → ログ → 設定 → MCP サーバー（``initialize`` 受付）→ ``roots/list``（取れたら。
+    取れなければ cwd）→ ワークスペース登録・``IndexWriter`` 起動とスキーマ移行 → 監視開始 → 差分索引を背景ジョブで投入。
+    終了は ``Lifecycle`` の段（``register_shutdown_steps``）を ``run_until_shutdown`` とシグナルで回す。
+    """
     fds = bootstrap_io()  # 最初の 1 バイトの前。以降 print / os.write(1) / 子プロセスの fd 1 は stderr へ
     settings = load_settings()
     log = setup_logging(settings)
@@ -59,22 +101,64 @@ def run_stdio() -> int:
     import anyio
 
     from lucianke import __version__
+    from lucianke.core.procs import ProcessRegistry
+    from lucianke.lifecycle import Lifecycle, install_signal_handlers, make_shutdown_guard, run_until_shutdown
+    from lucianke.lsp.pool import LspPool
     from lucianke.mcp.pipeline import Pipeline
     from lucianke.mcp.server import RootsState, build_server
+    from lucianke.syntax.parsers import TreeCache
+    from lucianke.tools._runtime import RuntimeHub
 
     registry = build_registry(settings)
     roots = RootsState.from_cwd()
-    pipeline = Pipeline(registry, services=build_services(lambda: roots.paths))
+    trees = TreeCache()
+    procs = ProcessRegistry()
+    hub = RuntimeHub(settings.cache_root, trees)
+    pool = LspPool(procs, on_diagnostics=hub.on_diagnostics)
+    hub.lsp_pool = pool
+    lifecycle = Lifecycle()
+    register_shutdown_steps(lifecycle, hub, pool, procs)
+    pipeline = Pipeline(
+        registry,
+        services=build_services(lambda: roots.paths, trees=trees, hub=hub),
+        data_version_provider=hub.data_version,
+        shutdown_guard=make_shutdown_guard(lifecycle),
+    )
     server = build_server(registry, pipeline, roots, version=__version__)
     log.info("lucianke %s starting (tools=%d)", __version__, len(registry), extra={"event": "startup"})
 
     async def serve() -> None:
         from mcp.server.stdio import stdio_server
 
+        settled = False
+
+        async def on_roots(state: RootsState) -> None:  # roots/list の結果（か、取れなかった結果）が出た
+            nonlocal settled
+            settled = True
+            await hub.sync_roots(state.paths)
+
+        async def roots_fallback() -> None:  # initialized が来ないホスト向け
+            await asyncio.sleep(ROOTS_FALLBACK_S)
+            if not settled:
+                log.warning("no roots decision after %.0f s; indexing the cwd", ROOTS_FALLBACK_S)
+                await on_roots(roots)
+
+        roots.listeners.append(on_roots)
+        fallback = asyncio.get_running_loop().create_task(roots_fallback(), name="lucianke-roots-fallback")
+        watch = install_signal_handlers(asyncio.get_running_loop(), lifecycle)
         stdin, stdout = open_transport_streams(fds)
-        # 引数なしの stdio_server() は呼ばない（fd 0 が NUL なので入力 EOF と見て即終了する。S-1）
-        async with stdio_server(stdin=anyio.wrap_file(stdin), stdout=anyio.wrap_file(stdout)) as (read, write):
-            await server.run(read, write, server.create_initialization_options())  # stdin の EOF で戻る
+
+        async def run_server() -> None:
+            # 引数なしの stdio_server() は呼ばない（fd 0 が NUL なので入力 EOF と見て即終了する。S-1）
+            async with stdio_server(stdin=anyio.wrap_file(stdin), stdout=anyio.wrap_file(stdout)) as (read, write):
+                await server.run(read, write, server.create_initialization_options())  # stdin の EOF で戻る
+
+        try:
+            await run_until_shutdown(lifecycle, run_server())
+        finally:
+            fallback.cancel()
+            watch.close()
+            await asyncio.gather(fallback, return_exceptions=True)
 
     try:
         anyio.run(serve)
