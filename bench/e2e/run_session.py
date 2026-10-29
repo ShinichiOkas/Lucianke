@@ -125,6 +125,8 @@ class Resp:
     def ok(self) -> bool:
         if self.rpc_error is not None or self.is_error:
             return False
+        if self.tool == "tools/list":
+            return True
         if self.is_json:
             return bool(self.envelope.get("ok"))
         return self.header.get("status") == "ok"
