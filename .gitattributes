@@ -1,0 +1,6 @@
+# 既定は LF に正規化する（Windows / macOS / Linux で同一のバイト列にする）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# フィクスチャはバイト単位で保持する（CRLF・BOM・末尾改行なしの検査に使う。仕様書 EP-6）
+tests/fixtures/** -text
