@@ -1103,6 +1103,9 @@ async def run_self() -> dict[str, Any]:
         r["files"] = ((await s.j("configure_workspace", {"action": "status"}))[0].get("data") or {}).get("cache")
         for name in ("LuciankeError", "TokenEstimator", "resolve_target", "open_reader", "confine", "LineIndex"):
             d, _ = await s.j("search_workspace_symbols", {"query": name, "match": "exact", "limit": 200, "symbol_kinds": ["Class", "Function"]})
+            if not d.get("data"):
+                note("self", f"T-03 exact {name}: data が無い応答 {str(d)[:300]}")
+                continue
             got = {x["path"] for x in d["data"]["symbols"]}
             exp = defs.get(name, set())
             r[f"t03:{name}"] = (len(got), len(exp), sorted(got ^ exp)[:4])
