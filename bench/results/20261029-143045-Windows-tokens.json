@@ -1,0 +1,868 @@
+{
+ "schema": "lucianke-bench-tokens/1",
+ "date": "2026-10-29T14:30:17+09:00",
+ "encoding": "o200k_base",
+ "threshold": 0.75,
+ "machine": {
+  "os": "Windows",
+  "os_release": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD64 Family 23 Model 49 Stepping 0, AuthenticAMD",
+  "cpu_count": 48,
+  "memory_gib": 63.9,
+  "python": "3.12.11",
+  "storage": "unrecorded"
+ },
+ "lucianke": {
+  "sha": "d0fbc3bb92981f2bbd38d00dfbf99f6946d43744",
+  "src_dirty": true
+ },
+ "fixtures": {
+  "F-PY": {
+   "name": "httpx",
+   "url": "https://github.com/encode/httpx",
+   "sha": "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+  },
+  "F-TS": {
+   "name": "ky",
+   "url": "https://github.com/sindresorhus/ky",
+   "sha": "3541888878c4d303a8bc2ad61815f4e048f55a5d"
+  }
+ },
+ "scenarios": [
+  {
+   "fixture": "F-PY",
+   "scenario": "S1",
+   "title": "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る",
+   "B": {
+    "tokens": 34815,
+    "calls": 11,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bdef send\\b",
+      "input_tokens": 13,
+      "output_tokens": 54,
+      "input_chars": 36,
+      "output_chars": 187,
+      "hit_files": 2,
+      "hit_lines": 3
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_client.py",
+      "input_tokens": 6,
+      "output_tokens": 13796,
+      "input_chars": 21,
+      "output_chars": 67732
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_transports/asgi.py",
+      "input_tokens": 9,
+      "output_tokens": 1217,
+      "input_chars": 30,
+      "output_chars": 5688
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef build_request\\b",
+      "input_tokens": 14,
+      "output_tokens": 13,
+      "input_chars": 45,
+      "output_chars": 43,
+      "hit_files": 1,
+      "hit_lines": 1
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef raise_for_status\\b",
+      "input_tokens": 15,
+      "output_tokens": 18,
+      "input_chars": 48,
+      "output_chars": 64,
+      "hit_files": 1,
+      "hit_lines": 1
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_models.py",
+      "input_tokens": 6,
+      "output_tokens": 9494,
+      "input_chars": 21,
+      "output_chars": 45974
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef join\\b",
+      "input_tokens": 13,
+      "output_tokens": 22,
+      "input_chars": 36,
+      "output_chars": 61,
+      "hit_files": 1,
+      "hit_lines": 1
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_urls.py",
+      "input_tokens": 6,
+      "output_tokens": 5234,
+      "input_chars": 19,
+      "output_chars": 22156
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdef request\\b",
+      "input_tokens": 13,
+      "output_tokens": 108,
+      "input_chars": 39,
+      "output_chars": 367,
+      "hit_files": 4,
+      "hit_lines": 7
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_api.py",
+      "input_tokens": 6,
+      "output_tokens": 2875,
+      "input_chars": 18,
+      "output_chars": 12181
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_exceptions.py",
+      "input_tokens": 6,
+      "output_tokens": 1877,
+      "input_chars": 25,
+      "output_chars": 8867
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens": 10984,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "get_file_skeleton",
+      "input_tokens": 65,
+      "output_tokens": 10919,
+      "input_chars": 201,
+      "output_chars": 39920,
+      "is_error": false,
+      "client_ms": 223.8,
+      "response": "# get_file_skeleton ok conf=structural lsp=n/a rev=WORKING_TREE ws=httpx ~10236/12000tok\n=== httpx/_client.py (2019 lines, skeleton: 114 lines, sha=5be2ca2aef13) ===\n[Variable] pub __all__ @L54\n[Constant] pub T @L58\n[Constant] pub U @L59\n[Class] pub UseClientDefault @L94-111\n  doc: For some parameters such as `auth=...` and `timeout=...` we need to be able\n[Constant] pub USE_CLIENT_DEFAULT @L114\n[Variable] pub logger @L117\n[Constant] pub USER_AGENT @L119\n[Constant] pub ACCEPT_ENCODING @L120-122\n[Class] pub ClientState @L125-136\n  [Constant] pub UNOPENED @L129\n  [Constant] pub OPENED @L132\n  [Constant] pub CLOSED @L136\n[Class] pub BoundSyncStream @L139-159\n  doc: A byte stream that is bound to a given response instance, and that\n  [Constructor] pub __init__(self, stream: SyncByteStream, response: Response, start: float) -> None @L145-150 { ...3 lines omitted }\n  [Method] pub __iter__(self) -> typing.Iterator[bytes] @L152-154 { ...2 lines omitted }\n  [Method] pub close(self) -> None @L156-159 { ...3 lines omitted }\n[Class] pub BoundAsyncStream @L162-182\n  doc: An async byte stream that is bound to a given response instance, and that\n  [Constructor] pub __init__(self, stream: AsyncByteStream, response: Response, start: float) -> None @L168-173 { ...3 lines omitted }\n  [Method] pub async __aiter__(self) -> typing.AsyncIterator[bytes] @L175-177 { ...2 lines omitted }\n  [Method] pub async aclose(self) -> None @L179-182 { ...3 lines omitted }\n[Variable] pub EventHook @L185\n[Class] pub BaseClient @L188-591\n  [Constructor] pub __init__(self, *, auth: AuthTypes | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, timeout: TimeoutTypes = DEFAULT_TIMEOUT_CONFIG, follow_redirects: bool = False, max_redirects: int = DEFAULT_MAX_REDIRECTS, event_hooks: None | (typing.Mapping[str, list[EventHook]]) = None, base_url: URL | str = \"\", trust_env: bool = True, default_encoding: str | typing.Callable[[bytes], str] = \"utf-8\") -> None @L189-221 { ...18 lines omitted }\n  [Property] pub is_closed(self) -> bool @L223-228\n    doc: Check if the client being closed\n    decorators: @property\n  [Property] pub trust_env(self) -> bool @L230-232\n    decorators: @property\n  [Property] pub timeout(self) -> Timeout @L253-255\n    decorators: @property\n  [Property] pub event_hooks(self) -> dict[str, list[EventHook]] @L261-263\n    decorators: @property\n  [Property] pub auth(self) -> Auth | None @L272-281\n    doc: Authentication class used when none is passed at the request-level.\n    decorators: @property\n  [Property] pub base_url(self) -> URL @L287-292\n    doc: Base URL to use when sending requests with relative URLs.\n    decorators: @property\n  [Property] pub headers(self) -> Headers @L298-303\n    doc: HTTP headers to include when sending requests.\n    decorators: @property\n  [Property] pub cookies(self) -> Cookies @L318-323\n    doc: Cookie values to include when sending requests.\n    decorators: @property\n  [Property] pub params(self) -> QueryParams @L329-334\n    doc: Query parameters to include in the URL when sending requests.\n    decorators: @property\n  [Method] pub build_request(self, method: str, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Request @L340-389 { ...35 lines omitted }\n    doc: Build and return a request instance.\n[Class] pub Client @L594-1304\n  doc: An HTTP client, with connection pooling, HTTP/2, redirects, cookie persistence, etc.\n  [Constructor] pub __init__(self, *, auth: AuthTypes | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, verify: ssl.SSLContext | str | bool = True, cert: CertTypes | None = None, trust_env: bool = True, http1: bool = True, http2: bool = False, proxy: ProxyTypes | None = None, mounts: None | (typing.Mapping[str, BaseTransport | None]) = None, timeout: TimeoutTypes = DEFAULT_TIMEOUT_CONFIG, follow_redirects: bool = False, limits: Limits = DEFAULT_LIMITS, max_redirects: int = DEFAULT_MAX_REDIRECTS, event_hooks: None | (typing.Mapping[str, list[EventHook]]) = None, base_url: URL | str = \"\", transport: BaseTransport | None = None, default_encoding: str | typing.Callable[[bytes], str] = \"utf-8\") -> None @L639-716 { ...55 lines omitted }\n    raises: ImportError\n  [Method] pub request(self, method: str, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L771-825 { ...38 lines omitted }\n    doc: Build and send a request.\n  [Method] pub stream(self, method: str, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> typing.Iterator[Response] @L827-877 { ...33 lines omitted }\n    doc: Alternative to `httpx.request()` that streams the response body\n    decorators: @contextmanager\n  [Method] pub send(self, request: Request, *, stream: bool = False, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT) -> Response @L879-928 { ...42 lines omitted }\n    doc: Send a request.\n    raises: RuntimeError\n  [Method] pub get(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1036-1063 { ...16 lines omitted }\n    doc: Send a `GET` request.\n  [Method] pub options(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1065-1092 { ...16 lines omitted }\n    doc: Send an `OPTIONS` request.\n  [Method] pub head(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1094-1121 { ...16 lines omitted }\n    doc: Send a `HEAD` request.\n  [Method] pub post(self, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1123-1158 { ...20 lines omitted }\n    doc: Send a `POST` request.\n  [Method] pub put(self, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1160-1195 { ...20 lines omitted }\n    doc: Send a `PUT` request.\n  [Method] pub patch(self, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1197-1232 { ...20 lines omitted }\n    doc: Send a `PATCH` request.\n  [Method] pub delete(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1234-1261 { ...16 lines omitted }\n    doc: Send a `DELETE` request.\n  [Method] pub close(self) -> None @L1263-1273 { ...10 lines omitted }\n    doc: Close transport and proxies.\n  [Method] pub __enter__(self: T) -> T @L1275-1291 { ...16 lines omitted }\n    raises: RuntimeError\n  [Method] pub __exit__(self, exc_type: type[BaseException] | None = None, exc_value: BaseException | None = None, traceback: TracebackType | None = None) -> None @L1293-1304 { ...6 lines omitted }\n[Class] pub AsyncClient @L1307-2019\n  doc: An asynchronous HTTP client, with connection pooling, HTTP/2, redirects,\n  [Constructor] pub __init__(self, *, auth: AuthTypes | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, verify: ssl.SSLContext | str | bool = True, cert: CertTypes | None = None, http1: bool = True, http2: bool = False, proxy: ProxyTypes | None = None, mounts: None | (typing.Mapping[str, AsyncBaseTransport | None]) = None, timeout: TimeoutTypes = DEFAULT_TIMEOUT_CONFIG, follow_redirects: bool = False, limits: Limits = DEFAULT_LIMITS, max_redirects: int = DEFAULT_MAX_REDIRECTS, event_hooks: None | (typing.Mapping[str, list[EventHook]]) = None, base_url: URL | str = \"\", transport: AsyncBaseTransport | None = None, trust_env: bool = True, default_encoding: str | typing.Callable[[bytes], str] = \"utf-8\") -> None @L1353-1430 { ...55 lines omitted }\n    raises: ImportError\n  [Method] pub async request(self, method: str, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1485-1540 { ...39 lines omitted }\n    doc: Build and send a request.\n  [Method] pub async stream(self, method: str, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> typing.AsyncIterator[Response] @L1542-1592 { ...33 lines omitted }\n    doc: Alternative to `httpx.request()` that streams the response body\n    decorators: @asynccontextmanager\n  [Method] pub async send(self, request: Request, *, stream: bool = False, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT) -> Response @L1594-1643 { ...42 lines omitted }\n    doc: Send a request.\n    raises: RuntimeError\n  [Method] pub async get(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1751-1778 { ...16 lines omitted }\n    doc: Send a `GET` request.\n  [Method] pub async options(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1780-1807 { ...16 lines omitted }\n    doc: Send an `OPTIONS` request.\n  [Method] pub async head(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1809-1836 { ...16 lines omitted }\n    doc: Send a `HEAD` request.\n  [Method] pub async post(self, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1838-1873 { ...20 lines omitted }\n    doc: Send a `POST` request.\n  [Method] pub async put(self, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1875-1910 { ...20 lines omitted }\n    doc: Send a `PUT` request.\n  [Method] pub async patch(self, url: URL | str, *, content: RequestContent | None = None, data: RequestData | None = None, files: RequestFiles | None = None, json: typing.Any | None = None, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1912-1947 { ...20 lines omitted }\n    doc: Send a `PATCH` request.\n  [Method] pub async delete(self, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, extensions: RequestExtensions | None = None) -> Response @L1949-1976 { ...16 lines omitted }\n    doc: Send a `DELETE` request.\n  [Method] pub async aclose(self) -> None @L1978-1988 { ...10 lines omitted }\n    doc: Close transport and proxies.\n  [Method] pub async __aenter__(self: U) -> U @L1990-2006 { ...16 lines omitted }\n    raises: RuntimeError\n  [Method] pub async __aexit__(self, exc_type: type[BaseException] | None = None, exc_value: BaseException | None = None, traceback: TracebackType | None = None) -> None @L2008-2019 { ...6 lines omitted }\n=== httpx/_models.py (1277 lines, skeleton: 158 lines, sha=033a271c9f50) ===\n[Variable] pub __all__ @L51\n[Constant] pub SENSITIVE_HEADERS @L53\n[Class] pub Headers @L139-379\n  doc: HTTP headers, as a case-insensitive multi-dict.\n  [Constructor] pub __init__(self, headers: HeaderTypes | None = None, encoding: str | None = None) -> None @L144-164 { ...16 lines omitted }\n  [Property] pub encoding(self) -> str @L166-189\n    doc: Header encoding is mandated as ascii, but we allow fallbacks to utf-8\n    decorators: @property\n  [Property] pub raw(self) -> list[tuple[bytes, bytes]] @L195-200\n    doc: Returns a list of the raw header items, as byte pairs.\n    decorators: @property\n  [Method] pub keys(self) -> typing.KeysView[str] @L202-203 { ...1 lines omitted }\n  [Method] pub values(self) -> typing.ValuesView[str] @L205-214 { ...9 lines omitted }\n  [Method] pub items(self) -> typing.ItemsView[str, str] @L216-229 { ...13 lines omitted }\n    doc: Return `(key, value)` items of headers. Concatenate headers\n  [Method] pub multi_items(self) -> list[tuple[str, str]] @L231-240 { ...9 lines omitted }\n    doc: Return a list of `(key, value)` pairs of headers. Allow multiple\n  [Method] pub get(self, key: str, default: typing.Any = None) -> typing.Any @L242-250 { ...8 lines omitted }\n    doc: Return a header value. If multiple occurrences of the header occur\n  [Method] pub get_list(self, key: str, split_commas: bool = False) -> list[str] @L252-272 { ...20 lines omitted }\n    doc: Return a list of all header values for a given key.\n  [Method] pub update(self, headers: HeaderTypes | None = None) -> None @L274-279 { ...5 lines omitted }\n  [Method] pub copy(self) -> Headers @L281-282 { ...1 lines omitted }\n  [Method] pub __getitem__(self, key: str) -> str @L284-302 { ...18 lines omitted }\n    doc: Return a single header value.\n    raises: KeyError\n  [Method] pub __setitem__(self, key: str, value: str) -> None @L304-326 { ...22 lines omitted }\n    doc: Set the header `key` to `value`, removing any duplicate entries.\n  [Method] pub __delitem__(self, key: str) -> None @L328-344 { ...16 lines omitted }\n    doc: Remove the header `key`.\n    raises: KeyError\n  [Method] pub __contains__(self, key: typing.Any) -> bool @L346-348 { ...2 lines omitted }\n  [Method] pub __iter__(self) -> typing.Iterator[typing.Any] @L350-351 { ...1 lines omitted }\n  [Method] pub __len__(self) -> int @L353-354 { ...1 lines omitted }\n  [Method] pub __eq__(self, other: typing.Any) -> bool @L356-364 { ...8 lines omitted }\n  [Method] pub __repr__(self) -> str @L366-379 { ...13 lines omitted }\n[Class] pub Request @L382-512\n  [Constructor] pub __init__(self, method: str, url: URL | str, *, params: QueryParamTypes | None = None, headers: HeaderTypes | None = None, cookies: CookieTypes | None = None, content: RequestContent | None = None, data: RequestData | N"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "configure_workspace",
+     "edit_symbol_body",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_symbol_bodies",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols"
+    ],
+    "tools_list_schema_tokens": 8556,
+    "wall_s": 2.37
+   },
+   "reduction": 0.6845,
+   "verdict": "fail",
+   "reduction_partial": 0.6845
+  },
+  {
+   "fixture": "F-PY",
+   "scenario": "S2",
+   "title": "メソッド URL.copy_with の全呼び出し元と、それを呼ぶテストを列挙する",
+   "B": {
+    "tokens": 45971,
+    "calls": 13,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bcopy_with\\b",
+      "input_tokens": 13,
+      "output_tokens": 1086,
+      "input_chars": 37,
+      "output_chars": 4312,
+      "hit_files": 12,
+      "hit_lines": 51
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_client.py",
+      "input_tokens": 6,
+      "output_tokens": 13796,
+      "input_chars": 21,
+      "output_chars": 67732
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_config.py",
+      "input_tokens": 6,
+      "output_tokens": 1964,
+      "input_chars": 21,
+      "output_chars": 8795
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_urlparse.py",
+      "input_tokens": 7,
+      "output_tokens": 4992,
+      "input_chars": 23,
+      "output_chars": 19073
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_urls.py",
+      "input_tokens": 6,
+      "output_tokens": 5234,
+      "input_chars": 19,
+      "output_chars": 22156
+     },
+     {
+      "kind": "read",
+      "label": "tests/client/test_async_client.py",
+      "input_tokens": 7,
+      "output_tokens": 2600,
+      "input_chars": 38,
+      "output_chars": 12045
+     },
+     {
+      "kind": "read",
+      "label": "tests/client/test_client.py",
+      "input_tokens": 6,
+      "output_tokens": 3450,
+      "input_chars": 32,
+      "output_chars": 15438
+     },
+     {
+      "kind": "read",
+      "label": "tests/models/test_url.py",
+      "input_tokens": 6,
+      "output_tokens": 7398,
+      "input_chars": 29,
+      "output_chars": 27353
+     },
+     {
+      "kind": "read",
+      "label": "tests/test_asgi.py",
+      "input_tokens": 6,
+      "output_tokens": 1873,
+      "input_chars": 23,
+      "output_chars": 8013
+     },
+     {
+      "kind": "read",
+      "label": "tests/test_exceptions.py",
+      "input_tokens": 6,
+      "output_tokens": 419,
+      "input_chars": 29,
+      "output_chars": 1910
+     },
+     {
+      "kind": "read",
+      "label": "tests/test_main.py",
+      "input_tokens": 5,
+      "output_tokens": 1416,
+      "input_chars": 23,
+      "output_chars": 5731
+     },
+     {
+      "kind": "read",
+      "label": "tests/test_timeouts.py",
+      "input_tokens": 6,
+      "output_tokens": 398,
+      "input_chars": 27,
+      "output_chars": 1805
+     },
+     {
+      "kind": "read",
+      "label": "tests/test_utils.py",
+      "input_tokens": 5,
+      "output_tokens": 1260,
+      "input_chars": 24,
+      "output_chars": 4715
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens": 78,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "find_references_and_implementations",
+      "input_tokens": 50,
+      "output_tokens": 28,
+      "input_chars": 177,
+      "output_chars": 106,
+      "is_error": true,
+      "client_ms": 119.6,
+      "response": "# find_references_and_implementations error E_TARGET_NOT_FOUND\n! file is not in the index: httpx/_urls.py\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "configure_workspace",
+     "edit_symbol_body",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_symbol_bodies",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols"
+    ],
+    "tools_list_schema_tokens": 8556,
+    "wall_s": 2.11
+   },
+   "verdict": "error",
+   "reason": "ツールがエラーを返した（測定不成立）: find_references_and_implementations",
+   "reduction_partial": 0.9983
+  },
+  {
+   "fixture": "F-PY",
+   "scenario": "S3",
+   "title": "",
+   "verdict": "skip",
+   "reason": "S3 は T-09 analyze_change_impact が M2 のため M1 では対象外（§15.2 M1-4）"
+  },
+  {
+   "fixture": "F-PY",
+   "scenario": "S4",
+   "title": "指定ファイルの型エラーを 1 件直し、残る診断が 0 であることを確かめる",
+   "B": {
+    "tokens": 5578,
+    "calls": 4,
+    "steps": [
+     {
+      "kind": "shell",
+      "label": "uv run --project S:\\work\\develop\\Lucianke basedpyright httpx/_urls.py",
+      "input_tokens": 21,
+      "output_tokens": 177,
+      "input_chars": 69,
+      "output_chars": 482,
+      "exit_code": 1
+     },
+     {
+      "kind": "read",
+      "label": "httpx/_urls.py",
+      "input_tokens": 6,
+      "output_tokens": 5234,
+      "input_chars": 19,
+      "output_chars": 22155
+     },
+     {
+      "kind": "edit",
+      "label": "httpx/_urls.py",
+      "input_tokens": 39,
+      "output_tokens": 1,
+      "input_chars": 123,
+      "output_chars": 2
+     },
+     {
+      "kind": "shell",
+      "label": "uv run --project S:\\work\\develop\\Lucianke basedpyright httpx/_urls.py",
+      "input_tokens": 21,
+      "output_tokens": 79,
+      "input_chars": 69,
+      "output_chars": 265,
+      "exit_code": 0
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens": 392,
+    "calls": 3,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "get_diagnostics",
+      "input_tokens": 29,
+      "output_tokens": 65,
+      "input_chars": 90,
+      "output_chars": 207,
+      "is_error": false,
+      "client_ms": 943.2,
+      "response": "# get_diagnostics ok conf=exact lsp=n/a rev=WORKING_TREE ws=httpx ~0/2000tok\n! httpx/_urls.py: not in the index (ignored, excluded or not yet indexed); skipped\ndiagnostics: 0 in 0 files (min_severity=error)\n"
+     },
+     {
+      "kind": "tool",
+      "label": "edit_symbol_body",
+      "input_tokens": 179,
+      "output_tokens": 25,
+      "input_chars": 714,
+      "output_chars": 114,
+      "is_error": true,
+      "client_ms": 2.8,
+      "response": "# edit_symbol_body error E_UNSUPPORTED\n! editing is not available in this build (the edit services are not wired)\n"
+     },
+     {
+      "kind": "tool",
+      "label": "get_diagnostics",
+      "input_tokens": 29,
+      "output_tokens": 65,
+      "input_chars": 90,
+      "output_chars": 207,
+      "is_error": false,
+      "client_ms": 4.8,
+      "response": "# get_diagnostics ok conf=exact lsp=n/a rev=WORKING_TREE ws=httpx ~0/2000tok\n! httpx/_urls.py: not in the index (ignored, excluded or not yet indexed); skipped\ndiagnostics: 0 in 0 files (min_severity=error)\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "configure_workspace",
+     "edit_symbol_body",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_symbol_bodies",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols"
+    ],
+    "tools_list_schema_tokens": 8556,
+    "wall_s": 3.04
+   },
+   "verdict": "error",
+   "reason": "ツールがエラーを返した（測定不成立）: edit_symbol_body",
+   "reduction_partial": 0.9297
+  },
+  {
+   "fixture": "F-TS",
+   "scenario": "S1",
+   "title": "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る",
+   "B": {
+    "tokens": 117094,
+    "calls": 13,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bvalidateAndMerge\\b",
+      "input_tokens": 15,
+      "output_tokens": 900,
+      "input_chars": 51,
+      "output_chars": 3020,
+      "hit_files": 4,
+      "hit_lines": 26
+     },
+     {
+      "kind": "read",
+      "label": "source/index.ts",
+      "input_tokens": 4,
+      "output_tokens": 1008,
+      "input_chars": 20,
+      "output_chars": 4250
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/merge.ts",
+      "input_tokens": 6,
+      "output_tokens": 5027,
+      "input_chars": 26,
+      "output_chars": 20603
+     },
+     {
+      "kind": "read",
+      "label": "test/merge.ts",
+      "input_tokens": 5,
+      "output_tokens": 3498,
+      "input_chars": 18,
+      "output_chars": 12908
+     },
+     {
+      "kind": "read",
+      "label": "test/retry.ts",
+      "input_tokens": 5,
+      "output_tokens": 39297,
+      "input_chars": 18,
+      "output_chars": 143638
+     },
+     {
+      "kind": "grep",
+      "label": "\\bmergeHeaders\\b",
+      "input_tokens": 14,
+      "output_tokens": 98,
+      "input_chars": 47,
+      "output_chars": 389,
+      "hit_files": 2,
+      "hit_lines": 4
+     },
+     {
+      "kind": "read",
+      "label": "source/core/Ky.ts",
+      "input_tokens": 6,
+      "output_tokens": 12694,
+      "input_chars": 22,
+      "output_chars": 53421
+     },
+     {
+      "kind": "grep",
+      "label": "\\bmergeHooks\\b",
+      "input_tokens": 14,
+      "output_tokens": 139,
+      "input_chars": 45,
+      "output_chars": 501,
+      "hit_files": 2,
+      "hit_lines": 6
+     },
+     {
+      "kind": "grep",
+      "label": "\\bdeepMerge\\b",
+      "input_tokens": 14,
+      "output_tokens": 144,
+      "input_chars": 44,
+      "output_chars": 583,
+      "hit_files": 2,
+      "hit_lines": 4
+     },
+     {
+      "kind": "read",
+      "label": "test/hooks.ts",
+      "input_tokens": 4,
+      "output_tokens": 52218,
+      "input_chars": 18,
+      "output_chars": 195374
+     },
+     {
+      "kind": "grep",
+      "label": "\\bnormalizeRetryOptions\\b",
+      "input_tokens": 15,
+      "output_tokens": 401,
+      "input_chars": 56,
+      "output_chars": 1554,
+      "hit_files": 3,
+      "hit_lines": 17
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/normalize.ts",
+      "input_tokens": 6,
+      "output_tokens": 1073,
+      "input_chars": 30,
+      "output_chars": 4321
+     },
+     {
+      "kind": "read",
+      "label": "test/normalize.ts",
+      "input_tokens": 5,
+      "output_tokens": 484,
+      "input_chars": 22,
+      "output_chars": 1932
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens": 604,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "get_file_skeleton",
+      "input_tokens": 51,
+      "output_tokens": 553,
+      "input_chars": 180,
+      "output_chars": 2035,
+      "is_error": false,
+      "client_ms": 203.6,
+      "response": "# get_file_skeleton ok conf=structural lsp=n/a rev=WORKING_TREE ws=ky ~476/12000tok\n=== source/utils/merge.ts (501 lines, skeleton: 14 lines, sha=3df5d33022ce) ===\n[Function] pub export replaceOption(<T>(value: T): T) @L53-61 { ...8 lines omitted }\n  doc: Wraps a value so that `ky.extend()` will replace the parent value instead of merging with it. Works with hooks, headers, search parameters, context, and any other deep-merged option.\n[Function] pub export validateAndMerge(...sources: Array<Partial<Options> | undefined>): Partial<Options> @L63-71 { ...8 lines omitted }\n  raises: TypeError\n[Function] pub export mergeHeaders(source1: KyHeadersInit = {}, source2: KyHeadersInit = {}) @L73-86 { ...13 lines omitted }\n[Function] pub export cloneShallow(<T>(value: T): T) @L100-122 { ...22 lines omitted }\n[Function] pub export cloneSearchParameters(<T>(value: T): T) @L125-126\n[Function] pub export cloneDeep(<T>(value: T, seen: WeakMap<Record<string, unknown> | unknown[], unknown> = new WeakMap()): T) @L129-167 { ...38 lines omitted }\n[Function] pub export mergeHeaderContainers(source1: KyHeadersInit, source2: KyHeadersInit): Record<string, string | undefined> @L188-196 { ...8 lines omitted }\n[Function] pub export mergeHooks(original: Hooks = {}, incoming: Hooks = {}): NormalizedHooks @L218-231 { ...13 lines omitted }\n  raises: TypeError\n[Variable] pub export deletedParametersSymbol @L233\n[Type] pub export MarkedSearchParameters @L235\n[Function] pub export deepMerge(<T>(...sources: Array<Partial<T> | undefined>): T) @L500-501\n=== source/utils/normalize.ts (100 lines, skeleton: 5 lines, sha=d355eabbf311) ===\n[Function] pub export normalizeRequestMethod(input: string): string @L6-7\n[Function] pub export normalizeRetryMethod(method: string): string @L14-15\n  doc: Normalizes common methods for retry matching while preserving case-sensitive custom methods.\n[Function] pub export normalizeRetryOptions(retry: number | RetryOptions = {}): InternalRetryOptions @L37-100 { ...63 lines omitted }\n  raises: TypeError, Error\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "configure_workspace",
+     "edit_symbol_body",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_symbol_bodies",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols"
+    ],
+    "tools_list_schema_tokens": 8556,
+    "wall_s": 2.35
+   },
+   "reduction": 0.9948,
+   "verdict": "pass",
+   "reduction_partial": 0.9948
+  },
+  {
+   "fixture": "F-TS",
+   "scenario": "S2",
+   "title": "関数 isHTTPError の全呼び出し元と、それを呼ぶテストを列挙する",
+   "B": {
+    "tokens": 85465,
+    "calls": 11,
+    "steps": [
+     {
+      "kind": "grep",
+      "label": "\\bisHTTPError\\b",
+      "input_tokens": 14,
+      "output_tokens": 738,
+      "input_chars": 46,
+      "output_chars": 2576,
+      "hit_files": 10,
+      "hit_lines": 40
+     },
+     {
+      "kind": "read",
+      "label": "source/core/Ky.ts",
+      "input_tokens": 6,
+      "output_tokens": 12694,
+      "input_chars": 22,
+      "output_chars": 53421
+     },
+     {
+      "kind": "read",
+      "label": "source/index.ts",
+      "input_tokens": 4,
+      "output_tokens": 1008,
+      "input_chars": 20,
+      "output_chars": 4250
+     },
+     {
+      "kind": "read",
+      "label": "source/types/hooks.ts",
+      "input_tokens": 5,
+      "output_tokens": 4117,
+      "input_chars": 26,
+      "output_chars": 17433
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/type-guards.ts",
+      "input_tokens": 7,
+      "output_tokens": 1063,
+      "input_chars": 32,
+      "output_chars": 4156
+     },
+     {
+      "kind": "read",
+      "label": "test/context.ts",
+      "input_tokens": 4,
+      "output_tokens": 2731,
+      "input_chars": 20,
+      "output_chars": 10161
+     },
+     {
+      "kind": "read",
+      "label": "test/errors.ts",
+      "input_tokens": 4,
+      "output_tokens": 2426,
+      "input_chars": 19,
+      "output_chars": 9620
+     },
+     {
+      "kind": "read",
+      "label": "test/hooks.ts",
+      "input_tokens": 4,
+      "output_tokens": 52218,
+      "input_chars": 18,
+      "output_chars": 195374
+     },
+     {
+      "kind": "read",
+      "label": "test/http-error.ts",
+      "input_tokens": 5,
+      "output_tokens": 7436,
+      "input_chars": 23,
+      "output_chars": 28593
+     },
+     {
+      "kind": "read",
+      "label": "test/type-guards.ts",
+      "input_tokens": 6,
+      "output_tokens": 796,
+      "input_chars": 24,
+      "output_chars": 3175
+     },
+     {
+      "kind": "read",
+      "label": "test-d/error-names.ts",
+      "input_tokens": 7,
+      "output_tokens": 172,
+      "input_chars": 26,
+      "output_chars": 649
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens": 80,
+    "calls": 1,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "find_references_and_implementations",
+      "input_tokens": 51,
+      "output_tokens": 29,
+      "input_chars": 188,
+      "output_chars": 119,
+      "is_error": true,
+      "client_ms": 115.5,
+      "response": "# find_references_and_implementations error E_TARGET_NOT_FOUND\n! file is not in the index: source/utils/type-guards.ts\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "configure_workspace",
+     "edit_symbol_body",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_symbol_bodies",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols"
+    ],
+    "tools_list_schema_tokens": 8556,
+    "wall_s": 2.2
+   },
+   "verdict": "error",
+   "reason": "ツールがエラーを返した（測定不成立）: find_references_and_implementations",
+   "reduction_partial": 0.9991
+  },
+  {
+   "fixture": "F-TS",
+   "scenario": "S3",
+   "title": "",
+   "verdict": "skip",
+   "reason": "S3 は T-09 analyze_change_impact が M2 のため M1 では対象外（§15.2 M1-4）"
+  },
+  {
+   "fixture": "F-TS",
+   "scenario": "S4",
+   "title": "指定ファイルの型エラーを 1 件直し、残る診断が 0 であることを確かめる（merge.ts 501 行。options.ts は 61 行で B が小さすぎ 75% に届き得ないため変更）",
+   "B": {
+    "tokens": 5231,
+    "calls": 4,
+    "steps": [
+     {
+      "kind": "shell",
+      "label": "npx --no-install tsc --noEmit -p tsconfig.json",
+      "input_tokens": 15,
+      "output_tokens": 99,
+      "input_chars": 46,
+      "output_chars": 333,
+      "exit_code": 2
+     },
+     {
+      "kind": "read",
+      "label": "source/utils/merge.ts",
+      "input_tokens": 6,
+      "output_tokens": 5021,
+      "input_chars": 26,
+      "output_chars": 20575
+     },
+     {
+      "kind": "edit",
+      "label": "source/utils/merge.ts",
+      "input_tokens": 74,
+      "output_tokens": 1,
+      "input_chars": 279,
+      "output_chars": 2
+     },
+     {
+      "kind": "shell",
+      "label": "npx --no-install tsc --noEmit -p tsconfig.json",
+      "input_tokens": 15,
+      "output_tokens": 0,
+      "input_chars": 46,
+      "output_chars": 0,
+      "exit_code": 0
+     }
+    ]
+   },
+   "variant": "default",
+   "L": {
+    "tokens": 361,
+    "calls": 3,
+    "steps": [
+     {
+      "kind": "tool",
+      "label": "get_diagnostics",
+      "input_tokens": 29,
+      "output_tokens": 65,
+      "input_chars": 97,
+      "output_chars": 211,
+      "is_error": false,
+      "client_ms": 1294.9,
+      "response": "# get_diagnostics ok conf=exact lsp=n/a rev=WORKING_TREE ws=ky ~0/2000tok\n! source/utils/merge.ts: not in the index (ignored, excluded or not yet indexed); skipped\ndiagnostics: 0 in 0 files (min_severity=error)\n"
+     },
+     {
+      "kind": "tool",
+      "label": "edit_symbol_body",
+      "input_tokens": 148,
+      "output_tokens": 25,
+      "input_chars": 566,
+      "output_chars": 114,
+      "is_error": true,
+      "client_ms": 3.3,
+      "response": "# edit_symbol_body error E_UNSUPPORTED\n! editing is not available in this build (the edit services are not wired)\n"
+     },
+     {
+      "kind": "tool",
+      "label": "get_diagnostics",
+      "input_tokens": 29,
+      "output_tokens": 65,
+      "input_chars": 97,
+      "output_chars": 211,
+      "is_error": false,
+      "client_ms": 155.8,
+      "response": "# get_diagnostics ok conf=exact lsp=n/a rev=WORKING_TREE ws=ky ~0/2000tok\n! source/utils/merge.ts: not in the index (ignored, excluded or not yet indexed); skipped\ndiagnostics: 0 in 0 files (min_severity=error)\n"
+     }
+    ],
+    "skipped_tools": [],
+    "tools_registered": [
+     "configure_workspace",
+     "edit_symbol_body",
+     "find_references_and_implementations",
+     "get_diagnostics",
+     "get_file_skeleton",
+     "get_project_db_schema",
+     "get_symbol_bodies",
+     "query_call_hierarchy",
+     "query_project_db",
+     "rename_symbol",
+     "resolve_symbols",
+     "search_workspace_symbols"
+    ],
+    "tools_list_schema_tokens": 8556,
+    "wall_s": 3.63
+   },
+   "verdict": "error",
+   "reason": "ツールがエラーを返した（測定不成立）: edit_symbol_body",
+   "reduction_partial": 0.931
+  }
+ ],
+ "judgement": {
+  "pass": 1,
+  "fail": 1,
+  "skip": 2,
+  "error": 4,
+  "all_pass": false
+ }
+}

@@ -1,0 +1,84 @@
+# トークン削減の台本（仕様書 §14.3）— F-TS（fixtures.toml の F-TS、現在は ky）。読み方は f-py.toml と bench/run_tokens.py。
+fixture = "F-TS"
+src_glob = ["*.ts", "*.tsx"]
+scope = ["source", "test", "test-d"]
+
+[S1]
+title = "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る"
+targets = ["source/utils/merge.ts::validateAndMerge", "source/utils/merge.ts::mergeHeaders", "source/utils/merge.ts::mergeHooks", "source/utils/merge.ts::deepMerge", "source/utils/normalize.ts::normalizeRetryOptions"]
+
+[[S1.baseline]]
+op = "grep"
+pattern = '\bvalidateAndMerge\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bmergeHeaders\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bmergeHooks\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bdeepMerge\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bnormalizeRetryOptions\b'
+
+[[S1.lucianke]]
+tool = "get_file_skeleton"
+args = { paths = ["source/utils/merge.ts", "source/utils/normalize.ts"], include_private = false, include_urns = "none", include_imports = false, max_tokens = 12000 }
+
+[[S1.lucianke_t04]]
+tool = "resolve_symbols"
+args = { targets = [
+  { path = "source/utils/merge.ts", symbol_name = "validateAndMerge" },
+  { path = "source/utils/merge.ts", symbol_name = "mergeHeaders" },
+  { path = "source/utils/merge.ts", symbol_name = "mergeHooks" },
+  { path = "source/utils/merge.ts", symbol_name = "deepMerge" },
+  { path = "source/utils/normalize.ts", symbol_name = "normalizeRetryOptions" },
+], max_tokens = 3000 }
+
+[S2]
+title = "関数 isHTTPError の全呼び出し元と、それを呼ぶテストを列挙する"
+target = "source/utils/type-guards.ts::isHTTPError"
+
+[[S2.baseline]]
+op = "grep"
+pattern = '\bisHTTPError\b'
+
+[[S2.lucianke]]
+tool = "find_references_and_implementations"
+args = { target = { path = "source/utils/type-guards.ts", symbol_name = "isHTTPError" }, query_type = "references", include_tests = true, max_tokens = 6000 }
+
+[S3]
+skip = "S3 は T-09 analyze_change_impact が M2 のため M1 では対象外（§15.2 M1-4）"
+
+[S4]
+title = "指定ファイルの型エラーを 1 件直し、残る診断が 0 であることを確かめる（merge.ts 501 行。options.ts は 61 行で B が小さすぎ 75% に届き得ないため変更）"
+path = "source/utils/merge.ts"
+inject = { path = "source/utils/merge.ts", old = "export const mergeHeaderContainers = (source1: KyHeadersInit, source2: KyHeadersInit): Record<string, string | undefined> => {", new = "export const mergeHeaderContainers = (source1: KyHeadersInit, source2: KyHeadersInit): number => {" }
+diag_cmd = "npx --no-install tsc --noEmit -p tsconfig.json"
+
+[[S4.baseline]]
+op = "shell"
+cmd = "{diag_cmd}"
+[[S4.baseline]]
+op = "read"
+path = "source/utils/merge.ts"
+[[S4.baseline]]
+op = "edit"
+path = "source/utils/merge.ts"
+old = "export const mergeHeaderContainers = (source1: KyHeadersInit, source2: KyHeadersInit): number => {"
+new = "export const mergeHeaderContainers = (source1: KyHeadersInit, source2: KyHeadersInit): Record<string, string | undefined> => {"
+[[S4.baseline]]
+op = "shell"
+cmd = "{diag_cmd}"
+
+[[S4.lucianke]]
+tool = "get_diagnostics"
+args = { paths = ["source/utils/merge.ts"], min_severity = "error", max_tokens = 2000 }
+[[S4.lucianke]]
+tool = "edit_symbol_body"
+args = { target = { path = "source/utils/merge.ts", symbol_name = "mergeHeaderContainers" }, operation = "replace_body", new_code = "@ORIGINAL@", max_tokens = 1500 }
+[[S4.lucianke]]
+tool = "get_diagnostics"
+args = { paths = ["source/utils/merge.ts"], min_severity = "error", max_tokens = 2000 }

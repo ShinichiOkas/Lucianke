@@ -1,0 +1,99 @@
+# トークン削減の台本（仕様書 §14.3）— F-PY（fixtures.toml の F-PY、現在は httpx）。
+# 基準値 B: baseline の手順（grep のヒットしたファイルは全部全文を読む。同じファイルは 1 回だけ）。
+# 測定値 L: lucianke の手順（ツール呼び出しの列）。判定は 1 - L/B >= 0.75。
+# 台本の読み方は bench/run_tokens.py の docstring を参照。ツール未登録の手順があると L は「skip: ツール未登録」になる。
+fixture = "F-PY"
+src_glob = ["*.py"]                       # grep の対象ファイルの種類
+scope = ["httpx", "tests"]                 # grep の対象ディレクトリ（src_dirs + test_dirs）
+
+[S1]
+title = "5 つの関数・メソッドの引数と戻り値の型、Doc 要約を知る"
+targets = ["httpx/_client.py::Client.send", "httpx/_client.py::BaseClient.build_request", "httpx/_models.py::Response.raise_for_status", "httpx/_urls.py::URL.join", "httpx/_api.py::request"]
+
+[[S1.baseline]]
+op = "grep"
+pattern = '\bdef send\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bdef build_request\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bdef raise_for_status\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bdef join\b'
+[[S1.baseline]]
+op = "grep"
+pattern = '\bdef request\b'
+
+# 既定: いまある T-02 だけで（骨格＝シグネチャと Doc 1 行目）。T-04 を使う別案は --variant t04
+[[S1.lucianke]]
+tool = "get_file_skeleton"
+args = { paths = ["httpx/_client.py", "httpx/_models.py", "httpx/_urls.py", "httpx/_api.py"], include_private = false, include_urns = "none", include_imports = false, max_tokens = 12000 }
+
+[[S1.lucianke_t04]]
+tool = "resolve_symbols"
+args = { targets = [
+  { path = "httpx/_client.py", symbol_name = "Client.send" },
+  { path = "httpx/_client.py", symbol_name = "BaseClient.build_request" },
+  { path = "httpx/_models.py", symbol_name = "Response.raise_for_status" },
+  { path = "httpx/_urls.py", symbol_name = "URL.join" },
+  { path = "httpx/_api.py", symbol_name = "request" },
+], max_tokens = 3000 }
+
+[S2]
+title = "メソッド URL.copy_with の全呼び出し元と、それを呼ぶテストを列挙する"
+target = "httpx/_urls.py::URL.copy_with"
+
+[[S2.baseline]]
+op = "grep"
+pattern = '\bcopy_with\b'
+
+[[S2.lucianke]]
+tool = "find_references_and_implementations"
+args = { target = { path = "httpx/_urls.py", symbol_name = "URL.copy_with" }, query_type = "references", include_tests = true, max_tokens = 6000 }
+
+[S3]
+skip = "S3 は T-09 analyze_change_impact が M2 のため M1 では対象外（§15.2 M1-4）"
+
+[S4]
+title = "指定ファイルの型エラーを 1 件直し、残る診断が 0 であることを確かめる"
+path = "httpx/_urls.py"
+# 固定の型エラー注入（1 行）: 戻り値の型注釈を bool から str に変える。直す手順はこの逆。
+inject = { path = "httpx/_urls.py", old = "    def is_absolute_url(self) -> bool:", new = "    def is_absolute_url(self) -> str:" }
+diag_cmd = "uv run --project {repo} basedpyright {path}"
+
+[[S4.baseline]]
+op = "shell"
+cmd = "{diag_cmd}"
+[[S4.baseline]]
+op = "read"
+path = "httpx/_urls.py"
+[[S4.baseline]]
+op = "edit"
+path = "httpx/_urls.py"
+old = "    def is_absolute_url(self) -> str:"
+new = "    def is_absolute_url(self) -> bool:"
+[[S4.baseline]]
+op = "shell"
+cmd = "{diag_cmd}"
+
+[[S4.lucianke]]
+tool = "get_diagnostics"
+args = { paths = ["httpx/_urls.py"], min_severity = "error", max_tokens = 2000 }
+[[S4.lucianke]]
+tool = "edit_symbol_body"
+args = { target = { path = "httpx/_urls.py", symbol_name = "URL.is_absolute_url" }, operation = "replace_body", new_code = '''    @property
+    def is_absolute_url(self) -> bool:
+        """
+        Return `True` for absolute URLs such as 'http://example.com/path',
+        and `False` for relative URLs such as '/path'.
+        """
+        # We don't use `.is_absolute` from `rfc3986` because it treats
+        # URLs with a fragment portion as not absolute.
+        # What we actually care about is if the URL provides
+        # a scheme and hostname to which connections should be made.
+        return bool(self._uri_reference.scheme and self._uri_reference.host)''', max_tokens = 1500 }
+[[S4.lucianke]]
+tool = "get_diagnostics"
+args = { paths = ["httpx/_urls.py"], min_severity = "error", max_tokens = 2000 }
