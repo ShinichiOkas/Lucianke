@@ -1,4 +1,4 @@
-# BUG-0050 tree-sitter の node を保持したまま check_fragment を呼ぶと、1 回だけアクセス違反（Windows）で落ちた
+# BUG-0051 tree-sitter の node を保持したまま check_fragment を呼ぶと、1 回だけアクセス違反（Windows）で落ちた
 
 - 報告: 2026-10-29 15:35 / 見た人: BUG-0045 を直す役（使い捨ての検証スクリプトで）
 - 見たこと:
