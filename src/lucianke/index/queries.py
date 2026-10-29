@@ -62,7 +62,7 @@ _SYMBOL_SELECT: Final = (
 )
 _FILE_SELECT: Final = (
     "SELECT file_id, workspace_id, path, language, tier, sha256, line_count, byte_size, is_test,"
-    " confidence_level FROM files"
+    " confidence_level, pagerank_score FROM files"
 )
 
 
@@ -114,7 +114,7 @@ def _symbol(row: Sequence[Any]) -> SymbolRecord:
 
 
 def _file(row: Sequence[Any]) -> FileInfo:
-    file_id, ws, path, language, tier, sha, lines, size, is_test, conf = row
+    file_id, ws, path, language, tier, sha, lines, size, is_test, conf, pagerank = row
     return FileInfo(
         file_id=int(file_id),
         workspace_id=str(ws),
@@ -126,6 +126,7 @@ def _file(row: Sequence[Any]) -> FileInfo:
         byte_size=int(size),
         is_test=bool(is_test),
         confidence=Confidence(str(conf)),
+        pagerank=None if pagerank is None else float(pagerank),
     )
 
 
