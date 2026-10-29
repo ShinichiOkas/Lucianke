@@ -636,6 +636,10 @@ def lexical_scan(
         raise ValueError("context must be >= 0")
     pattern = _word_pattern(name)
     needle = name.encode("utf-8", "surrogateescape")
+    if (
+        needle not in source
+    ):  # 1 行にも入っていない。行表（ファイルの行数ぶんの作業）を作らずに戻る（BUG-0027: 0 件の検索が全 Tier 4 ファイルで行表を作っていた）
+        return LexScan([], timed_out=False, truncated=False)
     idx = LineIndex(source)
     total = idx.content_line_count
     deadline = time.monotonic() + budget_ms / 1000

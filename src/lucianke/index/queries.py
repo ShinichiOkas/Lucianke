@@ -40,6 +40,7 @@ __all__ = [
     "data_version",
     "diagnostics_for",
     "file_by_path",
+    "files_by_paths",
     "files_fingerprint",
     "files_in_scope",
     "references_from",
@@ -55,10 +56,16 @@ __all__ = [
 MatchMode = Literal["fuzzy", "prefix", "exact"]
 SEVERITY_ORDER: Final = ("error", "warning", "information", "hint")
 
-_SYMBOL_SELECT: Final = (
-    "SELECT s.urn, f.path, s.name, s.qualified_name, s.kind, s.modifiers_json, s.start_line, s.end_line,"
+_SYMBOL_COLUMNS: Final = (
+    "s.urn, f.path, s.name, s.qualified_name, s.kind, s.modifiers_json, s.start_line, s.end_line,"
     " s.sel_line, s.sel_start_col, s.sel_end_col, s.signature, s.return_type, s.doc_summary, s.declared_in,"
-    " s.confidence_level, s.scip_symbol FROM symbols s LEFT JOIN files f ON f.file_id = s.file_id"
+    " s.confidence_level, s.scip_symbol"
+)
+_SYMBOL_SELECT: Final = f"SELECT {_SYMBOL_COLUMNS} FROM symbols s LEFT JOIN files f ON f.file_id = s.file_id"
+# UNION ALL の外側で選び直す列名（``_SYMBOL_COLUMNS`` の結果列の名前と同じ並び）
+_SYMBOL_OUTER: Final = (
+    "urn, path, name, qualified_name, kind, modifiers_json, start_line, end_line, sel_line, sel_start_col,"
+    " sel_end_col, signature, return_type, doc_summary, declared_in, confidence_level, scip_symbol"
 )
 _FILE_SELECT: Final = (
     "SELECT file_id, workspace_id, path, language, tier, sha256, line_count, byte_size, is_test,"
@@ -67,6 +74,11 @@ _FILE_SELECT: Final = (
 
 
 # --- 行 → core の型 ---------------------------------------------------------------------
+
+
+@lru_cache(maxsize=512)
+def _modifiers(mods_json: str) -> tuple[str, ...]:
+    return tuple(json.loads(mods_json)) if mods_json else ()
 
 
 def _symbol(row: Sequence[Any]) -> SymbolRecord:
@@ -101,7 +113,7 @@ def _symbol(row: Sequence[Any]) -> SymbolRecord:
         name=str(name),
         qualified_name=str(qualified),
         kind=Kind.parse(str(kind)),
-        modifiers=tuple(json.loads(str(mods))) if mods else (),
+        modifiers=_modifiers(str(mods)) if mods else (),
         range=Range.from_line_span_external(int(start), max(int(end), int(start))),
         selection=selection,
         signature=sig,
@@ -137,6 +149,26 @@ def file_by_path(conn: sqlite3.Connection, workspace_id: str, path: str) -> File
     """``files`` の 1 行。無ければ ``None``。"""
     row = conn.execute(_FILE_SELECT + " WHERE workspace_id = ? AND path = ?", (workspace_id, path)).fetchone()
     return None if row is None else _file(row)
+
+
+_PATHS_CHUNK = 500  # SQLite の変数の上限（古い版で 999）に余裕を残す
+
+
+def files_by_paths(conn: sqlite3.Connection, workspace_id: str, paths: Iterable[str]) -> dict[str, FileInfo]:
+    """``paths`` の ``files`` の行をまとめて引く（``path -> FileInfo``。無いパスは入らない）。
+
+    ファイルごとに ``file_by_path`` を呼ぶと、ヒットが散らばる検索で問い合わせが N 回になる（BUG-0027）ので、1 回（500 件ごと）で引く。
+    """
+    wanted = list(dict.fromkeys(paths))
+    out: dict[str, FileInfo] = {}
+    for i in range(0, len(wanted), _PATHS_CHUNK):
+        chunk = wanted[i : i + _PATHS_CHUNK]
+        marks = ",".join("?" * len(chunk))
+        sql = _FILE_SELECT + f" WHERE workspace_id = ? AND path IN ({marks})"
+        for row in conn.execute(sql, (workspace_id, *chunk)):
+            info = _file(row)
+            out[str(info.path)] = info
+    return out
 
 
 @lru_cache(maxsize=256)
@@ -360,20 +392,27 @@ def search_symbols_fts(
     if match != "fuzzy":
         raise ValueError(f"unknown match mode: {match!r}")
     fts_all = " AND ".join(_fts_phrase(t) for t in tokens)
-    hits_cte = (
-        "SELECT rowid AS rid, bm25(symbols_fts, 10.0, 5.0, 2.0, 1.0) AS score"
-        " FROM symbols_fts WHERE symbols_fts MATCH :fts"
-        if tokens
-        else "SELECT NULL AS rid, NULL AS score WHERE 0"
+    # FTS の一致（bm25 つき）と、名前の部分文字列の一致（bm25 なし）を UNION ALL で足してから並べる。
+    # 以前は ``LEFT JOIN hits h ON h.rid = s.rowid`` で足していたが、ORDER BY があると SQLite が ``hits`` を自動索引なしの
+    # 総なめ（``SCAN h``）にし、シンボル数 × 一致数の比較になった（1,800 シンボル・200 一致で 25 ms。BUG-0027）。
+    name_branch = (
+        f"SELECT {_SYMBOL_COLUMNS}, NULL AS score FROM symbols s LEFT JOIN files f ON f.file_id = s.file_id"
+        " WHERE f.workspace_id = :ws AND instr(lower(s.name), lower(:q)) > 0" + kind_sql
     )
+    if tokens:
+        fts_branch = (
+            f"SELECT {_SYMBOL_COLUMNS}, bm25(symbols_fts, 10.0, 5.0, 2.0, 1.0) AS score FROM symbols_fts"
+            " JOIN symbols s ON s.rowid = symbols_fts.rowid LEFT JOIN files f ON f.file_id = s.file_id"
+            " WHERE symbols_fts MATCH :fts AND f.workspace_id = :ws" + kind_sql
+        )
+        name_branch += " AND s.rowid NOT IN (SELECT rowid FROM symbols_fts WHERE symbols_fts MATCH :fts)"
+        source = f"{fts_branch} UNION ALL {name_branch}"
+    else:
+        source = name_branch
     sql = (
-        f"WITH hits AS ({hits_cte}) "
-        + _SYMBOL_SELECT
-        + " LEFT JOIN hits h ON h.rid = s.rowid WHERE f.workspace_id = :ws"
-        " AND (h.rid IS NOT NULL OR instr(lower(s.name), lower(:q)) > 0)"
-        + kind_sql
-        + order
-        + "(h.score IS NULL), h.score, length(s.name), s.qualified_name, s.urn LIMIT :limit"
+        f"SELECT {_SYMBOL_OUTER} FROM ({source})"
+        " ORDER BY (name = :q) DESC, (lower(name) = lower(:q)) DESC, (score IS NULL), score, length(name),"
+        " qualified_name, urn LIMIT :limit"
     )
     params = {"ws": workspace_id, "q": query, "limit": limit, **kind_params}
     if tokens:

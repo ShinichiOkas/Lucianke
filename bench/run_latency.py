@@ -138,7 +138,8 @@ def _a_skeleton(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
 
 def _a_search(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
     s = rng.choice(pool.symbols)
-    return {"query": s.name}, s.name
+    # テスト側のシンボルは既定（include_tests=false）では 0 件になり、Tier 4 の grep に落ちて降格応答になる（判定の母集団から外れる）
+    return {"query": s.name, "include_tests": True}, s.name
 
 
 def _a_resolve(rng: random.Random, pool: Pool) -> tuple[dict[str, Any], str]:
@@ -250,6 +251,9 @@ async def call_once(
     rec["confidence"] = meta.get("confidence_level")
     rec["degraded"] = meta.get("is_degraded")
     rec["lsp"] = meta.get("lsp_status")
+    if rec["ok"] and tool == "configure_workspace":
+        jobs = (env.get("data") or {}).get("jobs") or []
+        rec["jobs_running"] = sum(1 for j in jobs if str(j.get("state")) in ("queued", "running"))
     if rec["ok"] and tool == "query_project_db":
         rec["scalar"] = _first_cell(env)
         if want_rows:
@@ -303,8 +307,13 @@ async def warm_up(client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn
                     info["ready_ms"] = round((time.perf_counter() - t_spawn) * 1000, 1)
                     return info
                 break
+        jobs_running: int | None = None
+        if "configure_workspace" in tools:
+            st = await call_once(client, "configure_workspace", {"action": "status"}, "status")
+            if st["ok"]:
+                jobs_running = st.get("jobs_running")
         info["lsp_status"] = lsp
-        info["index"] = {"state": index_state, "files": n}
+        info["index"] = {"state": index_state, "files": n, "jobs_running": jobs_running}
         if lsp == "standby":
             standby_since = standby_since or time.perf_counter()
         else:
@@ -317,7 +326,9 @@ async def warm_up(client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn
             index_done = True  # 索引が結線されていない（または読めない）: 待っても変わらない
         else:
             stable = stable + 1 if (n is not None and n == last_n and n > 0) else 0
-            index_done = stable >= 3
+            # 件数が安定していても、索引ジョブが走っているうちは終わりではない（バッチ〈50 ファイル〉ごとのコミットの合間に
+            # 件数が止まって見え、索引が途中のまま計測に入ると、後のバッチが検索の 0 件と GIL の取り合いになる。BUG-0027）
+            index_done = stable >= 3 and not jobs_running
         last_n = n
         if lsp_done and index_done:
             break

@@ -324,12 +324,11 @@ def _search_index(
             args.match == "exact"
         ):  # 仕様書 T-03 手順 1・事後条件 1: exact は name の等価比較（限定名では当てない）
             syms = [s for s in syms if s.name == query]
-    infos: dict[str, FileInfo | None] = {}
+    # 候補のファイルの情報は 1 回の問い合わせでまとめて引く（ファイルごとに引くと、ヒットが散らばる検索で N 回になる。BUG-0027）
+    infos = queries.files_by_paths(conn, ws_id, (str(s.path) for s in syms))
 
     def info_of(path: str) -> FileInfo | None:
-        if path not in infos:
-            infos[path] = queries.file_by_path(conn, ws_id, path)
-        return infos[path]
+        return infos.get(path)
 
     for s in syms:
         path = str(s.path)
