@@ -321,7 +321,7 @@ Lucianke/
 │  │
 │  ├─ index/                 # PaaD
 │  │  ├─ schema.sql          #   仕様書 §9.2 の DDL（正本はそのコピー。差分はテストで検出）
-│  │  ├─ connection.py       #   接続の開き方（WAL、pragmas、ro URI）、ReaderPool
+│  │  ├─ connection.py       #   接続の開き方（WAL、pragmas、ro URI）、ReaderPool。WORKSPACE_HASH_LEN と workspace_hash は core/hashing.py の再公開
 │  │  ├─ writer.py           #   IndexWriter スレッド、ジョブキュー、data_version
 │  │  ├─ ingest.py           #   ファイル単位の取り込み（files/symbols/relations/diagnostics の差分更新）。解析結果は FileFacts で受け取り、呼び手のトランザクション内で実行（index は syntax/lsp を import しない）
 │  │  ├─ queries.py          #   ツールが使うパラメータ化クエリ（名前つき）
