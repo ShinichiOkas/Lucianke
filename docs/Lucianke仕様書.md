@@ -488,7 +488,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 ## 5.7 トークン計数
 
-- 計数器は `o200k_base` 互換の近似とする（MUST）。実装は厳密なトークナイザの代わりに、ベンチマーク（第 14 章）で誤差 ±10% 以内と確認したヒューリスティック（文字種別の係数）を用いてもよい（MAY）。
+- 計数器は `o200k_base` 互換の近似とする（MUST）。実装は厳密なトークナイザの代わりに、ベンチマーク（第 14 章）で誤差 ±10% 以内と確認したヒューリスティック（文字種別と連の数の係数。設計書 §7.2.1。S-12 で確認: 文字数だけの係数は日本語や base64 で 10〜60% 過小になった）を用いてもよい（MAY）。
 - `budget.used_tokens_est` には応答テキスト全体（ヘッダ・トレーラ含む）の推定値を入れる。
 
 ## 5.8 エラー分類
@@ -608,6 +608,8 @@ level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
 5. `code-block` 内の `@L<n>: ` 接頭辞は `with_line_numbers: true`（既定）のとき付ける。コード本文はエスケープせずそのまま出す。コード内に ``` が含まれる場合はフェンスを ```` に延長する。
 6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。
 7. `kind` の `File` は、シンボルに分解せずファイル全体を 1 要素として扱う場合（T-18 の Tier 3 / Tier 4 のファイルの変更要素。`modified_symbols[].kind`）に使う。`symbols` テーブルには格納しない。
+8. ツール固有の見出し行（`kv-line`: `target:`、`applied:`、`resolved:` など）はインデント 0 に置く。インデントされた `key: text` は `attr-line` で、キーは `attr-key` の語彙に限る。
+9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
 
 ### 6.1.1 代表例
 
@@ -706,7 +708,7 @@ lex-sel      = "lex:" , ident , "@L" , DIGIT , { DIGIT } ;                      
 - `workspace-id` は `configure_workspace` が割り当てる。既定はルートディレクトリ名（英数・`-`・`_`・`.` 以外は `_` に置換）。衝突したら `-2`, `-3` を付す。
 - セレクタを省いた URN はファイルそのものを指す。
 - `qualified` は言語のスコープ階層（モジュール内のクラス・関数・ネスト）を `.` で連ねる。モジュール名（パッケージパス）は `path` に含まれるので `qualified` には入れない。
-- `/arity` と `~sighash` は **オーバーロードや同名の再定義があるときだけ** 付ける（MUST NOT 常時付与）。`sighash` は正規化したシグネチャ文字列の SHA-256 先頭 8 桁。
+- `/arity` と `~sighash` は **オーバーロードや同名の再定義があるときだけ** 付ける（MUST NOT 常時付与）。実装の規則: 同じ `qualified` の衝突グループの中で **アリティが 2 種類以上あるときだけ** `/arity` を付ける（アリティが 1 種類だけの衝突グループには付けない。実装で確定 2026-10-29）。`sighash` は正規化したシグネチャ文字列の SHA-256 先頭 8 桁。
 - シグネチャまで同一の再定義（条件分岐の中で同じ関数を定義し直す場合など）は、ファイル内で **最後** の定義を素の URN とし、それ以外には `~` + SHA-256(正規化シグネチャ + 開始行) の先頭 8 桁を付ける。
 - `scip_symbol`（SCIP の標準シンボル文字列）は URN とは別に `symbols.scip_symbol` 列で保持し、相互運用に用いる。
 
@@ -1180,13 +1182,13 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 | 要素 | 含める条件 |
 |---|---|
 | デコレータ / 属性（Python `@x`, Rust `#[x]`, TS `@x`, C# `[X]`） | 常に含める |
-| 直前の Doc コメント（JSDoc, Rustdoc `///`, Python の直後 docstring） | 常に含める（Python の docstring は本体の一部） |
-| 直前の通常コメント | シンボルとの間に空行が無い場合のみ含める |
+| 直前の Doc コメント（JSDoc, Rustdoc `///`, Python の直後 docstring） | 常に含める（Python の docstring は本体の一部）。**Doc コメントとシンボルの間に空行があっても含める**（実装で確定 2026-10-29） |
+| 直前の通常コメント | シンボルとの間に空行が無く、**かつそのコメントの行に他のコードが無い**（コードの行末コメントではない）場合のみ含める（実装で確定 2026-10-29） |
 | 末尾の同一行コメント | 含める |
 | 直後の空行 | 含めない。`delete_symbol` では直後の連続空行を 1 行に詰める |
 | 可視性修飾子・`async`・`export` | 含める |
 
-`insert_member` の挿入位置は、親（クラス・構造体・モジュール）の最後のメンバーの直後。親にメンバーが無ければ本体の先頭（Python の `pass` だけの本体は `pass` を置換する）。`insert_before` / `insert_after` は上の境界の外側に挿入し、前後に空行を 1 行ずつ置く（言語の慣例で 2 行が標準のトップレベル Python 関数は 2 行）。
+`insert_member` の挿入位置は、親（クラス・構造体・モジュール）の最後のメンバーの直後。親にメンバーが無ければ本体の先頭（Python の `pass` または `...` だけの本体は、その文を置換対象にする）。`insert_before` / `insert_after` は上の境界の外側に挿入し、前後に空行を置く。`blank_lines_around`（前後の空行数）は **Python のトップレベルの関数・クラスだけ 2**、それ以外（クラス内のメソッド、他の言語）は 1 とする（実装で確定 2026-10-29）。
 
 ## 10.9 新規コードの正規化
 
@@ -2981,7 +2983,7 @@ json の `data`:
 
 1. **静的検査**: `query` を SQLite の準備段階（`prepare` 相当）に通し、次のいずれかなら `E_QUERY_REJECTED` とする（MUST）: 文が 2 つ以上ある（`;` 区切りの複文。末尾の `;` とコメントは許し、`;;` は複文とみなす）／先頭のキーワードが `SELECT` / `WITH` 以外／`ATTACH` / `DETACH` / `PRAGMA` / `VACUUM` / `load_extension` / `writefile` / `readfile` を含む／公開ビュー以外のオブジェクトを参照する／構文エラー（`details.sqlite_message`）。許可する関数は SQLite 組み込みの集計・文字列・日付・JSON・FTS5 関数と、Lucianke が登録する読み取り専用関数に限る。
 2. **接続**: 読み取り専用で開き（`SQLITE_OPEN_READONLY` 相当）、`PRAGMA query_only = ON` を設定し、認可フック（authorizer 相当）で読み取り以外の操作を拒否する。DB 本体への書き込みについて、3 重の防御のいずれか 1 つが欠けても他が効く構成とする（MUST。副作用を止められるのは authorizer と禁止語検査だけなので、これらは省かない。§13.2）。
-3. **一時テーブル**: `auto_fallback_grep_pattern` が指定されたとき、クエリ実行前に `temp_grep_matches(path TEXT, line INTEGER, snippet TEXT, confidence_level TEXT)` を接続ローカルの一時領域に作り、`.gitignore` と `exclude_globs` を尊重して単語境界付きで検索した結果を入れる。`confidence_level` は常に `'lexical_fallback'`。マッチ上限は 10,000 件で、超えたら `data.grep_fallback.truncated: true`。概念文書の「結果 0 件のとき自動的に grep」は採用せず、**指定があれば必ず作る** 決定論的な挙動とする。
+3. **一時テーブル**: `auto_fallback_grep_pattern` が指定されたとき、クエリ実行前に `temp_grep_matches(path TEXT, line INTEGER, snippet TEXT, confidence_level TEXT)` を接続ローカルの一時領域に作り、`.gitignore` と `exclude_globs` を尊重して単語境界付きで検索した結果を入れる。`confidence_level` は常に `'lexical_fallback'`。マッチ上限は 10,000 件で、超えたら `data.grep_fallback.truncated: true`。概念文書の「結果 0 件のとき自動的に grep」は採用せず、**指定があれば必ず作る** 決定論的な挙動とする。作成と投入は `query_only` と認可フックの設定より前に済ませる（設計書 §7.6.4）。
 4. **バインド**: `params` の各キーは `query` 中に `:key` として現れなければならず、現れないキー、または `params` に無いバインド名があれば `E_INVALID_ARGUMENT`。
 5. **実行**: `limit + 1` 行まで取り、`limit + 1` 行目が存在すれば `truncated: true`。進捗ハンドラ（`progress_handler` 相当）で `timeout_ms` を監視し、超えたら中断して `E_TIMEOUT`（取得済みの行を `data.rows` に入れ、`details.partial: true`）。
 6. **結果の形**: 1 レコードは 1 行。compact では Markdown 表とし、各セルは 80 文字で `…` 省略、NULL は `NULL` と表示する。列名はクエリの別名をそのまま使う。
@@ -3069,11 +3071,11 @@ json の `data`:
 ## 12.4 ファイル監視と増分同期
 
 1. OS ネイティブの監視（Linux `inotify`、macOS `FSEvents`、Windows `ReadDirectoryChangesW`）を用い、`.gitignore` と `exclude_globs` に一致するパスを除外する。
-2. イベントは 50 ms でデバウンスし、ファイルごとに `sha256` を再計算して **変化があったときだけ** 再解析する。
+2. イベントは静穏 10 ms で配信し（パスが増え続ける間は最大 1 s まで束ねる）、種別は信用せずパスの集合に畳んで、ファイルごとに `sha256` を再計算して **変化があったときだけ** 再解析する（S-6 で確認: 単発変更が p95 約 20 ms で届く。50 ms のデバウンスでは単発が約 100 ms になるため採らない）。ディレクトリの移動・改名は子のイベントが届かないので、列挙して取り込む。
 3. 単一ファイルの変更は、検知から PaaD 反映と LSP 通知まで 500 ms 以内（NFR-PERF-3）。
-4. 1 回のバーストで 500 ファイル以上が変わった場合（ブランチ切り替えなど）は、個別処理をやめて差分索引（起動時と同じ手順）に切り替える。
+4. 1 回のバーストで 500 ファイル以上が変わった場合（ブランチ切り替えなど）は、個別処理をやめて差分索引（起動時と同じ手順）に切り替える。1 回の配信は 500 に届かないことがあるため、大きい配信が続くあいだは 0.3 秒静まるまで合算して数える（S-6 で確認）。
 5. 既定 5 MB を超えるファイルは構文木を作らず、Tier 3 ならストリーミング骨格、それ以外は `files` 行のみ（`confidence_level: "lexical_fallback"`）とする。上限は設定で変えられる。
-6. 監視が利用できない環境（ネットワークドライブなど）では、要求時に対象ファイルの `sha256` を照合する遅延検証に切り替え、`configure_workspace status` に `watcher: "polling"` と表示する。
+6. 監視が利用できない環境（ネットワークドライブなど。Windows のネットワークドライブは未検証。`force_polling` は取りこぼすので使わない）では、要求時に対象ファイルの `sha256` を照合する遅延検証に切り替え、`configure_workspace status` に `watcher: "polling"` と表示する。
 
 ## 12.5 終了処理
 
@@ -3128,6 +3130,7 @@ json の `data`:
 - 実行前に文を解析し、先頭が `SELECT` または `WITH`（最終的に `SELECT`）以外は `E_QUERY_REJECTED`（MUST）。複文（`;` 区切り）は拒否する。
 - authorizer で、公開テーブル（§9.5）以外のオブジェクト、`ATTACH` / `DETACH`、`PRAGMA`、`load_extension`、ファイル入出力系の関数（`readfile`, `writefile`, `fts5` の外部コンテンツ書き込み）を拒否する（MUST）。
 - progress handler で `timeout_ms` の超過を検知して中断する（期限は `time.perf_counter()` で判定する）。再帰 CTE の深さの上限は SQLite に機構が無く実装できないため設けず、時間で止める。巨大な値は `SQLITE_LIMIT_LENGTH`（16 MiB）と `SQLITE_LIMIT_SQL_LENGTH`（64 KiB）で抑える（S-7 で確認）。
+- 防御は静的検査を含めて **4 段**（静的検査 → `mode=ro` → `query_only` → authorizer）。T-20 の `temp_grep_matches` の作成と投入は、`query_only` と authorizer を有効にする前に済ませる（`query_only` の下では一時テーブルも作れない）。authorizer は `PRAGMA` のうち `data_version` と `query_only` の読み取りだけを許可する（実装で確定 2026-10-29。S-7 で確認した順序）。
 - 読み取り専用・`query_only`・authorizer の 3 重は、DB 本体への書き込みについてはどれか 1 つが欠けても他が効く。ただし `ATTACH` が任意パスに 0 バイトのファイルを作る副作用と、`PRAGMA journal_mode` による DB の変更は、authorizer と禁止語検査（`ATTACH` / `PRAGMA` など）でのみ止まる。禁止語検査は省かない（S-7 で確認）。
 - 返却行数は `limit`（既定 200、最大 2,000）で切り、切ったことを `page` と `warnings[]` に書く。
 
@@ -3404,7 +3407,7 @@ Lucianke は **できるだけ自由なライセンス** で公開する。本�
 | OD-17 | T-16 の対象外 | `async` 関数とジェネレータを M3 の範囲外（`E_UNSUPPORTED`）とする | **範囲外のまま M3 を閉じ、需要があれば M4 で扱う** | M3 着手前 |
 | OD-18 | LSP 不在時の Code Action | (a) 提供しない（T-13 は `E_LSP_UNAVAILABLE`）、(b) Tree-sitter だけで安全に行える数種（未使用 import の除去など）を内蔵する | **(a) で M1 を閉じる。** 需要が見えたら (b) を M2 以降で | M2 着手前 |
 | OD-19 | 本体のライセンス | (a) MIT、(b) Apache-2.0、(c) MIT OR Apache-2.0 のデュアル | **決定済み: (a) MIT**（師匠 2026-10-29「ライセンスは MIT に確定」）。リポジトリ直下に `LICENSE` を置いた。依存側の確認は第 16 章 | 決定済み |
-| OD-20 | Git 層のライブラリ（Python を選んだ場合） | (a) dulwich（Apache-2.0 側を選択）、(b) pygit2（GPL-2.0-only + リンク例外。GPL 文面の同梱が要る）、(c) GitPython（BSD-3。シェルの git を起動） | **(a) を第一候補。** 純 Python で寛容。M2 のベンチマーク（NFR-PERF-2）で足りなければ (b) を第 16 章 L-3 の手続きで検討する。(c) は §4.2 の方針と相反。アーキテクチャ設計書 §11.1 は dulwich を M1 の必須依存に置いた（T-02 / T-05 の revision 解決に要る） | M1 着手前 |
+| OD-20 | Git 層のライブラリ（Python を選んだ場合） | (a) dulwich（Apache-2.0 側を選択）、(b) pygit2（GPL-2.0-only + リンク例外。GPL 文面の同梱が要る）、(c) GitPython（BSD-3。シェルの git を起動） | **(a) を第一候補。** 純 Python で寛容。M2 のベンチマーク（NFR-PERF-2）で足りなければ (b) を第 16 章 L-3 の手続きで検討する。(c) は §4.2 の方針と相反。アーキテクチャ設計書 §11.1 は dulwich を M1 の必須依存に置いた（T-02 / T-05 の revision 解決に要る）。**S-8 の結果**（2026-10-29）: M1 の用途（参照解決・blob・`STAGED`・`.gitignore`・不変性）は dulwich で合格（1〜5 ms）。M2 の履歴だけ、dulwich の `Walker` が F-PY 規模で 13 秒超（`git log --follow` は 106 ms）で不合格。M2 の案に「(a) ＋ 履歴専用の `git` 子プロセス（読み取り専用）」を加える（推奨。未決）。(b) pygit2 は未測定で、M2 のベンチ（NFR-PERF-2）で L-3 の手続きに従って測る | M1 着手前（M1 の範囲は (a) で確定。M2 の履歴だけ未決） |
 | OD-22 | HTTP 系トランスポート | (a) 提供しない（stdio のみ）、(b) Streamable HTTP を任意で提供 | **決定済み: (a)**（師匠 2026-10-29「stdio のコマンド実行型でできるよね？ HTTP 型はあまり望ましくない」）。配布物に HTTP サーバーの起動経路を持たない | 決定済み |
 | OD-21 | Cython と Jinja2 の Tree-sitter 文法 | Cython: 専用文法が未特定。Jinja2: 公式系に無く、参考の cathaysia/tree-sitter-jinja は Apache-2.0 | **着手前に一次情報で確認して決める。** 見つからなければ Cython は Python 文法で寛容に解析、Jinja2 は自前の字句解析で `{{ }}` / `{% %}` だけを拾う | B1b / B7 着手前（M2） |
 

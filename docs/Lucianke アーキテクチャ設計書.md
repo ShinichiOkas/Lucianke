@@ -628,7 +628,13 @@ tools/call(name, arguments)
 
 ### 7.2.1 `TokenEstimator`
 
-- 文字種別の係数で推定する: ASCII 英数字と空白は 1/4 トークン、ASCII 記号は 1/2、全角・漢字・かなは 1/1.5、その他は 1/2（係数は `tokens.toml` に置き、ベンチで `o200k_base` と比べて ±10% に調整する。§10.4）。
+- **`lean_wide` 式**（文字種別と連の数の係数）で推定する（S-12 で `o200k_base` と比べて較正した提案。`core/tokens.py` の実装は追従する）。旧版の「ASCII 英数字と空白 1/4、ASCII 記号 1/2、全角・漢字・かな 1/1.5、その他 1/2」は、日本語 Markdown で −16〜−17%、compact 出力で −11%、base64 などの塊で −43〜−63% と**過小**だった（係数だけ当て直しても通らない。ASCII は文字数ではなく語の数、空白と記号は連でトークンになる）。トークン数 = 切り上げ(Σ 係数 × 数)。係数は 1/100 刻みの有理数で、整数演算にできる（分母 100）。置き場は `tokens.toml`（ベンチで `o200k_base` と比べて ±10% に保つ。§10.4）:
+  - `blob_chars` 0.63: `[A-Za-z0-9+/=]{40,}` の文字数（base64・SHA-1/256 の hex）。**先に数えて本文から除く**。
+  - `letters_runs` 0.85: `[A-Za-z]+` の個数。`digits_chars` 0.90: `[0-9]` の文字数。`symbol_runs` 0.87: ASCII 記号 `` [!-/:-@\[-`{-~]+ `` の連の個数。
+  - `space_runs_multi` 0.92: `[ \t]{2,}` の個数（インデント）。単一の空白は 0（語に吸収される）。`nl_chars` 0.60: `\r` と `\n` の文字数。
+  - `wide` 0.95: 仮名・漢字・全角記号の文字数（U+3000–30FF、U+31F0–31FF、U+3400–4DBF、U+4E00–9FFF、U+F900–FAFF、U+FF00–FFEF、U+20000–2FA1F）。`other` 0.46: 上記のどれでもない文字の個数（ASCII 以外の記号・制御文字・ハングルなど）。
+  - 誤差（ファイル単位の 2 分割交差検証の保持側）は、種類別の合計で ±3.3% 以内（標本が 1 つの base64 だけ標本内で −8.9%）。安全側にしたければ全係数を ×1.03 にしてよい（MAY。推定が実測より小さいと実測が `max_tokens` を超えるため）。ASCII だけの文字列は `wide` の走査を省く（`text.isascii()`）。1 MB で旧版の約 2.3〜2.8 倍（150〜200 ms）だが、パッカーは予算までしか数えない（8 KB で約 1.5 ms）ので許容する。
+  - 限界: 当てはめの標本は本リポジトリ（日本語コメントの Python が多い）に偏り、TS・Go・Rust・韓国語は未検証。`bench/run_bench.py` で較正を再実行し、種類別の合計誤差が ±10% を超えたら失敗にする。単体テスト（`tests/unit`）は tiktoken なしで、固定の文字列と基準トークン数との比が ±10% に入ることを確かめ、陽性対照に旧版の係数が落ちることも置く。再現は `bench/tokens/calibrate.py`。
 - 1 レコードの推定は `lines` の合計。ヘッダ・警告・トレーラも同じ推定器で数える。
 
 ### 7.2.2 `Packer`
@@ -668,7 +674,7 @@ pack(out, budget, offset):
 | dot / mermaid | `out.data_static["edges"]` と `records` のうち `kind in {"tree", "path", "ref", "row"}` | 文字列。ヘッダはコメント |
 
 - `ToolOutput.head_kv` は常に予算内に含める（短い kv 行だけを置く）。編集ツールの `diff` のように長くなりうるものは `Record(kind="code")` として渡し、パッカーの切り詰め対象にする。
-- compact の各行種（`symbol-block`, `ref-line`, `diag-line`, `tree-line` …）を組み立てる関数は `core/compact_lines.py`（`mcp/render/compact.py` は連結とヘッダ・トレーラだけ）に **行種ごとに 1 つ** 置き、ツールと `syntax` はそれを呼んで `Record.lines` を作る。文法（仕様書 §6.1）に適合するかは、この関数群の単体テストで EBNF 由来のパーサに通して検査する（§10.2）。
+- compact の各行種（`symbol-block`, `ref-line`, `diag-line`, `tree-line` …）を組み立てる関数は `core/compact_lines.py`（`mcp/render/compact.py` は連結とヘッダ・トレーラだけ）に **行種ごとに 1 つ** 置き、ツールと `syntax` はそれを呼んで `Record.lines` を作る。文法（仕様書 §6.1）に適合するかは、この関数群の単体テストで EBNF 由来のパーサに通して検査する（§10.2。検査器は `tests/contract/compact_grammar.py`。仕様書 §11 の例も通す）。
 
 ---
 ## 7.3 Workspace Context（workspace/）
@@ -769,12 +775,12 @@ class Watcher:
     def expect(self, path: RelPath, sha256_after: str) -> None             # 自分の書き込みイベントを 1 回だけ無視する（§7.7.1 Reindexed）
 ```
 
-1. `watchfiles.awatch(ws.root, debounce=WATCH_DEBOUNCE_MS, watch_filter=…)` を用いる想定（S-6 で Windows の挙動を確認）。フィルタは `.gitignore`（`dulwich.ignore` を用いる想定。S-8 で確認。使えなければ fnmatch の自前サブセット）と `exclude_globs`、`.git/` 配下。
-2. 1 回のデバウンス窓のイベントをパスごとに畳む（追加 + 削除 = 削除、変更の連続 = 1 回）。
-3. 窓内のパス数が `WATCH_BURST_FILES`（500）を超えたら個別処理をやめ、`sink.rescan(ws)`（§7.6.5 と同じ差分索引）に切り替える。
-4. 各パスについて `confine` → `stat` → `sha256`（スレッドプール）→ `files.sha256` と比較 → 変化があれば `sink.changed(path)`、削除なら `sink.removed(path)`。`sha256` が同じなら何もしない（エディタの保存で mtime だけ変わる場合を吸収）。
+1. `watchfiles.awatch(ws.root, debounce=WATCH_DEBOUNCE_MS, step=WATCH_STEP_MS, watch_filter=…, stop_event=stop)` を用いる（S-6 で Windows の挙動を確認）。**`step=10` が必須**: 既定の `step=50` では単発変更の p95 が 100.6 ms で NFR-PERF-3 の境界に当たり、`step=10` なら p50 18.8 / p95 19.9 ms（遅延はほぼ 1〜2×`step`）。`WATCH_STEP_MS = 10`、`WATCH_DEBOUNCE_MS = 1000`。`debounce` の意味は「パスが増え続ける間にグループ化する最大時間」で、単発の遅延には効かない（同じファイルを 3 ms ごとに書き続けても 21 ms 前後ごとに配信される）。フィルタは Python 側で全イベントに対して呼ばれる（Rust 側に除外手段は無い。2,000 件を含む 2.2 s の操作で支障なし）: `.git/` 配下（`.git/HEAD` だけ通してブランチ切替を直接拾う案は MAY）、EditTransaction の一時名 `.lucianke-tmp-*`（これで `expect()` が対象にするのは最終パスのイベントだけになる）、`.gitignore`（`dulwich.ignore.IgnoreFilterManager`。S-8 で確認。1,000 パスで 50 ms 以下。ディレクトリは末尾 `/` を付けて渡す。fnmatch の自前サブセットは要らない）、`exclude_globs`。`awatch` を `wait_for` で包んで期限を付けてはならない（キャンセルで監視が終わる）。期限が要るときは下の手順 3 のようにキューを挟む。
+2. **イベントの種別は信用しない**。種別は `added` / `modified` / `deleted` の 3 つだけで、改名は `added` + `deleted`、既存ファイルへの `os.replace`（EditTransaction の書き込み）では a.py が存在するのに `deleted a.py` も届く。旧版の「追加 + 削除 = 削除」の畳み込みは**誤り**（S-6 で確認）。種別は捨て、1 回の配信のイベントを **パスの集合** に畳む。
+3. **バースト検知**: 1 回の窓のパス数を 500 と比べても成立しない（`debounce=50` の窓は最大約 170 件、`debounce=1000` でも 700 ファイルの `git checkout` が [1271, 152] に割れる）。窓が `BURST_HINT`（100 件）以上のときだけ、`BURST_QUIET_S`（0.3 秒）静まるまで続く窓を合算し、合算が `WATCH_BURST_FILES`（500）を超えたら個別処理をやめ、`sink.rescan(ws)`（§7.6.5 と同じ差分索引）に切り替える。小さい窓は待たず即処理するので、単発の遅延は増えない。型は `spikes/s06_watch/pattern.py`（700 ファイルで `rescan` 1 回・個別処理 0 回）。
+4. 各パスについて `confine` → `stat` → 存在すれば `sha256`（スレッドプール）→ `files.sha256` と比較 → 変化があれば `sink.changed(path)`、不在なら `sink.removed(path)`。`sha256` が同じなら何もしない（エディタの保存で mtime だけ変わる場合を吸収）。**ディレクトリ**: 中身のあるディレクトリを外から移し入れる・改名する・移し出すとき、子のイベントは届かない（`added pkg` / `added new` + `deleted old` / `deleted pkg` だけ）。パスがディレクトリなら `os.walk` で子を列挙して取り込み、パスが不在なら `files.path` の前方一致 `パス + '/'` の行もすべて `removed` にする（`git checkout`・ブランチ切替で消えた・移された配下の取りこぼし防止。S-6 で確認）。
 5. `IndexWriter` の取り込みが完了したら、`LspPool.notify_watched(changes)`（`workspace/didChangeWatchedFiles`）と、開いている文書には `documents.on_external_change(path)`（全文 `didChange`）を送る。`TreeCache` の該当エントリは新しい `sha256` で自然に置き換わる。
-6. 監視が開始できない（ネットワークドライブなど）ときは `mode="polling"` にし、背景のポーリングは行わず、要求時に対象ファイルの `sha256` を照合する遅延検証（`ToolContext.resolve_target` と `EditTransaction` 段 3）に切り替える。T-00 `status` に `watcher: "polling"` を出す。
+6. 監視が開始できない（存在しないパスは `FileNotFoundError` で表れるので `try/except OSError` で受ける。ネットワークドライブなど）ときは `mode="polling"` にし、`force_polling=True` は使わない（0.5 秒おきの書き換え 8 回のうち 3 回が 3 秒待っても届かなかった。S-6）。ネットワークドライブは環境が無く未検証。背景のポーリングは行わず、要求時に対象ファイルの `sha256` を照合する遅延検証（`ToolContext.resolve_target` と `EditTransaction` 段 3）に切り替える。T-00 `status` に `watcher: "polling"` を出す。
 7. NFR-PERF-3 の測定のため、イベント受信・DB コミット・LSP 通知の各時刻を `debug` ログに残す。
 8. `drain(paths)` はデバウンス窓に溜まっているイベントのうち指定パス（省略時は全部）を即座に処理し、取り込みの完了まで待つ。`EditTransaction` が前提検証の直前に呼ぶ。`expect(path, sha256_after)` は、直後に届く自分の書き込みイベントを `sha256` が一致する場合に 1 回だけ捨てる（二重取り込みの抑止）。
 
@@ -783,6 +789,10 @@ class Watcher:
 - 外部プロセスが 1 ファイルを書き換えたとき、`files.sha256` の更新と `didChangeWatchedFiles` の送信が `INDEX_REFLECT_MS`（500）以内に完了する（p95、100 回）。
 - `.gitignore` に一致するファイルを作っても `files` に行が増えない。
 - 501 ファイルを同時に変えたとき、ログに `rescan` への切替が 1 回記録され、個別取り込みが走らない。
+- `os.replace` で既存ファイルを置き換えたとき（`deleted` と `added` が同時に届く）、`files` の行は消えず、`sha256` が更新される。
+- 中身のあるディレクトリを外から移し入れたとき、配下のファイルがすべて `files` に入る。ディレクトリを移し出したとき、配下の行がすべて消える。
+
+起動順: `awatch` を `create_task` してイベントループを 1〜2 回譲ってから差分索引（§7.6.5）を始めれば、起動時の隙間は生じない（開始通知は無いが、2 回譲った後に書いたファイルは 23 ms で届き、取りこぼしは無かった）。`stop.set()` から終了までは 1〜48 ms（S-6 で確認）。
 
 ---
 
@@ -980,23 +990,47 @@ class LspServerDef:
     name: str                               # "basedpyright" / "ruff" / "vtsls" …
     language_ids: tuple[str, ...]
     role: Literal["types", "lint"]          # 同一言語に 2 役を並列してよい（仕様書 §12.3）
-    discover: tuple[Candidate, ...]         # 探索順: LUCIANKE_LSP_<LANG>_CMD → .venv/bin|Scripts, node_modules/.bin → PATH
+    discover: tuple[Candidate, ...]         # 探索順: LUCIANKE_LSP_<サーバー名>_CMD（サーバー名単位。types と lint を別々に上書きできる）→ LUCIANKE_LSP_<LANG>_CMD → .venv/bin|Scripts, node_modules/.bin → PATH
     args: tuple[str, ...]                   # 例: ("--stdio",)
-    init_options: Callable[[Workspace], dict]
-    position_encoding_default: Literal["utf-16", "utf-8"]
+    init_options: Callable[[Workspace], dict]   # initialize の initializationOptions（tsls の tsserver.path など）
+    config_for: Callable[[Workspace, str], dict]   # workspace/configuration への返答（section ごと。basedpyright の python、vtsls の vtsls など）
+    locale: str | None                      # initialize の locale。basedpyright は "en"（診断を英語に固定。既定は OS のロケール＝日本語）
+    # position_encoding_default は持たない（S-11: 応答に positionEncoding が無ければ全部 UTF-16 で足りる）
     requests_m1: frozenset[str]             # ADR-15 の範囲でこのサーバーに送ってよいもの
 ```
 
-M1 の定義（起動コマンド・初期化オプション・位置単位は **S-4 / S-5 / S-11 で実機確認してから固定する**。ここは想定）:
+M1 の定義（Python と TypeScript / JavaScript の起動コマンド・初期化・位置単位は S-4 / S-5 / S-11 で実機確認して固定した。ほかの言語は想定のまま）:
 
 | 言語 | 既定 | 代替 | 備考 |
 |---|---|---|---|
-| Python（types） | `basedpyright`（PyPI の `basedpyright` は `nodejs-wheel-binaries` を依存に持ち、Node を別途入れずに動く見込み。付録 A） | `pyright`（`nodeenv` 依存で Node を取りに行く） | インタープリタは `initializationOptions` / `workspace/configuration` で渡す（`python.pythonPath` 相当。S-4） |
-| Python（lint） | `ruff server` | — | QuickFix / `source.organizeImports` の供給元 |
-| TypeScript / JavaScript | `vtsls --stdio` | `typescript-language-server --stdio` | どちらも Node が要る。`node_modules/.bin` → PATH。tsserver の所在を初期化で渡す（S-5） |
+| Python（types） | `basedpyright-langserver --stdio`（起動口は `<.venv>/Scripts/basedpyright-langserver.exe`（POSIX は `bin/`）。PyPI の `basedpyright` が `nodejs-wheel-binaries` を同梱するので Node の別途導入は不要。PATH を System32 だけにしても起動する。S-4 で確認） | `pyright`（`nodeenv` 依存で Node を取りに行く） | インタープリタは **`workspace/configuration` の `python` セクション**（`{"pythonPath": …}`）への応答だけで渡す。`initializationOptions` の `pythonPath` は効かない（S-4 で確認）。`locale: "en"` を渡す。`positionEncoding` は応答に無い → UTF-16（S-11）。`initialize` 応答まで 377 ms、`didChange` から診断まで約 0.3 s |
+| Python（lint） | `ruff server` | — | **QuickFix / `source.organizeImports` / `source.fixAll` の供給元は ruff**（basedpyright の `codeAction` は `# pyright: ignore` の追加だけで、`source.organizeImports` は返さない。S-4 で確認）。起動 12 ms、`positionEncoding: "utf-8"` を返す、診断は `didChange` ごとに版つきで届く（0.5 ms） |
+| TypeScript / JavaScript | `typescript-language-server --stdio`（tsls） | `vtsls --stdio` | **既定は tsls**（S-5 で確認: 診断が常に最新で空配列も届く、診断が約 110 ms 速い、`definition` の範囲が名前になる）。vtsls は TypeScript を同梱するので、tsserver が見つからず tsls の `initialize` が失敗するとき（ワークスペースに TypeScript が無い、または npm の `typescript@7` のように `lib/tsserver.js` が無い）の代替にする。どちらも Node が要る。`positionEncoding` は応答に無い → UTF-16（S-11） |
 | Rust / Go / C,C++ / C# / Kotlin / Swift | `rust-analyzer` / `gopls` / `clangd` / `csharp-ls` / `kotlin-language-server` / `sourcekit-lsp` | — | best effort。PATH に無ければ `unavailable` |
 
-`initialize` では `positionEncodings: ["utf-8", "utf-16"]` を提示し、応答の `positionEncoding` を `LspClient` に設定する。交渉できないサーバーは UTF-16（仕様書 §12.2）。
+`initialize` では `positionEncodings: ["utf-8", "utf-16"]` を提示し、応答の `positionEncoding` を `LspClient` に設定する。応答に無い（交渉できない）サーバーは UTF-16（仕様書 §12.2）。未知の値（`utf-32` など）も UTF-16 に倒して警告ログに出す。**サーバーごとの既定値は持たない**: 旧版（と S-4 の提案）の `position_encoding_default` は削除した。実測した 4 サーバーのうち、basedpyright・vtsls・tsls は応答に無く UTF-16 で、`utf-8` を採るのは ruff だけ。上書きを持つと誤った値が黙って位置を壊す穴になる（S-11 で確認）。サーバーの更新で単位が変わったら落ちるよう、期待する単位を契約テスト（サーバー未導入なら skip）に持たせる。`utf-8` の経路は将来のサーバー（rust-analyzer・clangd など）でも通るので ruff で常時検査する。提示を `["utf-16"]` に絞る設定（`lsp.position_encodings`）を逃げ道に用意する（MAY）。
+
+**探索順と tsserver の所在**（S-4・S-5 で確認）:
+
+- サーバー: `LUCIANKE_LSP_<サーバー名>_CMD` → `LUCIANKE_LSP_<LANG>_CMD`（lint は `…_LINT_CMD`）→ `<root>/.venv/Scripts|bin/` → `<root>/node_modules/.bin/` → PATH（`shutil.which`。Windows は `.CMD` を返し、`create_subprocess_exec` にそのまま渡せる）。TypeScript は tsls → vtsls の順。
+- tsserver: 明示指定 → `<root>/node_modules/typescript/lib/tsserver.js`（存在確認。TypeScript 7 には無い）→ 無ければ vtsls に切り替える。tsls へは `initializationOptions.tsserver.path`、vtsls へは `workspace/configuration` の応答（`{"vtsls": {"autoUseWorkspaceTsdk": true}}`。返さないと同梱の TypeScript を使う）で渡す。
+
+**サーバーからの要求への返答**（`on_request`。S-4・S-5 で確認）: `workspace/configuration`（basedpyright は section `python` と `basedpyright`、vtsls は section `""`、tsls は `formattingOptions`。MUST。`config_for` が作る）、`window/workDoneProgress/create`・`client/registerCapability`・`client/unregisterCapability`（`None`）、`workspace/applyEdit`（M1 では適用しない: `{"applied": false}`。書くのは `EditTransaction` だけ。tsls の organizeImports は `only: source.removeUnusedImports.ts` で `edit` つきが返るのでそれを使い、`_typescript.organizeImports` 経由の `applyEdit` は使わない）、未知のメソッドは `-32601`。
+
+**サーバーごとの癖**（実測。`servers.py` に集約する）:
+
+| 事項 | basedpyright | ruff | vtsls | tsls |
+|---|---|---|---|---|
+| `rename` の `WorkspaceEdit` | `documentChanges`（`version: null`） | — | `changes` | `changes` |
+| `codeAction` の `edit` | `changes`（`# pyright: ignore` のみ） | `documentChanges` | `changes` | `documentChanges` |
+| organizeImports | `workspace/executeCommand basedpyright.organizeimports`（未広告）だけ | `only: source.organizeImports` → `codeAction/resolve` で `edit` | `only: source.organizeImports` → `resolve` で `edit` | `only: source.removeUnusedImports.ts`（kind に `.ts` 接尾辞） |
+| `definition` の範囲 | 識別子 | — | **宣言全体**（名前の範囲は hover / documentSymbol で取る） | 識別子 |
+| `publishDiagnostics.version` | あり | あり | **無し** | **無し** |
+| 診断の更新 | 連続した変更は最後の版だけ | 版ごと | 誤りを消しても古い診断が届くことがある | 常に最新 |
+| 受信 URI | 小文字ドライブ＋`%3A` | 送った形のまま | 小文字ドライブ＋`%3A` | 同左 |
+| `didOpen` 直後の要求 | 約 0.6 s 待たされて正しい結果（`null` は返さない） | — | — | — |
+
+`requests_m1`: basedpyright に `definition / references / hover / prepareRename / rename / callHierarchy`、ruff に `codeAction / codeAction/resolve`、vtsls と tsls に `definition / references / hover / prepareRename / rename / callHierarchy / codeAction`（vtsls の organizeImports は `codeAction/resolve` も）。`rename` は `changes` に頼らず両形を受ける（§7.5.6）。
 
 ### 7.5.2 状態機械（pool.py）
 
@@ -1015,11 +1049,15 @@ class LspPool:
 |---|---|---|---|
 | `standby` | 初期状態。30 分無要求（MAY） | 何もしない | 当該言語への最初の要求 → `starting` |
 | `starting` | 要求 | コマンド探索 → `ProcessRegistry.spawn` → `initialize` / `initialized` を送る。要求元には降格応答（待たない） | `initialize` 成功 → `indexing`。失敗 → 再試行判定 |
-| `indexing` | 初期化直後 | `$/progress` / `window/workDoneProgress` を `progress` に反映。取れないサーバーは最初の `publishDiagnostics` 受信で `ready` | 進捗完了 → `ready` |
+| `indexing` | 初期化直後 | `$/progress` / `window/workDoneProgress` を `progress` に反映。取れないサーバーは最初の `publishDiagnostics` 受信で `ready`（basedpyright は単一文書では `$/progress` を出さない。`ready` は「`initialize` 応答後、最初に開いた文書の実診断を受信」または「`$/progress end`」の早い方。S-4 で確認） | 進捗完了 → `ready` |
 | `ready` | 索引完了 | 要求を通す | クラッシュ / 無応答（連続 3 回のタイムアウト）→ 再試行判定。`reset` → `standby` |
 | `unavailable` | 再試行上限 | `status.reason` に理由（`not_found` / `crashed_3x` / `init_failed`）。T-00 `status` に出す | `reset` → `standby` |
 
 再試行は `LSP_RESTART_BACKOFF_S = (1, 2, 4)`、`LSP_RESTART_MAX = 3`。状態遷移は言語ごとの `asyncio.Lock` の下で行い、二重起動を防ぐ。`EngineSelector` は `status()` だけを見る。
+
+`didOpen` 直後（解析中）の `definition` はサーバー内で約 0.6 s 待たされて正しい結果が返る（`null` は返さない。3 秒の `LSP_TIMEOUT_*` に収まる）ので、`indexing` 中の要求を `None` で返す設計（ADR-6 (b)）は安全側で変更不要（S-4 で確認）。
+
+**終了**（S-4・S-5・S-11 で確認）: `shutdown` → `exit` で、起動口 `.exe` → python → python → `node.exe` の 4 段（basedpyright）も、tsserver の子（vtsls・tsls）も 1 秒以内に終わる。`ProcessRegistry` は起動口の PID を持てばよい。固まった子の `kill` と、**`.bin/vtsls.cmd` のようなシム経由で `cmd.exe` だけを殺すと `node` が残る**（パイプを握り続け `proc.wait()` も返らない）問題があるので、強制終了は木ごと（Job Object〔ADR-12〕か `taskkill /T /F`）にする。basedpyright の子 `node` が 1.5 秒後に残ったことが 10 回中 1 回あった（後から消える見込み）。
 
 受入で確かめる点:
 
@@ -1036,13 +1074,13 @@ class LspClient:
     def on_notification(self, method: str, handler) -> None
     def on_request(self, method: str, handler) -> None     # client/registerCapability, workspace/configuration, window/workDoneProgress/create
     async def cancel(self, request_id: int) -> None        # $/cancelRequest
-    encoding: Literal["utf-16", "utf-8"]
+    encoding: Unit                                         # 応答の positionEncoding。無い・未知なら UTF-16（S-11）
 ```
 
 1. フレーミングは `Content-Length` ヘッダ。読み取りタスク 1 本が応答を `id → Future` に配り、通知をハンドラへ回す。子の `stderr` は別タスクでログへ（`debug`）。`window/logMessage` / `showMessage` もログへ。
 2. タイムアウトは `core/limits.py` の定数: `LSP_TIMEOUT_DEFINITION_MS=3000`、`LSP_TIMEOUT_REFERENCES_MS=3000`、`LSP_TIMEOUT_HOVER_MS=3000`、`LSP_TIMEOUT_CALL_HIERARCHY_MS=5000`、`LSP_TIMEOUT_CODE_ACTION_MS=5000`、`LSP_TIMEOUT_RENAME_MS=10000`。超過時は `$/cancelRequest` を送ってから呼び手に返す。
-3. **位置変換はこの境界だけ**（MUST）。`to_lsp(pos: Position, line_text) -> {line, character}` と `from_lsp(...)` が `core/textpos.LineIndex` でコードポイント ↔ UTF-16 ↔ バイトを変換する。`Range` / `Location` / `TextEdit` を越境させる関数はここに閉じる。
-4. URI: 送信は realpath の絶対パスから `file://` を作る（Windows は `file:///S:/...`）。受信は `confine` を通し、ルート外は外部シンボル扱い。
+3. **位置変換はこの境界だけ**（MUST）。`to_lsp(pos: Position, line_text) -> {line, character}` と `from_lsp(...)` が `core/textpos.LineIndex` でコードポイント ↔ UTF-16 ↔ バイトを変換する。`Range` / `Location` / `TextEdit` を越境させる関数はここに閉じる。**サーバーへは文字境界の列だけを送る**（MUST）。`to_unit` の丸め（`clamped=True`）が出たら要求を送らず降格応答にする（UTF-16 の 3 サーバーは境界でない列だと黙って別のシンボルや `null` を返し、ruff は文字の途中を指す増分 `didChange` でパニックして終了する〔exit 101〕。S-11 で確認）。`didChange` は全文なので、位置を送るのは definition・references・hover・rename・codeAction の range だけ。増分 `didChange` を入れる（MAY）ときは境界検査を必須にする。`LineIndex` は 4 サーバーの全件で一致した（S-11）。
+4. URI: 送信は realpath の絶対パスから `file://` を作る（Windows は `file:///S:/...`）。受信は先に正規化してから `confine` を通し、ルート外は外部シンボル扱い。正規化は `unquote` → 先頭の `/` を落とす（`/s:/work` → `s:/work`）→ `os.path.normcase(realpath)`。basedpyright・vtsls・tsls は小文字ドライブ＋`%3A`（`file:///s%3A/work/...`）で返す（S-4・S-5 で確認）。
 
 ### 7.5.4 文書同期（documents.py）
 
@@ -1065,7 +1103,12 @@ class DiagnosticsStore:
 ```
 
 1. 受信した診断は `IndexWriter` に「`(file_id, source)` 単位の全置換」として積む（仕様書 §9.4）。`source` は LSP 名（`basedpyright`, `ruff`, `vtsls` …）。`enclosing_urn` は `symbols` の範囲包含で引く。`data_version` は進めない（ADR-8）。
-2. `wait_for` は `version >= min_version` の `publishDiagnostics` 到着を待つ。`version` を付けないサーバーに対しては、当該文書の `didChange` 送信時刻より後に受信した最初の `publishDiagnostics` を応答とみなす（SHOULD）。
+2. `wait_for` の条件（S-4・S-5 で確認）:
+   - (a) 自分が `didChange` した文書は `version >= min_version`（`==` ではなく `>=`）。basedpyright は連続した変更を畳んで最後の版だけ、ruff は版ごとに届く。診断が変わらない変更（コメントだけ）でも basedpyright は毎回 1 件届く。想定の待ち時間は basedpyright が `didChange` から約 0.3 s、ruff が 1 ms 未満。
+   - (b) 依存元の文書は、`version` が自分の旧い版のまま再送されるので、`workspace/didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止で「揃った」とする。
+   - (c) 複数文書を続けて `didOpen` した直後の**空の診断は「きれい」と見なさない**（basedpyright は同じ版 1 の空の診断を先に送り、実診断は約 75 ms 後に `$/progress end` と同時に来る）。`$/progress end` または最初の受信から 300 ms の静止まで `unknown` とする。
+   - (d) **`version` を付けないサーバー**（vtsls・tsls）は、publish を受けた＝現行とは言えない（vtsls は誤りを消したあとも古い診断〔n=1〕を返し、次の変更で正常化する。3 回の別実行で再現）。変更ごとの発行を数えて追い越しを検出する。診断の無いファイルを開いても何も届かない vtsls に備え、「届かない＝0 件」とみなす猶予時間（設計値: 2 s）を持つ。tsls は常に最新で、空配列も届く。
+   - (e) 受信 URI は §7.5.3 の正規化を通してから `DiagnosticsStore` に入れる。
 3. Tree-sitter の構文エラーは LSP ではなく Indexer が `source: "tree-sitter"` で入れる（§7.6.2）。同一位置・同一メッセージの重複は T-08 が LSP 側を優先する。
 
 ### 7.5.6 機能呼び出しと PaaD への反映（features.py、ADR-6、ADR-15）
@@ -1091,7 +1134,8 @@ PaaD への反映:
 
 1. `definition` / `references` / `callHierarchy` の結果は `Location` → `symbols` の範囲包含で URN に写し（ワークスペース外は `_ext`）、`relations` に `exact` で書く。同じ `(source_urn, target_urn, relation_kind)` の `structural` 行は置き換える（仕様書 §9.4）。この書き込みは `data_version` を進める（結果集合が増えうるため。ADR-8 の規則どおり。親に報告）。
 2. `hover` の型文字列は内部テーブル `_hover_cache(urn, file_sha256, text)` に置き、T-04 の `signature_expanded` に使う。公開しない（`_` 接頭辞）。
-3. `rename` / `codeAction` の `WorkspaceEdit` は `edit/plan.py` の `Plan`（hunk 列）に変換して返すだけで、**書き込みは `EditTransaction`** が行う（ADR-11）。ファイルの作成・削除を含む `WorkspaceEdit` は `E_UNSUPPORTED`。
+3. `rename` / `codeAction` の `WorkspaceEdit` は `edit/plan.py` の `Plan`（hunk 列）に変換して返すだけで、**書き込みは `EditTransaction`** が行う（ADR-11）。ファイルの作成・削除を含む `WorkspaceEdit` は `E_UNSUPPORTED`（実測ではどのサーバーも `resourceOperations` は 0 件）。`changes` と `documentChanges` の**両方の形**を変換する（サーバーごとの形は §7.5.1 の表。`textDocument.version` は `null`＝版検査なし。S-4・S-5 で確認）。開いたのが定義側 1 ファイルだけでも、basedpyright の `rename` は呼び元の編集も返す。
+- **Python の `codeAction`（quickfix・organizeImports・fixAll）は ruff に送る**（PaaD への反映ではなく送り先の規約）。`LspFeatures.code_actions` は Python では ruff に送り、basedpyright には送らない。`resolve_code_action` は ruff のためにある（`data` あり・`edit` 無しが返り、`codeAction/resolve` で `edit` が付く）。TypeScript の organizeImports は経路が違う（§7.5.1 の表）ため、サーバー定義ごとに持つ。
 
 受入で確かめる点:
 
@@ -1197,14 +1241,14 @@ authorizer の判定表（`sqlite3` の定数名）:
 | `SQLITE_SELECT`, `SQLITE_RECURSIVE` | 許可 |
 | `SQLITE_READ(table, column)` | `table` が公開 10 テーブル・`symbols_fts` とその影テーブル（`symbols_fts_config` / `_data` / `_docsize` / `_idx`。FTS5 の内部クエリにも authorizer が呼ばれる）・`json_each` / `json_tree`・`temp_grep_matches` なら許可。列を読まない参照（`count(*)`、CTE・サブクエリの別名）は `READ(名, '', None)` で届くので、DB に実在する非公開名（`_` 始まり、`sqlite_`、`pragma_`、起動時の `sqlite_master` の写し）だけ拒否し、それ以外は別名として通す（副作用: `WITH _meta AS (SELECT 1) SELECT count(*) FROM _meta` も拒否される。許容）。それ以外（`_` 始まりの内部テーブル、`sqlite_master` を含む）は拒否 |
 | `SQLITE_FUNCTION(name)` | 組み込みの集計・文字列・日付・JSON・FTS5 関数と Lucianke 登録の読み取り専用関数なら許可。`load_extension`, `readfile`, `writefile`, `edit`, `fts5` の書き込み系は拒否 |
-| `SQLITE_PRAGMA(data_version)`（引数なし） | 許可（FTS5 の `MATCH` が内部で読む。拒否すると `authorization denied` で失敗する） |
-| それ以外（INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / ATTACH / DETACH / PRAGMA（`data_version` を除く）/ TRANSACTION …） | 拒否。`ATTACH`（24）は `SQLITE_FORMAT` と数値が衝突するので名前で扱う |
+| `SQLITE_PRAGMA(data_version)`・`SQLITE_PRAGMA(query_only)`（引数なしの読み取り） | 許可（`data_version` は FTS5 の `MATCH` が内部で読む。拒否すると `authorization denied` で失敗する。`query_only` は読み取りだけ。利用者が書いた `PRAGMA` は手順 1 の禁止語検査で先に拒否される。実装で確定 2026-10-29） |
+| それ以外（INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / ATTACH / DETACH / PRAGMA（`data_version` と `query_only` の読み取りを除く）/ TRANSACTION …） | 拒否。`ATTACH`（24）は `SQLITE_FORMAT` と数値が衝突するので名前で扱う |
 
 FTS5 の内部読み取りと利用者の `SELECT * FROM symbols_fts_data` は authorizer で区別できない（内容は公開列から導出した索引なので害は無い）。
 
 拒否は `E_QUERY_REJECTED(non_public_object)` または `(forbidden_keyword)` に写す。例外は `sqlite3.DatabaseError` 1 本で受け（`OperationalError` はその子）、`guard.denied`（`non_public_object` / `forbidden_keyword`）と `guard.timed_out`（`E_TIMEOUT`）で分ける。`ProgrammingError` は `multiple_statements`、または bind 不足の `E_INVALID_ARGUMENT`。
 
-`mode=ro`・`query_only`・authorizer の 3 重は、**DB 本体への書き込みについて、どれか 1 つが欠けても他が効く**（MUST。テストでは 1 つずつ外して書き込み文が通らないことを確かめる。S-7 で 25 種の書き込み系の文 × 層の 8 通りを DB ファイルの前後比較で確認）。ただし副作用は別で、次を既知として明記する: ① `ATTACH` は `mode=ro` + `query_only` でも**任意パスに 0 バイトのファイルを作り**（`mode=ro` だけなら ATTACH 先へ書ける）、② `query_only` 単独は `PRAGMA journal_mode` で DB を変更でき、`PRAGMA query_only=OFF` で自分を外せる（`mode=ro` は外しても拒否のまま）。副作用を止められるのは authorizer と手順 1 の禁止語検査だけなので、**禁止語検査は省かない**。テストには「層を 1 つ外す」ことに加え、「authorizer を外した状態では `ATTACH` が 0 バイトのファイルを作る」ことを既知の挙動として書く。
+実装は静的検査（手順 1）を含めて **4 段**（静的検査 → `mode=ro` → `query_only` → authorizer）で守る。このうち `mode=ro`・`query_only`・authorizer の 3 重は、**DB 本体への書き込みについて、どれか 1 つが欠けても他が効く**（MUST。テストでは 1 つずつ外して書き込み文が通らないことを確かめる。S-7 で 25 種の書き込み系の文 × 層の 8 通りを DB ファイルの前後比較で確認）。ただし副作用は別で、次を既知として明記する: ① `ATTACH` は `mode=ro` + `query_only` でも**任意パスに 0 バイトのファイルを作り**（`mode=ro` だけなら ATTACH 先へ書ける）、② `query_only` 単独は `PRAGMA journal_mode` で DB を変更でき、`PRAGMA query_only=OFF` で自分を外せる（`mode=ro` は外しても拒否のまま）。副作用を止められるのは authorizer と手順 1 の禁止語検査だけなので、**禁止語検査は省かない**。テストには「層を 1 つ外す」ことに加え、「authorizer を外した状態では `ATTACH` が 0 バイトのファイルを作る」ことを既知の挙動として書く。
 
 受入で確かめる点:
 
@@ -1388,8 +1432,8 @@ class Plan:
 仕様書 §10.7 の実装。
 
 1. **編集前スナップショット**（Resolved で取る）: 対象ファイルと **直接の参照元ファイル** について `diagnostics` を読む。参照元は `relations` で `target_urn ∈ Plan.target_urns` かつ `source_file_id ≠ 対象` の `source_file_id` を、関係行数の多い順に最大 20 ファイル。それぞれの行を同一性キー `(file, source, code, message, enclosing_urn)` で辞書にする。行番号は使わない。
-2. **対象ファイルの開き直し**: Reindexed で `lsp/documents.py` が対象ファイルに `didChange`（版 `v_n`）を送る。参照元ファイルは LSP が開いていなければ `didOpen` する（LSP は開いている文書にしか診断を再発行しないことが多いため。S-4 / S-5 で確認）。
-3. **待ち**: `DiagnosticsWaiter.wait(paths, min_versions, timeout_ms=diagnostics_wait_ms)`。各パスについて「版 ≥ `v_n` の `publishDiagnostics` を受信した」ことを条件とする。版が付かない LSP では「`didChange` 送信時刻より後の受信」を条件にする。参照元は「`didOpen` / 最後の `didChange` 以後の受信」。`diagnostics_wait_ms == 0` なら待たず 5 へ。
+2. **対象ファイルの開き直し**: Reindexed で `lsp/documents.py` が対象ファイルに `didChange`（版 `v_n`）を送り、`workspace/didChangeWatchedFiles`（`type: 2`）を送る。**`didChangeWatchedFiles` が必須**: basedpyright はディスクの書き換えだけでは依存元の診断を更新せず（3 秒待っても無し）、送ると 40 ms で再発行する（S-4 で確認）。参照元ファイルの診断を取りたいときは、LSP が開いていなければ `didOpen` する（`diagnosticMode: openFilesOnly` では開いた文書の診断しか来ない）。`references` / `rename` / `callHierarchy` のために参照元を開く必要は無い（未オープンの文書も対象になる）。開いていないファイルの診断を TypeScript の 2 サーバーが再発行するかは未確認（S-5）。
+3. **待ち**: `DiagnosticsWaiter.wait(paths, min_versions, timeout_ms=diagnostics_wait_ms)`。各パスについて「版 ≥ `v_n` の `publishDiagnostics` を受信した」ことを条件とする。版が付かない LSP では「`didChange` 送信時刻より後の受信」を条件にする。参照元は `didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止（§7.5.5 の 2 (b)。版が旧いまま届くため版では判定できない）。`diagnostics_wait_ms == 0` なら待たず 5 へ。
 4. **受信側**: `lsp/diagnostics.py` は受信のたびに `diagnostics` テーブルの当該ファイル行を全置換する（`IndexWriter`）。待ちの完了は、この書き込みが終わった後に通知する（EP-7: 直後の `get_diagnostics` と整合させるため）。
 5. **差分**: 揃ったファイルについて、現在の `diagnostics` 行を同じキーで辞書にし、`added = after − before`、`resolved = before − after`。`added[]` / `resolved[]` の要素は T-08 の診断オブジェクトと同形（行番号は現在値）。
 6. **状態**: 対象ファイルと参照元がすべて揃えば `"complete"`、1 つでも揃わなければ `"pending"`（揃った分だけ入れ、`checked_files[]` に `{path, fresh: bool}`）。`dry_run` で予測診断を行わなかったときは `"not_computed"`。
@@ -1409,7 +1453,7 @@ class DiagDelta:
 
 | ツール | `plan_builder` が作るもの | 固有の前段 | 再索引後の対応付け |
 |---|---|---|---|
-| T-10 `edit_symbol_body` | `replace_body`: `syntax/boundaries.py` の定義範囲（デコレータ・属性・直前 Doc コメント込み）を 1 hunk で置換。`insert_before` / `insert_after`: 定義範囲の直前・直後（行頭 / 行末の改行後）に空の範囲で挿入。`insert_member`: 親の最後のメンバの定義範囲末尾（無ければ本体先頭。Python の `pass` だけの本体は `pass` 文を置換）。`delete_symbol`: 定義範囲 + 行末の改行 + 規定数を超える後続空行 | `new_code` を §7.7.3 で正規化。`insert_member` の対象が本体を持たなければ `E_INVALID_ARGUMENT`。降格ファイルで終了行の候補が 2 つ以上なら `E_MUTATION_BLOCKED` | 再索引後、hunk の適用後開始行（デコレータを除いた最初の行）から始まるシンボルを `symbols` で引き、その URN を `target_urn`、範囲を `new_range` にする。`delete_symbol` は `None` |
+| T-10 `edit_symbol_body` | `replace_body`: `syntax/boundaries.py` の定義範囲（デコレータ・属性・直前 Doc コメント込み）を 1 hunk で置換。`insert_before` / `insert_after`: 定義範囲の直前・直後（行頭 / 行末の改行後）に空の範囲で挿入。`insert_member`: 親の最後のメンバの定義範囲末尾（無ければ本体先頭。Python の `pass` / `...` だけの本体はその文を置換）。`delete_symbol`: 定義範囲 + 行末の改行 + 規定数を超える後続空行 | `new_code` を §7.7.3 で正規化。`insert_member` の対象が本体を持たなければ `E_INVALID_ARGUMENT`。降格ファイルで終了行の候補が 2 つ以上なら `E_MUTATION_BLOCKED` | 再索引後、hunk の適用後開始行（デコレータを除いた最初の行）から始まるシンボルを `symbols` で引き、その URN を `target_urn`、範囲を `new_range` にする。`delete_symbol` は `None` |
 | T-11 `rename_symbol` | `prepareRename` → `rename(newName)` → `WorkspaceEdit` → `plan.from_workspace_edit` | LSP が `ready` でなければ `E_LSP_UNAVAILABLE`。`new_name` が識別子でなければ `E_INVALID_ARGUMENT`。降格モード（字句置換）では対象ファイル内に `new_name` が単語として既出なら `E_MUTATION_BLOCKED` | Resolved で対象ファイル群の `symbols` を `(path, selection 開始位置)` つきで控え、再索引後に `LineIndex.shift`（前方 hunk の行・列ずれ）で位置を写像して突き合わせ、`qualified_name` が変わった全シンボルの旧 URN → 新 URN を `urn_map` にする |
 | T-12 `structural_search_replace` | `syntax/structural.py` の一致ごとに `(range, replacement)` → hunk。`rewrite` 無しなら計画を作らず読み取りのみ | `pattern` / `rewrite` の解析失敗は `E_SYNTAX_INVALID`。一致数が `max_matches` を超えたら計画を作らず `applied: false`。`dry_run` 既定 `true` | 不要（`matches[]` を返す） |
 | T-13 `apply_code_action` | `codeAction`（または保持中の ID）→ 必要なら `codeAction/resolve` → `edit` → `plan.from_workspace_edit` | ID の発行後に sha が変わっていれば `E_PRECONDITION_FAILED`（`code_action_id_expired`）。`command` だけのアクションは `E_UNSUPPORTED` | 不要。`target_diagnostic_resolved` は `DiagDelta.resolved` に ID の診断キーが含まれるかで決める |
@@ -1503,7 +1547,7 @@ compact の `! DEGRADED: confidence=… engine=… lang=…` 行と 2 行目の 
 
 ### 7.9.1 M1 の範囲: リビジョン解決と仮想ツリー（vtree.py、仕様書 §8.5）
 
-dulwich（Apache-2.0 側を選択。第 16 章、OD-20）を用いる想定で、M1 で必要なのは次の 3 つだけ（能力は S-8 で確認）。
+dulwich（Apache-2.0 側を選択。第 16 章、OD-20）を M1 の第一候補として維持する（S-8: M1 の用途である参照解決・blob・`STAGED`・`.gitignore`・不変性は合格で 1〜5 ms）。M1 で必要なのは次の 3 つだけ。
 
 ```python
 class GitRepo:                               # git/repo.py
@@ -1521,7 +1565,11 @@ class ResolvedRevision:
     display: str                              # ヘッダの rev= に出す（入力をそのまま）
 ```
 
-`resolve_revision` が受けるもの: `WORKING_TREE`、`STAGED`、`HEAD`、`HEAD~N` / `HEAD^`、ブランチ名（`refs/heads/`）、タグ名（`refs/tags/`、注釈付きタグは剥がす）、リモート追跡名（`refs/remotes/`）、40 桁 SHA、4 桁以上の一意な短縮 SHA。それ以外の構文（`@{...}`、範囲 `a..b`、`:path`）は `E_REVISION_NOT_FOUND`（`details.hint: "対応する指定: WORKING_TREE, STAGED, HEAD, HEAD~N, ブランチ, タグ, SHA"`）。短縮 SHA の一意性確認がオブジェクト数に比例して遅い場合は、`git_commits`（M2 で埋まる）を先に引き、無ければ走査する（S-8）。
+`resolve_revision` が受けるもの: `WORKING_TREE`、`STAGED`、`HEAD`、`HEAD~N` / `HEAD^`、ブランチ名（`refs/heads/`）、タグ名（`refs/tags/`、注釈付きタグは剥がす）、リモート追跡名（`refs/remotes/`）、40 桁 SHA、4 桁以上の一意な短縮 SHA。それ以外の構文（`@{...}`、範囲 `a..b`、`:path`）は `E_REVISION_NOT_FOUND`（`details.hint: "対応する指定: WORKING_TREE, STAGED, HEAD, HEAD~N, ブランチ, タグ, SHA"`）。
+
+実装は**許可リスト方式**にする（S-8 で確認）: 前置検査で `@{…}`・`a..b`・`:path`・`^{}`・空白や `:?*[\` を含む名前を拒否し（dulwich の `parse_object` は `HEAD@{1}`・`HEAD:README.md`・`^{}` を受理してしまい、短縮 SHA を基点にした `a9477ab~1` は解せない）、基点を `parse_commit` で解決してから `~N` / `^N` を `parse_object` で辿る。`KeyError`（無い名前・3 桁以下の SHA）・`ValueError`（`HEAD~9999`・親が足りない・タグがツリーを指す）・`objectspec.AmbiguousShortId`（`Exception` 直下で `KeyError` ではない）の 3 つを `E_REVISION_NOT_FOUND` に束ねる（曖昧は `details.reason: "ambiguous"`）。4 桁以上の短縮 SHA の解決は 15,757 オブジェクトの規模（pallets/click）でも約 5 ms なので、`git_commits` を先に引く最適化は M1 では要らない。
+
+`GitRepo` は **`Repo` を保持しない**。要求ごとに `with Repo(root)` で開閉する（開き直しは +1〜3 ms。pack を開いたままだと、利用者の `git gc` / `repack` が Windows で `winerror=32` で失敗する）。`open()` は `Repo.discover` ではなく `Repo(root)` を使い、`NotGitRepository` を捕まえて `None` を返す（モノレポのサブディレクトリを作業ルートにするときのパス前置は M2）。`read_blob` は `lookup_path` の `KeyError` / `NotTreeError` / `SubmoduleEncountered`、および結果が `Tree`（ディレクトリ）のときに `None` を返す（ツリーのパスは UTF-8 の `bytes`）。`read_staged_blob` は `repo.open_index()[path]` を読むだけで（ロックも書き込みもしない）、競合中の `ConflictedIndexEntry` は `this` を採り、未追跡は `None`。
 
 `VirtualTree`（要求の間だけ生きる）:
 
@@ -1531,7 +1579,7 @@ class ResolvedRevision:
 4. `ToolContext.file_source(path)` は `revision` が `WORKING_TREE` なら作業ツリー、それ以外なら `VirtualTree` を見る。T-02 / T-05 はこの 1 つの入口だけを使い、`revision` を意識しない。
 5. 応答のヘッダは `rev=<display>`、`engine_used = "tree-sitter@<短縮 SHA>"`、最高水準 `structural`（LSP を使わない）、`accuracy_warning` に「過去断面のため LSP を使わず構文木で解析した」。
 6. パス名は `workspace/paths.py` の封じ込めを通す。Git のツリー項目に `..` や絶対パスが含まれていれば拒否する。
-7. 検査: 任意の `revision` 指定の読み取りの前後で、作業ツリー全ファイルの sha と `.git` 配下の sha が変わらない（M2-5 の受入をこの形で機械化する。M1 でも T-02 / T-05 に対して走らせる）。
+7. 検査: 任意の `revision` 指定の読み取りの前後で、作業ツリー全ファイルの sha と `.git` 配下の sha が変わらない（M2-5 の受入をこの形で機械化する。M1 でも T-02 / T-05 に対して走らせる）。`porcelain.status` を使うときは **`optional_locks=False` を MUST** とする（既定の `True` は、stat だけが変わったファイルがあると `.git/index` を書き換える。S-8 で確認）。機械検査は `git status` を先に 1 回流してから `index` の sha を測る（`git status` 自体も index を更新するため）。
 
 M1 で `revision` を受けるのは T-02 と T-05 だけ（仕様書 §8.5）。他の読み取りツールは `E_UNSUPPORTED`（`details.reason: "revision_not_supported_until_M2"`）。
 
@@ -1539,9 +1587,10 @@ M1 で `revision` を受けるのは T-02 と T-05 だけ（仕様書 §8.5）�
 
 内部設計は M2 着手時に本書を改版して足す。ここでは境界と不変の規約だけを置く。
 
-- `history.symbol_changes(repo, path, *, since, max_commits) -> list[SymbolChange]`: ファイル名変更を追跡した履歴（`git log --follow` 相当。dulwich の walker と改名検出の能力は S-8）を新しい順に辿り、各コミットの前後の blob を `SyntaxEngine` で `SymbolRecord` 集合にして、`(qualified_name, kind)` で突き合わせ、`body_sha256` の異同と正規化シグネチャの異同で `ADDED` / `DELETED` / `MODIFIED_SIG` / `MODIFIED_BODY` / `RENAMED` を決める（仕様書 T-17 処理規約 3）。結果は `git_symbol_changes` に `IndexWriter` 経由で追記し、2 回目以降は索引済み範囲を飛ばす。
+- `history.symbol_changes(repo, path, *, since, max_commits) -> list[SymbolChange]`: ファイル名変更を追跡した履歴（`git log --follow` 相当。**dulwich の `Walker` は使わない**: F-PY 規模の pallets/click で `src/click/core.py`〔git は 431 件、改名 2 回〕に 13〜17 秒かかり、件数も git と食い違う〔`git log --follow` は 106 ms〕。自前の path 限定 walk〔親との `(mode, sha)` 比較〕でも無制限で 1.8 秒、`max_commits=500` に区切って 392 ms。S-8 で確認）を新しい順に辿り、各コミットの前後の blob を `SyntaxEngine` で `SymbolRecord` 集合にして、`(qualified_name, kind)` で突き合わせ、`body_sha256` の異同と正規化シグネチャの異同で `ADDED` / `DELETED` / `MODIFIED_SIG` / `MODIFIED_BODY` / `RENAMED` を決める（仕様書 T-17 処理規約 3）。結果は `git_symbol_changes` に `IndexWriter` 経由で追記し、2 回目以降は索引済み範囲を飛ばす。
 - `cochange.aggregate(repo, *, window=CO_CHANGE_WINDOW)`（`CO_CHANGE_WINDOW = 500`）: 直近 `window` コミットの変更ファイル集合から対 `(a, b)` の共起回数と `a` の変更回数を数え、`git_co_changes` を全置換する。シンボル単位は `git_symbol_changes` から同様に。`HEAD` の移動（`.git/HEAD` と `refs/` の監視、または要求時の照合）で増分更新する。
-- Git 層は作業ツリーを書かない（MUST）。シェルの `git` を起動しない（SHOULD NOT）。
+- Git 層は作業ツリーを書かない（MUST）。シェルの `git` を起動しない（SHOULD NOT）。**履歴の経路は M2 着手時に決める。S-8 の推奨（未決）**: 履歴専用に `git` 子プロセス（読み取り専用の `git log --follow --format=%H -n <max_commits> -- <path>` と `git diff-tree -r -M50% --name-status <a> <b>`、`LC_ALL=C`、`core/procs` 経由）を許可して上の SHOULD NOT の例外とし、`git` が無い環境のフォールバックは自前の path 限定 walk を `max_commits=500` に区切る形（git と件数・順序が完全には一致しない）にする。どちらでも `max_commits` を T-17 の引数にする。
+- 改名検出は `RenameDetector(store, rename_threshold=50)`（git 既定の 50%。dulwich の既定 60 は厳しく、click の R053 を D+A にする）。100 ファイルを超える大きな差分は 300 ms 級で、改名の判定が git と 1 件ずれうる（T-18 の `RENAMED` は本体ハッシュ一致が主なので影響は小さい）。
 - `git_commits` の取り込みは `cochange` / `history` の前段として `repo.walk(max=window)` で行う。
 
 ## 7.10 Verification Core（verify/）の境界
@@ -1927,17 +1976,17 @@ build-backend = "hatchling.build"
 | S-1 | `mcp` 2.x の低水準サーバーで、`tools/list` のスキーマを自前 JSON で返せるか、`tools/call` の結果に `structuredContent` と `isError` を載せられるか、`roots/list` を要求できるか、トランスポートに任意のバイナリストリーム（退避 fd）を渡せるか。あわせて、HTTP 系の依存（starlette / uvicorn 等）が extras で外せるか、外せないなら stdio 起動時に import されないか | 4 点とも可能で、SDK クライアントから往復できる | 高水準 API へ切替（スキーマは後処理で `additionalProperties: false` を付ける）。ストリームが渡せなければ `sys.stdout` を退避 fd のラッパに戻す | **合格**（[docs/spikes/S-01.md](spikes/S-01.md)）。4 点とも可で、SDK クライアントから往復できた。HTTP 系の依存は extras で外せず stdio でも import される（起動 +約 190 ms、コールドスタート約 1.0 s）。ADR-2 は維持、ADR-3 は文言を修正 |
 | S-2 | `tree-sitter` 0.26 の API（`Language(mod.language())`、`Query` / `QueryCursor`）と、2024 年で更新が止まった文法（typescript / cpp / json / xml / toml）の ABI 互換 | 対象 7 文法で解析・タグクエリが通る | 互換しない文法は版を下げるか、`tree-sitter-language-pack` を避けて個別に再ビルド（ライセンス再確認） | **合格**（[docs/spikes/S-02.md](spikes/S-02.md)）。対象 7 文法を含む全 18 言語で解析・タグクエリが通る（ABI 14 / 15）。GIL とメモリ量（ソースの約 20〜26 倍）が前提と違い、ADR-13・§7.4.2 を改版 |
 | S-3 | `ast-grep-py` でパターン検索と書き換え案（メタ変数展開）が得られるか | `print($MSG)` → `logger.info($MSG)` の一致と置換テキストが取れる | M2 まで保留。自前の Tree-sitter クエリで検索のみ | **合格**（[docs/spikes/S-03.md](spikes/S-03.md)）。`print($MSG)` → `logger.info($MSG)` の一致と置換テキストが Python・TS・TSX・JS で取れた。`replace` はメタ変数を展開しないので展開は自前（代替は不要） |
-| S-4 | `basedpyright` を pip で入れ、`basedpyright-langserver --stdio` 相当で起動し、`initialize` → `didOpen` → `publishDiagnostics` → `definition` が通るか。`positionEncodings` に `utf-8` を返すか | Windows / macOS / Linux で通る | `pyright` + Node を利用者の環境に求める | 未反映（報告書の作成中。完了後に反映） |
-| S-5 | `vtsls` または `typescript-language-server` の探索・起動・`definition` / `references` / `rename` | 1 つ以上で通る | TS は best effort に格下げ（OD-7 の改版） | 未反映（報告書の作成中。完了後に反映） |
-| S-6 | `watchfiles` の Windows での検知遅延・デバウンス・ネットワークドライブの挙動 | 単一ファイル変更をイベントまで 100 ms 以内で受ける | ポーリング（仕様書 §12.4 の 6） | 未反映（報告書の作成中。完了後に反映） |
+| S-4 | `basedpyright` を pip で入れ、`basedpyright-langserver --stdio` 相当で起動し、`initialize` → `didOpen` → `publishDiagnostics` → `definition` が通るか。`positionEncodings` に `utf-8` を返すか | Windows / macOS / Linux で通る | `pyright` + Node を利用者の環境に求める | **合格**（[docs/spikes/S-04.md](spikes/S-04.md)）。Windows 11 のみ実測（macOS / Linux は CI で確認）。basedpyright は起動 377 ms で `initialize`・診断・`definition`・`references`・`hover`・`rename`・`callHierarchy` が通り、ruff は診断・quickfix・organizeImports が通る。`positionEncoding` は basedpyright が返さず UTF-16、ruff が `utf-8`。インタープリタは `workspace/configuration` の `python` セクションだけで渡せる。§7.5・§7.7.6 を改版 |
+| S-5 | `vtsls` または `typescript-language-server` の探索・起動・`definition` / `references` / `rename` | 1 つ以上で通る | TS は best effort に格下げ（OD-7 の改版） | **合格**（[docs/spikes/S-05.md](spikes/S-05.md)）。vtsls・typescript-language-server の両方で `definition` / `references` / `rename` が通る。診断は typescript-language-server が常に最新で空配列も届くため、**既定を typescript-language-server に入れ替え**、vtsls は tsserver が見つからないときの代替にした（OD-7 の改版は不要）。どちらも `publishDiagnostics.version` を返さず、vtsls は古い診断を返すことがある。§7.5・§7.7.6 を改版 |
+| S-6 | `watchfiles` の Windows での検知遅延・デバウンス・ネットワークドライブの挙動 | 単一ファイル変更をイベントまで 100 ms 以内で受ける | ポーリング（仕様書 §12.4 の 6） | **合格（`step=10` を指定した場合）**（[docs/spikes/S-06.md](spikes/S-06.md)）。単発変更が p50 18.8 / p95 19.9 ms で届く（既定の `step=50` では p95 100.6 ms で境界）。バースト検知・イベント種別・ディレクトリ移動の扱いが想定と違い、§7.3.6 を改版。ネットワークドライブは未検証 |
 | S-7 | `sqlite3` の `set_authorizer` / `set_progress_handler` / `mode=ro` URI が WAL の DB で動くか（`-shm` の扱い含む）、`query_only` が書き込みを拒否するか | 書き込み文が 3 重のどの層でも拒否される | `mode=ro` を外して `query_only` + authorizer の 2 重にする（その旨を仕様書に反映） | **合格**（[docs/spikes/S-07.md](spikes/S-07.md)）。DB 本体への書き込み文は 3 層のどの 1 層でも拒否される。ただし `ATTACH` の空ファイル作成と `PRAGMA journal_mode` は authorizer と禁止語検査でのみ止まる。§7.6.4 を改版 |
-| S-8 | `dulwich` で参照解決・blob 取得・ツリー差分・改名追跡が F-PY 規模で何 ms か | `HEAD~3` の blob 取得が 50 ms 以内、`log --follow` 相当が 500 ms 以内 | `pygit2`（L-3 の手続き）または `git` 子プロセス | 未反映（報告書の作成中。完了後に反映） |
+| S-8 | `dulwich` で参照解決・blob 取得・ツリー差分・改名追跡が F-PY 規模で何 ms か | `HEAD~3` の blob 取得が 50 ms 以内、`log --follow` 相当が 500 ms 以内 | `pygit2`（L-3 の手続き）または `git` 子プロセス | **部分合格**（[docs/spikes/S-08.md](spikes/S-08.md)）。M1 の範囲（参照解決・blob・`STAGED`・`.gitignore`・不変性）は合格で、`HEAD~3` の blob は 2.2 ms。**`log --follow` 相当は F-PY 規模で不合格**（dulwich の `Walker` が 13〜16 秒、自前の path 限定 walk でも 1.8 秒。`git log --follow` は 106 ms）。M1 は dulwich 維持、M2 の履歴は「履歴専用の `git` 子プロセス」案（推奨・未決）。§7.9 を改版 |
 | S-9 | Python + SDK の往復オーバーヘッド: 何もしないツールと `get_file_skeleton`（キャッシュ済み）の p95 | 何もしないツールで p95 < 10 ms、骨格で p95 < 50 ms | JSON 直列化・pydantic 検証の最適化、ダメなら OD-1 (c) | **合格**（[docs/spikes/S-09.md](spikes/S-09.md)）。何もしないツールの往復 p95 1.08 ms（条件 10 ms）。骨格（T-02）の p95 < 50 ms は実装後に測る |
 | S-10 | Windows で `os.replace` の対象をエディタが開いているときの挙動と再試行の効果 | 5 回以内の再試行で成功するか、失敗を検知してロールバックできる | 一時ファイルに書いて内容をコピーする方式（原子性は劣る。仕様書に注記） | **合格**（[docs/spikes/S-10.md](spikes/S-10.md)）。失敗は `PermissionError`（winerror 5・32）で確実に検知でき target は無傷。50 ms の保持は 4 回目の試行で成功。再試行の条件と間隔を §7.7.5 で改版 |
-| S-11 | basedpyright / vtsls / rust-analyzer / gopls / clangd の `positionEncodings` 交渉結果 | 各サーバーの単位が分かり、`LineIndex` の変換で非 ASCII 行の位置が一致する | UTF-16 固定 | 未反映（報告書の作成中。完了後に反映） |
-| S-12 | トークン推定の係数を `o200k_base` と比べて較正 | 仕様書 §14 のコーパスで誤差 ±10% | 係数表を文字種別にさらに分ける | 未反映（報告書の作成中。完了後に反映） |
+| S-11 | basedpyright / vtsls / rust-analyzer / gopls / clangd の `positionEncodings` 交渉結果 | 各サーバーの単位が分かり、`LineIndex` の変換で非 ASCII 行の位置が一致する | UTF-16 固定 | **合格**（[docs/spikes/S-11.md](spikes/S-11.md)）。basedpyright・vtsls・typescript-language-server は応答に `positionEncoding` が無く UTF-16、ruff だけが `utf-8` を返す。`LineIndex` の変換は 4 サーバーで全件一致。`position_encoding_default` を削除し、文字境界の列だけを送る規則を足した。rust-analyzer・gopls・clangd は未導入で未測定 |
+| S-12 | トークン推定の係数を `o200k_base` と比べて較正 | 仕様書 §14 のコーパスで誤差 ±10% | 係数表を文字種別にさらに分ける | **現行の係数は不合格、代替で合格見込み**（[docs/spikes/S-12.md](spikes/S-12.md)）。日本語 Markdown が −16〜−17%、compact 出力が −11%、base64 などが −43〜−63% で、いずれも過小。文字種別に分けるだけでは足りず、連の数を数える `lean_wide`（8 項）で種類別の合計誤差が ±3.3% 以内（交差検証の保持側）。§7.2.1 を改版し、`core/tokens.py` の置き換えを依頼 |
 
-結果の欄は反映済みのスパイクだけを埋めた。S-4・S-5・S-6・S-8・S-11・S-12 は報告書の作成中で、完了後に反映する（反映の一覧は [docs/spikes/SYNC-1.md](spikes/SYNC-1.md)）。
+結果の欄は S-1〜S-12 のすべてを埋めた（反映の一覧は [docs/spikes/SYNC-1.md](spikes/SYNC-1.md)〔S-1・S-2・S-3・S-7・S-9・S-10〕と [docs/spikes/SYNC-2.md](spikes/SYNC-2.md)〔S-4・S-5・S-6・S-8・S-11・S-12 と構築の担当の報告〕）。
 
 ## 12.2 M1 の着手順（最初の 12 タスク）
 
@@ -1945,7 +1994,7 @@ build-backend = "hatchling.build"
 
 | # | タスク | 成果物 | 確かめ方 | 依存 |
 |---|---|---|---|---|
-| 1 | S-1、S-2、S-7、S-9 のスパイク（S-3・S-10 も実施済み。結果は §12.1） | `docs/spikes/` | 各合格条件 | なし（並列） |
+| 1 | 12 本のスパイク（実施済み。結果は §12.1） | `docs/spikes/` | 各合格条件 | なし（並列） |
 | 2 | リポジトリ骨格: `pyproject.toml`、`src/lucianke` の空パッケージ、`core/`、CI（lint / test / license） | ビルドとテストが空で通る | CI 緑、`pip-licenses` 緑 | なし |
 | 3 | `core`（model / urn / errors / records / textpos / limits） | 単体テスト | `urn` の往復、`LineIndex` の非 ASCII | 2 |
 | 4 | `mcp`（server / registry / pipeline / envelope / budget / render.compact / render.json） | 何もしないツール `ping`（開発時だけ登録し `tools/list` に載せない）が SDK クライアントから往復 | S-9 の型（`spikes/s01_mcp/bench.py`）を `bench/` へ移して回帰の基準にする（実ツールでも同じ 500 回計測の p95 を CI に記録）、compact 文法パーサ | 1, 3 |
@@ -1970,14 +2019,15 @@ build-backend = "hatchling.build"
 | R-1 | Python の往復オーバーヘッドで NFR-PERF-1 を満たせない | S-9 で p95 > 50 ms | 直列化と検証の削減、レコードの遅延生成、骨格の事前計算。最後に OD-1 (c) | **縮小**（S-9: 何もしないツールの往復は p95 1.08 ms で、JSON 直列化・pydantic 検証の最適化は不要。T-02 の p95 は実装後に測る） |
 | R-2 | `mcp` SDK 2.x の API が想定と違う | S-1 不合格 | ADR-2 の代替。SDK の版を固定し、境界を `mcp/server.py` に閉じ込めてあるので影響は 1 ファイル | **解消**（S-1 合格。維持する前提は ADR-2） |
 | R-3 | 更新が止まった Tree-sitter 文法が 0.26 と合わない | S-2 不合格 | 版の固定、個別再ビルド、または当該言語を `structural` 不可の Tier 4 扱いに一時格下げ | **解消**（S-2: 読めない文法は無かった。18 言語すべて読み込み・クエリ可） |
-| R-4 | LSP サーバーごとの差（位置単位、`publishDiagnostics` の `version` 無し、`callHierarchy` 未対応） | e2e で位置ずれ・診断待ちのタイムアウト | `servers.py` にサーバー別の癖を集約。`FakeLsp` の録画で回帰を固定 | 継続（S-4・S-5・S-11 の反映待ち） |
+| R-4 | LSP サーバーごとの差（位置単位、`publishDiagnostics` の `version` 無し、`callHierarchy` 未対応） | e2e で位置ずれ・診断待ちのタイムアウト | `servers.py` にサーバー別の癖を集約。`FakeLsp` の録画で回帰を固定 | **縮小**（S-4・S-5・S-11: 位置単位は 4 サーバーで実測し `LineIndex` が全件一致。`version` が無い・古い診断を返すサーバー〔tsls・vtsls〕は §7.5.5 の規則で吸収。`callHierarchy` は basedpyright・tsls・vtsls で通る。残り: rust-analyzer・gopls・clangd の単位と診断は未測定） |
 | R-5 | Windows での共有違反・改行・大文字小文字 | EP-6 / EP-9 が Windows でだけ落ちる | CI を 3 OS で回す。`writer.py` の再試行とロールバック | **縮小**（S-10: 失敗は winerror 5・32 で確実に検知でき target は無傷。310 ms の再試行で 200 ms までの保持に勝てる。3 OS の CI は継続） |
 | R-6 | GIL により初回索引が遅い | 1 万ファイルの索引に分単位 | 許容する方針（師匠 2026-10-29）。索引中も降格応答で答え続けることと、`configure_workspace status` の進捗表示を優先する。プロセスプールや `lucianke index` の事前実行は、利用者が困ったときの手段として M2 以降（別プロセス 4 本で約 4 倍に伸びる。S-2） | 継続（S-2: スレッドプールは並列化しない） |
-| R-7 | `dulwich` の性能 | S-8 不合格 | OD-20 の (b) または (c) | 継続（S-8 の反映待ち） |
+| R-7 | `dulwich` の性能 | S-8 不合格 | OD-20 の (b) または (c) | **縮小**（S-8: M1 の用途は dulwich で合格〔1〜5 ms〕。M2 の履歴〔`log --follow`〕は F-PY 規模で `Walker` が不合格のため、OD-20 を「M1 は (a) 維持、M2 は (a) ＋履歴専用の `git` 子プロセス、(b) は M2 のベンチで測る」と読み替えることを推奨。未決） |
 | R-8 | ライセンスの許可リスト外が依存木に紛れ込む | CI の license ジョブが赤 | L-8 の検査を必須ジョブに。extras ごとに検査 | 継続 |
 | R-9 | 仕様書と設計の乖離 | 契約テストが仕様書の番号と合わない | 事後条件 → テスト名の対応を機械的に検査（§10.2） | 継続 |
 | R-10 | キャッシュディレクトリの肥大 | ディスク警告 | ジャーナル 50 件、ログ 7 日、構文木キャッシュの上限、`lucianke doctor` に使用量表示 | 継続 |
 | R-11 | `exact` の応答に LSP 往復が含まれ、NFR-PERF-1 が LSP の速度に左右される（§8.3 の 2 回目の呼び出し） | `definition` / `references` の p95 が LSP 待ちで 50 ms を超える | 結果を `relations` / `_hover_cache` に書いて 2 回目以降は PaaD から答える。S-9 で「LSP 待ちを含む p95」と「含まない p95」を分けて測り、仕様書 §14.4 の母集団定義（`exact` で応答した呼び出し）と照らす。超えるなら `WAIT_SHORT` の上限を下げて `structural` を先に返す | 継続（S-9 の往復は LSP 待ちを含まない値。LSP 待ちを含む p95 は実装後に測る） |
+| R-12 | トークン推定が実測より小さく、応答が `max_tokens` を超える（NFR-TOK の予算が守れない） | S-12 の種類別の合計誤差が ±10% を超える。`bench/run_bench.py` の較正が落ちる | `lean_wide`（§7.2.1）に替え、ベンチで較正を再実行する。必要なら係数を ×1.03 にして誤差を + 側へ寄せる | **縮小**（S-12: 旧係数は日本語で −16〜−17%、base64 で −43〜−63% と過小。`lean_wide` で ±3.3% 以内。TS・Go・Rust・韓国語は未検証） |
 
 ---
 
