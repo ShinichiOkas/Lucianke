@@ -12,7 +12,7 @@
 - `syntax/relations.py` の Python の走査（`_scan_python`）が、`def` の中の `import` / `from ... import` が束縛した名前を「その関数のローカル変数」の表（`scan.locals`）に入れていた。素の識別子の解決（`_resolve_bare`）は、ローカルに束縛された名前を参照に数えず捨てる（パラメータ・代入と同じ扱い）。import の行そのものは別の道（`_import_candidate`）で出るので、`IMPORTS` の行だけが残り、同じ関数の中の使用（`pytest.raises(LuciankeError)`）が落ちた。票の 237 行（import）が返り、239 行（使用）が返らない現象と一致する。`tests/unit/test_engine_indexer.py` 以外でも、関数の中で import した名前の使用はすべて同じ理由で漏れる。
 - もう 1 つの欠陥（同じ根）: 索引器の名前表（`imported_name_map`）はファイル全体で 1 枚（文書順で後勝ち）で、関数の中の import もモジュール直下の同名と混ざる。ローカル扱いで使用を捨てていたために表に出なかったが、使用を数えるようにすれば、別のスコープの同名の import を取り違える。
 
-## 直し方
+## 直し方（コミット 3b9a017）
 - スコープを区別して解決する。`ImportFact` に `nested`（Python: `def` / `class` の中の import。`if TYPE_CHECKING:`・`try:` のモジュール直下は含めない）を足した（`syntax/imports.py`）。索引器（`engine/indexer.py`）は、モジュール直下の import だけでファイルの名前表を作り、`nested` の import は文の開始位置ごとの名前表を持つ。`extract_relations` の新しい引数 `resolve_import(import 文の開始位置, 名前) -> URN` で引く。
 - `_Extractor` は、`def` / `class` の中の import が束縛した名前を、ローカル変数とは別の表（`scan.imports`: スコープのノード → 名前 → 文の位置）に控える。`_binding(name, node)` が使用箇所から内側のスコープへ向かって最初の束縛を探す（関数は外側まで、クラス直下の束縛は使用箇所がそのクラス直下のときだけ。`global` の名前はモジュールの名前）。import なら `resolve_import` でその文の先へ、ローカル変数なら従来どおり参照に数えない。`self.x` の型・`Foo.create()` のレシーバ・`import a.b` の連鎖・IMPORTS の行も同じ道を通る。
 - `resolve_import` を渡さない呼び手（`tools/_lsp_exact.py` の位置の分類）でも、使用は候補として残る（解決先は `resolve_name` で引く）。
