@@ -163,7 +163,7 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 
 | ID | 要求 | 受入 |
 |---|---|---|
-| FR-WS-1 | 起動時に MCP `roots/list` とマーカーファイル（`pyproject.toml`, `uv.lock`, `poetry.lock`, `package.json`, `Cargo.toml`, `go.mod`, `.git`）からワークスペース境界と Python 実行環境（`.venv`, `uv`, `poetry`, `conda`）を自動検出する | T-00 `status` の出力で検出結果が確認できる |
+| FR-WS-1 | 起動時に MCP `roots/list`（取れたとき。取れなければ cwd と T-00 `set_roots`。§5.1）とマーカーファイル（`pyproject.toml`, `uv.lock`, `poetry.lock`, `package.json`, `Cargo.toml`, `go.mod`, `.git`）からワークスペース境界と Python 実行環境（`.venv`, `uv`, `poetry`, `conda`）を自動検出する | T-00 `status` の出力で検出結果が確認できる |
 | FR-WS-2 | ルート・Python 環境・除外パターン・基準リビジョンを明示設定し、LSP とインデックスの状態を確認・再構築できる | T-00 |
 | FR-WS-3 | `revision` を指定すると、作業ツリーを変えずに Git オブジェクトから当該断面の仮想ツリーを構築して読み取りツールが解析する | 読み取りツール全般。§8.5 |
 | FR-EXP-1 | 重要度順（参照グラフ上のスコア）に並べたリポジトリ俯瞰マップを予算内で返す | T-01 |
@@ -280,7 +280,7 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 
 1. `stdout` を JSON-RPC 専用にし、ログを `stderr` とログファイルへ向ける（§12.1）。
 2. MCP `initialize` に応じ、`tools/list` を提供できる状態にする。
-3. `roots/list` を要求し、マーカーファイルからワークスペースと Python 環境を検出して `workspaces` に登録する。
+3. `initialized` の後に、取れれば `roots/list` を要求し（取れなければ cwd と T-00 `set_roots`。§5.1）、マーカーファイルからワークスペースと Python 環境を検出して `workspaces` に登録する。
 4. キャッシュ（§4.5）に前回の PaaD があれば開き、ファイルの `sha256` を照合して差分だけ再索引する。無ければ Tree-sitter で全ファイルの骨格を索引する（LSP は起動しない）。
 5. ファイル監視を開始する。
 
@@ -354,8 +354,8 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 - Lucianke は MCP サーバーとして `tools/list` と `tools/call` を提供する。トランスポートは **`stdio` のみ**（MUST）。ホストが Lucianke をコマンドとして子プロセス起動し、標準入出力で JSON-RPC をやり取りする。HTTP 系トランスポートは提供しない（師匠 2026-10-29「stdio のコマンド実行型。HTTP 型はあまり望ましくない」。必要が生じたら §17 OD-22 として改めて決める）。
 - 各ツールは `tools/list` で JSON Schema（入力スキーマ）を公開する。入力スキーマには第 5.2 節の共通パラメータを含めなければならない（MUST）。
 - ツール実行の結果は `tools/call` の `content[0]` に `type: "text"` として本章のエンベロープ（第 5.4 節）を格納する。`format: "json"` のときは、同じ JSON を `structuredContent` にも格納してもよい（MAY）。
-- ツール実行中の失敗（対象が見つからない、前提条件不一致など）は JSON-RPC エラーではなく、`isError: true` を伴う通常の結果として返す（MUST）。JSON-RPC エラーはプロトコル違反（未知のツール名、スキーマ違反の引数）に限る。
-- サーバーは MCP の `roots/list` を起動時に要求し、`notifications/roots/list_changed` を購読する（SHOULD）。
+- ツール実行中の失敗（対象が見つからない、前提条件不一致など）は JSON-RPC エラーではなく、`isError: true` を伴う通常の結果として返す（MUST）。**JSON-RPC エラーにするのは未知のツール名だけ**とする（プロトコル違反）。スキーマに違反する引数（未知のプロパティ・型違反・必須の欠落）は JSON-RPC エラーにせず、`isError: true` の通常の結果で `E_INVALID_ARGUMENT` を返す（エージェントが結果を読んで自己修正できる。設計書 §7.1.2。MCP SDK は引数を検証しないので、検証は Lucianke のパイプラインが行う。S-1 で確認）。
+- サーバーは、ホストが roots 能力を宣言していれば、`notifications/initialized` の後に MCP の `roots/list` を要求し（タイムアウト 5 s）、`notifications/roots/list_changed` が来たら取り直す（SHOULD）。**取れなくても動く**こと（MUST）: ホストが roots 能力を宣言しない場合、および roots の `list_changed` とサーバー起点の `roots/list` が仕様から消えた 2026-07-28 版の MCP では、カレントディレクトリをルート候補にし、`configure_workspace set_roots`（T-00）で登録できる（S-1 で確認。設計書 §6.5）。
 
 ## 5.2 共通パラメータ
 
@@ -493,7 +493,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 | コード | 意味 | 再試行の指針 | 付随情報 |
 |---|---|---|---|
-| `E_INVALID_ARGUMENT` | スキーマは通るが規約違反（非対応 format、小さすぎる max_tokens、ルート外パス、編集系に revision 指定） | 引数を直す | `details.param` |
+| `E_INVALID_ARGUMENT` | スキーマに違反する引数（未知のプロパティ・型違反・必須の欠落。JSON-RPC エラーにはしない。§5.1）、およびスキーマは通るが規約違反（非対応 format、小さすぎる max_tokens、ルート外パス、編集系に revision 指定） | 引数を直す | `details.param` |
 | `E_WORKSPACE_NOT_CONFIGURED` | `workspace_id` が未登録、または対象パスからルートを解決できない | `configure_workspace` を呼ぶ | `details.known_workspaces[]` |
 | `E_REVISION_NOT_FOUND` | `revision` を Git オブジェクトに解決できない | 参照名を直す | |
 | `E_TARGET_NOT_FOUND` | TargetRef が 0 件に解決 | 名前を `search_workspace_symbols` で確かめる | `details.searched_in` |
@@ -501,7 +501,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `E_LSP_UNAVAILABLE` | 操作に LSP が必須だが起動できない・応答しない（降格では代替できない操作: `rename_symbol`、`apply_code_action`） | LSP の導入状況を `configure_workspace status` で確認 | `details.language`, `details.reason` |
 | `E_PRECONDITION_FAILED` | 編集の前提不一致（`expected_file_sha256` 不一致、解決から書き込みまでの間に外部変更を検知）。**ファイルは変更されていない** | 対象を読み直して再実行 | `details.path`, `details.expected`, `details.actual` |
 | `E_SYNTAX_INVALID` | `new_code` / `rewrite` が対象言語として解析できない、または適用結果に構文エラーノードが生じる | コードを直す | `details.errors[] {line, message}` |
-| `E_MUTATION_BLOCKED` | 降格ファイルへの編集で、`allow_heuristic_mutation: true` があっても安全に確定できない（推定した境界が一意に決まらない、改名後の名前が対象ファイルに既出。第 10.5 節）。許可フラグが無いだけならエラーにせず dry_run に切り替える | 範囲を `get_symbol_bodies` で確かめ、対象を絞って再実行 | `details.confidence_level`, `details.reason` |
+| `E_MUTATION_BLOCKED` | 降格ファイルへの編集で、`allow_heuristic_mutation: true` があっても安全に確定できない（推定した境界が一意に決まらない、改名後の名前が対象ファイルに既出。第 10.5 節）、または Windows で対象が読み取り専用属性を持つ（`details.reason: "read_only_file"`。第 10.6 節）。許可フラグが無いだけならエラーにせず dry_run に切り替える | 範囲を `get_symbol_bodies` で確かめ、対象を絞って再実行 | `details.confidence_level`, `details.reason` |
 | `E_QUERY_REJECTED` | `query_project_db` に SELECT / WITH 以外、または禁止関数を含む文 | 文を直す | `details.reason` |
 | `E_CURSOR_EXPIRED` | `cursor` が無効または基データが更新済み | 先頭から呼び直す | |
 | `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる | 範囲を狭める | `details.partial` |
@@ -563,7 +563,7 @@ symbol-block = indent , "[" , kind , "] " , [ modifiers , " " ] , name , [ sig-i
 kind         = "Module" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type"
              | "Function" | "Method" | "Constructor" | "Field" | "Property" | "Variable" | "Constant"
              | "Table" | "Column" | "Endpoint" | "Message" | "Service" | "Node" | "Edge"
-             | "Cell" | "Tag" | "Key" | "Section" ;
+             | "Cell" | "Tag" | "Key" | "Section" | "File" ;
 modifiers    = modifier , { " " , modifier } ;
 modifier     = "pub" | "priv" | "prot" | "static" | "async" | "abstract" | "export" ;
 sig-inline   = "(" , text , ")" , [ " -> " , text ] ;
@@ -605,6 +605,7 @@ level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
 4. `conf=` は、応答内で `_resolution_meta.confidence_level` と異なる水準の要素にだけ付ける（混在時の個別表示）。
 5. `code-block` 内の `@L<n>: ` 接頭辞は `with_line_numbers: true`（既定）のとき付ける。コード本文はエスケープせずそのまま出す。コード内に ``` が含まれる場合はフェンスを ```` に延長する。
 6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。
+7. `kind` の `File` は、シンボルに分解せずファイル全体を 1 要素として扱う場合（T-18 の Tier 3 / Tier 4 のファイルの変更要素。`modified_symbols[].kind`）に使う。`symbols` テーブルには格納しない。
 
 ### 6.1.1 代表例
 
@@ -1055,7 +1056,7 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 |---|---|
 | 外部シンボル | ワークスペース外の対象（標準ライブラリ・依存パッケージ）は `is_external = 1`、`file_id = NULL`、URN は `lk://_ext/<パッケージ名>[@<版>]#<qualified>`。`relations.target_urn` から参照されるときに最小の行を作る |
 | `files.is_test` | 既定のパス規則で判定し、`configure_workspace` の `exclude_globs` とは独立。T-06 の `include_tests` と T-09 の `affected_test_targets` はこの列を使う |
-| `symbols.kind` | §6.1 の `kind` 語彙と同一。追加は本書の改版で行う |
+| `symbols.kind` | §6.1 の `kind` 語彙と同一（ただし `File` は応答上の要素で、`symbols` には格納しない）。追加は本書の改版で行う |
 | `relations.guard_condition` | 呼び出し箇所を直接囲む `if` / `match` / `try` / 三項式の条件を 1 行に正規化した文字列。無ければ NULL |
 | `git_co_changes` の方向 | `(a, b)` と `(b, a)` は別の行。`coupling_ratio` は `a` を変えたコミットのうち `b` も変えた割合 |
 | `git_co_changes.window_commits` | 既定 500。`configure_workspace` で変更できる（MAY） |
@@ -1080,8 +1081,8 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 ## 9.5 公開と保護
 
 - `query_project_db` の接続は読み取り専用で開き、`PRAGMA query_only = ON` を設定する（MUST）。
-- SQLite の authorizer で、上の 10 テーブルと `symbols_fts`、および一時テーブル `temp_grep_matches` 以外への参照を拒否する（MUST）。`_` で始まる内部テーブルは見えない。
-- `ATTACH`、`PRAGMA`（`query_only` の読み取りを除く）、`load_extension`、書き込み文はすべて `E_QUERY_REJECTED`（§13.2）。
+- SQLite の authorizer で、上の 10 テーブルと `symbols_fts`（FTS5 の影テーブル `symbols_fts_config` / `_data` / `_docsize` / `_idx` を含む）、`json_each` / `json_tree`、および一時テーブル `temp_grep_matches` 以外への参照を拒否する（MUST）。`_` で始まる内部テーブルは見えない。列を読まない参照（`count(*)`、CTE の別名）は、DB に実在する非公開名でなければ通す（S-7 で確認）。
+- `ATTACH`、`PRAGMA`（FTS5 が内部で読む `data_version` を除く）、`load_extension`、書き込み文はすべて `E_QUERY_REJECTED`（§13.2）。
 
 ---
 
@@ -1149,7 +1150,7 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 1. 対象ファイルごとに、書き込み前の内容をジャーナル（`<cache_root>/<workspace_hash>/journal/<edit_id>/<path>`）に退避する（MUST）。
 2. 新しい内容を **同じディレクトリの一時ファイル** に書き、`fsync` し、元のパスへアトミックに改名する（MUST）。複数ファイルのときは、全ファイルの一時ファイルを書き終えてから改名を始める。
 3. 改名の途中で失敗したら、改名済みのファイルをジャーナルから書き戻す（ロールバック）。ロールバック後に `E_INTERNAL` を返し、`details.rolled_back: true` と `details.log_ref` を入れる。
-4. 保持するもの: 改行コード（ファイル内の多数派。混在時は先頭行に従う）、末尾改行の有無、BOM、ファイルモード（実行ビット）。一時ファイルの改名でこれらが変わってはならない。
+4. 保持するもの: 改行コード（ファイル内の多数派。混在時は先頭行に従う）、末尾改行の有無、BOM、ファイルモード（実行ビット）。一時ファイルの改名でこれらが変わってはならない。ただし改名方式のため、NTFS の作成時刻・明示 ACE・代替データストリームは保持されない（mtime は書き込み時刻になる。S-10 で確認）。Windows で対象が読み取り専用属性を持つときは、属性を黙って外さず、何も書かずに `E_MUTATION_BLOCKED`（`details.reason: "read_only_file"`）を返す。
 5. ジャーナルは直近 50 トランザクション分を保持し、古いものから削除する。取り消しツールの追加は未決事項（§17 OD-5）。
 6. 事後条件: トランザクションの成否にかかわらず、「一部の hunk だけが適用されたファイル」が存在しない（NFR-SAFE-4）。
 
@@ -2229,7 +2230,7 @@ json `data`（共通フィールドに加えて）:
 
 | パラメータ | 型 | 必須 | 既定 | 規約 |
 |---|---|---|---|---|
-| `language` | string | 必須 | — | 対象言語 ID（`python`, `typescript`, `rust`, `go`, …）。文法を持たない言語は `E_UNSUPPORTED` |
+| `language` | string | 必須 | — | 対象言語 ID（`python`, `typescript`, `rust`, `go`, …）。文法を持たない言語は `E_UNSUPPORTED`（Tree-sitter の文法があっても ast-grep が対応しない `toml` / `xml` / `dtd` / `rst` / `sql` / `markdown_inline` を含む。S-3 で確認） |
 | `pattern` | string | 必須 | — | ast-grep 互換のパターン。メタ変数は `$NAME`（単一ノード）、`$$$NAME`（0 個以上の連続ノード） |
 | `rewrite` | string | 任意 | なし | 書き換えテンプレート。同じメタ変数を参照できる。省略時は検索のみ |
 | `constraints` | object | 任意 | なし | メタ変数名 → 正規表現。一致したノードのテキストがその正規表現に合うものだけを採る（MAY） |
@@ -2238,8 +2239,8 @@ json `data`（共通フィールドに加えて）:
 
 **処理規約**:
 
-1. `pattern`（および `rewrite`）を `language` の文法で解析できることを確かめる。解析できなければ `E_SYNTAX_INVALID`（`details.param: "pattern"` または `"rewrite"`）。
-2. 対象ファイルを列挙し（除外設定 §12 を適用）、各ファイルの構文木に対してパターン照合を行う。1 レコード = 一致 1 件。一致は `path` → `line` → `character` の順に並べる。
+1. `pattern`（および `rewrite`）を `language` の文法で解析できることを確かめる。解析できなければ `E_SYNTAX_INVALID`（`details.param: "pattern"` または `"rewrite"`）。ast-grep は不正なパターンでも例外にならず 0 件を返すことがあるので、一致が 0 件のときに限り、パターンが解析できない可能性を `warnings` に添えてよい（MAY。S-3 で確認）。
+2. 対象ファイルを列挙し（除外設定 §12 を適用）、各ファイルの構文木に対してパターン照合を行う。1 レコード = 一致 1 件。一致は `path` → `line` → `character` の順に並べる。入れ子の一致（外側の式と内側の式の両方がパターンに合う場合）は外側だけを採り、重なる一致を作らない（MUST。ast-grep は両方を返すので `outermost` を通す。S-3 で確認）。
 3. `rewrite` が無い場合、本ツールは読み取り専用である。`applied: false`、`files_changed: []` を返す。`allow_heuristic_mutation` と `expected_file_sha256s` は無視する。
 4. `rewrite` がある場合、一致ごとに置換テキストを生成し、ファイル単位でまとめて §10 の前提検証と構文検証を行う。置換後のファイルに新規の `ERROR` / `MISSING` ノードが生じるファイルが 1 つでもあれば、**どのファイルも書かずに** `E_SYNTAX_INVALID`（`details.errors[]` に該当ファイルと行）。
 5. `dry_run: false` のとき、全対象ファイルを §10 の原子的多ファイル書き込みで確定する。一致数が `max_matches` を超えるときは書き込まない。
@@ -2974,8 +2975,8 @@ json の `data`:
 
 **処理規約**
 
-1. **静的検査**: `query` を SQLite の準備段階（`prepare` 相当）に通し、次のいずれかなら `E_QUERY_REJECTED` とする（MUST）: 文が 2 つ以上ある（`;` 区切りの複文）／先頭のキーワードが `SELECT` / `WITH` 以外／`ATTACH` / `DETACH` / `PRAGMA` / `VACUUM` / `load_extension` / `writefile` / `readfile` を含む／公開ビュー以外のオブジェクトを参照する／構文エラー（`details.sqlite_message`）。許可する関数は SQLite 組み込みの集計・文字列・日付・JSON・FTS5 関数と、Lucianke が登録する読み取り専用関数に限る。
-2. **接続**: 読み取り専用で開き（`SQLITE_OPEN_READONLY` 相当）、`PRAGMA query_only = ON` を設定し、認可フック（authorizer 相当）で読み取り以外の操作を拒否する。3 重の防御のいずれか 1 つが欠けても他が効く構成とする（MUST）。
+1. **静的検査**: `query` を SQLite の準備段階（`prepare` 相当）に通し、次のいずれかなら `E_QUERY_REJECTED` とする（MUST）: 文が 2 つ以上ある（`;` 区切りの複文。末尾の `;` とコメントは許し、`;;` は複文とみなす）／先頭のキーワードが `SELECT` / `WITH` 以外／`ATTACH` / `DETACH` / `PRAGMA` / `VACUUM` / `load_extension` / `writefile` / `readfile` を含む／公開ビュー以外のオブジェクトを参照する／構文エラー（`details.sqlite_message`）。許可する関数は SQLite 組み込みの集計・文字列・日付・JSON・FTS5 関数と、Lucianke が登録する読み取り専用関数に限る。
+2. **接続**: 読み取り専用で開き（`SQLITE_OPEN_READONLY` 相当）、`PRAGMA query_only = ON` を設定し、認可フック（authorizer 相当）で読み取り以外の操作を拒否する。DB 本体への書き込みについて、3 重の防御のいずれか 1 つが欠けても他が効く構成とする（MUST。副作用を止められるのは authorizer と禁止語検査だけなので、これらは省かない。§13.2）。
 3. **一時テーブル**: `auto_fallback_grep_pattern` が指定されたとき、クエリ実行前に `temp_grep_matches(path TEXT, line INTEGER, snippet TEXT, confidence_level TEXT)` を接続ローカルの一時領域に作り、`.gitignore` と `exclude_globs` を尊重して単語境界付きで検索した結果を入れる。`confidence_level` は常に `'lexical_fallback'`。マッチ上限は 10,000 件で、超えたら `data.grep_fallback.truncated: true`。概念文書の「結果 0 件のとき自動的に grep」は採用せず、**指定があれば必ず作る** 決定論的な挙動とする。
 4. **バインド**: `params` の各キーは `query` 中に `:key` として現れなければならず、現れないキー、または `params` に無いバインド名があれば `E_INVALID_ARGUMENT`。
 5. **実行**: `limit + 1` 行まで取り、`limit + 1` 行目が存在すれば `truncated: true`。進捗ハンドラ（`progress_handler` 相当）で `timeout_ms` を監視し、超えたら中断して `E_TIMEOUT`（取得済みの行を `data.rows` に入れ、`details.partial: true`）。
@@ -3036,8 +3037,8 @@ json の `data`:
 ## 12.1 `stdio` トランスポートとストリーム隔離
 
 1. Lucianke 本体は起動直後、**最初の 1 バイトを書く前に**、ログ出力先を `stderr` とログファイル（§12.6）へ向ける（MUST）。`stdout` には改行区切りの JSON-RPC 2.0 メッセージ以外を書いてはならない（NFR-OPS-1）。
-2. 子プロセス（LSP、ctags、grep、ソルバ）は `stdout` / `stderr` を必ずパイプで捕捉し、親の `stdout` を継承させない（MUST）。子の `stderr` はログへ転送する。
-3. 標準ライブラリや依存ライブラリが `stdout` に書く経路（`print`、警告、進捗バー）は、起動時に `stdout` のファイル記述子を差し替えて `stderr` に流す（SHOULD）。
+2. 子プロセス（LSP、ctags、grep、ソルバ）は `stdout` / `stderr` を必ずパイプで捕捉し、親の `stdout` を継承させない（MUST）。子の `stderr` はログへ転送する。子に親の `stdin` を継承させない（fd 0 は NUL に差し替える。子が MCP の入力を横取りしないため。S-1 で確認）。
+3. 標準ライブラリや依存ライブラリが `stdout` に書く経路（`print`、警告、進捗バー）は、起動時に `stdout` のファイル記述子を差し替えて `stderr` に流す（SHOULD）。あわせて `stdin`（fd 0）も NUL に差し替え、MCP のトランスポートには退避した fd のストリームを明示的に渡す（設計書 ADR-3。S-1 で確認）。
 4. 受入: 起動から終了までの `stdout` を記録し、各行が JSON として解析でき、かつ JSON-RPC のメッセージであることを検査する（§14.2 の全テストで常時検査する）。
 5. HTTP 系トランスポートは提供しない（§5.1）。ネットワークを聴くポートを開かないことは §13.7 の受入でも確かめる。
 
@@ -3100,7 +3101,7 @@ json の `data`:
 
 | 資源 | 既定上限 | 超過時 |
 |---|---|---|
-| 構文木キャッシュ | 2,000 ファイルまたは 512 MB（LRU） | 古いものを破棄し再解析で賄う |
+| 構文木キャッシュ | 2,000 ファイルまたは 512 MB（LRU）。メモリは構文木の推定量（ソース長 × 25）で数える。構文木はソースの約 20〜26 倍のメモリを食う（S-2 で確認） | 古いものを破棄し再解析で賄う |
 | PaaD ファイルサイズ | 制限なし（目安として 10 万シンボルで 100 MB 程度を想定。実測は §14） | — |
 | 1 要求の処理時間 | 読み取り 10,000 ms、編集 30,000 ms | `E_TIMEOUT`（部分結果つき） |
 | `new_code` の長さ | 1 MB | `E_INVALID_ARGUMENT` |
@@ -3122,7 +3123,8 @@ json の `data`:
 - `query_project_db` 用の接続は読み取り専用フラグで開き、`PRAGMA query_only = ON` を設定する（MUST）。
 - 実行前に文を解析し、先頭が `SELECT` または `WITH`（最終的に `SELECT`）以外は `E_QUERY_REJECTED`（MUST）。複文（`;` 区切り）は拒否する。
 - authorizer で、公開テーブル（§9.5）以外のオブジェクト、`ATTACH` / `DETACH`、`PRAGMA`、`load_extension`、ファイル入出力系の関数（`readfile`, `writefile`, `fts5` の外部コンテンツ書き込み）を拒否する（MUST）。
-- progress handler による命令数上限と `timeout_ms` で暴走を止める。再帰 CTE の深さは 10,000 を上限とする。
+- progress handler で `timeout_ms` の超過を検知して中断する（期限は `time.perf_counter()` で判定する）。再帰 CTE の深さの上限は SQLite に機構が無く実装できないため設けず、時間で止める。巨大な値は `SQLITE_LIMIT_LENGTH`（16 MiB）と `SQLITE_LIMIT_SQL_LENGTH`（64 KiB）で抑える（S-7 で確認）。
+- 読み取り専用・`query_only`・authorizer の 3 重は、DB 本体への書き込みについてはどれか 1 つが欠けても他が効く。ただし `ATTACH` が任意パスに 0 バイトのファイルを作る副作用と、`PRAGMA journal_mode` による DB の変更は、authorizer と禁止語検査（`ATTACH` / `PRAGMA` など）でのみ止まる。禁止語検査は省かない（S-7 で確認）。
 - 返却行数は `limit`（既定 200、最大 2,000）で切り、切ったことを `page` と `warnings[]` に書く。
 
 ## 13.3 子プロセスの起動
@@ -3146,7 +3148,7 @@ json の `data`:
 
 ## 13.6 入力検証
 
-- すべての引数は `tools/list` で公開した JSON Schema で検証し、未知のプロパティは拒否する（`additionalProperties: false`）。
+- すべての引数は `tools/list` で公開した JSON Schema で検証し、未知のプロパティは拒否する（`additionalProperties: false`。拒否は `E_INVALID_ARGUMENT`〔§5.1〕。MCP SDK は引数を検証しないので、Lucianke のパイプラインで検証する）。
 - 正規表現を受ける引数（`query`、`auto_fallback_grep_pattern`、`exclude_globs`）は、バックトラックしないエンジン（RE2 系または Rust `regex` 系）で評価するか、評価時間の上限を設ける（MUST）。
 - セレクタ（XPath / JSONPath / jq）は評価時間の上限（1,000 ms）を設ける。
 
@@ -3189,7 +3191,7 @@ json の `data`:
 
 ## 14.4 レイテンシ（NFR-PERF-1、NFR-PERF-2）
 
-1. **ウォームアップ**: 対象言語の LSP が `ready` になり、起動時の差分索引が終わるまで待つ。これを満たすまでの時間も記録する（合否には用いない）。**初回の索引が重く時間がかかることは許容する**（師匠 2026-10-29「初回分析はいずれにせよ重く時間がかかる可能性があるのは仕方ない」）。合否の対象は定常状態の応答であり、初回索引の所要は報告値にとどめる。ただし索引中もツールは降格応答で答え続けなければならない（NFR-OPS-3）。
+1. **ウォームアップ**: 対象言語の LSP が `ready` になり、起動時の差分索引が終わるまで待つ。これを満たすまでの時間も記録する（合否には用いない）。**初回の索引が重く時間がかかることは許容する**（師匠 2026-10-29「初回分析はいずれにせよ重く時間がかかる可能性があるのは仕方ない」）。合否の対象は定常状態の応答であり、初回索引の所要は報告値にとどめる。起動時間も同様で、コールドスタート（プロセス起動 → `initialize` 応答）は約 1 秒（中央値 980 ms。MCP SDK の import が主因。S-1 で確認）であり、初回の重さとして許容し、報告値にとどめる。ただし索引中もツールは降格応答で答え続けなければならない（NFR-OPS-3）。
 2. **母集団**: ツールごとに、台本が F-PY / F-TS からランダムに選んだ対象で 200 回呼び出す。対象は Tier 1 のファイルに限り、精度水準 `exact` で応答した呼び出しだけを集計する（降格応答は別に集計して報告する）。
 3. **計測**: サーバー内の `timing_ms`（受信から送信直前）と、クライアント側の往復時間の両方を記録する。合否はサーバー内時間で判定する。
 4. **判定**: Fast Path ツール（§3.2 の NFR-PERF-1 の一覧）は p95 < 50 ms。Verification Path ツールは p95 < 500 ms。`verify_contract` は `timeout_ms` で打ち切った呼び出しを母集団から除く。

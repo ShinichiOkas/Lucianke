@@ -931,7 +931,7 @@ def rewrite(match: Match, template: str) -> str
 - **書き換え**: `node.replace(new_text) -> Edit` と `root.commit_edits([Edit…])` はあるが、**`replace` はメタ変数を展開せず**文字列をそのまま挿入する。よって `rewrite` のテンプレート展開は自前で行う（`$X` は `get_match` のテキスト、`$$$X` は先頭ノードの開始〜末尾ノードの終了のソース断片で展開し、区切りと空白を保つ。複数行はインデントを挿入先に合わせる。パターンに無い変数の参照は `TemplateError`）。展開済みの文字列を `replace` に渡し、適用は `commit_edits` か `Match` の `start_index` / `end_index` による文字列連結で行う。
 - **入れ子の一致**は外側と内側の両方が返る（`foo(foo(1))` に `foo($X)`）。重なる hunk を作らないため、`outermost` を **必ず** 通してから hunk にする（MUST）。
 - **言語表**: `lang_id → ast-grep の言語名` の登録表で持つ。**非対応は `toml` / `xml` / `dtd` / `rst` / `sql` / `markdown_inline`**（`E_UNSUPPORTED`）。`c_sharp` は ast-grep では `csharp`。未対応名で `SgRoot` を作ると `PanicException`（`BaseException` の子で `Exception` ではない）と stderr 出力が出るので、**登録表で事前に弾く**。
-- **不正パターン**は例外にならず 0 件を返す。例外（`RuntimeError: cannot get matcher`）になるのは、パターンが単独の AST ルートにならないとき（→ `E_SYNTAX_INVALID`）。一致 0 件のときだけ Tree-sitter でパターンを解析し、ERROR なら `details.hint` に「パターンが解析できない可能性」を付ける（ERROR だけで断定すると、Rust・Java・C# の正しいパターンを誤判定する）。Go・C の式パターンは `{"context": …, "selector": …}` 形式で包む必要がある（`LanguageSupport` に「パターン用の包み」を持たせる案。M2 で T-12 の対象言語を決めるときに確定）。
+- **不正パターン**は例外にならず 0 件を返す。例外（`RuntimeError: cannot get matcher`）になるのは、パターンが単独の AST ルートにならないとき（→ `E_SYNTAX_INVALID`）。一致 0 件のときだけ Tree-sitter でパターンを解析し、ERROR なら応答の `warnings` に「パターンが解析できない可能性」を添える（`E_SYNTAX_INVALID` にはしない。S-3 の報告では `details.hint`）（ERROR だけで断定すると、Rust・Java・C# の正しいパターンを誤判定する）。Go・C の式パターンは `{"context": …, "selector": …}` 形式で包む必要がある（`LanguageSupport` に「パターン用の包み」を持たせる案。M2 で T-12 の対象言語を決めるときに確定）。
 - **位置**: ast-grep の行・列は 0 始まりのコードポイントで、Lucianke の内部表現と同じ（変換は要らない。ADR-14）。入力は `str` なので、UTF-8 として読めないファイルの書き換えは拒否する。
 - **予算**: ast-grep は `TreeCache` の木を使えず自前で再解析する（約 10 ms / 2,000 行）ので、5 秒で約 400 ファイル。GIL を解放しないのでスレッドプールでは速くならない（並列化するなら別プロセス）。ファイル数が多い検索には、パターン中のリテラルを `bytes.find` で調べてから渡す前ふるいが効くはず（未測定の推奨）。
 
@@ -1139,7 +1139,7 @@ async def rescan(ws) -> JobHandle          # §7.6.5 と同じ差分索引
    - `symbols_fts` は `symbols` への INSERT / UPDATE / DELETE トリガで追従させる（`schema.sql` にトリガを足す。仕様書 §9.2 の DDL への追記。親に報告）。
 5. 完了後、Watcher 経由なら LSP への通知（§7.3.6 手順 5）。
 
-並列度: 解析はスレッドプール（`READER_POOL_SIZE`=8 と同じ数）、書き込みはキューで直列。バースト（`WATCH_BURST_FILES` 超）と起動時は `rescan` に切り替える。
+並列度: 解析はスレッドプール（`READER_POOL_SIZE`=8 と同じ数）で行うが、Tree-sitter の解析は GIL を握るため並列化しない（ADR-13。S-2 で確認）。書き込みはキューで直列。バースト（`WATCH_BURST_FILES` 超）と起動時は `rescan` に切り替える。
 
 受入で確かめる点:
 
