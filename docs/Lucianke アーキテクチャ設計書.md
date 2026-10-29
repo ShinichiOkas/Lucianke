@@ -260,7 +260,8 @@ Lucianke/
 │  │  ├─ urn.py              #   URN の構文解析・整形・緩和（仕様書第 7 章）
 │  │  ├─ errors.py           #   LuciankeError(code, message, details, candidates)
 │  │  ├─ records.py          #   Record, RecordGroup, Summary（ADR-4）
-│  │  └─ textpos.py          #   LineIndex（ADR-14）、改行・BOM・インデントの検出
+│  │  ├─ textpos.py          #   LineIndex（ADR-14）、改行・BOM・インデントの検出
+│  │  └─ limits.py            #   時間・件数の上限定数（§6.4）。仕様書 §12 の値をここにだけ置く
 │  │
 │  ├─ mcp/                   # MCP との境界
 │  │  ├─ server.py           #   SDK の低水準サーバーを組み立て、tools/list・tools/call・roots を接続
@@ -325,7 +326,13 @@ Lucianke/
 │  │  ├─ history.py          #   シンボル単位の変更検出（M2）
 │  │  └─ cochange.py         #   共変更結合の集計（M2）
 │  │
-│  ├─ verify/                # M2（paths）/ M3（contracts）。境界のみ定義
+│  ├─ verify/                # M2（paths）/ M3（contracts）。境界のみ定義（§7.10）
+│  │  ├─ paths.py             #   M2: 経路探索（再帰 CTE）
+│  │  ├─ dataflow.py          #   M2: 手続き内 Def-Use → dataflows
+│  │  ├─ contracts/extract.py #   M3: 決定論的契約抽出
+│  │  ├─ exprlang.py          #   M3: 制約式の構文解析と SMT-LIB 化
+│  │  ├─ ssa.py               #   M3: 関数本体の SSA 化
+│  │  └─ solver.py            #   M3: SMT ソルバ呼び出し（タイムアウト付き）
 │  │
 │  ├─ tools/                 # 21 ツール。1 ファイル 1 ツール。薄い: 引数モデル + レコード生成
 │  │  ├─ _base.py            #   ToolContext、共通ヘルパ（TargetRef 解決の呼び出し、ファイル列挙）
