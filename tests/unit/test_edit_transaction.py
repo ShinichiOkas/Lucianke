@@ -17,13 +17,17 @@ from typing import Any
 
 import pytest
 
+from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Confidence, Position, Range, RelPath, TargetRef
 from lucianke.edit.builders import replace_body_builder
 from lucianke.edit.lock import WorkspaceLocks
-from lucianke.edit.transaction import EditTransaction
+from lucianke.edit.plan import Hunk, Plan
+from lucianke.edit.transaction import EditTransaction, PlanContext
+from lucianke.edit.verify import DiagDelta, Snapshot, compute_delta, structural_delta
 from lucianke.edit.writer import TMP_PREFIX
 from lucianke.index.queries import DiagnosticRow
 from lucianke.index.writer import IndexWriter
+from lucianke.syntax.parsers import parse_source
 from lucianke.workspace.types import Workspace
 
 POLY = Path(__file__).resolve().parents[1] / "fixtures" / "poly"
@@ -239,3 +243,545 @@ async def test_ep1_replace_body_runs_the_eight_stages_and_writes(rig: Rig):
     assert rig.indexer.calls == [str(PAYMENT)]
     assert rig.watcher.expected == [(str(PAYMENT), sha(after))]
     assert leftovers(rig.root) == []
+
+
+# --- EP-2: applied: false のあとバイト不変 -------------------------------------------------------
+
+
+async def test_ep2_dry_run_changes_nothing_and_predicts_the_write(rig: Rig):
+    before = read(rig, PAYMENT)
+    dry = await replace_validate(rig, dry_run=True)
+    assert dry.applied is False and dry.edit_id is None
+    assert read(rig, PAYMENT) == before
+    assert dry.diff and dry.files_changed[0].sha256_after != sha(before)
+    assert dry.new_diagnostics.status == "not_computed"
+    assert rig.indexer.calls == [] and rig.watcher.expected == []
+    assert not rig.journal.exists() or list(rig.journal.glob("*")) == []
+
+    real = await replace_validate(rig)
+    assert real.files_changed[0].sha256_after == dry.files_changed[0].sha256_after  # 予測値のとおり
+    assert real.diff == dry.diff
+
+
+@pytest.mark.parametrize(
+    "error_code, runner",
+    [
+        (ErrorCode.E_TARGET_NOT_FOUND, "missing_symbol"),
+        (ErrorCode.E_SYNTAX_INVALID, "body_only"),
+        (ErrorCode.E_INVALID_ARGUMENT, "empty_code"),
+    ],
+)
+async def test_ep2_errors_leave_every_byte_alone(rig: Rig, error_code: ErrorCode, runner: str):
+    before = read(rig, PAYMENT)
+    target = (
+        TargetRef(path=str(PAYMENT), symbol_name="PaymentProcessor.nope")
+        if runner == "missing_symbol"
+        else VALIDATE
+    )
+    code = {"body_only": "return amount < 1\n", "empty_code": "  \n"}.get(runner, NEW_VALIDATE)
+    with pytest.raises(LuciankeError) as exc:
+        await rig.tx.run(replace_body_builder(target, code), target=target, diagnostics_wait_ms=0)
+    assert exc.value.code is error_code
+    assert read(rig, PAYMENT) == before
+    assert leftovers(rig.root) == []
+    assert rig.indexer.calls == []
+
+
+async def test_body_only_new_code_is_rejected_with_the_hint(rig: Rig):
+    with pytest.raises(LuciankeError) as exc:
+        await replace_validate(rig, "return amount < 1\n")
+    assert exc.value.code is ErrorCode.E_SYNTAX_INVALID
+    assert "シグネチャを含む定義全体" in exc.value.details["hint"]
+
+
+async def test_non_working_tree_revision_is_rejected_before_anything(rig: Rig):
+    with pytest.raises(LuciankeError) as exc:
+        await rig.tx.run(replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, revision="HEAD")
+    assert exc.value.code is ErrorCode.E_INVALID_ARGUMENT and exc.value.details["param"] == "revision"
+
+
+async def test_ambiguous_target_lists_candidates_and_changes_nothing(rig: Rig):
+    dup = rig.root / "src/shop/dup.py"
+    dup.write_text(
+        "class A:\n    def go(self):\n        return 1\n\n\nclass B:\n    def go(self):\n        return 2\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    target = TargetRef(path="src/shop/dup.py", symbol_name="go")
+    before = dup.read_bytes()
+    with pytest.raises(LuciankeError) as exc:
+        await rig.tx.run(replace_body_builder(target, "def go(self):\n    return 3\n"), target=target)
+    assert exc.value.code is ErrorCode.E_TARGET_AMBIGUOUS
+    assert {c["path"] for c in exc.value.candidates} == {"src/shop/dup.py"} and len(exc.value.candidates) == 2
+    assert dup.read_bytes() == before
+
+
+# --- EP-3: expected_file_sha256 -----------------------------------------------------------------
+
+
+async def test_ep3_wrong_expected_sha_fails_and_changes_nothing(rig: Rig):
+    before = read(rig, PAYMENT)
+    with pytest.raises(LuciankeError) as exc:
+        await replace_validate(rig, expected_shas={str(PAYMENT): "0" * 64})
+    assert exc.value.code is ErrorCode.E_PRECONDITION_FAILED
+    assert exc.value.details["path"] == str(PAYMENT)
+    assert exc.value.details["actual"] == sha(before)
+    assert read(rig, PAYMENT) == before
+
+
+async def test_ep3_prefix_of_twelve_digits_or_more_is_accepted(rig: Rig):
+    before = read(rig, PAYMENT)
+    result = await replace_validate(rig, expected_shas={str(PAYMENT): sha(before)[:12]})
+    assert result.applied is True
+
+
+async def test_ep3_short_or_non_hex_prefix_is_an_invalid_argument(rig: Rig):
+    for bad in (sha(b"x")[:11], "z" * 12, ""):
+        with pytest.raises(LuciankeError) as exc:
+            await replace_validate(rig, expected_shas={str(PAYMENT): bad})
+        assert exc.value.code is ErrorCode.E_INVALID_ARGUMENT
+
+
+# --- EP-4: 解決と書き込みの間の外部書き込み -------------------------------------------------------
+
+
+EXTERNAL = b'"""rewritten by someone else."""\n'
+
+
+@pytest.mark.parametrize(
+    "stage", ["Planned", "Locked", "PreconditionsVerified", "SyntaxChecked", "Journaled"]
+)
+async def test_ep4_external_write_between_resolve_and_write_is_detected_and_kept(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, stage: str
+):
+    rig = make_rig(ws, index_writer, tmp_path)
+
+    def hook(name: str) -> None:
+        if name == stage:
+            (rig.root / PAYMENT).write_bytes(EXTERNAL)
+
+    rig.tx.stage_hook = hook
+    with pytest.raises(LuciankeError) as exc:
+        await replace_validate(rig)
+    assert exc.value.code is ErrorCode.E_PRECONDITION_FAILED
+    assert read(rig, PAYMENT) == EXTERNAL  # 外部の変更が保たれる
+    assert leftovers(rig.root) == []
+    assert rig.indexer.calls == []
+
+
+async def test_ep4_event_delivered_late_is_caught_by_the_drain_recheck(rig: Rig):
+    rig.watcher.on_drain = lambda: (rig.root / PAYMENT).write_bytes(EXTERNAL)
+    with pytest.raises(LuciankeError) as exc:
+        await replace_validate(rig)
+    assert exc.value.code is ErrorCode.E_PRECONDITION_FAILED
+    assert rig.watcher.drained == 1
+    assert read(rig, PAYMENT) == EXTERNAL
+
+
+# --- EP-5: 構文 ---------------------------------------------------------------------------------
+
+
+def error_count(data: bytes) -> int:
+    parsed, _ = parse_source(data, "python", sha(data))
+    return len(parsed.error_ranges)
+
+
+def breaking_builder(old: str, new: str):
+    async def build(ctx: PlanContext) -> Plan:
+        text = ctx.source.decode("utf-8")
+        i = text.index(old)
+        assert ctx.parsed is not None
+        start = ctx.parsed.line_index.offset_to_position(len(text[:i].encode("utf-8"))).value
+        end = Position(start.line, start.col + len(old))
+        return Plan(
+            hunks=(Hunk(ctx.path, Range(start, end), new, "test"),), resolved_shas={ctx.path: ctx.sha256}
+        )
+
+    return build
+
+
+async def test_ep5_an_edit_that_adds_an_error_node_is_refused(rig: Rig):
+    before = read(rig, PAYMENT)
+    builder = breaking_builder("return amount <= limit", "return amount <=")
+    with pytest.raises(LuciankeError) as exc:
+        await rig.tx.run(builder, target=VALIDATE, diagnostics_wait_ms=0)
+    assert exc.value.code is ErrorCode.E_SYNTAX_INVALID
+    assert exc.value.details["errors"] and exc.value.details["errors"][0]["line"] >= 1
+    assert read(rig, PAYMENT) == before
+
+
+async def test_ep5_applied_file_has_no_more_error_nodes_than_before(rig: Rig):
+    before = read(rig, PAYMENT)
+    await replace_validate(rig)
+    assert error_count(read(rig, PAYMENT)) <= error_count(before) == 0
+
+
+async def test_ep5_a_file_that_was_already_broken_may_be_edited_elsewhere(rig: Rig):
+    broken = rig.root / "src/shop/broken.py"
+    broken.write_bytes(b"def fine(x):\n    return x\n\n\ndef oops(:\n    pass\n")
+    target = TargetRef(path="src/shop/broken.py", symbol_name="fine")
+    before_errors = error_count(broken.read_bytes())
+    assert before_errors > 0
+    result = await rig.tx.run(
+        replace_body_builder(target, "def fine(x):\n    return x + 1\n"), target=target, diagnostics_wait_ms=0
+    )
+    assert result.applied is True
+    assert error_count(broken.read_bytes()) <= before_errors
+
+
+# --- EP-6: 恒等編集 -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rel, name, code",
+    [
+        (
+            CRLF_BOM,
+            "crlf_function",
+            'def crlf_function(x: int) -> int:\n    """Doubles x."""\n    return x * 2\n',
+        ),
+        (
+            RelPath("src/shop/models/no_final_newline.py"),
+            "no_newline_at_end",
+            "def no_newline_at_end(value: int) -> int:\n    return value + 1\n",
+        ),
+    ],
+)
+async def test_ep6_identity_replace_body_keeps_every_byte(rig: Rig, rel: RelPath, name: str, code: str):
+    before = read(rig, rel)
+    mtime = (rig.root / rel).stat().st_mtime_ns
+    target = TargetRef(path=str(rel), symbol_name=name)
+    result = await rig.tx.run(replace_body_builder(target, code), target=target, diagnostics_wait_ms=0)
+    assert result.applied is True and result.edit_id is None
+    assert result.diff == "" and result.files_changed[0].hunks == 0
+    assert result.files_changed[0].sha256_after == sha(before)
+    assert any("no-op" in w for w in result.warnings)
+    assert read(rig, rel) == before
+    assert (rig.root / rel).stat().st_mtime_ns == mtime  # 更新時刻も変えない
+    assert rig.indexer.calls == [] and rig.watcher.expected == []
+    assert "Journaled" not in result.stages
+
+
+async def test_edit_keeps_crlf_bom_and_final_newline_state(rig: Rig):
+    before = read(rig, CRLF_BOM)
+    target = TargetRef(path=str(CRLF_BOM), symbol_name="crlf_function")
+    code = 'def crlf_function(x: int) -> int:\n    """Triples x."""\n    return x * 3\n'
+    result = await rig.tx.run(replace_body_builder(target, code), target=target, diagnostics_wait_ms=0)
+    after = read(rig, CRLF_BOM)
+    assert result.applied is True and after.startswith(b"\xef\xbb\xbf")
+    assert b"return x * 3\r\n" in after and after.count(b"\r\n") == before.count(b"\r\n")
+    assert b"\n" not in after.replace(b"\r\n", b"")
+
+
+# --- EP-8: 降格インターロック ---------------------------------------------------------------------
+
+
+def cobol_builder():
+    async def build(ctx: PlanContext) -> Plan:
+        lines = ctx.source.decode("utf-8").splitlines()
+        idx = next(i for i, line in enumerate(lines) if "0.10" in line)
+        rng = Range(Position(idx, 0), Position(idx, len(lines[idx])))
+        return Plan(
+            hunks=(Hunk(ctx.path, rng, "           COMPUTE WS-TAX = WS-AMOUNT * 0.20.", "test"),),
+            resolved_shas={ctx.path: ctx.sha256},
+            expects_syntax=False,
+        )
+
+    return build
+
+
+async def test_ep8_degraded_file_is_not_written_without_the_flag(rig: Rig):
+    target = TargetRef(path=str(COBOL))
+    before = read(rig, COBOL)
+    result = await rig.tx.run(cobol_builder(), target=target)
+    assert result.applied is False and result.edit_id is None and result.forced_dry_run is True
+    assert result.confidence < Confidence.STRUCTURAL
+    assert "allow_heuristic_mutation" in " ".join(result.warnings)
+    assert "0.20" in result.diff and result.syntax_check == "skipped"
+    assert read(rig, COBOL) == before  # EP-8 / EP-2
+    assert rig.indexer.calls == []
+
+
+async def test_ep8_flag_without_dry_run_writes_a_degraded_file(rig: Rig):
+    target = TargetRef(path=str(COBOL))
+    result = await rig.tx.run(
+        cobol_builder(), target=target, allow_heuristic_mutation=True, diagnostics_wait_ms=0
+    )
+    assert result.applied is True and result.edit_id is not None
+    assert b"0.20" in read(rig, COBOL) and result.confidence < Confidence.STRUCTURAL
+    assert result.warnings  # 推定境界の注意
+
+
+async def test_ep8_flag_with_explicit_dry_run_still_does_not_write(rig: Rig):
+    target = TargetRef(path=str(COBOL))
+    before = read(rig, COBOL)
+    result = await rig.tx.run(cobol_builder(), target=target, allow_heuristic_mutation=True, dry_run=True)
+    assert result.applied is False and result.forced_dry_run is False
+    assert read(rig, COBOL) == before
+
+
+# --- EP-9: 複数ファイル・改名段階の失敗 ---------------------------------------------------------------
+
+LIMITS = RelPath("src/shop/services/limits.py")
+
+
+def two_file_builder():
+    async def build(ctx: PlanContext) -> Plan:
+        other_data = (ctx.workspace.root / LIMITS).read_bytes()
+        hunks = (
+            Hunk(ctx.path, Range(Position(0, 0), Position(0, 0)), "# edited a\n", "test"),
+            Hunk(LIMITS, Range(Position(0, 0), Position(0, 0)), "# edited b\n", "test"),
+        )
+        return Plan(hunks=hunks, resolved_shas={ctx.path: ctx.sha256, LIMITS: sha(other_data)})
+
+    return build
+
+
+async def test_two_file_plan_writes_both(rig: Rig):
+    result = await rig.tx.run(two_file_builder(), target=VALIDATE, diagnostics_wait_ms=0)
+    assert [str(c.path) for c in result.files_changed] == [str(PAYMENT), str(LIMITS)]
+    assert read(rig, PAYMENT).startswith(b"# edited a") and read(rig, LIMITS).startswith(b"# edited b")
+    assert rig.indexer.calls == [str(PAYMENT), str(LIMITS)]
+
+
+async def test_ep9_rename_failure_on_the_second_file_restores_every_file(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+):
+    before = {PAYMENT: read(rig, PAYMENT), LIMITS: read(rig, LIMITS)}
+    real_replace = os.replace
+    target_abs = rig.root / LIMITS
+
+    def fake(src, dst, *a, **k):
+        if Path(dst) == target_abs and Path(src).name.startswith(TMP_PREFIX):
+            raise OSError(5, "injected rename failure")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "replace", fake)
+    with pytest.raises(LuciankeError) as exc:
+        await rig.tx.run(two_file_builder(), target=VALIDATE, diagnostics_wait_ms=0)
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert exc.value.code is ErrorCode.E_INTERNAL
+    assert exc.value.details["rolled_back"] is True and exc.value.details["log_ref"]
+    assert {p: read(rig, p) for p in before} == before  # 全ファイルが書き込み前に戻っている
+    assert leftovers(rig.root) == []
+    assert rig.indexer.calls == [] and rig.watcher.expected == []
+
+
+# --- ロック ---------------------------------------------------------------------------------------
+
+
+async def test_lock_is_held_for_stages_3_to_7_and_released_after_reindex(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    rig = make_rig(ws, index_writer, tmp_path)
+    seen: dict[str, bool] = {}
+    rig.tx.stage_hook = lambda name: seen.__setitem__(name, rig.locks.is_locked("poly"))
+    await replace_validate(rig)
+    assert seen["Resolved"] is False and seen["Planned"] is False
+    for held in ("Locked", "PreconditionsVerified", "SyntaxChecked", "Journaled", "Written", "Reindexed"):
+        assert seen[held] is True, held
+    assert seen["Diagnosed"] is False and seen["Done"] is False
+
+
+async def test_lock_is_free_while_waiting_for_diagnostics_so_another_edit_proceeds(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    assert rig.hub is not None
+    rig.hub.gate = asyncio.Event()
+    first = asyncio.create_task(
+        rig.tx.run(replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=2000)
+    )
+    await asyncio.wait_for(rig.hub.entered.wait(), 5)
+    assert rig.locks.is_locked("poly") is False  # 診断待ちはロックの外
+
+    other = TargetRef(path=str(PAYMENT), symbol_name="PaymentProcessor.apply_discount")
+    code = "def apply_discount(self, price: Decimal, rate: int) -> Decimal:\n    return price\n"
+    second = await asyncio.wait_for(
+        rig.tx.run(replace_body_builder(other, code), target=other, diagnostics_wait_ms=0), 5
+    )
+    assert second.applied is True and "Written" in second.stages
+    assert not first.done()
+
+    rig.hub.gate.set()
+    done = await asyncio.wait_for(first, 5)
+    assert done.applied is True and done.new_diagnostics.status == "complete"
+    assert b"return price\n" in read(rig, PAYMENT) and b"return amount < limit" in read(rig, PAYMENT)
+
+
+async def test_lock_wait_beyond_the_limit_is_a_timeout_and_nothing_changes(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    rig = make_rig(ws, index_writer, tmp_path, lock_wait_ms=30)
+    before = read(rig, PAYMENT)
+    async with rig.locks.acquire("poly"):
+        with pytest.raises(LuciankeError) as exc:
+            await replace_validate(rig)
+    assert exc.value.code is ErrorCode.E_TIMEOUT
+    assert read(rig, PAYMENT) == before
+
+
+async def test_edit_ids_increase_and_reindex_failure_is_only_a_warning(rig: Rig):
+    class Boom:
+        async def index_file(self, rel: RelPath) -> None:
+            raise RuntimeError("index down")
+
+    rig.tx._indexer = Boom()  # type: ignore[assignment]
+    first = await replace_validate(rig)
+    second = await replace_validate(rig, NEW_VALIDATE.replace("amount < limit", "amount <= limit"))
+    assert (first.edit_id, second.edit_id) == ("ed_0001", "ed_0002")
+    assert first.applied and any("reindex failed" in w for w in first.warnings)
+
+
+# --- EP-7 / 診断差分 -------------------------------------------------------------------------------
+
+
+ROUTES = RelPath("src/shop/api/routes.py")
+
+
+def patch_diagnostics(
+    rig: Rig,
+    monkeypatch: pytest.MonkeyPatch,
+    before: dict[RelPath, list[DiagnosticRow]],
+    after: dict[RelPath, list[DiagnosticRow]],
+) -> list[list[RelPath]]:
+    calls: list[list[RelPath]] = []
+
+    async def read_diagnostics(paths):
+        calls.append(list(paths))
+        source = before if len(calls) == 1 else after
+        return {p: list(source.get(p, [])) for p in paths}
+
+    async def referrers(urns, exclude):
+        return (ROUTES,), 0
+
+    monkeypatch.setattr(rig.tx, "_read_diagnostics", read_diagnostics)
+    monkeypatch.setattr(rig.tx, "_direct_referrers", referrers)
+    return calls
+
+
+def key_of(o: dict) -> tuple:
+    return (o["path"], o["source"], o["code"], o["message"], o["enclosing_urn"])
+
+
+async def test_ep7_complete_delta_matches_the_diagnostics_table(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    a_before, a_after = diag(PAYMENT, "unused variable", line=3), diag(PAYMENT, "unused variable", line=5)
+    b = diag(PAYMENT, "possibly unbound", line=10)
+    d = diag(PAYMENT, "reportOperatorIssue", line=12, code="Y2")
+    c = diag(ROUTES, "import cycle", line=1)
+    before = {PAYMENT: [a_before, b], ROUTES: [c]}
+    after = {PAYMENT: [a_after, d], ROUTES: []}
+    calls = patch_diagnostics(rig, monkeypatch, before, after)
+
+    result = await rig.tx.run(
+        replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=500
+    )
+    delta = result.new_diagnostics
+    assert delta.status == "complete"
+    # 行がずれただけの a は差分にならない
+    assert {key_of(o) for o in delta.added} == {(str(PAYMENT), "pyright", "Y2", "reportOperatorIssue", None)}
+    assert {key_of(o) for o in delta.resolved} == {
+        (str(PAYMENT), "pyright", "X1", "possibly unbound", None),
+        (str(ROUTES), "pyright", "X1", "import cycle", None),
+    }
+    assert [(f["path"], f["fresh"]) for f in delta.checked_files] == [
+        (str(PAYMENT), True),
+        (str(ROUTES), True),
+    ]
+    # EP-7: added はすべて現在の診断に含まれ、resolved はいずれも含まれない
+    current = {
+        (str(r.path), r.source, r.code, r.message, r.enclosing_urn) for rows in after.values() for r in rows
+    }
+    assert {key_of(o) for o in delta.added} <= current
+    assert not ({key_of(o) for o in delta.resolved} & current)
+    assert calls[0] == [PAYMENT, ROUTES] and sorted(calls[1]) == sorted([PAYMENT, ROUTES])
+    # LSP には編集したファイルの新しい版と、参照元の本文が渡る
+    assert rig.documents is not None and rig.documents.versions[str(PAYMENT)] == 1
+    assert str(ROUTES) in rig.documents.versions
+    assert rig.hub is not None and {w[0] for w in rig.hub.waits} == {str(PAYMENT), str(ROUTES)}
+    assert delta.added[0]["start_line"] == 13 and delta.added[0]["severity"] == "error"
+
+
+async def test_delta_is_pending_for_files_the_lsp_has_not_caught_up_on(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    assert rig.hub is not None
+    rig.hub.stale = {str(ROUTES)}
+    patch_diagnostics(
+        rig,
+        monkeypatch,
+        {PAYMENT: [diag(PAYMENT, "old")], ROUTES: [diag(ROUTES, "stale")]},
+        {PAYMENT: [], ROUTES: [diag(ROUTES, "stale")]},
+    )
+    result = await rig.tx.run(
+        replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=100
+    )
+    delta = result.new_diagnostics
+    assert delta.status == "pending"
+    assert [(f["path"], f["fresh"]) for f in delta.checked_files] == [
+        (str(PAYMENT), True),
+        (str(ROUTES), False),
+    ]
+    assert {key_of(o) for o in delta.resolved} == {
+        (str(PAYMENT), "pyright", "X1", "old", None)
+    }  # 揃った分だけ
+
+
+async def test_zero_wait_answers_pending_without_waiting(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    patch_diagnostics(rig, monkeypatch, {}, {})
+    result = await rig.tx.run(
+        replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=0
+    )
+    assert result.new_diagnostics.status == "pending"
+    assert rig.hub is not None and rig.hub.waits == []
+
+
+async def test_without_an_lsp_the_delta_is_the_tree_sitter_error_difference(rig: Rig):
+    broken = rig.root / "src/shop/broken.py"
+    broken.write_bytes(b"def fine(x):\n    return x\n\n\ndef oops(:\n    pass\n")
+    target = TargetRef(path="src/shop/broken.py", symbol_name="fine")
+    result = await rig.tx.run(replace_body_builder(target, "def fine(x):\n    return x + 1\n"), target=target)
+    delta = result.new_diagnostics
+    assert delta.status == "complete" and delta.confidence is Confidence.STRUCTURAL
+    assert delta.added == () and delta.resolved == ()  # 壊れ方は変わらない
+    assert [f["path"] for f in delta.checked_files] == ["src/shop/broken.py"]
+
+
+# --- verify.py の単体 ------------------------------------------------------------------------------
+
+
+def test_verify_identity_ignores_line_numbers_and_diffs_by_key():
+    a1, a2 = diag(PAYMENT, "m", line=1), diag(PAYMENT, "m", line=40)
+    other = diag(PAYMENT, "n", line=2)
+    delta = compute_delta(Snapshot({PAYMENT: (a1, other)}), {PAYMENT: [a2]}, {PAYMENT: True})
+    assert (
+        delta.status == "complete" and delta.added == () and [r["message"] for r in delta.resolved] == ["n"]
+    )
+
+
+def test_verify_enclosing_urn_is_part_of_the_identity():
+    x1, x2 = diag(PAYMENT, "m", urn="lk://poly/a#f"), diag(PAYMENT, "m", urn="lk://poly/a#g")
+    delta = compute_delta(Snapshot({PAYMENT: (x1,)}), {PAYMENT: [x2]}, {PAYMENT: True})
+    assert len(delta.added) == 1 and len(delta.resolved) == 1
+
+
+def test_verify_omitted_referrers_become_a_warning():
+    delta = compute_delta(Snapshot({PAYMENT: ()}, (), 7), {PAYMENT: []}, {PAYMENT: True})
+    assert any("7" in w for w in delta.warnings)
+
+
+def test_verify_structural_delta_counts_error_nodes():
+    good, _ = parse_source(b"def f():\n    return 1\n", "python", "a")
+    bad, _ = parse_source(b"def f(:\n    return 1\n", "python", "b")
+    broke = structural_delta({PAYMENT: (good, bad)})
+    fixed = structural_delta({PAYMENT: (bad, good)})
+    assert broke.status == "complete" and len(broke.added) == 1 and broke.resolved == ()
+    assert len(fixed.resolved) == 1 and fixed.added == ()
+    assert isinstance(broke, DiagDelta)

@@ -863,11 +863,12 @@ class EditTransaction:
     async def _read_diagnostics(self, paths: Sequence[RelPath]) -> dict[RelPath, list[DiagnosticRow]]:
         """``diagnostics`` 表の現在行（``paths`` ごと）。DB が無ければ空。"""
         out: dict[RelPath, list[DiagnosticRow]] = {p: [] for p in paths}
-        if self._pool is None or not paths:
+        pool = self._pool
+        if pool is None or not paths:
             return out
 
         def work() -> list[DiagnosticRow]:
-            with self._pool.reader() as conn:
+            with pool.reader() as conn:
                 return diagnostics_for(conn, self._ws.workspace_id, [str(p) for p in paths])
 
         for row in await asyncio.to_thread(work):
@@ -878,12 +879,13 @@ class EditTransaction:
         self, urns: Sequence[str], exclude: Sequence[RelPath]
     ) -> tuple[tuple[RelPath, ...], int]:
         """``urns`` を ``target_urn`` に持つ関係の参照元ファイル（多い順、上限 ``DIRECT_REFERRERS_MAX``）と、除いた件数。"""
-        if self._pool is None or not urns:
+        pool = self._pool
+        if pool is None or not urns:
             return (), 0
 
         def work() -> tuple[tuple[RelPath, ...], int]:
             counts: dict[RelPath, int] = {}
-            with self._pool.reader() as conn:
+            with pool.reader() as conn:
                 for urn in urns:
                     for row in references_to(conn, urn):
                         if row.path is not None and row.path not in exclude:
