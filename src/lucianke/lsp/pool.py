@@ -18,11 +18,6 @@
 * 呼び手（機能呼び出し）が数える要求のタイムアウトは ``LspHandle.record_timeout`` / ``record_ok``。連続 3 回で
   プロセスを落として ``unavailable``（``timeout_3x``）。
 * 終了は ``LspClient.shutdown``（``shutdown`` → ``exit`` → ``ProcessRegistry.terminate``。Windows は Job Object で孫ごと）。
-* ``LspHandle.started_at``（ISO 8601・UTC・ミリ秒）は直近に起動を始めた時刻（T-00 ``lsp_daemons[].started_at``）。再起動のたびに
-  進み、止めると ``None``。``LspHandle.rebind(ws)`` / ``LspPool.rebind(ws)`` はワークスペースの設定変更を取り込む
-  （Python のインタープリタが変わったら Python 系は再起動する。仕様書 T-00 事後条件 3）。
-* ``LspPool.router(ws)`` は言語ごとに正しいハンドルへ文書を振り分ける ``DocumentRouter``（1 言語に複数のサーバー〔basedpyright と ruff〕が
-  あるとき、全サーバーに同期し、診断の待ちを合わせる。編集トランザクションには 1 組の口として渡す。BUG-0023）。
 * ``LspHandle.documents`` / ``.diagnostics`` はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。
 * index への診断の書き込みは呼び手の ``on_diagnostics(path, diags, version, source, ws)`` に任せる（``source`` はサーバー名、
   ``ws`` はそのハンドルのワークスペース。複数ルートでも診断を送り元の DB へ書ける）。
@@ -38,7 +33,6 @@ import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -53,7 +47,7 @@ from lucianke.core.model import LspStatus, RelPath
 from lucianke.core.procs import ProcessRegistry
 from lucianke.lsp.client import LspClient, LspError
 from lucianke.lsp.diagnostics import PUBLISH_DIAGNOSTICS, DiagnosticsHub
-from lucianke.lsp.documents import DocumentRouter, DocumentSync
+from lucianke.lsp.documents import DocumentSync
 from lucianke.lsp.servers import (
     LspServerDef,
     Role,
@@ -166,8 +160,6 @@ class LspHandle:
         self.timeouts = 0
         self.last_error: str | None = None
         self.last_used = pool._clock()
-        self.started_at: str | None = None
-        """直近に起動を始めた時刻（ISO 8601・UTC・ミリ秒）。起動前・``_stop`` の後は ``None``。"""
         self.history: deque[LspState] = deque([LspState.STANDBY], maxlen=64)
         self.documents = DocumentSync(ws, self._notify, max_open=pool._open_docs_max)
         self.diagnostics = DiagnosticsHub(ws, source=language_id, on_diagnostics=self._on_diagnostics)
@@ -195,51 +187,12 @@ class LspHandle:
         client = self.client
         return client.pid if client is not None and client.is_connected else None
 
-    def _mark_started(self) -> None:
-        self.started_at = self._pool._wall_clock().isoformat(timespec="milliseconds")
-
     def snapshot(self) -> PoolStatus:
         return PoolStatus(self.state.public, self.progress, self.server_name, self.pid, self.reason)
 
     def touch(self) -> None:
         """要求で使った（アイドル停止の判定を延ばす）。"""
         self.last_used = self._pool._clock()
-
-    async def rebind(self, ws: Workspace) -> bool:
-        """ワークスペースの設定が変わった（``set_python_env``・除外・``default_base_ref`` …）。新しい ``Workspace`` に差し替える。
-
-        ``self.ws`` と、``documents`` / ``diagnostics``（URI の変換に ``ws`` を使う）が同じ ``ws`` を持つ。``on_diagnostics`` の
-        ``ws`` 引数も新しい方になる。除外などの変更は LSP の設定に出ない（``build_settings`` が使うのは Python のインタープリタと
-        tsserver だけ）ので、再起動は要らず ``workspace/didChangeConfiguration`` も送らない。
-
-        **Python 系（``language_id == "python"``）はインタープリタが変わったら再起動する**（仕様書 T-00 事後条件 3: ``set_python_env`` の
-        後の ``started_at`` が呼び出し時刻より後。basedpyright はインタープリタを ``workspace/configuration`` の応答でしか受け取らず、
-        起動時の値で環境を作る〔設計書 §7.5.1〕）。起動中・起動済み（``starting`` / ``indexing`` / ``ready``）なら止めてすぐ起動し直す
-        （クラッシュではないので ``restarts`` は増やさない）。``unavailable``（新しい venv にサーバーが入っているかもしれない）は
-        ``standby`` に戻す（``reset`` と同じ。次の要求で起動）。``standby`` は差し替えだけ。ルートが変わったときは言語を問わず同じ。
-
-        再起動したら ``True``。``workspace_id`` が違うと ``ValueError``（別のハンドルの仕事）。
-        """
-        if ws.workspace_id != self.ws.workspace_id:
-            raise ValueError(f"workspace_id mismatch: {ws.workspace_id!r} != {self.ws.workspace_id!r}")
-        old = self.ws
-        self.ws = ws
-        self.documents.ws = ws
-        self.diagnostics.ws = ws
-        old_py = old.python_env.interpreter if old.python_env is not None else None
-        new_py = ws.python_env.interpreter if ws.python_env is not None else None
-        needs_restart = ws.root != old.root or (self.language_id == "python" and old_py != new_py)
-        if not needs_restart or self.state is LspState.STANDBY:
-            return False
-        pool = self._pool
-        if self.state is LspState.UNAVAILABLE:
-            await pool.reset_handle(self)
-            return False
-        await pool._stop(self)
-        self.restarts = 0
-        self.timeouts = 0
-        pool._begin(self)  # ``_stop`` の戻りから ``_begin`` まで ``await`` が無い: 他の要求に割り込まれない
-        return self.state is LspState.STARTING
 
     # --- 要求のタイムアウトの計数（設計書 §8.3） ---------------------------------------
 
@@ -394,7 +347,6 @@ class LspPool:
         grace_ms: int = 500,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
-        wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not backoff_s:
             raise ValueError("backoff_s must not be empty")
@@ -412,9 +364,7 @@ class LspPool:
         self._grace_ms = grace_ms
         self._sleep = sleep
         self._clock = clock
-        self._wall_clock = wall_clock
         self._handles: dict[tuple[str, str, Role], LspHandle] = {}
-        self._routers: dict[str, DocumentRouter] = {}
         self._bg: set[asyncio.Task[Any]] = set()
         self._closed = False
 
@@ -512,7 +462,6 @@ class LspPool:
             defs = self._defs(h.language_id, h.role)
             h.server_name = defs[0].name if defs else None
         h._set_state(LspState.STARTING)
-        h._mark_started()
         h._task = asyncio.create_task(self._supervise(h), name=f"lsp-pool:{h.language_id}:{h.role}")
 
     # --- 監督タスク -----------------------------------------------------------------
@@ -581,7 +530,6 @@ class LspPool:
     async def _run_once(self, h: LspHandle) -> str | None:
         """1 回起動して、切断されるまで見張る。戻り値は失敗の種類（``init_failed`` / ``crashed``）。止めている最中は ``None``。"""
         defn, argv, tsserver = self._pick(h)
-        h._mark_started()  # クラッシュ後の再起動（バックオフの後）では、ここで実際の起動の時刻に進む
         h.defn = defn
         h.server_name = defn.name
         h.diagnostics.source = defn.name
@@ -659,43 +607,17 @@ class LspPool:
         h._tokens.clear()
         h.progress = None
         h._up_since = None
-        h.started_at = None
         h._set_state(final, reason)
         h._stopping = False
 
     async def reset(self, language_id: str | None, ws: Workspace) -> None:
         """``reindex_scope: "lsp"``: 該当のハンドルを止めて ``standby`` に戻す（``unavailable`` も解く。次の要求で再起動）。"""
         for h in self.handles(ws, language_id):
-            await self.reset_handle(h)
-
-    async def reset_handle(self, h: LspHandle) -> None:
-        """1 ハンドルの ``reset``（止めて ``standby`` に戻し、失敗の計数を解く）。"""
-        if h.state is not LspState.STANDBY or h._task is not None:
-            await self._stop(h)
-        h.restarts = 0
-        h.timeouts = 0
-        h.reason = None
-
-    async def rebind(self, ws: Workspace) -> list[LspHandle]:
-        """``ws``（``workspace_id`` が同じ既存のハンドルが対象）の設定変更を取り込む（``LspHandle.rebind``）。再起動したハンドルを返す。
-
-        T-00 の ``set_python_env`` / ``set_roots``（設定の更新）が呼ぶ。ハンドルが 1 つも無い（まだ一度も使っていない）ときは何もしない:
-        ハンドルは作られる時点の ``Workspace`` を持つので、呼び手は更新後の ``Workspace`` を渡し続ければよい。
-        """
-        restarted: list[LspHandle] = []
-        for h in self.handles(ws):
-            if await h.rebind(ws):
-                restarted.append(h)
-        return restarted
-
-    def router(self, ws: Workspace) -> DocumentRouter:
-        """``ws`` の ``DocumentRouter``（同じ ``workspace_id`` なら同じものを返す）。編集トランザクションに ``documents=`` と
-        ``diagnostics_hub=router.diagnostics_hub`` を渡す。"""
-        r = self._routers.get(ws.workspace_id)
-        if r is None:
-            r = self._routers[ws.workspace_id] = DocumentRouter(self, ws)
-        r.ws = ws
-        return r
+            if h.state is not LspState.STANDBY or h._task is not None:
+                await self._stop(h)
+            h.restarts = 0
+            h.timeouts = 0
+            h.reason = None
 
     async def shutdown_all(self, grace_ms: int | None = None) -> None:
         """全 LSP を落として回収する（終了手順 §6.5）。以後の起動は行わない。戻った時点で子プロセスは残らない。"""
