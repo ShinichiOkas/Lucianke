@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -45,6 +47,7 @@ from lucianke.core.model import (
     LspStatus,
     Position,
     Range,
+    RelPath,
     Tier,
 )
 from lucianke.core.urn import Urn
@@ -57,6 +60,7 @@ from lucianke.lsp.servers import servers_for
 from lucianke.syntax.relations import extract_relations
 from lucianke.syntax.support import get_support
 from lucianke.tools._services import analyze_file
+from lucianke.workspace.paths import to_abs
 from lucianke.workspace.types import Workspace
 
 _log = logging.getLogger("lucianke.tools.lsp_exact")
@@ -65,11 +69,17 @@ __all__ = [
     "EXACT_BUDGET_S",
     "MEMO",
     "CallEdgeSource",
+    "PRIME_LANGUAGES",
+    "PRIME_MAX",
     "LspRoute",
+    "PrimeSet",
     "SiteIndex",
     "SiteInfo",
     "cached_rows",
     "confirm_marker",
+    "needs_priming",
+    "prime_candidates",
+    "prime_documents",
     "degraded_choice",
     "is_lsp_failure",
     "lsp_status_of",
@@ -189,6 +199,87 @@ def degraded_choice(route: LspRoute, exc: BaseException) -> EngineChoice:
         return lower
     keep = route.choice.lsp_status if reason in ("position_clamped", "lsp_error") else lower.lsp_status
     return replace(lower, lsp_status=keep)
+
+
+# --- 参照元になりうるファイルを LSP に開かせる（BUG-0047） ------------------------------------------
+
+PRIME_LANGUAGES = frozenset({"typescript", "tsx", "javascript"})
+"""tsserver 系の言語 ID。``tsconfig.json`` / ``jsconfig.json`` の ``include`` に入らないファイル（``test/`` など）は、開くまで
+どのプロジェクトにも入らず ``references`` / ``callHierarchy`` に出ない。Python（basedpyright）は未オープンの文書も探すので要らない。"""
+
+PRIME_MAX = 100
+"""1 回の問い合わせで新しく開く上限（``didOpen`` の LRU 上限 200 の半分。``get_diagnostics`` のワークスペース全体の呼び出しと同じ）。"""
+
+
+def needs_priming(language: str) -> bool:
+    return language in PRIME_LANGUAGES
+
+
+@dataclass(frozen=True, slots=True)
+class PrimeSet:
+    """LSP に開かせるファイル（``(RelPath, LSP の languageId)``）と、上限で開けなかった件数。"""
+
+    files: tuple[tuple[RelPath, str], ...] = ()
+    skipped: int = 0
+
+    def warning(self, name: str) -> str | None:
+        if not self.skipped:
+            return None
+        return (
+            f"{self.skipped} more file(s) mention {name!r} but were not opened for the LSP (limit {PRIME_MAX} per call); "
+            "references there may be missing (narrow with scope_paths)"
+        )
+
+
+def prime_candidates(
+    conn: sqlite3.Connection,
+    ws: Workspace,
+    *,
+    name: str,
+    exclude: str,
+    is_open: Callable[[RelPath], bool],
+    limit: int = PRIME_MAX,
+) -> PrimeSet:
+    """``name`` を単語境界で含む tsserver 系のファイル（索引にある Tier 1〜2）のうち、LSP がまだ開いていないもの。
+
+    参照の探す側を LSP に教えるための候補（``features.open_documents`` に渡す）。``exclude``（対象自身のファイル）は除く。
+    テストを先に、次にパス順。``limit`` を超えた分は ``skipped`` に数える。読めないファイルは飛ばす。
+    """
+    try:
+        pattern = re.compile(rb"(?<![\w$])" + re.escape(name.encode("utf-8")) + rb"(?![\w$])")
+    except re.error:
+        return PrimeSet()
+    infos = [
+        f
+        for f in queries.files_in_scope(conn, ws.workspace_id, ())
+        if f.language in PRIME_LANGUAGES and f.tier in (Tier.T1, Tier.T2) and str(f.path) != exclude
+    ]
+    infos.sort(key=lambda f: (not f.is_test, str(f.path)))
+    hits: list[tuple[RelPath, str]] = []
+    skipped = 0
+    for info in infos:
+        rel = RelPath(str(info.path))
+        if is_open(rel):
+            continue
+        try:
+            data = to_abs(ws, rel).read_bytes()
+        except (OSError, ValueError):
+            continue
+        if not pattern.search(data):
+            continue
+        if len(hits) >= limit:
+            skipped += 1
+            continue
+        defs = servers_for(info.language, "types")
+        hits.append((rel, defs[0].document_language_id if defs else info.language))
+    return PrimeSet(tuple(hits), skipped)
+
+
+async def prime_documents(handle: LspHandle, prime: PrimeSet) -> int:
+    """``prime`` のファイルを LSP に開かせる（失敗は ``LSP_FAILURES`` として呼び手が降格する）。開いた件数を返す。"""
+    if not prime.files:
+        return 0
+    return await features.open_documents(handle, prime.files)
 
 
 # --- 「この集合は完全」の目印 ------------------------------------------------------------------

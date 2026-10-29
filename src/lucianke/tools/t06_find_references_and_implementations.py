@@ -408,6 +408,8 @@ class _Pre:
     token: str  # この時点の files_fingerprint（目印の鮮度。LSP に聞く前に取る）
     cached: list[queries.ReferenceRow] | None  # 目印が新しいときの PaaD の exact 行
     structural_hits: int = 0  # relations にある参照の数（LSP が 0 件と答えたときの突き合わせ用）
+    # exact 経路で足す警告（LSP に開かせるファイルの上限など）
+    warnings: list[str] = field(default_factory=list)
 
 
 def _refs_wanted(args: FindReferencesArgs) -> bool:
@@ -549,12 +551,27 @@ def _confirm(db_path: Any, ws_id: str, urn: str, rows: Sequence[queries.Referenc
         return lx.confirm_marker(conn, db_path, ws_id, "refs", urn, _load_refs(urn), rows, token=token)
 
 
+def _prime_set(db_path: Any, ws: Workspace, handle: Any, sym: SymbolRecord) -> lx.PrimeSet:
+    with reader(db_path) as conn:
+        return lx.prime_candidates(
+            conn, ws, name=sym.name, exclude=str(sym.path), is_open=handle.documents.is_open
+        )
+
+
 async def _exact_references(
     ctx: ToolContext, ws: Workspace, db_path: Any, route: lx.LspRoute, pre: _Pre
 ) -> list[queries.ReferenceRow]:
     """LSP の ``references`` で集め、``relations`` に ``exact`` で書き戻して、その行を返す（失敗は ``lx.LSP_FAILURES``）。"""
     sym = pre.sym
     assert route.handle is not None
+    if lx.needs_priming(route.file.language):
+        # tsserver は tsconfig の include に入らないファイル（test/ など）を、開かれるまで探さない（BUG-0047）。
+        # 対象の名前を含むファイルを先に開いてから聞くので、結果は「LSP が見たものそのまま」のまま（exact）。
+        prime = await asyncio.to_thread(_prime_set, db_path, ws, route.handle, sym)
+        await lx.prime_documents(route.handle, prime)
+        note = prime.warning(sym.name)
+        if note:
+            pre.warnings.append(note)
     sel = sym.selection or sym.range
     locs = await features.references(route.handle, sym.path, sel.start, include_declaration=False)
     target_urn = str(sym.urn)
@@ -680,7 +697,9 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
         data_static=data,
         tier=found.tier,
         detected_language=found.language,
-        warnings=tuple(found.warnings) + tuple(hierarchy_note),
+        warnings=tuple(found.warnings)
+        + tuple(pre.warnings if exact_rows is not None else ())
+        + tuple(hierarchy_note),
         total_estimate=None,
     )
 

@@ -70,6 +70,7 @@ __all__ = [
     "execute_command",
     "hover",
     "incoming_calls",
+    "open_documents",
     "outgoing_calls",
     "prepare_call_hierarchy",
     "references",
@@ -347,6 +348,33 @@ async def _open(handle: LspHandle, rel: RelPath) -> tuple[LspClient, LineIndex, 
         raise _unavailable(handle, "disconnected") from e
     handle.touch()
     return client, LineIndex(data), to_file_uri(handle.ws, rel)
+
+
+async def open_documents(handle: LspHandle, files: Iterable[tuple[RelPath, str]]) -> int:
+    """``files``（``(作業ツリーの RelPath, LSP の languageId)``）を LSP に見せる（未オープンなら ``didOpen``）。新しく開いた件数を返す。
+
+    参照検索の **探す側** を LSP に教えるためのもの。tsserver（typescript-language-server / vtsls）は、``tsconfig.json`` の
+    ``include`` に入っていないファイル（``include: ["source"]`` の ``test/`` など）を、開かれるまでどのプロジェクトにも入れず、
+    ``references`` / ``callHierarchy`` の結果に出さない（BUG-0047）。呼び手が参照元になりうるファイルをここで開いてから聞く。
+    読めないファイルは飛ばす。``ready`` でなければ ``E_LSP_UNAVAILABLE``、切断なら ``E_LSP_UNAVAILABLE`` / ``disconnected``。
+    """
+    _require_ready(handle)
+    opened = 0
+    for rel, language_id in files:
+        if handle.documents.is_open(rel):
+            continue
+        try:
+            text = _text_of(_read(handle.ws, rel))
+        except LuciankeError:
+            continue
+        try:
+            handle.documents.did_open(rel, text, language_id)
+        except ConnectionError as e:
+            raise _unavailable(handle, "disconnected") from e
+        opened += 1
+    if opened:
+        handle.touch()
+    return opened
 
 
 def _lsp_position(handle: LspHandle, client: LspClient, index: LineIndex, pos: Position) -> dict[str, int]:
