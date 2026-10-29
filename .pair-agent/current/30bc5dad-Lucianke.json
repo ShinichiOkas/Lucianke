@@ -4,8 +4,8 @@
     "path": "S:/work/develop/Lucianke",
     "key": "30bc5dad"
   },
-  "sprint_id": null,
-  "status": "idle",
-  "journal": null,
-  "updated_at": "2026-10-29T11:13:27+09:00"
+  "sprint_id": "arch-design-20261029",
+  "status": "executing",
+  "journal": ".pair-agent/sprints/arch-design-20261029.json",
+  "updated_at": "2026-10-29T11:59:52+09:00"
 }

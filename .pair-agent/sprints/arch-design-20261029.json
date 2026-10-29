@@ -1,0 +1,14 @@
+{
+  "sprint_id": "arch-design-20261029",
+  "status": "executing",
+  "goal": "アーキテクチャ設計書 1.0 Draft を起こす（仕様書 1.0 Draft を上位文書とし、Python・MIT を前提に構造・責務・実行モデル・ADR・M1 着手順を定める）",
+  "created_at": "2026-10-29T11:59:51+09:00",
+  "agreement_path": ".pair-agent/agreements/1-0-draft-1-0-draft-python-mit-adr-m1.md",
+  "経過": [
+    {
+      "at": "2026-10-29T11:59:52+09:00",
+      "status": "deliberating -> executing",
+      "note": "合意ドキュメント起草済み。詳細章を並列起草中"
+    }
+  ]
+}
