@@ -25,7 +25,7 @@ from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
 from lucianke.index import queries
 from lucianke.index.connection import open_reader
-from lucianke.tools._base import WORKING_TREE, ToolContext
+from lucianke.tools._base import ToolContext
 from lucianke.workspace.paths import confine, to_abs
 from lucianke.workspace.types import Workspace
 
@@ -56,16 +56,6 @@ class TargetRefArg(BaseModel):
         default=None, ge=1, description="1-based line; selects the innermost symbol containing it."
     )
     character: int | None = Field(default=None, ge=1, description="1-based column (optional with line).")
-
-
-def require_working_tree(revision: str) -> None:
-    """``T-06`` / ``T-07`` の ``structural`` は M1 では作業ツリーだけ（仕様書 §8.5）。"""
-    if revision != WORKING_TREE:
-        raise LuciankeError(
-            ErrorCode.E_UNSUPPORTED,
-            f"revision {revision!r} is not supported yet (WORKING_TREE only)",
-            details={"reason": "revision_not_supported", "revision": revision},
-        )
 
 
 def db_path_of(ctx: ToolContext) -> Path:

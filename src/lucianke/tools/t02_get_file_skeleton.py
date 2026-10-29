@@ -2,7 +2,11 @@
 
 縦切りの範囲: Python・TypeScript・JavaScript を構文木だけで（``structural``）。Tier 3 のデータファイル（JSON・JSONL・YAML・TOML・XML）
 と ``.ipynb`` はデータ形式アダプタの骨格（``_data_files.py``。``[Key]`` / ``[Tag]`` / ``[Cell]``、``max_depth`` で畳む）。
-他の言語は項目単位で ``E_UNSUPPORTED``。``revision`` は ``WORKING_TREE`` のみ。
+Markdown・reStructuredText は見出しの入れ子（``[Section]``、``structural``）、それ以外の未知の言語・拡張子なし（Tier 4）は
+ブロック推定の骨格（``heuristic`` / ``lexical_fallback``）。種類の振り分けは ``_skeletons.file_skeleton``。
+
+``revision`` は ``WORKING_TREE``・``STAGED``・ブランチ・タグ・SHA・``HEAD~N``。ファイルは ``tools/_rev.py`` を通して Git の
+オブジェクト / インデックスから読み、作業ツリーに触れない。解決できない参照は ``E_REVISION_NOT_FOUND``（BUG-0018）。
 """
 
 from __future__ import annotations
@@ -11,15 +15,15 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.errors import LuciankeError
 from lucianke.core.limits import BATCH_MAX_ITEMS
 from lucianke.core.model import Confidence, EngineChoice, Tier
 from lucianke.core.records import Record, ToolOutput
-from lucianke.syntax.skeleton import build_file_record
 from lucianke.syntax.types import SkeletonOptions
-from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._data_files import data_skeleton
-from lucianke.tools._services import analyze_file, batch_warnings, services_of
+from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._rev import open_revision
+from lucianke.tools._services import batch_warnings, services_of
+from lucianke.tools._skeletons import engine_name, file_skeleton
 
 
 class GetFileSkeletonArgs(CommonArgs):
@@ -48,22 +52,10 @@ def failure_record(path: str, err: LuciankeError, priority: int, banner: Any) ->
     )
 
 
-def _engine_name(code_files: int, data_files: int) -> str:
-    """``engine_used``: コードは構文木、データファイルはアダプタ（JSON / YAML / TOML / XML / ipynb のパーサ）。"""
-    if data_files == 0:
-        return "tree-sitter"
-    return "data-adapter" if code_files == 0 else "tree-sitter+data-adapter"
-
-
 async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
-    if args.revision != WORKING_TREE:
-        raise LuciankeError(
-            ErrorCode.E_UNSUPPORTED,
-            f"revision {args.revision!r} is not supported yet (WORKING_TREE only)",
-            details={"reason": "revision_not_supported", "revision": args.revision},
-        )
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
+    view = await open_revision(ws, args.revision)  # 解決できなければ E_REVISION_NOT_FOUND（作業ツリーは Git に触れない）
     opts = SkeletonOptions(
         include_private=args.include_private,
         include_doc_summary=args.include_doc_summary,
@@ -75,26 +67,15 @@ async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
     errors: list[tuple[str, LuciankeError]] = []
     languages: list[str] = []
     tier = Tier.T1
-    data_files = code_files = 0
+    engines: set[str] = set()
     for i, path in enumerate(args.paths):
         try:
-            data = await data_skeleton(ws, path, opts, priority=i, param="paths")
-            if data is not None:  # Tier 3 のデータファイル・.ipynb: アダプタの骨格
-                records.append(data.record)
-                language_id, file_tier = data.language_id, data.tier
-                data_files += 1
-            else:
-                analysis = await analyze_file(svc, ws, path, param="paths")
-                records.append(
-                    build_file_record(
-                        analysis.parsed, list(analysis.symbols), rel=str(analysis.rel), opts=opts, priority=i
-                    )
-                )
-                language_id, file_tier = analysis.language_id, analysis.tier
-                code_files += 1
-            if language_id not in languages:
-                languages.append(language_id)
-            tier = max(tier, file_tier)
+            sk = await file_skeleton(svc, ws, view, path, opts, priority=i, param="paths")
+            records.append(sk.record)
+            engines.add(sk.engine)
+            if sk.language_id not in languages:
+                languages.append(sk.language_id)
+            tier = max(tier, sk.tier)
         except LuciankeError as err:
             errors.append((path, err))
             records.append(failure_record(path, err, i, svc.lines.banner))
@@ -111,11 +92,11 @@ async def handler(ctx: ToolContext, args: GetFileSkeletonArgs) -> ToolOutput:
     return ToolOutput(
         records=records,
         max_confidence=Confidence.STRUCTURAL,
-        engine=EngineChoice(engine=_engine_name(code_files, data_files), confidence=Confidence.STRUCTURAL),
+        engine=EngineChoice(engine=view.engine_name(engine_name(engines)), confidence=Confidence.STRUCTURAL),
         page_unit="file",
         tier=tier,
         detected_language=",".join(languages) if languages else "n/a",
-        warnings=batch_warnings(len(errors), len(args.paths)),
+        warnings=(*view.warnings, *batch_warnings(len(errors), len(args.paths))),
     )
 
 
@@ -129,8 +110,10 @@ SPEC = ToolSpec(
         "Return a skeleton of 1-20 files: imports, class/function signatures with line ranges, and the first "
         "line of each doc comment, with bodies folded. Use it instead of reading whole files. Python/TypeScript/JavaScript "
         "(syntax tree only); data files (JSON/JSONL/YAML/TOML/XML) as a key/tag tree with array types, folded at max_depth; "
-        ".ipynb as cells (outputs are never shown). Each file block carries sha= for edit preconditions; a failed path is "
-        "reported as '! path: CODE msg'."
+        ".ipynb as cells (outputs are never shown); Markdown/reStructuredText as a heading tree; other files (unknown "
+        "language, no extension) as a heuristic outline marked DEGRADED. Reads any revision (HEAD, HEAD~N, branch, tag, SHA, "
+        "STAGED) from Git without touching the working tree. Each file block carries sha= for edit preconditions; a failed "
+        "path is reported as '! path: CODE msg'."
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

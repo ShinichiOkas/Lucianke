@@ -306,8 +306,9 @@ async def test_t03_default_budget(pipeline: Pipeline) -> None:
 
 
 async def test_t03_revision_other_than_working_tree(pipeline: Pipeline) -> None:
+    # poly は Git のワーキングコピーではないので HEAD は解決できない（BUG-0018。E_UNSUPPORTED は test_revision_reads.py）
     r = await search(pipeline, query="pay", revision="HEAD")
-    assert r.is_error and r.structured["error"]["code"] == "E_UNSUPPORTED"
+    assert r.is_error and r.structured["error"]["code"] == "E_REVISION_NOT_FOUND"
 
 
 async def test_t03_without_index_is_workspace_not_configured() -> None:
@@ -578,7 +579,7 @@ async def test_t04_without_index_is_workspace_not_configured() -> None:
 
 async def test_t04_revision_other_than_working_tree(pipeline: Pipeline) -> None:
     r = await resolve(pipeline, targets=[METHOD], revision="HEAD")
-    assert r.is_error and r.structured["error"]["code"] == "E_UNSUPPORTED"
+    assert r.is_error and r.structured["error"]["code"] == "E_REVISION_NOT_FOUND"  # 同上
 
 
 async def test_t03_over_limit_issues_next_cursor_and_pages_do_not_overlap(pipeline: Pipeline) -> None:

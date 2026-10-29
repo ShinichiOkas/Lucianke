@@ -62,7 +62,8 @@ from lucianke.index import queries
 from lucianke.lsp.pool import LspHandle, LspState, PoolStatus
 from lucianke.lsp.servers import servers_for
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._nav import db_path_of, reader, require_working_tree, workspace_of
+from lucianke.tools._nav import db_path_of, reader, workspace_of
+from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.workspace.paths import confine, to_abs
 from lucianke.workspace.types import Workspace
 
@@ -672,7 +673,7 @@ def _lsp_sources(pool: Any, ws: Workspace, languages: list[str]) -> list[dict[st
 
 
 async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
-    require_working_tree(args.revision)
+    await reject_unsupported_revision(ctx, args.revision)
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]

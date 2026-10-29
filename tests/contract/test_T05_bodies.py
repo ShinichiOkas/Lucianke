@@ -195,9 +195,10 @@ async def test_truncated_body_is_a_prefix_and_tells_where(pipeline: Pipeline) ->
     assert "truncated at line" in text
 
 
-async def test_non_working_tree_revision_is_unsupported(pipeline: Pipeline) -> None:
+async def test_revision_on_a_workspace_without_git_is_revision_not_found(pipeline: Pipeline) -> None:
+    """poly は Git のワーキングコピーではない。過去断面の読み取りは tests/contract/test_revision_reads.py（BUG-0018）。"""
     r = await call(pipeline, "json", targets=[{"path": PAY_PY, "symbol_name": "PaymentRequest"}], revision="HEAD")
-    assert r.is_error and r.structured["error"]["code"] == "E_UNSUPPORTED"
+    assert r.is_error and r.structured["error"]["code"] == "E_REVISION_NOT_FOUND"
 
 
 async def test_partial_failure_counts_failed_items_in_warnings(pipeline: Pipeline) -> None:

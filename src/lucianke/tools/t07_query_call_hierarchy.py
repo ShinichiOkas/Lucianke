@@ -38,10 +38,10 @@ from lucianke.tools._nav import (
     db_path_of,
     enclosing_name_of,
     reader,
-    require_working_tree,
     resolve_target,
     workspace_of,
 )
+from lucianke.tools._rev import reject_unsupported_revision
 
 DEPTH_MAX = 5
 NODE_CAP = 2000  # 木全体のノード数の歯止め（深さ 5 × 子 20 の爆発を防ぐ）
@@ -363,7 +363,7 @@ def _summarize(rest: Sequence[Record]) -> str:
 
 
 async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
-    require_working_tree(args.revision)
+    await reject_unsupported_revision(ctx, args.revision)
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]

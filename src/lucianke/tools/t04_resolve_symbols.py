@@ -45,10 +45,11 @@ from lucianke.engine import selector
 from lucianke.index import queries
 from lucianke.syntax.imports import ImportFact, extract_imports, imported_name_map, make_resolver
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.tools._services import FileAnalysis, ToolServices, analyze_file, services_of
 from lucianke.tools._t04_exact import ExactLifter
 from lucianke.tools.t02_get_file_skeleton import failure_record
-from lucianke.tools.t03_search_workspace_symbols import index_reader, require_working_tree
+from lucianke.tools.t03_search_workspace_symbols import index_reader
 from lucianke.tools.t05_get_symbol_bodies import TargetRefArg, body_lines
 from lucianke.workspace.paths import confine
 from lucianke.workspace.types import Workspace
@@ -665,7 +666,7 @@ def _response_engine(choices: list[EngineChoice]) -> EngineChoice:
 
 
 async def handler(ctx: ToolContext, args: ResolveSymbolsArgs) -> ToolOutput:
-    require_working_tree(args.revision)
+    await reject_unsupported_revision(ctx, args.revision)
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
     records: list[Record] = []

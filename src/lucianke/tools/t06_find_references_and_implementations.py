@@ -38,11 +38,11 @@ from lucianke.tools._nav import (
     enclosing_name_of,
     file_urn,
     reader,
-    require_working_tree,
     resolve_target,
     use_of,
     workspace_of,
 )
+from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.workspace.paths import to_abs
 from lucianke.workspace.types import Workspace
 
@@ -463,7 +463,7 @@ def _graph(found: _Found, ws_id: str) -> dict[str, Any]:
 
 
 async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
-    require_working_tree(args.revision)
+    await reject_unsupported_revision(ctx, args.revision)
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]

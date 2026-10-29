@@ -48,7 +48,8 @@ from lucianke.engine.selector import ENGINE_LEXICAL_GREP, WarningReason, warning
 from lucianke.index import queries
 from lucianke.index.connection import open_reader
 from lucianke.syntax.heuristic import lexical_scan
-from lucianke.tools._base import WORKING_TREE, CommonArgs, Services, ToolContext, ToolSpec
+from lucianke.tools._base import CommonArgs, Services, ToolContext, ToolSpec
+from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.tools._services import ToolServices, services_of
 from lucianke.workspace.paths import confine
 from lucianke.workspace.types import Workspace
@@ -83,15 +84,6 @@ class SearchWorkspaceSymbolsArgs(CommonArgs):
 
 
 # --- サービス（T-04 も使う） -----------------------------------------------------------------
-
-
-def require_working_tree(revision: str) -> None:
-    if revision != WORKING_TREE:
-        raise LuciankeError(
-            ErrorCode.E_UNSUPPORTED,
-            f"revision {revision!r} is not supported yet (WORKING_TREE only)",
-            details={"reason": "revision_not_supported", "revision": revision},
-        )
 
 
 @contextmanager
@@ -474,7 +466,7 @@ def _build_output(
 
 
 async def handler(ctx: ToolContext, args: SearchWorkspaceSymbolsArgs) -> ToolOutput:
-    require_working_tree(args.revision)
+    await reject_unsupported_revision(ctx, args.revision)
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
     query = args.query.strip()

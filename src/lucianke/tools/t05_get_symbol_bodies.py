@@ -2,7 +2,7 @@
 
 縦切りの範囲: Python・TypeScript・JavaScript を構文木だけで（``structural``）。TargetRef は ``urn`` と ``path`` +
 ``symbol_name`` / ``line``。セレクタ（``xpath:`` など）は項目単位で ``E_UNSUPPORTED``。``include_referenced_symbols`` は
-索引が無いので ``refs:`` を出さない。``revision`` は ``WORKING_TREE`` のみ。
+索引が無いので ``refs:`` を出さない。``revision`` は ``WORKING_TREE``・``STAGED``・過去断面（``tools/_rev.py``。ファイルは Git オブジェクトから読み、作業ツリーに触れない）。
 
 返す範囲は ``syntax.boundaries.definition_range``（デコレータ・直前の Doc コメントを含む）の前に ``context_lines`` 行を足したもの。
 1 対象が残り予算に収まらないときは ``Record.shrink`` が先頭から詰めた版を返し、``truncated_at_line`` を記録する。
@@ -22,11 +22,11 @@ from lucianke.core.model import Confidence, EngineChoice, SymbolRecord, Tier
 from lucianke.core.records import Record, ToolOutput, split_offset
 from lucianke.core.urn import CodeSel, Urn, parse, relax
 from lucianke.syntax.boundaries import definition_range
-from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._rev import RevisionView, analyze_at, open_revision
 from lucianke.tools._services import (
     FileAnalysis,
     ToolServices,
-    analyze_file,
     batch_warnings,
     estimate_tokens,
     services_of,
@@ -128,10 +128,10 @@ def _by_urn(an: FileAnalysis, urn: Urn) -> SymbolRecord:
     raise LuciankeError(ErrorCode.E_TARGET_NOT_FOUND, f"no symbol with urn {wanted}", details={"urn": wanted})
 
 
-async def _resolve(svc: ToolServices, ws: Any, ref: TargetRefArg, cache: dict[str, FileAnalysis]) -> tuple[FileAnalysis, SymbolRecord]:
+async def _resolve(svc: ToolServices, ws: Any, view: RevisionView, ref: TargetRefArg, cache: dict[str, FileAnalysis]) -> tuple[FileAnalysis, SymbolRecord]:
     async def load(path: str) -> FileAnalysis:
         if path not in cache:
-            cache[path] = await analyze_file(svc, ws, path, param="targets")
+            cache[path] = await analyze_at(svc, ws, view, path, param="targets")
         return cache[path]
 
     if ref.urn is not None:  # urn > line > symbol_name（§5.3 規則 4）
@@ -285,14 +285,9 @@ def build_record(svc: ToolServices, an: FileAnalysis, sym: SymbolRecord, args: G
 
 
 async def handler(ctx: ToolContext, args: GetSymbolBodiesArgs) -> ToolOutput:
-    if args.revision != WORKING_TREE:
-        raise LuciankeError(
-            ErrorCode.E_UNSUPPORTED,
-            f"revision {args.revision!r} is not supported yet (WORKING_TREE only)",
-            details={"reason": "revision_not_supported", "revision": args.revision},
-        )
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
+    view = await open_revision(ws, args.revision)  # 解決できなければ E_REVISION_NOT_FOUND（作業ツリーは Git に触れない）
     cache: dict[str, FileAnalysis] = {}
     records: list[Record] = []
     errors: list[tuple[str, LuciankeError]] = []
@@ -303,7 +298,7 @@ async def handler(ctx: ToolContext, args: GetSymbolBodiesArgs) -> ToolOutput:
         request = ref.model_dump(exclude_none=True)
         label = ref.urn or (f"{ref.path}#{ref.symbol_name}" if ref.symbol_name else f"{ref.path}:{ref.line}")
         try:
-            an, sym = await _resolve(svc, ws, ref, cache)
+            an, sym = await _resolve(svc, ws, view, ref, cache)
             records.append(build_record(svc, an, sym, args, request, i, resume_line if i == resume_index else None))
             if an.language_id not in languages:
                 languages.append(an.language_id)
@@ -329,11 +324,11 @@ async def handler(ctx: ToolContext, args: GetSymbolBodiesArgs) -> ToolOutput:
     return ToolOutput(
         records=records,
         max_confidence=Confidence.STRUCTURAL,
-        engine=EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL),
+        engine=EngineChoice(engine=view.engine_name(), confidence=Confidence.STRUCTURAL),
         page_unit="target",
         tier=tier,
         detected_language=",".join(languages) if languages else "n/a",
-        warnings=batch_warnings(len(errors), len(args.targets)),
+        warnings=(*view.warnings, *batch_warnings(len(errors), len(args.targets))),
     )
 
 

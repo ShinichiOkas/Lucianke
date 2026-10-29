@@ -169,7 +169,7 @@ async def test_engine_used_by_kind_of_files(pipeline: Pipeline) -> None:
 async def test_unsupported_files_still_fail_per_item(pipeline: Pipeline) -> None:
     r = await call(pipeline, paths=[SETTINGS, "legacy/calc.cob", "conf/.env", "src/missing.json"])
     assert not r.is_error and g.validate(r.text) == []
-    assert "! legacy/calc.cob: E_UNSUPPORTED" in r.text
+    assert "=== legacy/calc.cob" in r.text and "! legacy/calc.cob" not in r.text  # Tier 4 は推定の骨格（BUG-0018）
     assert "! conf/.env: E_UNSUPPORTED" in r.text and "secret_file" in r.text
     assert "! src/missing.json: E_TARGET_NOT_FOUND" in r.text
     assert "SECRET_SENTINEL" not in r.text

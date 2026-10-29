@@ -5,14 +5,13 @@
 （呼び手がコードのパスに回す）。構文木は作らない。
 
 注意: json / yaml / toml / xml は文法（``LanguageSpec``）も持つので ``get_support`` ではアダプタを引けない。``get_adapter`` を使う。
-読み込みの検査（存在・大きさ・秘密/バイナリ）は ``analyze_file`` と同じ規約で、ここに写している（``_services.py`` は結線の役の持ち場）。
+読み込み（存在・大きさ・秘密/バイナリの検査）は ``_rev.read_checked`` に任せる。これで ``revision`` の断面（過去のコミット・ステージ）からも読める。
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import hashlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -24,8 +23,9 @@ from lucianke.syntax.parsers import parse_source
 from lucianke.syntax.support import SUPPORT, FormatAdapter, get_adapter, language_for_extension
 from lucianke.syntax.symbols import extract, load_query_source
 from lucianke.syntax.types import SkeletonOptions
-from lucianke.workspace.languages import HEAD_BYTES, detect
-from lucianke.workspace.paths import confine, to_abs
+from lucianke.tools._rev import WORKING_VIEW, RevisionView, read_checked
+from lucianke.workspace.languages import detect
+from lucianke.workspace.paths import confine
 from lucianke.workspace.types import Workspace
 
 __all__ = ["DATA_FILE_MAX_BYTES", "DataSkeleton", "adapter_for", "data_skeleton"]
@@ -77,40 +77,25 @@ def _python_symbols(workspace_id: str, rel: RelPath, sha256: str) -> Callable[[b
 
 
 async def data_skeleton(
-    ws: Workspace, user_path: str, opts: SkeletonOptions, *, priority: int, param: str = "paths"
+    ws: Workspace,
+    user_path: str,
+    opts: SkeletonOptions,
+    *,
+    priority: int,
+    param: str = "paths",
+    view: RevisionView = WORKING_VIEW,
 ) -> DataSkeleton | None:
     """``user_path`` がデータ形式なら骨格を作る。コードのパスなら ``None``。失敗は ``LuciankeError``（項目単位）。
 
+    ``view`` の断面（作業ツリー・ステージ・過去のコミット）から読む（``_rev.read_checked``）。
     構文が壊れたファイルは ``E_UNSUPPORTED``（``details.reason == "invalid_data_file"``。``E_SYNTAX_INVALID`` は編集の検証用）。
     """
     rel = confine(ws, user_path, param=param)
     adapter = adapter_for(str(rel))
     if adapter is None:
         return None
-    abs_path = to_abs(ws, rel)
-    try:
-        is_file = abs_path.is_file()
-    except OSError:
-        is_file = False
-    if not is_file:
-        raise LuciankeError(
-            ErrorCode.E_TARGET_NOT_FOUND, f"file not found: {rel}", details={"path": str(rel), "param": param}
-        )
-    size = abs_path.stat().st_size
-    if size > DATA_FILE_MAX_BYTES:
-        raise LuciankeError(
-            ErrorCode.E_UNSUPPORTED,
-            f"file too large to parse: {size} bytes > {DATA_FILE_MAX_BYTES}",
-            details={"reason": "file_too_large", "size": size, "limit": DATA_FILE_MAX_BYTES},
-        )
-    data = await asyncio.to_thread(abs_path.read_bytes)
-    det = detect(rel, data[:HEAD_BYTES])
-    if not det.index_content:
-        reason = "secret_file" if det.is_secret else "binary_file"
-        raise LuciankeError(
-            ErrorCode.E_UNSUPPORTED, f"{rel}: content is not readable ({reason})", details={"reason": reason}
-        )
-    sha256 = hashlib.sha256(data).hexdigest()
+    loaded = await read_checked(view, ws, user_path, param=param, max_bytes=DATA_FILE_MAX_BYTES)
+    data, sha256 = loaded.data, loaded.sha256
     python_symbols = _python_symbols(ws.workspace_id, rel, sha256) if adapter.language_id == "ipynb" else None
     try:
         record = await asyncio.to_thread(

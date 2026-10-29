@@ -751,7 +751,7 @@ async def test_budget_is_respected_and_pages_continue(indexed: tuple[Path, Path]
         ({"paths": [BROKEN] * 51}, "E_INVALID_ARGUMENT"),
         ({"min_severity": "fatal"}, "E_INVALID_ARGUMENT"),
         ({"paths": ["src/shop/nope.py"]}, "E_TARGET_NOT_FOUND"),
-        ({"revision": "HEAD"}, "E_UNSUPPORTED"),
+        ({"revision": "HEAD"}, "E_REVISION_NOT_FOUND"),  # フィクスチャは Git のワーキングコピーではない（BUG-0018）
     ],
 )
 async def test_errors(indexed: tuple[Path, Path], args: dict[str, Any], code: str) -> None:

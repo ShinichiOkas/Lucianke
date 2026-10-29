@@ -473,8 +473,10 @@ async def test_t06_target_forms_and_errors(pipeline: Pipeline) -> None:
     assert bad_use.is_error and bad_use.structured["error"]["code"] == "E_INVALID_ARGUMENT"
     outside = await refs(pipeline, PC, scope_paths=["../elsewhere"])
     assert outside.is_error and outside.structured["error"]["code"] == "E_INVALID_ARGUMENT"
+    # フィクスチャ（poly）は Git のワーキングコピーではない: HEAD は解決できず E_REVISION_NOT_FOUND（BUG-0018）。
+    # 解決できる参照の E_UNSUPPORTED は tests/contract/test_revision_reads.py（実リポジトリ）で確かめる。
     other_rev = await refs(pipeline, PC, revision="HEAD")
-    assert other_rev.is_error and other_rev.structured["error"]["code"] == "E_UNSUPPORTED"
+    assert other_rev.is_error and other_rev.structured["error"]["code"] == "E_REVISION_NOT_FOUND"
 
 
 async def test_t06_scope_paths_and_declaration(pipeline: Pipeline) -> None:

@@ -157,7 +157,7 @@ async def test_partial_failure_keeps_ok_and_marks_item(pipeline: Pipeline) -> No
     assert g.validate(r.text) == []
     assert "! src/missing.py: E_TARGET_NOT_FOUND" in r.text
     assert "! ../outside.py: E_INVALID_ARGUMENT" in r.text
-    assert "! legacy/calc.cob: E_UNSUPPORTED" in r.text  # 文法も骨格のアダプタも無い言語（データファイルは test_T02_data_files.py）
+    assert "=== legacy/calc.cob" in r.text and "! legacy/calc.cob" not in r.text  # Tier 4 は失敗にせず推定の骨格（BUG-0018）
     j = await call(pipeline, "json", paths=[PAY_PY, "src/missing.py"])
     items = j.structured["data"]["items"]
     assert [i["ok"] for i in items] == [True, False]
@@ -186,9 +186,10 @@ async def test_include_options(pipeline: Pipeline) -> None:
     assert g.validate(r.text) == []
 
 
-async def test_non_working_tree_revision_is_unsupported(pipeline: Pipeline) -> None:
+async def test_revision_on_a_workspace_without_git_is_revision_not_found(pipeline: Pipeline) -> None:
+    """poly は Git のワーキングコピーではない。過去断面の読み取りは tests/contract/test_revision_reads.py（BUG-0018）。"""
     r = await call(pipeline, "json", paths=[PAY_PY], revision="HEAD")
-    assert r.is_error and r.structured["error"]["code"] == "E_UNSUPPORTED"
+    assert r.is_error and r.structured["error"]["code"] == "E_REVISION_NOT_FOUND"
 
 
 async def test_unknown_workspace_id(pipeline: Pipeline) -> None:
