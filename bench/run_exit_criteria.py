@@ -351,6 +351,8 @@ def builtin_cross_os(ctx: dict[str, Any]) -> tuple[str, str]:
             d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        if d.get("args", {}).get("only"):  # --only の部分実行は「その OS の結果」に数えない
+            continue
         os_ = d.get("machine", {}).get("os")
         crit = {k: v.get("verdict") for k, v in d.get("criteria", {}).items()}
         if os_ and all(g in crit for g in gate) and (os_ not in latest or d.get("finished_at", "") >= latest[os_][0]):

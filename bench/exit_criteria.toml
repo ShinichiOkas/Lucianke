@@ -230,8 +230,8 @@ spec = "§14.5、NFR-SAFE-1（構文妥当 >= 99.9%、恒等編集は 100%）"
 title = "1,000 件の編集操作の構文妥当性・恒等編集のバイト一致 100%・ジャーナル復元 50 件"
 kind = "script"
 cmd = ["{py}", "bench/run_edit_safety.py"]
-result_kind = "edit_safety"
-pass = "結果 JSON の verdict が pass（未整備: 別の役が作成中。台本ができたら自動で判定に入る）"
+result_kind = "edit-safety"
+pass = "結果 JSON の verdict が pass（partial = 未実装の操作を合否から外した合格は、M1 では不合格として扱う）"
 expect = [
   { path = "verdict", op = "eq", value = "pass" },
 ]
@@ -348,15 +348,11 @@ criterion = "M1-6"
 spec = "§15.2 M1-6（骨格 -> 本体 -> 編集 -> 診断ゼロ確認）。台本と記録は bench/e2e/"
 title = ".mcp.json の起動コマンドで接続し、台本化したセッションを完走する"
 kind = "script"
-cmd = ["{py}", "bench/e2e/run_session.py", "--mcp-json", ".mcp.json"]
-result_kind = "e2e"
-pass = "結果 JSON の verdict が pass（骨格 -> 本体 -> 編集 -> 診断ゼロの全段が成功）。未整備: 別の役が作成中"
-expect = [
-  { path = "verdict", op = "eq", value = "pass" },
-]
-slow = true
+cmd = ["{py}", "bench/e2e/run_session.py"]
+pass = "終了コード 0（全段が成立: tools/list -> 骨格 -> 本体 -> 編集 -> 診断ゼロ確認）。記録は bench/e2e/records/<日時>-<OS>.jsonl"
+slow = false
 timeout_s = 900
-est_min = 3
+est_min = 0.5
 requires_files = ["bench/e2e/run_session.py"]
 
 # ======================================================================================

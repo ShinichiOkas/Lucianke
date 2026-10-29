@@ -1,0 +1,1690 @@
+{
+ "schema": "lucianke-bench-exit/1",
+ "kind": "exit",
+ "finished_at": "2026-10-29T15:04:11+09:00",
+ "lucianke": {
+  "commit": "8a6f40fd806786fad4564c08412285fae5b98785",
+  "dirty": true,
+  "dirty_paths": 47
+ },
+ "machine": {
+  "os": "windows",
+  "os_detail": "Windows-11-10.0.26300-SP0",
+  "python": "3.12.11",
+  "cpu": "AMD Ryzen Threadripper 3960X 24-Core Processor",
+  "cpu_logical": 48,
+  "memory_gb": 63.9,
+  "storage": "HDD/SATA"
+ },
+ "spec": "docs/Lucianke仕様書.md §15.2（M1-1〜M1-8）、第 14 章",
+ "args": {
+  "only": [],
+  "skip_slow": true
+ },
+ "started_at": "2026-10-29T14:58:41+09:00",
+ "elapsed_s": 329.1,
+ "repo_start": {
+  "commit": "f68766bd9e28132cc60f96e1f7e826e98379e5a5",
+  "dirty": true,
+  "dirty_paths": 51
+ },
+ "overall": "fail",
+ "criteria": {
+  "M1-1": {
+   "verdict": "fail",
+   "checks": {
+    "M1-1.contract-fpoly": "fail",
+    "M1-1.e2e-stdio": "fail",
+    "M1-1.postcondition-map": "fail",
+    "M1-1.tool-t01-get_repo_map": "fail",
+    "M1-1.contract-fpy-fts": "skipped"
+   }
+  },
+  "M1-2": {
+   "verdict": "pass",
+   "checks": {
+    "M1-2.ep-transaction": "pass",
+    "M1-2.ep-map": "pass",
+    "M1-2.edit-contract": "pass"
+   }
+  },
+  "M1-3": {
+   "verdict": "not_run",
+   "checks": {
+    "M1-3.latency": "skipped"
+   }
+  },
+  "M1-4": {
+   "verdict": "not_run",
+   "checks": {
+    "M1-4.tokens": "skipped"
+   }
+  },
+  "M1-5": {
+   "verdict": "fail",
+   "checks": {
+    "M1-5.safe1-edit-syntax": "skipped",
+    "M1-5.safe2-db-readonly": "fail",
+    "M1-5.safe3-path-containment": "pass",
+    "M1-5.safe4-atomic-edit": "pass",
+    "M1-5.ops1-stdout": "pass",
+    "M1-5.ops2-children": "pass",
+    "M1-5.ops3-nonblocking": "pass",
+    "M1-5.ops4-positions": "pass"
+   }
+  },
+  "M1-6": {
+   "verdict": "not_run",
+   "checks": {
+    "M1-6.e2e-session": "skipped"
+   }
+  },
+  "M1-7": {
+   "verdict": "missing",
+   "checks": {
+    "M1-7.cross-os": "missing"
+   }
+  },
+  "M1-8": {
+   "verdict": "pass",
+   "checks": {
+    "M1-8.license-check": "pass",
+    "M1-8.ci-runs-license-check": "pass",
+    "M1-8.notices-up-to-date": "pass",
+    "M1-8.dist-includes-license-files": "pass"
+   }
+  }
+ },
+ "checks": [
+  {
+   "id": "M1-1.contract-fpoly",
+   "criterion": "M1-1",
+   "spec": "§11 各ツールの事後条件、§14.2 F-POLY",
+   "title": "ツールごとの契約テスト（F-POLY と実 LSP〈ruff・basedpyright〉・偽 LSP）",
+   "kind": "pytest",
+   "pass": "tests/contract が全部通る（赤 0・エラー 0・走った件数 >= 1）。skip は件数と理由を載せる",
+   "gating": true,
+   "slow": false,
+   "est_min": 6,
+   "quiet": false,
+   "needs": [],
+   "lsp": [
+    "ruff",
+    "basedpyright"
+   ],
+   "rc": 1,
+   "elapsed_s": 134.7,
+   "timed_out": false,
+   "stdout_tail": [
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target7-insert_before-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-end]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target8-insert_member-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-start]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target9-insert_member-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-end]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_4_dry_run_changes_nothing_and_predicts_the_write[target0-insert_after-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_4_dry_run_changes_nothing_and_predicts_the_write[target1-insert_member-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_4_dry_run_changes_nothing_and_predicts_the_write[target2-insert_before-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_expected_file_sha256_is_checked_and_chains_with_sha_after[insert_after-target0]",
+    "FAILED tests/contract/test_T10_insert.py::test_expected_file_sha256_is_checked_and_chains_with_sha_after[insert_before-target1]",
+    "FAILED tests/contract/test_T10_insert.py::test_expected_file_sha256_is_checked_and_chains_with_sha_after[insert_member-target2]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target0-insert_after-def broken(self, x:\\n    return 1\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target1-insert_before-def broken(self):\\n    return (1 +\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target2-insert_member-def broken(self:\\n    pass\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target3-insert_member-x = = 1\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target4-insert_after-broken(orderId: string {\\n  return 1;\\n}\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target5-insert_before-broken( {\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target6-insert_member-refund(orderId: string): boolean {\\n  return 1;\\n]",
+    "FAILED tests/contract/test_T10_insert.py::test_a_fragment_that_is_valid_alone_but_breaks_the_file_is_refused",
+    "FAILED tests/contract/test_T10_insert.py::test_insert_member_needs_a_container[target0]",
+    "FAILED tests/contract/test_T10_insert.py::test_insert_member_needs_a_container[target1]",
+    "FAILED tests/contract/test_T10_insert.py::test_insert_member_needs_a_container[target2]",
+    "FAILED tests/contract/test_T10_insert.py::test_mixed_tabs_and_spaces_and_empty_new_code_are_invalid_arguments[insert_before-target0]",
+    "FAILED tests/contract/test_T10_insert.py::test_mixed_tabs_and_spaces_and_empty_new_code_are_invalid_arguments[insert_after-target1]",
+    "FAILED tests/contract/test_T10_insert.py::test_mixed_tabs_and_spaces_and_empty_new_code_are_invalid_arguments[insert_member-target2]",
+    "FAILED tests/contract/test_T10_insert.py::test_target_errors_leave_every_byte_alone[target0-E_TARGET_NOT_FOUND]",
+    "FAILED tests/contract/test_T10_insert.py::test_target_errors_leave_every_byte_alone[target1-E_TARGET_NOT_FOUND]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target0-insert_after]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target1-insert_before]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target2-insert_member]",
+    "FAILED tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target3-insert_after]",
+    "FAILED tests/contract/test_T10_insert.py::test_crlf_insert_at_the_very_first_line_keeps_the_bom_in_front",
+    "FAILED tests/contract/test_T10_insert.py::test_missing_final_newline_stays_missing",
+    "FAILED tests/contract/test_T10_insert.py::test_compact_output_follows_the_grammar[target0-insert_after-PaymentProcessor.refund]",
+    "FAILED tests/contract/test_T10_insert.py::test_compact_output_follows_the_grammar[target1-insert_before-PaymentProcessor.refund]",
+    "FAILED tests/contract/test_T10_insert.py::test_compact_output_follows_the_grammar[target2-insert_member-PaymentProcessor.refund]",
+    "FAILED tests/contract/test_T10_insert.py::test_json_data_has_every_documented_field",
+    "FAILED tests/contract/test_T19_T20.py::test_t19_post1_default_tables_are_the_ten_public_views",
+    "FAILED tests/contract/test_T19_T20.py::test_t19_post2_column_names_match_the_ddl",
+    "FAILED tests/contract/test_T19_T20.py::test_t19_columns_carry_type_nullability_keys_and_ddl_comments",
+    "FAILED tests/contract/test_revision_reads.py::test_tools_without_revision_support[query_call_hierarchy-args3]",
+    "94 failed, 476 passed in 133.33s (0:02:13)"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 34.2,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-1.contract-fpoly.junit.xml"
+   ],
+   "tests": {
+    "total": 570,
+    "passed": 476,
+    "failed": 94,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_postcondition_4_total_estimate_is_the_number_of_target_files",
+     "kind": "failure",
+     "message": "assert None"
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_postcondition_5_budget_is_respected[200]",
+     "kind": "failure",
+     "message": "assert ({'ok': True, 'tool': 'get_repo_map', '_resolution_meta': {'confidence_level': 'structural', 'is_degraded': False, 'tie...'web/', 'file_count': 3, 'line_count': 31}, {'dir': 'db/', 'file_count': 1, 'line_count': 11}, ...], 'files': ["
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_postcondition_5_budget_is_respected[300]",
+     "kind": "failure",
+     "message": "assert ({'ok': True, 'tool': 'get_repo_map', '_resolution_meta': {'confidence_level': 'structural', 'is_degraded': False, 'tie...'web/', 'file_count': 3, 'line_count': 31}, {'dir': 'db/', 'file_count': 1, 'line_count': 11}, ...], 'files': ["
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_smaller_budget_is_a_prefix_of_the_larger",
+     "kind": "failure",
+     "message": "assert ([])"
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_cursor_walks_all_files_exactly_once",
+     "kind": "failure",
+     "message": "AssertionError: assert [] == ['src/shop/se...alc.cob', ...]"
+    },
+    {
+     "node": "tests/contract/test_T02_data_files.py::test_shrink_reduces_depth_and_says_so",
+     "kind": "failure",
+     "message": "AssertionError: assert '- truncated: 5 members omitted (depth limited to 1)' in '# get_file_skeleton ok conf=structural lsp=n/a rev=WORKING_TREE ws=poly ~64/200tok\\n! no record fits in max_tokens=200: the next record needs ~117 tokens; rais"
+    },
+    {
+     "node": "tests/contract/test_T02_data_files.py::test_batch_keeps_request_order_and_mixes_code_and_data",
+     "kind": "failure",
+     "message": "AssertionError: assert ['conf/settin...s/payment.py'] == ['conf/settin...ts/junit.xml']"
+    },
+    {
+     "node": "tests/contract/test_T03_T04.py::test_t03_budget_postcondition_5",
+     "kind": "failure",
+     "message": "assert (None)"
+    },
+    {
+     "node": "tests/contract/test_T03_T04.py::test_t04_budget",
+     "kind": "failure",
+     "message": "assert 223 <= 200"
+    },
+    {
+     "node": "tests/contract/test_T03_T04.py::test_t03_over_limit_issues_next_cursor_and_pages_do_not_overlap",
+     "kind": "failure",
+     "message": "AssertionError: assert (11 == 19)"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_truncated_body_is_a_prefix_and_tells_where",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":true,\"tool\":\"get_symbol_bodies\",\"_resolution_meta\":{\"confidence_level\":\"structural\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"python\",\"engine_used\":\"tree-sitter\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":f"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_cursor_continues_a_truncated_body_without_overlap_or_gap[260-0]",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_cursor_continues_a_truncated_body_without_overlap_or_gap[260-2]",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_cursor_continues_a_truncated_body_without_overlap_or_gap[300-0]",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_cursor_continues_a_truncated_body_without_overlap_or_gap[300-2]",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_cursor_continues_a_truncated_body_without_overlap_or_gap[450-0]",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_cursor_continues_a_truncated_body_without_overlap_or_gap[450-2]",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_truncation_never_lands_inside_the_context_lines",
+     "kind": "failure",
+     "message": "assert 0 >= 5"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_continue_with_line_range_gets_the_rest_and_the_note_says_how",
+     "kind": "failure",
+     "message": "IndexError: list index out of range"
+    },
+    {
+     "node": "tests/contract/test_T05_bodies.py::test_truncated_target_is_not_followed_by_the_next_target_until_it_is_complete",
+     "kind": "failure",
+     "message": "AssertionError: 進まないページ"
+    },
+    {
+     "node": "tests/contract/test_T06_T07.py::test_t06_postcondition_4_5_pages_have_no_duplicates_and_fit_the_budget",
+     "kind": "failure",
+     "message": "assert 357 <= 200"
+    },
+    {
+     "node": "tests/contract/test_T06_T07.py::test_t07_postcondition_5_budget",
+     "kind": "failure",
+     "message": "assert 732 <= 200"
+    },
+    {
+     "node": "tests/contract/test_T06_T07.py::test_real_call_hierarchy_create_order_to_process_charge_and_beyond",
+     "kind": "failure",
+     "message": "AssertionError: assert (('PaymentProcessor._validate_limit', 2) in [('PaymentRequest', 1), ('PaymentProcessor.process_charge', 1), ('PaymentProcessor._validate_limit', 2), ('LimitTable.get', 3), ('LimitExceeded', 3)] and ('PaymentDeclined',"
+    },
+    {
+     "node": "tests/contract/test_T08_diagnostics.py::test_budget_is_respected_and_pages_continue",
+     "kind": "failure",
+     "message": "assert (None)"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_after_a_method_puts_one_blank_line_on_each_side",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_before_a_method",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_before_the_first_method_of_a_class_adds_no_blank_line_above",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_toplevel_function_gets_two_blank_lines_after",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_before_a_decorated_class_goes_above_the_decorator",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_after_the_last_toplevel_class_keeps_the_end_of_file",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_new_code_indentation_is_converted_to_the_file_unit",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_member_end_appends_after_the_last_member",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_member_start_goes_after_the_docstring",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_member_into_a_pass_only_class_replaces_the_pass",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_member_into_empty_bodies[start]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_python_insert_member_into_empty_bodies[end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_typescript_insert_member_end",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_typescript_insert_member_start_goes_before_the_first_member",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_typescript_insert_after_and_before_a_member",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_typescript_insert_after_a_toplevel_interface_uses_one_blank_line",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_typescript_insert_before_the_first_definition_in_the_file",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_typescript_insert_member_into_empty_bodies",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postconditions_1_2_sha_after_diff_and_error_nodes[target0-insert_after-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-src/shop/services/payment.py-python]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postconditions_1_2_sha_after_diff_and_error_nodes[target1-insert_before-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-src/shop/services/payment.py-python]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postconditions_1_2_sha_after_diff_and_error_nodes[target2-insert_member-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-src/shop/services/payment.py-python]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postconditions_1_2_sha_after_diff_and_error_nodes[target3-insert_after-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-web/src/payment.ts-typescript]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postconditions_1_2_sha_after_diff_and_error_nodes[target4-insert_before-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-web/src/payment.ts-typescript]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postconditions_1_2_sha_after_diff_and_error_nodes[target5-insert_member-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-web/src/payment.ts-typescript]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target0-insert_after-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-PaymentProcessor.refund-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target1-insert_before-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-PaymentProcessor.refund-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target2-insert_member-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-PaymentProcessor.refund-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target3-insert_member-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n-PaymentProcessor.refund-start]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target4-insert_after-def helper(x: int) -> int:\\n    return x + 1\\n-helper-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target5-insert_before-def helper(x: int) -> int:\\n    return x + 1\\n-helper-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target6-insert_after-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target7-insert_before-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target8-insert_member-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-start]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_3_target_urn_and_new_range_point_at_the_inserted_symbol[target9-insert_member-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n-PaymentClient.refund-end]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_4_dry_run_changes_nothing_and_predicts_the_write[target0-insert_after-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_4_dry_run_changes_nothing_and_predicts_the_write[target1-insert_member-def refund(self, order_id: str) -> bool:\\n    \"\"\"\\u8fd4\\u91d1\\u3059\\u308b\\u3002\"\"\"\\n    return bool(order_id)\\n]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_4_dry_run_changes_nothing_and_predicts_the_write[target2-insert_before-refund(orderId: string): boolean {\\n  return orderId !== \"\";\\n}\\n]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_expected_file_sha256_is_checked_and_chains_with_sha_after[insert_after-target0]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_PRECONDITION_FAILED'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_expected_file_sha256_is_checked_and_chains_with_sha_after[insert_before-target1]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_PRECONDITION_FAILED'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_expected_file_sha256_is_checked_and_chains_with_sha_after[insert_member-target2]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_PRECONDITION_FAILED'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target0-insert_after-def broken(self, x:\\n    return 1\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target1-insert_before-def broken(self):\\n    return (1 +\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target2-insert_member-def broken(self:\\n    pass\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target3-insert_member-x = = 1\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target4-insert_after-broken(orderId: string {\\n  return 1;\\n}\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target5-insert_before-broken( {\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_breaks_the_syntax_is_refused_and_the_file_is_unchanged[target6-insert_member-refund(orderId: string): boolean {\\n  return 1;\\n]",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_a_fragment_that_is_valid_alone_but_breaks_the_file_is_refused",
+     "kind": "failure",
+     "message": "AssertionError: assert 'E_UNSUPPORTED' == 'E_SYNTAX_INVALID'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_insert_member_needs_a_container[target0]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_INVALID_ARGUMENT'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_insert_member_needs_a_container[target1]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_INVALID_ARGUMENT'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_insert_member_needs_a_container[target2]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_INVALID_ARGUMENT'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_mixed_tabs_and_spaces_and_empty_new_code_are_invalid_arguments[insert_before-target0]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_INVALID_ARGUMENT'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_mixed_tabs_and_spaces_and_empty_new_code_are_invalid_arguments[insert_after-target1]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_INVALID_ARGUMENT'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_mixed_tabs_and_spaces_and_empty_new_code_are_invalid_arguments[insert_member-target2]",
+     "kind": "failure",
+     "message": "AssertionError: assert ('E_UNSUPPORTED' == 'E_INVALID_ARGUMENT'"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_target_errors_leave_every_byte_alone[target0-E_TARGET_NOT_FOUND]",
+     "kind": "failure",
+     "message": "AssertionError: ('insert_before', {'code': 'E_UNSUPPORTED', 'message': 'operation insert_before is not implemented yet (replace_body only)', 'details': {'reason': 'operation_not_implemented', 'operation': 'insert_before'}, 'candidates': []}"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_target_errors_leave_every_byte_alone[target1-E_TARGET_NOT_FOUND]",
+     "kind": "failure",
+     "message": "AssertionError: ('insert_before', {'code': 'E_UNSUPPORTED', 'message': 'operation insert_before is not implemented yet (replace_body only)', 'details': {'reason': 'operation_not_implemented', 'operation': 'insert_before'}, 'candidates': []}"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target0-insert_after]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target1-insert_before]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target2-insert_member]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_postcondition_5_crlf_and_bom_survive_an_insert[target3-insert_after]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_crlf_insert_at_the_very_first_line_keeps_the_bom_in_front",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_missing_final_newline_stays_missing",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_compact_output_follows_the_grammar[target0-insert_after-PaymentProcessor.refund]",
+     "kind": "failure",
+     "message": "AssertionError: # edit_symbol_body error E_UNSUPPORTED"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_compact_output_follows_the_grammar[target1-insert_before-PaymentProcessor.refund]",
+     "kind": "failure",
+     "message": "AssertionError: # edit_symbol_body error E_UNSUPPORTED"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_compact_output_follows_the_grammar[target2-insert_member-PaymentProcessor.refund]",
+     "kind": "failure",
+     "message": "AssertionError: # edit_symbol_body error E_UNSUPPORTED"
+    },
+    {
+     "node": "tests/contract/test_T10_insert.py::test_json_data_has_every_documented_field",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"edit_symbol_body\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confidence"
+    },
+    {
+     "node": "tests/contract/test_T19_T20.py::test_t19_post1_default_tables_are_the_ten_public_views",
+     "kind": "failure",
+     "message": "AssertionError: assert ({'files', 'workspaces'} == {'contracts',...commits', ...}"
+    },
+    {
+     "node": "tests/contract/test_T19_T20.py::test_t19_post2_column_names_match_the_ddl",
+     "kind": "failure",
+     "message": "KeyError: 'symbols'"
+    },
+    {
+     "node": "tests/contract/test_T19_T20.py::test_t19_columns_carry_type_nullability_keys_and_ddl_comments",
+     "kind": "failure",
+     "message": "KeyError: 'symbols'"
+    },
+    {
+     "node": "tests/contract/test_revision_reads.py::test_tools_without_revision_support[query_call_hierarchy-args3]",
+     "kind": "failure",
+     "message": "AssertionError: {\"ok\":false,\"tool\":\"query_call_hierarchy\",\"_resolution_meta\":{\"confidence_level\":\"exact\",\"is_degraded\":false,\"tier\":1,\"detected_language\":\"n/a\",\"engine_used\":\"n/a\",\"lsp_status\":\"n/a\",\"lsp_progress\":null,\"mixed\":false,\"confid"
+    }
+   ],
+   "skip_reasons": {},
+   "verdict": "fail",
+   "reason": "赤 94 件・エラー 0 件（走った 570 件）"
+  },
+  {
+   "id": "M1-1.e2e-stdio",
+   "criterion": "M1-1",
+   "spec": "§11、§12.1（実プロセスの stdio 経由で 14 ツールが答える）",
+   "title": "実プロセスのサーバーに stdio でつなぐ縦串（tools/list と索引ツール）",
+   "kind": "pytest",
+   "pass": "tests/e2e が全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 2,
+   "quiet": false,
+   "needs": [],
+   "rc": 1,
+   "elapsed_s": 43.8,
+   "timed_out": false,
+   "stdout_tail": [
+    "    |     cb_suppress = await cb(*exc_details)",
+    "    |                   ^^^^^^^^^^^^^^^^^^^^^^",
+    "    |   File \"S:\\work\\develop\\Lucianke\\.venv\\Lib\\site-packages\\mcp\\client\\session.py\", line 514, in __aexit__",
+    "    |     result = await self._task_group.__aexit__(exc_type, exc_val, exc_tb)",
+    "    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    "    |   File \"S:\\work\\develop\\Lucianke\\.venv\\Lib\\site-packages\\anyio\\_backends\\_asyncio.py\", line 847, in __aexit__",
+    "    |     raise BaseExceptionGroup(",
+    "    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)",
+    "    +-+---------------- 1 ----------------",
+    "      | Traceback (most recent call last):",
+    "      |   File \"S:\\work\\develop\\Lucianke\\tests\\e2e\\test_vertical_slice_stdio.py\", line 44, in test_stdio_vertical_slice",
+    "      |     assert {\"get_file_skeleton\", \"get_symbol_bodies\"} <= set(tools)",
+    "      | AssertionError: assert {'get_file_sk...ymbol_bodies'} <= {'analyze_git...nostics', ...}",
+    "      |   ",
+    "      |   Extra items in the left set:",
+    "      |   'get_file_skeleton'",
+    "      |   'get_symbol_bodies'",
+    "      +------------------------------------",
+    "---------------------------- Captured stderr call -----------------------------",
+    "15:01:28 ERROR lucianke.tools: tool module t02_get_file_skeleton failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t04_resolve_symbols failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t05_get_symbol_bodies failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t09_analyze_change_impact failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t10_edit_symbol_body failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t14_find_code_paths failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t16_verify_contract failed to import; skipped (SyntaxError)",
+    "15:01:28 ERROR lucianke.tools: tool module t17_get_symbol_history failed to import; skipped (SyntaxError)",
+    "15:01:28 INFO  lucianke: lucianke 0.0.1 starting (tools=13)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown begin: reason=stdin_eof steps=6",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown step 'edits' ok (0 ms)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown step 'watchers' ok (0 ms)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown step 'indexers' ok (0 ms)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown step 'lsp' ok (0 ms)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown step 'children' ok (0 ms)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown step 'index_close' ok (0 ms)",
+    "15:01:28 INFO  lucianke.lifecycle: shutdown done: 0 ms, 6/6 steps ok",
+    "15:01:28 INFO  lucianke: shutdown complete",
+    "=========================== short test summary info ===========================",
+    "FAILED tests/e2e/test_vertical_slice_stdio.py::test_stdio_vertical_slice - As...",
+    "1 failed, 5 passed in 42.60s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 45.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/e2e",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-1.e2e-stdio.junit.xml"
+   ],
+   "tests": {
+    "total": 6,
+    "passed": 5,
+    "failed": 1,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [
+    {
+     "node": "tests/e2e/test_vertical_slice_stdio.py::test_stdio_vertical_slice",
+     "kind": "failure",
+     "message": "AssertionError(\"assert {'get_file_sk...ymbol_bodies'} <= {'analyze_git...nostics', ...}\\n  \\n  Extra items in the left set:\\n  'get_file_skeleton'\\n  'get_symbol_bodies'\") [single exception in ExceptionGroup]"
+    }
+   ],
+   "skip_reasons": {},
+   "verdict": "fail",
+   "reason": "赤 1 件・エラー 0 件（走った 6 件）"
+  },
+  {
+   "id": "M1-1.postcondition-map",
+   "criterion": "M1-1",
+   "spec": "§11 各ツールの「事後条件」、設計書 R-9",
+   "title": "事後条件の番号 -> 契約テストの対応表を機械で作り、対応の無い事後条件が 0 であること",
+   "kind": "script",
+   "pass": "M1 の 14 ツールの事後条件のうち、テストに結び付かないもの（unmapped）が 0 件",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 1.1,
+   "timed_out": false,
+   "stdout_tail": [
+    "postcondition_map: M1 事後条件 68 件、未対応 10 件、EP 未対応 0 件、範囲外 0 件、ツール不明 0 件"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 40.0,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "bench/postcondition_map.py",
+    "--m1-only",
+    "--json",
+    "C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-1.postcondition-map.out.json",
+    "--quiet"
+   ],
+   "result_file": null,
+   "expect": [
+    {
+     "path": "unmapped_total",
+     "op": "eq",
+     "value": 0,
+     "ok": false,
+     "n": 1,
+     "got": [
+      10
+     ]
+    }
+   ],
+   "verdict": "fail",
+   "reason": "unmapped_total eq 0（得た: [10]）"
+  },
+  {
+   "id": "M1-1.tool-t01-get_repo_map",
+   "criterion": "M1-1",
+   "spec": "§11.2 T-01 `get_repo_map`（M1 の 14 ツールの 1 本）",
+   "title": "T-01 の実装と契約テストがある（tools/t01_*.py と repo_map を名前に持つ契約テスト）",
+   "kind": "pytest",
+   "pass": "T-01 の実装ファイルが在り、repo_map を名前に持つ契約テストが 1 件以上通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 1,
+   "elapsed_s": 4.4,
+   "timed_out": false,
+   "stdout_tail": [
+    "        \"\"\"重要なファイルが先: 小さい予算で出るファイルは、大きい予算で出るファイルの先頭と同じ。\"\"\"",
+    "        big = paths_of(await repo_map(pipeline, max_tokens=8000))",
+    "        for max_tokens in (250, 500, 1000):",
+    "            small = paths_of(await repo_map(pipeline, max_tokens=max_tokens))",
+    ">           assert small and small == big[: len(small)]",
+    "E           assert ([])",
+    "",
+    "tests\\contract\\test_T01_repo_map.py:274: AssertionError",
+    "__________________ test_cursor_walks_all_files_exactly_once ___________________",
+    "",
+    "pipeline = <lucianke.mcp.pipeline.Pipeline object at 0x00000156F9CEF6B0>",
+    "",
+    "    async def test_cursor_walks_all_files_exactly_once(pipeline: Pipeline) -> None:",
+    "        full = paths_of(await repo_map(pipeline, max_tokens=20000))",
+    "        seen: list[str] = []",
+    "        cursor: str | None = None",
+    "        for _ in range(60):",
+    "            args: dict[str, Any] = {\"max_tokens\": 250}",
+    "            if cursor:",
+    "                args[\"cursor\"] = cursor",
+    "            r = await repo_map(pipeline, **args)",
+    "            assert not r.is_error, r.text",
+    "            seen += paths_of(r)",
+    "            cursor = r.structured[\"page\"].get(\"next_cursor\")",
+    "            if not cursor:",
+    "                break",
+    ">       assert seen == full  # 重複も取りこぼしも無い",
+    "        ^^^^^^^^^^^^^^^^^^^",
+    "E       AssertionError: assert [] == ['src/shop/se...alc.cob', ...]",
+    "E         ",
+    "E         Right contains 29 more items, first extra item: 'src/shop/services/limits.py'",
+    "E         Use -v to get more diff",
+    "",
+    "tests\\contract\\test_T01_repo_map.py:411: AssertionError",
+    "=========================== short test summary info ===========================",
+    "FAILED tests/contract/test_T01_repo_map.py::test_postcondition_4_total_estimate_is_the_number_of_target_files",
+    "FAILED tests/contract/test_T01_repo_map.py::test_postcondition_5_budget_is_respected[200]",
+    "FAILED tests/contract/test_T01_repo_map.py::test_smaller_budget_is_a_prefix_of_the_larger",
+    "FAILED tests/contract/test_T01_repo_map.py::test_cursor_walks_all_files_exactly_once",
+    "4 failed, 36 passed, 535 deselected in 3.30s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 38.8,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract",
+    "-k",
+    "repo_map",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-1.tool-t01-get_repo_map.junit.xml"
+   ],
+   "tests": {
+    "total": 40,
+    "passed": 36,
+    "failed": 4,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_postcondition_4_total_estimate_is_the_number_of_target_files",
+     "kind": "failure",
+     "message": "assert None"
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_postcondition_5_budget_is_respected[200]",
+     "kind": "failure",
+     "message": "assert ({'ok': True, 'tool': 'get_repo_map', '_resolution_meta': {'confidence_level': 'structural', 'is_degraded': False, 'tie...': 'docs/', 'file_count': 3, 'line_count': 19}, {'dir': 'web/', 'file_count': 3, 'line_count': 31}], 'files': ["
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_smaller_budget_is_a_prefix_of_the_larger",
+     "kind": "failure",
+     "message": "assert ([])"
+    },
+    {
+     "node": "tests/contract/test_T01_repo_map.py::test_cursor_walks_all_files_exactly_once",
+     "kind": "failure",
+     "message": "AssertionError: assert [] == ['src/shop/se...alc.cob', ...]"
+    }
+   ],
+   "skip_reasons": {},
+   "verdict": "fail",
+   "reason": "赤 4 件・エラー 0 件（走った 40 件）"
+  },
+  {
+   "id": "M1-1.contract-fpy-fts",
+   "criterion": "M1-1",
+   "spec": "§14.2 F-PY・F-TS（bench/fixtures.toml）、§15.2 M1-1",
+   "title": "F-PY（httpx）と F-TS（ky）に対して契約テストを回す仕組み",
+   "kind": "pytest",
+   "pass": "取得済みの F-PY・F-TS を対象に、14 ツールの事後条件の試験が通る（契約テストを F-POLY 以外のワークスペースで回す仕組みが前提）",
+   "gating": true,
+   "slow": true,
+   "est_min": 10,
+   "quiet": false,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-2.ep-transaction",
+   "criterion": "M1-2",
+   "spec": "§10.10 EP-1〜EP-9",
+   "title": "編集トランザクションの EP-1〜EP-9（外部変更の競合・恒等編集のバイト一致・多ファイル改名の巻き戻しを含む）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 5.6,
+   "timed_out": false,
+   "stdout_tail": [
+    ".........................................                                [100%]",
+    "41 passed in 4.59s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 40.3,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_edit_transaction.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-2.ep-transaction.junit.xml"
+   ],
+   "tests": {
+    "total": 41,
+    "passed": 41,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "41 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-2.ep-map",
+   "criterion": "M1-2",
+   "spec": "§10.10 EP-1〜EP-9",
+   "title": "EP-1〜EP-9 のそれぞれが、編集系のテストから名前で参照されている",
+   "kind": "script",
+   "pass": "EP-1〜EP-9 の未対応が 0 件",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 1.1,
+   "timed_out": false,
+   "stdout_tail": [
+    "postcondition_map: M1 事後条件 68 件、未対応 10 件、EP 未対応 0 件、範囲外 0 件、ツール不明 0 件"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 31.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "bench/postcondition_map.py",
+    "--ep-only",
+    "--json",
+    "C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-2.ep-map.out.json",
+    "--quiet"
+   ],
+   "result_file": null,
+   "expect": [
+    {
+     "path": "ep.unmapped_total",
+     "op": "eq",
+     "value": 0,
+     "ok": true,
+     "n": 1,
+     "got": null
+    }
+   ],
+   "verdict": "pass",
+   "reason": "結果 JSON の条件を満たす"
+  },
+  {
+   "id": "M1-2.edit-contract",
+   "criterion": "M1-2",
+   "spec": "§10.10、§11.5 T-10・T-11・T-13 の事後条件",
+   "title": "編集ツール（T-10 本体と削除、T-11、T-13）の契約テストと、書き込み・正規化・構文検査の単体",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 3,
+   "quiet": false,
+   "needs": [],
+   "lsp": [
+    "ruff"
+   ],
+   "rc": 0,
+   "elapsed_s": 45.9,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [ 22%]",
+    "...................................................s.................... [ 44%]",
+    "........................................................................ [ 66%]",
+    "........................................................................ [ 88%]",
+    ".....................................                                    [100%]",
+    "324 passed, 1 skipped in 44.81s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 56.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract/test_T10_edit_body.py",
+    "tests/contract/test_T10_delete.py",
+    "tests/contract/test_T11_rename.py",
+    "tests/contract/test_T13_code_action.py",
+    "tests/unit/test_edit_writer.py",
+    "tests/unit/test_edit_normalize.py",
+    "tests/unit/test_edit_syntax_check.py",
+    "tests/unit/test_edit_plan.py",
+    "tests/unit/test_edit_workspace_edit.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-2.edit-contract.junit.xml"
+   ],
+   "tests": {
+    "total": 325,
+    "passed": 324,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 1
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "実行ビットは POSIX のみ保持する（設計書 §9.5）": 1
+   },
+   "verdict": "pass",
+   "reason": "324 件が通った（skip 1 件）"
+  },
+  {
+   "id": "M1-3.latency",
+   "criterion": "M1-3",
+   "spec": "§14.4、NFR-PERF-1（Fast Path は p95 < 50 ms）",
+   "title": "14 ツール x 200 回（F-POLY と F-PY・F-TS）のサーバー内 timing_ms の p95 < 50 ms",
+   "kind": "script",
+   "pass": "全フィクスチャ・14 ツールが pass（not_implemented・skip・fail が無い）。stdout 純度と子プロセスの監視も通る",
+   "gating": true,
+   "slow": true,
+   "est_min": 20,
+   "quiet": true,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS",
+    "exe:uv"
+   ],
+   "lsp": [
+    "ruff",
+    "basedpyright",
+    "typescript"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-4.tokens",
+   "criterion": "M1-4",
+   "spec": "§14.3、NFR-TOK-1（削減率 >= 75%）",
+   "title": "S1・S2・S4 x F-PY・F-TS の 6 件で 1 - L/B >= 0.75（o200k_base）",
+   "kind": "script",
+   "pass": "6 件すべて pass（skip・error・fail が無い）",
+   "gating": true,
+   "slow": true,
+   "est_min": 15,
+   "quiet": false,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS",
+    "exe:uv",
+    "exe:npm"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-5.safe1-edit-syntax",
+   "criterion": "M1-5",
+   "spec": "§14.5、NFR-SAFE-1（構文妥当 >= 99.9%、恒等編集は 100%）",
+   "title": "1,000 件の編集操作の構文妥当性・恒等編集のバイト一致 100%・ジャーナル復元 50 件",
+   "kind": "script",
+   "pass": "結果 JSON の verdict が pass（未整備: 別の役が作成中。台本ができたら自動で判定に入る）",
+   "gating": true,
+   "slow": true,
+   "est_min": 20,
+   "quiet": false,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-5.safe2-db-readonly",
+   "criterion": "M1-5",
+   "spec": "§13.2、NFR-SAFE-2（書き込み文はすべて拒否。接続は読み取り専用）",
+   "title": "公開 DB の読み取り専用（多層防御の各層を外しても書けない・ATTACH 遮断）と T-20 の拒否",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 1,
+   "quiet": false,
+   "needs": [],
+   "rc": 1,
+   "elapsed_s": 23.6,
+   "timed_out": false,
+   "stdout_tail": [
+    "E         'dataflows'",
+    "E         'symbols'",
+    "E         'contracts'...",
+    "E         ",
+    "E         ...Full output truncated, use '-vv' to show)",
+    "",
+    "tests\\contract\\test_T19_T20.py:157: AssertionError",
+    "__________________ test_t19_post2_column_names_match_the_ddl __________________",
+    "",
+    "pipeline = <lucianke.mcp.pipeline.Pipeline object at 0x0000011E6FE32840>",
+    "",
+    "    async def test_t19_post2_column_names_match_the_ddl(pipeline: Pipeline) -> None:",
+    "        ddl = sqlite3.connect(\":memory:\")",
+    "        ddl.executescript(schema_sql())",
+    "        expected = {t: {row[1] for row in ddl.execute(f\"PRAGMA table_info({t})\")} for t in PUBLIC}",
+    "        r = await schema(pipeline)",
+    "        got = {t[\"name\"]: {c[\"name\"] for c in t[\"columns\"]} for t in r.structured[\"data\"][\"tables\"]}",
+    "        for table in PUBLIC:",
+    ">           assert got[table] == expected[table], table",
+    "                   ^^^^^^^^^^",
+    "E           KeyError: 'symbols'",
+    "",
+    "tests\\contract\\test_T19_T20.py:171: KeyError",
+    "________ test_t19_columns_carry_type_nullability_keys_and_ddl_comments ________",
+    "",
+    "pipeline = <lucianke.mcp.pipeline.Pipeline object at 0x0000011E6FE331D0>",
+    "",
+    "    async def test_t19_columns_carry_type_nullability_keys_and_ddl_comments(pipeline: Pipeline) -> None:",
+    "        r = await schema(pipeline)",
+    "        tables = {t[\"name\"]: t for t in r.structured[\"data\"][\"tables\"]}",
+    ">       cols = {c[\"name\"]: c for c in tables[\"symbols\"][\"columns\"]}",
+    "                                      ^^^^^^^^^^^^^^^^^",
+    "E       KeyError: 'symbols'",
+    "",
+    "tests\\contract\\test_T19_T20.py:178: KeyError",
+    "=========================== short test summary info ===========================",
+    "FAILED tests/contract/test_T19_T20.py::test_t19_post1_default_tables_are_the_ten_public_views",
+    "FAILED tests/contract/test_T19_T20.py::test_t19_post2_column_names_match_the_ddl",
+    "FAILED tests/contract/test_T19_T20.py::test_t19_columns_carry_type_nullability_keys_and_ddl_comments",
+    "3 failed, 311 passed, 1 skipped in 22.58s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 47.2,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/invariants/test_public_db_readonly.py",
+    "tests/unit/test_index_public.py",
+    "tests/contract/test_T19_T20.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.safe2-db-readonly.junit.xml"
+   ],
+   "tests": {
+    "total": 315,
+    "passed": 311,
+    "failed": 3,
+    "errors": 0,
+    "skipped": 1
+   },
+   "failed_nodes": [
+    {
+     "node": "tests/contract/test_T19_T20.py::test_t19_post1_default_tables_are_the_ten_public_views",
+     "kind": "failure",
+     "message": "AssertionError: assert ({'files', 'workspaces'} == {'contracts',...commits', ...}"
+    },
+    {
+     "node": "tests/contract/test_T19_T20.py::test_t19_post2_column_names_match_the_ddl",
+     "kind": "failure",
+     "message": "KeyError: 'symbols'"
+    },
+    {
+     "node": "tests/contract/test_T19_T20.py::test_t19_columns_carry_type_nullability_keys_and_ddl_comments",
+     "kind": "failure",
+     "message": "KeyError: 'symbols'"
+    }
+   ],
+   "skip_reasons": {
+    "symlinks not permitted": 1
+   },
+   "verdict": "fail",
+   "reason": "赤 3 件・エラー 0 件（走った 315 件）"
+  },
+  {
+   "id": "M1-5.safe3-path-containment",
+   "criterion": "M1-5",
+   "spec": "§13.1、NFR-SAFE-3（ルート外のパスは E_INVALID_ARGUMENT）",
+   "title": "パスの封じ込め（.. ・別ドライブ・拡張長接頭辞・禁止文字）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.2,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 5.8,
+   "timed_out": false,
+   "stdout_tail": [
+    ".........................s...................sss........................ [ 59%]",
+    "...........................................ss....                        [100%]",
+    "115 passed, 6 skipped in 4.78s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 54.9,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_workspace_paths.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.safe3-path-containment.junit.xml"
+   ],
+   "tests": {
+    "total": 121,
+    "passed": 115,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 6
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "大文字小文字を区別する FS では綴りをそのまま返す": 1,
+    "cannot create symlinks here: [WinError 1314] クライアントは要求された特権を保有していません。: 'C:\\\\Users\\\\shini\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-shini\\\\pytest-9870\\\\test_symlinked_fil": 1,
+    "cannot create symlinks here: [WinError 1314] クライアントは要求された特権を保有していません。: 'C:\\\\Users\\\\shini\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-shini\\\\pytest-9870\\\\test_dangling_syml": 1,
+    "Windows は OS 自身が ``..`` を字句で畳んでからリンクをたどる": 1,
+    "POSIX の file:///home/... 形式": 1,
+    "POSIX の他ホスト URI": 1
+   },
+   "verdict": "pass",
+   "reason": "115 件が通った（skip 6 件）"
+  },
+  {
+   "id": "M1-5.safe4-atomic-edit",
+   "criterion": "M1-5",
+   "spec": "§10.6、NFR-SAFE-4（失敗時に部分的に書き換わったファイルが無い）",
+   "title": "原子的書き込み（2 本目・最後の rename 失敗の巻き戻し、新規作成の巻き戻し、ジャーナルからの手動復元）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.3,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 6.2,
+   "timed_out": false,
+   "stdout_tail": [
+    "...........s...............................                              [100%]",
+    "42 passed, 1 skipped in 5.18s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 55.4,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_edit_writer.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.safe4-atomic-edit.junit.xml"
+   ],
+   "tests": {
+    "total": 43,
+    "passed": 42,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 1
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "実行ビットは POSIX のみ保持する（設計書 §9.5）": 1
+   },
+   "verdict": "pass",
+   "reason": "42 件が通った（skip 1 件）"
+  },
+  {
+   "id": "M1-5.ops1-stdout",
+   "criterion": "M1-5",
+   "spec": "§12.1、NFR-OPS-1（stdout は改行区切りの JSON-RPC のみ）",
+   "title": "実プロセスの stdout の全バイトが JSON-RPC 2.0（ノイズを書くツールを呼んでも混ざらない）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 10.8,
+   "timed_out": false,
+   "stdout_tail": [
+    ".......                                                                  [100%]",
+    "7 passed in 9.78s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 49.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/invariants/test_stdout_purity.py",
+    "tests/unit/test_smoke.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.ops1-stdout.junit.xml"
+   ],
+   "tests": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "7 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-5.ops2-children",
+   "criterion": "M1-5",
+   "spec": "§12.5、NFR-OPS-2（終了後 1 秒以内に子プロセス 0）",
+   "title": "終了手順と子プロセスの回収（SIGTERM・Ctrl-Break・子孫の kill）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 4.0,
+   "timed_out": false,
+   "stdout_tail": [
+    ".................ss..............                                        [100%]",
+    "31 passed, 2 skipped in 3.05s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 38.4,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_lifecycle.py",
+    "tests/unit/test_core_procs.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.ops2-children.junit.xml"
+   ],
+   "tests": {
+    "total": 33,
+    "passed": 31,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 2
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "loop.add_signal_handler は POSIX のみ": 1,
+    "SIGTERM は POSIX のみ（Windows は下の CTRL_BREAK で検査）": 1
+   },
+   "verdict": "pass",
+   "reason": "31 件が通った（skip 2 件）"
+  },
+  {
+   "id": "M1-5.ops3-nonblocking",
+   "criterion": "M1-5",
+   "spec": "§12.3、NFR-OPS-3（LSP の起動・索引中でも降格応答で答える）",
+   "title": "LSP が starting / indexing / unavailable でも待たずに降格応答",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 7.5,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [ 34%]",
+    "........................................................................ [ 68%]",
+    "...................................................................      [100%]",
+    "211 passed in 6.35s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 32.5,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract/test_T04_lsp.py::test_not_ready_lsp_is_not_waited_for_and_is_started",
+    "tests/contract/test_T08_diagnostics.py::test_lsp_indexing_degrades_to_syntax_errors_then_exact",
+    "tests/contract/test_T08_diagnostics.py::test_unavailable_lsp_degrades_without_error",
+    "tests/unit/test_engine_selector.py",
+    "tests/unit/test_engine_selector_failure.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.ops3-nonblocking.junit.xml"
+   ],
+   "tests": {
+    "total": 211,
+    "passed": 211,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "211 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-5.ops4-positions",
+   "criterion": "M1-5",
+   "spec": "§5.10、§12.2、NFR-OPS-4（行・列の正規化）",
+   "title": "位置の正規化（非 ASCII・絵文字・結合文字・CRLF・BOM・UTF-8/16 の往復）と LSP の位置変換",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 27.6,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [100%]",
+    "72 passed in 26.62s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 39.5,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_core_textpos.py",
+    "tests/unit/test_lsp_features.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-sh2nzhs7\\M1-5.ops4-positions.junit.xml"
+   ],
+   "tests": {
+    "total": 72,
+    "passed": 72,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "72 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-6.e2e-session",
+   "criterion": "M1-6",
+   "spec": "§15.2 M1-6（骨格 -> 本体 -> 編集 -> 診断ゼロ確認）。台本と記録は bench/e2e/",
+   "title": ".mcp.json の起動コマンドで接続し、台本化したセッションを完走する",
+   "kind": "script",
+   "pass": "結果 JSON の verdict が pass（骨格 -> 本体 -> 編集 -> 診断ゼロの全段が成功）。未整備: 別の役が作成中",
+   "gating": true,
+   "slow": true,
+   "est_min": 3,
+   "quiet": false,
+   "needs": [],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-7.cross-os",
+   "criterion": "M1-7",
+   "spec": "§15.2 M1-7、NFR-PORT-2（閾値は OS によらず同一）",
+   "title": "bench/results/ に 3 OS の *-exit.json があり、M1-1〜M1-6 の判定が OS 間で一致する",
+   "kind": "builtin",
+   "pass": "windows・macos・linux の最新の exit 結果が揃い、M1-1〜M1-6 の各判定が同じ（設計書 §10.5 の CI の OS 行列で実行器を回して集める）",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.01,
+   "quiet": false,
+   "needs": [],
+   "verdict": "missing",
+   "reason": "未整備: macos, linux の exit 結果が bench/results/ に無い（在るのは: windows）。CI の OS 行列で実行器を回して集める"
+  },
+  {
+   "id": "M1-8.license-check",
+   "criterion": "M1-8",
+   "spec": "§16 L-8（依存木に許可リスト外の SPDX 識別子が無い）",
+   "title": "tools/check_licenses.py（CI の license ジョブと同じコマンド）",
+   "kind": "script",
+   "pass": "終了コード 0",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.3,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 3.3,
+   "timed_out": false,
+   "stdout_tail": [
+    "checked 65 packages: 0 fail, 0 warn"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 42.3,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "tools/check_licenses.py"
+   ],
+   "verdict": "pass",
+   "reason": "終了コード 0"
+  },
+  {
+   "id": "M1-8.ci-runs-license-check",
+   "criterion": "M1-8",
+   "spec": "§15.2 M1-8（CI で通る）、設計書 §10.5",
+   "title": ".github/workflows/ci.yml が tools/check_licenses.py を実行している",
+   "kind": "builtin",
+   "pass": "ci.yml に check_licenses.py を走らせる行がある",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.01,
+   "quiet": false,
+   "needs": [],
+   "verdict": "pass",
+   "reason": "ci.yml が tools/check_licenses.py を run している"
+  },
+  {
+   "id": "M1-8.notices-up-to-date",
+   "criterion": "M1-8",
+   "spec": "§16.1 L-7、§16.3、設計書 §10.5（生成して差分が無いこと）",
+   "title": "THIRD_PARTY_NOTICES.md が uv.lock の依存木から再生成したものと一致する（tools/gen_notices.py --check）",
+   "kind": "script",
+   "pass": "終了コード 0（古ければ 1）",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.3,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 3.2,
+   "timed_out": false,
+   "stdout_tail": [
+    "THIRD_PARTY_NOTICES.md is up to date (57 packages)"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 36.9,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "tools/gen_notices.py",
+    "--check"
+   ],
+   "verdict": "pass",
+   "reason": "終了コード 0"
+  },
+  {
+   "id": "M1-8.dist-includes-license-files",
+   "criterion": "M1-8",
+   "spec": "§15.2 M1-8、§16.3（配布物に LICENSE と THIRD_PARTY_NOTICES.md を含める）",
+   "title": "pyproject.toml の license-files に LICENSE と THIRD_PARTY_NOTICES.md があり、どちらもリポジトリに在って git の管理下にある",
+   "kind": "builtin",
+   "pass": "license-files が両方を含み、両ファイルが git ls-files に載っている",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.01,
+   "quiet": false,
+   "needs": [],
+   "verdict": "pass",
+   "reason": "license-files が両方を含み、両ファイルが管理下にある"
+  },
+  {
+   "id": "REF.reaction",
+   "criterion": "REF",
+   "spec": "§14.6、NFR-PERF-3（外部変更の反映 p95 <= 500 ms）。M1 の出口条件には入っていない",
+   "title": "外部からの 1 ファイル変更が files.sha256 に反映されるまで（F-POLY の複製で 100 回）",
+   "kind": "script",
+   "pass": "verdict が pass",
+   "gating": false,
+   "slow": true,
+   "est_min": 3,
+   "quiet": true,
+   "needs": [],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "REF.full-suite",
+   "criterion": "REF",
+   "spec": "§15.1（前のマイルストーンの出口条件を壊さない＝非回帰）、CI の test ジョブ",
+   "title": "tests/ 全体（unit + contract + invariants + e2e）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": false,
+   "slow": true,
+   "est_min": 15,
+   "quiet": false,
+   "needs": [],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  }
+ ]
+}

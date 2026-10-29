@@ -1,0 +1,1099 @@
+{
+ "schema": "lucianke-bench-exit/1",
+ "kind": "exit",
+ "finished_at": "2026-10-29T15:15:00+09:00",
+ "lucianke": {
+  "commit": "f6fd68106e6a03e3fd129605334ea8cebd8b4adb",
+  "dirty": true,
+  "dirty_paths": 21
+ },
+ "machine": {
+  "os": "windows",
+  "os_detail": "Windows-11-10.0.26300-SP0",
+  "python": "3.12.11",
+  "cpu": "AMD Ryzen Threadripper 3960X 24-Core Processor",
+  "cpu_logical": 48,
+  "memory_gb": 63.9,
+  "storage": "HDD/SATA"
+ },
+ "spec": "docs/Lucianke仕様書.md §15.2（M1-1〜M1-8）、第 14 章",
+ "args": {
+  "only": [],
+  "skip_slow": true
+ },
+ "started_at": "2026-10-29T15:07:43+09:00",
+ "elapsed_s": 437.5,
+ "repo_start": {
+  "commit": "da81727ccb93a02b1ced4373df0980bdcddb21ea",
+  "dirty": true,
+  "dirty_paths": 36
+ },
+ "overall": "fail",
+ "criteria": {
+  "M1-1": {
+   "verdict": "fail",
+   "checks": {
+    "M1-1.contract-fpoly": "pass",
+    "M1-1.e2e-stdio": "pass",
+    "M1-1.postcondition-map": "fail",
+    "M1-1.tool-t01-get_repo_map": "pass",
+    "M1-1.contract-fpy-fts": "skipped"
+   }
+  },
+  "M1-2": {
+   "verdict": "pass",
+   "checks": {
+    "M1-2.ep-transaction": "pass",
+    "M1-2.ep-map": "pass",
+    "M1-2.edit-contract": "pass"
+   }
+  },
+  "M1-3": {
+   "verdict": "not_run",
+   "checks": {
+    "M1-3.latency": "skipped"
+   }
+  },
+  "M1-4": {
+   "verdict": "not_run",
+   "checks": {
+    "M1-4.tokens": "skipped"
+   }
+  },
+  "M1-5": {
+   "verdict": "not_run",
+   "checks": {
+    "M1-5.safe1-edit-syntax": "skipped",
+    "M1-5.safe2-db-readonly": "pass",
+    "M1-5.safe3-path-containment": "pass",
+    "M1-5.safe4-atomic-edit": "pass",
+    "M1-5.ops1-stdout": "pass",
+    "M1-5.ops2-children": "pass",
+    "M1-5.ops3-nonblocking": "pass",
+    "M1-5.ops4-positions": "pass"
+   }
+  },
+  "M1-6": {
+   "verdict": "pass",
+   "checks": {
+    "M1-6.e2e-session": "pass"
+   }
+  },
+  "M1-7": {
+   "verdict": "missing",
+   "checks": {
+    "M1-7.cross-os": "missing"
+   }
+  },
+  "M1-8": {
+   "verdict": "pass",
+   "checks": {
+    "M1-8.license-check": "pass",
+    "M1-8.ci-runs-license-check": "pass",
+    "M1-8.notices-up-to-date": "pass",
+    "M1-8.dist-includes-license-files": "pass"
+   }
+  }
+ },
+ "checks": [
+  {
+   "id": "M1-1.contract-fpoly",
+   "criterion": "M1-1",
+   "spec": "§11 各ツールの事後条件、§14.2 F-POLY",
+   "title": "ツールごとの契約テスト（F-POLY と実 LSP〈ruff・basedpyright〉・偽 LSP）",
+   "kind": "pytest",
+   "pass": "tests/contract が全部通る（赤 0・エラー 0・走った件数 >= 1）。skip は件数と理由を載せる",
+   "gating": true,
+   "slow": false,
+   "est_min": 6,
+   "quiet": false,
+   "needs": [],
+   "lsp": [
+    "ruff",
+    "basedpyright"
+   ],
+   "rc": 0,
+   "elapsed_s": 174.2,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [ 12%]",
+    "........................................................................ [ 25%]",
+    "........................................................................ [ 37%]",
+    "........................................................................ [ 50%]",
+    "........................................................................ [ 62%]",
+    "........................................................................ [ 75%]",
+    "........................................................................ [ 87%]",
+    "........................................................................ [100%]",
+    "576 passed in 172.95s (0:02:52)"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 28.6,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-1.contract-fpoly.junit.xml"
+   ],
+   "tests": {
+    "total": 576,
+    "passed": 576,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "576 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-1.e2e-stdio",
+   "criterion": "M1-1",
+   "spec": "§11、§12.1（実プロセスの stdio 経由で 14 ツールが答える）",
+   "title": "実プロセスのサーバーに stdio でつなぐ縦串（tools/list と索引ツール）",
+   "kind": "pytest",
+   "pass": "tests/e2e が全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 2,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 68.4,
+   "timed_out": false,
+   "stdout_tail": [
+    "........                                                                 [100%]",
+    "8 passed in 67.19s (0:01:07)"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 44.9,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/e2e",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-1.e2e-stdio.junit.xml"
+   ],
+   "tests": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "8 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-1.postcondition-map",
+   "criterion": "M1-1",
+   "spec": "§11 各ツールの「事後条件」、設計書 R-9",
+   "title": "事後条件の番号 -> 契約テストの対応表を機械で作り、対応の無い事後条件が 0 であること",
+   "kind": "script",
+   "pass": "M1 の 14 ツールの事後条件のうち、テストに結び付かないもの（unmapped）が 0 件",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 1.1,
+   "timed_out": false,
+   "stdout_tail": [
+    "postcondition_map: M1 事後条件 68 件、未対応 10 件、EP 未対応 0 件、範囲外 0 件、ツール不明 0 件"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 36.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "bench/postcondition_map.py",
+    "--m1-only",
+    "--json",
+    "C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-1.postcondition-map.out.json",
+    "--quiet"
+   ],
+   "result_file": null,
+   "expect": [
+    {
+     "path": "unmapped_total",
+     "op": "eq",
+     "value": 0,
+     "ok": false,
+     "n": 1,
+     "got": [
+      10
+     ]
+    }
+   ],
+   "verdict": "fail",
+   "reason": "unmapped_total eq 0（得た: [10]）"
+  },
+  {
+   "id": "M1-1.tool-t01-get_repo_map",
+   "criterion": "M1-1",
+   "spec": "§11.2 T-01 `get_repo_map`（M1 の 14 ツールの 1 本）",
+   "title": "T-01 の実装と契約テストがある（tools/t01_*.py と repo_map を名前に持つ契約テスト）",
+   "kind": "pytest",
+   "pass": "T-01 の実装ファイルが在り、repo_map を名前に持つ契約テストが 1 件以上通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 8.6,
+   "timed_out": false,
+   "stdout_tail": [
+    ".......................................                                  [100%]",
+    "39 passed, 565 deselected in 7.49s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 43.5,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract",
+    "-k",
+    "repo_map",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-1.tool-t01-get_repo_map.junit.xml"
+   ],
+   "tests": {
+    "total": 39,
+    "passed": 39,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "39 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-1.contract-fpy-fts",
+   "criterion": "M1-1",
+   "spec": "§14.2 F-PY・F-TS（bench/fixtures.toml）、§15.2 M1-1",
+   "title": "F-PY（httpx）と F-TS（ky）に対して契約テストを回す仕組み",
+   "kind": "pytest",
+   "pass": "取得済みの F-PY・F-TS を対象に、14 ツールの事後条件の試験が通る（契約テストを F-POLY 以外のワークスペースで回す仕組みが前提）",
+   "gating": true,
+   "slow": true,
+   "est_min": 10,
+   "quiet": false,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-2.ep-transaction",
+   "criterion": "M1-2",
+   "spec": "§10.10 EP-1〜EP-9",
+   "title": "編集トランザクションの EP-1〜EP-9（外部変更の競合・恒等編集のバイト一致・多ファイル改名の巻き戻しを含む）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 5.8,
+   "timed_out": false,
+   "stdout_tail": [
+    ".........................................                                [100%]",
+    "41 passed in 4.85s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 64.3,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_edit_transaction.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-2.ep-transaction.junit.xml"
+   ],
+   "tests": {
+    "total": 41,
+    "passed": 41,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "41 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-2.ep-map",
+   "criterion": "M1-2",
+   "spec": "§10.10 EP-1〜EP-9",
+   "title": "EP-1〜EP-9 のそれぞれが、編集系のテストから名前で参照されている",
+   "kind": "script",
+   "pass": "EP-1〜EP-9 の未対応が 0 件",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 1.2,
+   "timed_out": false,
+   "stdout_tail": [
+    "postcondition_map: M1 事後条件 68 件、未対応 10 件、EP 未対応 0 件、範囲外 0 件、ツール不明 0 件"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 59.9,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "bench/postcondition_map.py",
+    "--ep-only",
+    "--json",
+    "C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-2.ep-map.out.json",
+    "--quiet"
+   ],
+   "result_file": null,
+   "expect": [
+    {
+     "path": "ep.unmapped_total",
+     "op": "eq",
+     "value": 0,
+     "ok": true,
+     "n": 1,
+     "got": null
+    }
+   ],
+   "verdict": "pass",
+   "reason": "結果 JSON の条件を満たす"
+  },
+  {
+   "id": "M1-2.edit-contract",
+   "criterion": "M1-2",
+   "spec": "§10.10、§11.5 T-10・T-11・T-13 の事後条件",
+   "title": "編集ツール（T-10 本体と削除、T-11、T-13）の契約テストと、書き込み・正規化・構文検査の単体",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 3,
+   "quiet": false,
+   "needs": [],
+   "lsp": [
+    "ruff"
+   ],
+   "rc": 0,
+   "elapsed_s": 43.6,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [ 22%]",
+    "...................................................s.................... [ 44%]",
+    "........................................................................ [ 66%]",
+    "........................................................................ [ 88%]",
+    ".....................................                                    [100%]",
+    "324 passed, 1 skipped in 42.55s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 70.6,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract/test_T10_edit_body.py",
+    "tests/contract/test_T10_delete.py",
+    "tests/contract/test_T11_rename.py",
+    "tests/contract/test_T13_code_action.py",
+    "tests/unit/test_edit_writer.py",
+    "tests/unit/test_edit_normalize.py",
+    "tests/unit/test_edit_syntax_check.py",
+    "tests/unit/test_edit_plan.py",
+    "tests/unit/test_edit_workspace_edit.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-2.edit-contract.junit.xml"
+   ],
+   "tests": {
+    "total": 325,
+    "passed": 324,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 1
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "実行ビットは POSIX のみ保持する（設計書 §9.5）": 1
+   },
+   "verdict": "pass",
+   "reason": "324 件が通った（skip 1 件）"
+  },
+  {
+   "id": "M1-3.latency",
+   "criterion": "M1-3",
+   "spec": "§14.4、NFR-PERF-1（Fast Path は p95 < 50 ms）",
+   "title": "14 ツール x 200 回（F-POLY と F-PY・F-TS）のサーバー内 timing_ms の p95 < 50 ms",
+   "kind": "script",
+   "pass": "全フィクスチャ・14 ツールが pass（not_implemented・skip・fail が無い）。stdout 純度と子プロセスの監視も通る",
+   "gating": true,
+   "slow": true,
+   "est_min": 20,
+   "quiet": true,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS",
+    "exe:uv"
+   ],
+   "lsp": [
+    "ruff",
+    "basedpyright",
+    "typescript"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-4.tokens",
+   "criterion": "M1-4",
+   "spec": "§14.3、NFR-TOK-1（削減率 >= 75%）",
+   "title": "S1・S2・S4 x F-PY・F-TS の 6 件で 1 - L/B >= 0.75（o200k_base）",
+   "kind": "script",
+   "pass": "6 件すべて pass（skip・error・fail が無い）",
+   "gating": true,
+   "slow": true,
+   "est_min": 15,
+   "quiet": false,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS",
+    "exe:uv",
+    "exe:npm"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-5.safe1-edit-syntax",
+   "criterion": "M1-5",
+   "spec": "§14.5、NFR-SAFE-1（構文妥当 >= 99.9%、恒等編集は 100%）",
+   "title": "1,000 件の編集操作の構文妥当性・恒等編集のバイト一致 100%・ジャーナル復元 50 件",
+   "kind": "script",
+   "pass": "結果 JSON の verdict が pass（partial = 未実装の操作を合否から外した合格は、M1 では不合格として扱う）",
+   "gating": true,
+   "slow": true,
+   "est_min": 20,
+   "quiet": false,
+   "needs": [
+    "fixture:F-PY",
+    "fixture:F-TS"
+   ],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "M1-5.safe2-db-readonly",
+   "criterion": "M1-5",
+   "spec": "§13.2、NFR-SAFE-2（書き込み文はすべて拒否。接続は読み取り専用）",
+   "title": "公開 DB の読み取り専用（多層防御の各層を外しても書けない・ATTACH 遮断）と T-20 の拒否",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 30.8,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [ 22%]",
+    "........................................................................ [ 45%]",
+    "........................................................................ [ 68%]",
+    "..............................................s......................... [ 91%]",
+    "...........................                                              [100%]",
+    "314 passed, 1 skipped in 29.83s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 68.8,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/invariants/test_public_db_readonly.py",
+    "tests/unit/test_index_public.py",
+    "tests/contract/test_T19_T20.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.safe2-db-readonly.junit.xml"
+   ],
+   "tests": {
+    "total": 315,
+    "passed": 314,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 1
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "symlinks not permitted": 1
+   },
+   "verdict": "pass",
+   "reason": "314 件が通った（skip 1 件）"
+  },
+  {
+   "id": "M1-5.safe3-path-containment",
+   "criterion": "M1-5",
+   "spec": "§13.1、NFR-SAFE-3（ルート外のパスは E_INVALID_ARGUMENT）",
+   "title": "パスの封じ込め（.. ・別ドライブ・拡張長接頭辞・禁止文字）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.2,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 5.8,
+   "timed_out": false,
+   "stdout_tail": [
+    ".........................s...................sss........................ [ 59%]",
+    "...........................................ss....                        [100%]",
+    "115 passed, 6 skipped in 4.89s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 68.9,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_workspace_paths.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.safe3-path-containment.junit.xml"
+   ],
+   "tests": {
+    "total": 121,
+    "passed": 115,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 6
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "大文字小文字を区別する FS では綴りをそのまま返す": 1,
+    "cannot create symlinks here: [WinError 1314] クライアントは要求された特権を保有していません。: 'C:\\\\Users\\\\shini\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-shini\\\\pytest-10039\\\\test_symlinked_fi": 1,
+    "cannot create symlinks here: [WinError 1314] クライアントは要求された特権を保有していません。: 'C:\\\\Users\\\\shini\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-shini\\\\pytest-10039\\\\test_dangling_sym": 1,
+    "Windows は OS 自身が ``..`` を字句で畳んでからリンクをたどる": 1,
+    "POSIX の file:///home/... 形式": 1,
+    "POSIX の他ホスト URI": 1
+   },
+   "verdict": "pass",
+   "reason": "115 件が通った（skip 6 件）"
+  },
+  {
+   "id": "M1-5.safe4-atomic-edit",
+   "criterion": "M1-5",
+   "spec": "§10.6、NFR-SAFE-4（失敗時に部分的に書き換わったファイルが無い）",
+   "title": "原子的書き込み（2 本目・最後の rename 失敗の巻き戻し、新規作成の巻き戻し、ジャーナルからの手動復元）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.3,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 9.5,
+   "timed_out": false,
+   "stdout_tail": [
+    "...........s...............................                              [100%]",
+    "42 passed, 1 skipped in 8.36s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 75.0,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_edit_writer.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.safe4-atomic-edit.junit.xml"
+   ],
+   "tests": {
+    "total": 43,
+    "passed": 42,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 1
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "実行ビットは POSIX のみ保持する（設計書 §9.5）": 1
+   },
+   "verdict": "pass",
+   "reason": "42 件が通った（skip 1 件）"
+  },
+  {
+   "id": "M1-5.ops1-stdout",
+   "criterion": "M1-5",
+   "spec": "§12.1、NFR-OPS-1（stdout は改行区切りの JSON-RPC のみ）",
+   "title": "実プロセスの stdout の全バイトが JSON-RPC 2.0（ノイズを書くツールを呼んでも混ざらない）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 17.3,
+   "timed_out": false,
+   "stdout_tail": [
+    ".......                                                                  [100%]",
+    "7 passed in 16.27s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 78.6,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/invariants/test_stdout_purity.py",
+    "tests/unit/test_smoke.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.ops1-stdout.junit.xml"
+   ],
+   "tests": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "7 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-5.ops2-children",
+   "criterion": "M1-5",
+   "spec": "§12.5、NFR-OPS-2（終了後 1 秒以内に子プロセス 0）",
+   "title": "終了手順と子プロセスの回収（SIGTERM・Ctrl-Break・子孫の kill）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 1,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 4.0,
+   "timed_out": false,
+   "stdout_tail": [
+    ".................ss..............                                        [100%]",
+    "31 passed, 2 skipped in 3.07s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 69.6,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_lifecycle.py",
+    "tests/unit/test_core_procs.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.ops2-children.junit.xml"
+   ],
+   "tests": {
+    "total": 33,
+    "passed": 31,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 2
+   },
+   "failed_nodes": [],
+   "skip_reasons": {
+    "loop.add_signal_handler は POSIX のみ": 1,
+    "SIGTERM は POSIX のみ（Windows は下の CTRL_BREAK で検査）": 1
+   },
+   "verdict": "pass",
+   "reason": "31 件が通った（skip 2 件）"
+  },
+  {
+   "id": "M1-5.ops3-nonblocking",
+   "criterion": "M1-5",
+   "spec": "§12.3、NFR-OPS-3（LSP の起動・索引中でも降格応答で答える）",
+   "title": "LSP が starting / indexing / unavailable でも待たずに降格応答",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 5.9,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [ 34%]",
+    "........................................................................ [ 68%]",
+    "...................................................................      [100%]",
+    "211 passed in 4.83s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 72.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/contract/test_T04_lsp.py::test_not_ready_lsp_is_not_waited_for_and_is_started",
+    "tests/contract/test_T08_diagnostics.py::test_lsp_indexing_degrades_to_syntax_errors_then_exact",
+    "tests/contract/test_T08_diagnostics.py::test_unavailable_lsp_degrades_without_error",
+    "tests/unit/test_engine_selector.py",
+    "tests/unit/test_engine_selector_failure.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.ops3-nonblocking.junit.xml"
+   ],
+   "tests": {
+    "total": 211,
+    "passed": 211,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "211 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-5.ops4-positions",
+   "criterion": "M1-5",
+   "spec": "§5.10、§12.2、NFR-OPS-4（行・列の正規化）",
+   "title": "位置の正規化（非 ASCII・絵文字・結合文字・CRLF・BOM・UTF-8/16 の往復）と LSP の位置変換",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 28.9,
+   "timed_out": false,
+   "stdout_tail": [
+    "........................................................................ [100%]",
+    "72 passed in 27.92s"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 66.2,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "tests/unit/test_core_textpos.py",
+    "tests/unit/test_lsp_features.py",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-exit-bj6nob0o\\M1-5.ops4-positions.junit.xml"
+   ],
+   "tests": {
+    "total": 72,
+    "passed": 72,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0
+   },
+   "failed_nodes": [],
+   "skip_reasons": {},
+   "verdict": "pass",
+   "reason": "72 件が通った（skip 0 件）"
+  },
+  {
+   "id": "M1-6.e2e-session",
+   "criterion": "M1-6",
+   "spec": "§15.2 M1-6（骨格 -> 本体 -> 編集 -> 診断ゼロ確認）。台本と記録は bench/e2e/",
+   "title": ".mcp.json の起動コマンドで接続し、台本化したセッションを完走する",
+   "kind": "script",
+   "pass": "終了コード 0（全段が成立: tools/list -> 骨格 -> 本体 -> 編集 -> 診断ゼロ確認）。記録は bench/e2e/records/<日時>-<OS>.jsonl",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.5,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 22.5,
+   "timed_out": false,
+   "stdout_tail": [
+    "M1-6 session: PASS in 20.9s  record=S:\\work\\develop\\Lucianke\\bench\\e2e\\records\\20261029-151430-windows.jsonl",
+    "  tools_list   pass",
+    "  workspace    pass",
+    "  skeleton     pass",
+    "  bodies       pass",
+    "  diag_before  pass",
+    "  edit         pass",
+    "  reread       pass",
+    "  diag_after   pass",
+    "  diag_alive   pass"
+   ],
+   "stderr_tail": [
+    "15:14:32 INFO  lucianke: lucianke 0.0.1 starting (tools=21)",
+    "15:14:32 INFO  lucianke.server: roots updated: ['C:\\\\Users\\\\shini\\\\AppData\\\\Local\\\\Temp\\\\lucianke-m16-5ligfbqj\\\\ws'] (client)",
+    "15:14:32 INFO  lucianke.runtime: index opened: ws=ws db=C:\\Users\\shini\\AppData\\Local\\Temp\\lucianke-m16-5ligfbqj\\cache\\6d044e5ce5cf9cef\\paad.sqlite schema=created",
+    "15:14:32 INFO  lucianke.runtime: watching (native) and scan job job_0001 started: ws=ws",
+    "15:14:32 INFO  lucianke.pipeline: tool call finished tool=configure_workspace timing_ms=311 request_id=525abde169eb",
+    "15:14:33 INFO  lucianke.pipeline: tool call finished tool=configure_workspace timing_ms=11 request_id=2c94f1bc3037",
+    "15:14:33 INFO  lucianke.pipeline: tool call finished tool=get_file_skeleton timing_ms=4 request_id=21ad540389b0",
+    "15:14:33 INFO  lucianke.pipeline: tool call finished tool=get_symbol_bodies timing_ms=3 request_id=eb0a99a7ec8e",
+    "15:14:33 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=20 request_id=0c4700494519",
+    "15:14:34 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=ab8249d0891d",
+    "15:14:35 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=7 request_id=dd2fa7433b3e",
+    "15:14:36 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=4d5ee35af1a2",
+    "15:14:37 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=6 request_id=4a9bc55d0acc",
+    "15:14:38 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=3c0e9bba2942",
+    "15:14:39 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=794d7c37e4ae",
+    "15:14:40 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=18d4aacf878d",
+    "15:14:41 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=cfc2ca88b639",
+    "15:14:42 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=be93c9158815",
+    "15:14:43 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=4 request_id=f2e50415513c",
+    "15:14:44 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=4 request_id=0ba76d120c7e",
+    "15:14:45 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=1e7f1ea3615b",
+    "15:14:46 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=4423e63059bb",
+    "15:14:47 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=5 request_id=9568b50877a6",
+    "15:14:48 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=4 request_id=f012a63b1263",
+    "15:14:50 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=732 request_id=be8c005b1107",
+    "15:14:50 INFO  lucianke.pipeline: tool call finished tool=edit_symbol_body timing_ms=403 request_id=38d5a304c7c9",
+    "15:14:50 INFO  lucianke.pipeline: tool call finished tool=get_symbol_bodies timing_ms=3 request_id=43ffff10059c",
+    "15:14:50 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=12 request_id=d5f1d31472b6",
+    "15:14:50 INFO  lucianke.pipeline: tool call finished tool=get_diagnostics timing_ms=10 request_id=3ab718c24771",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown begin: reason=stdin_eof steps=6",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown step 'edits' ok (0 ms)",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown step 'watchers' ok (0 ms)",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown step 'indexers' ok (0 ms)",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown requested: stdin_eof",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown step 'lsp' ok (62 ms)",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown step 'children' ok (0 ms)",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown step 'index_close' ok (31 ms)",
+    "15:14:50 INFO  lucianke.lifecycle: shutdown done: 93 ms, 6/6 steps ok",
+    "15:14:50 INFO  lucianke: shutdown complete"
+   ],
+   "load": {
+    "cpu_busy_pct": 56.8,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "bench/e2e/run_session.py"
+   ],
+   "verdict": "pass",
+   "reason": "終了コード 0"
+  },
+  {
+   "id": "M1-7.cross-os",
+   "criterion": "M1-7",
+   "spec": "§15.2 M1-7、NFR-PORT-2（閾値は OS によらず同一）",
+   "title": "bench/results/ に 3 OS の *-exit.json があり、M1-1〜M1-6 の判定が OS 間で一致する",
+   "kind": "builtin",
+   "pass": "windows・macos・linux の最新の exit 結果が揃い、M1-1〜M1-6 の各判定が同じ（設計書 §10.5 の CI の OS 行列で実行器を回して集める）",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.01,
+   "quiet": false,
+   "needs": [],
+   "verdict": "missing",
+   "reason": "未整備: macos, linux の exit 結果が bench/results/ に無い（在るのは: windows）。CI の OS 行列で実行器を回して集める"
+  },
+  {
+   "id": "M1-8.license-check",
+   "criterion": "M1-8",
+   "spec": "§16 L-8（依存木に許可リスト外の SPDX 識別子が無い）",
+   "title": "tools/check_licenses.py（CI の license ジョブと同じコマンド）",
+   "kind": "script",
+   "pass": "終了コード 0",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.3,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 3.5,
+   "timed_out": false,
+   "stdout_tail": [
+    "checked 65 packages: 0 fail, 0 warn"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 65.7,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "tools/check_licenses.py"
+   ],
+   "verdict": "pass",
+   "reason": "終了コード 0"
+  },
+  {
+   "id": "M1-8.ci-runs-license-check",
+   "criterion": "M1-8",
+   "spec": "§15.2 M1-8（CI で通る）、設計書 §10.5",
+   "title": ".github/workflows/ci.yml が tools/check_licenses.py を実行している",
+   "kind": "builtin",
+   "pass": "ci.yml に check_licenses.py を走らせる行がある",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.01,
+   "quiet": false,
+   "needs": [],
+   "verdict": "pass",
+   "reason": "ci.yml が tools/check_licenses.py を run している"
+  },
+  {
+   "id": "M1-8.notices-up-to-date",
+   "criterion": "M1-8",
+   "spec": "§16.1 L-7、§16.3、設計書 §10.5（生成して差分が無いこと）",
+   "title": "THIRD_PARTY_NOTICES.md が uv.lock の依存木から再生成したものと一致する（tools/gen_notices.py --check）",
+   "kind": "script",
+   "pass": "終了コード 0（古ければ 1）",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.3,
+   "quiet": false,
+   "needs": [],
+   "rc": 0,
+   "elapsed_s": 4.9,
+   "timed_out": false,
+   "stdout_tail": [
+    "THIRD_PARTY_NOTICES.md is up to date (57 packages)"
+   ],
+   "stderr_tail": [],
+   "load": {
+    "cpu_busy_pct": 96.5,
+    "loadavg_1m": null
+   },
+   "argv": [
+    "S:\\work\\develop\\Lucianke\\.venv\\Scripts\\python.exe",
+    "tools/gen_notices.py",
+    "--check"
+   ],
+   "verdict": "pass",
+   "reason": "終了コード 0"
+  },
+  {
+   "id": "M1-8.dist-includes-license-files",
+   "criterion": "M1-8",
+   "spec": "§15.2 M1-8、§16.3（配布物に LICENSE と THIRD_PARTY_NOTICES.md を含める）",
+   "title": "pyproject.toml の license-files に LICENSE と THIRD_PARTY_NOTICES.md があり、どちらもリポジトリに在って git の管理下にある",
+   "kind": "builtin",
+   "pass": "license-files が両方を含み、両ファイルが git ls-files に載っている",
+   "gating": true,
+   "slow": false,
+   "est_min": 0.01,
+   "quiet": false,
+   "needs": [],
+   "verdict": "pass",
+   "reason": "license-files が両方を含み、両ファイルが管理下にある"
+  },
+  {
+   "id": "REF.reaction",
+   "criterion": "REF",
+   "spec": "§14.6、NFR-PERF-3（外部変更の反映 p95 <= 500 ms）。M1 の出口条件には入っていない",
+   "title": "外部からの 1 ファイル変更が files.sha256 に反映されるまで（F-POLY の複製で 100 回）",
+   "kind": "script",
+   "pass": "verdict が pass",
+   "gating": false,
+   "slow": true,
+   "est_min": 3,
+   "quiet": true,
+   "needs": [],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  },
+  {
+   "id": "REF.full-suite",
+   "criterion": "REF",
+   "spec": "§15.1（前のマイルストーンの出口条件を壊さない＝非回帰）、CI の test ジョブ",
+   "title": "tests/ 全体（unit + contract + invariants + e2e）",
+   "kind": "pytest",
+   "pass": "全部通る",
+   "gating": false,
+   "slow": true,
+   "est_min": 15,
+   "quiet": false,
+   "needs": [],
+   "verdict": "skipped",
+   "reason": "--skip-slow（slow = true）"
+  }
+ ]
+}
