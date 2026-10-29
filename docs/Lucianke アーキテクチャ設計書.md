@@ -56,7 +56,7 @@
 
 | 由来 | 制約 | 設計への影響 |
 |---|---|---|
-| NFR-PERF-1 | Fast Path p95 < 50 ms（ウォームアップ後、サーバー内時間） | 要求経路で LSP 往復を待たない設計（キャッシュと PaaD から答え、LSP は背景で更新）。Python のオーバーヘッドを測る（§12 S-9） |
+| NFR-PERF-1 | Fast Path p95 < 50 ms（ウォームアップ後、サーバー内時間） | 要求経路で LSP 往復を待たない設計（キャッシュと PaaD から答え、LSP は背景で更新）。Python のオーバーヘッドは S-9 で測り、往復は何もしないツールで p95 1.08 ms と十分小さい（§12.1。T-02 の p95 は実装後に測る） |
 | NFR-PERF-3 | 外部変更の反映 500 ms 以内 | 監視 → 差分再解析 → DB 更新 → LSP 通知を 1 本の非同期パイプラインにする（§7.6） |
 | NFR-SAFE-4 / 第 10 章 | 編集の原子性、陳腐化検知、ジャーナル | 編集トランザクションを状態機械として 1 か所に実装（§7.7） |
 | NFR-OPS-1 | `stdout` は JSON-RPC のみ | 起動直後に fd 1 を退避し、以後の fd 1 への書き込みを stderr へ向ける（ADR-3） |
@@ -148,16 +148,20 @@ lucianke（ホストが起動する 1 プロセス。寿命はホストのセッ
 ### ADR-2 MCP SDK は低水準 API を使い、ツールのスキーマとエンベロープは自前で持つ
 
 - 文脈: 仕様書は共通パラメータ、`additionalProperties: false`、`isError` 付きの通常結果、`structuredContent` の併用、`roots/list` 購読を求める。高水準の自動スキーマ生成では既定値や禁止プロパティの制御が効きにくい。
-- 決定: SDK の低水準サーバー（`tools/list` / `tools/call` のハンドラ登録）を使い、入力スキーマは pydantic モデル（`extra="forbid"`）から生成して Lucianke 側のレジストリが保持する。結果の `content` と `structuredContent` と `isError` はパイプラインが組み立てる。
+- 決定: SDK の低水準サーバー（v2 は `Server(name, on_list_tools=…, on_call_tool=…)` のコンストラクタ引数方式で、ハンドラは `(ctx, params)`。v1 のデコレータではない。S-1 で確認）を使い、入力スキーマは pydantic モデル（`extra="forbid"`）から生成して Lucianke 側のレジストリが保持する。結果の `content` と `structuredContent` と `isError` はパイプラインが組み立てる。
 - 捨てた案: 高水準の関数デコレータ方式（速いが、エンベロープを全ツールに強制しにくい）。
-- 帰結: SDK の該当 API の存在と挙動をスパイク S-1 で確かめる。SDK の版は固定する。
+- 帰結: スパイク S-1 で確認した（合格。[`docs/spikes/S-01.md`](spikes/S-01.md)）。決定は変えず、次の 4 点を前提に加える。
+  1. 自前の JSON Schema（`additionalProperties: false` 込み）は `tools/list` にそのまま通り、`tools/call` は `CallToolResult(content, structured_content, is_error=True)` を例外なしで返せる。未知のツール名だけが `raise MCPError(INVALID_PARAMS)`（`-32602`）になる（S-1 で確認）。
+  2. **SDK は引数をスキーマで検証せず、ハンドラから漏れた例外も捕捉しない**（漏れると `error.code=0` で例外文面がそのままクライアントへ出る）。検証と例外捕捉は §7.1.2 のパイプラインが全責任を持ち、最外周で必ず捕捉する（S-1 で確認）。
+  3. `Server.middleware` は SDK が暫定 API と明記しているので製品コードでは使わない。`timing_ms` は §7.1.2 の自前計測とする（S-1・S-9 で確認）。
+  4. SDK の版は固定する: `mcp>=2.3,<2.4`（§11.1。S-1 は 2.3.0 で実施）。HTTP 系の依存（starlette・uvicorn・httpx2 等）は `mcp` の無条件依存で extras では外せず、低水準 `Server` が import するので stdio でも読み込まれる。遅延 import は SDK 内部の import 構造への依存が強く効果も約 −190 ms にとどまるので採用しない（付録 A.3。S-1 で確認）。
 
 ### ADR-3 `stdout` の退避と差し替えをプロセス起動の最初に行う
 
 - 文脈: NFR-OPS-1。依存ライブラリや C 拡張が fd 1 に書く可能性を排除できない。
-- 決定: 起動直後に `real_stdout = os.dup(1)` で退避し、`os.dup2(2, 1)` で fd 1 を stderr に重ねる。MCP のトランスポートには退避した fd から作ったバイナリストリームを渡す。`sys.stdout` も stderr 向けのラッパに差し替える。
+- 決定: 起動直後に `real_stdout = os.dup(1)` で退避し、`os.dup2(2, 1)` で fd 1 を stderr に重ねる。fd 0 も NUL に差し替える（子プロセスに入力を横取りさせない）。MCP のトランスポートには、退避した fd を `io.TextIOWrapper(os.fdopen(fd, "wb", closefd=False), encoding="utf-8", newline="\n")` で包み、`anyio.wrap_file` して `stdio_server(stdin=…, stdout=…)` に **明示的に** 渡す（SDK が受け取るのはバイナリではなくテキストストリーム `anyio.AsyncFile[str]`。`newline="\n"` を忘れると Windows で行末が CRLF になる）。`sys.stdout` も stderr 向けのラッパに差し替える。**手動で退避したあとに、引数なしの `stdio_server()` を呼んではならない**（fd 0 が NUL なので SDK が入力 EOF と見て即終了し、応答が 0 行になる）。
 - 捨てた案: `sys.stdout` の差し替えだけ（C レベルの書き込みを防げない）。
-- 帰結: トランスポートに任意のストリームを渡せることをスパイク S-1 で確認。できなければ `sys.stdout` を退避 fd のテキストラッパに戻す形で代替する。
+- 帰結: スパイク S-1 で確認した（合格）。トランスポートに退避 fd のストリームを渡せる。ツール内の `print`・`os.write(1)`・`sys.__stdout__`・UCRT `puts`・`WriteFile(GetStdHandle)`・stdout 継承の子プロセスの 6 経路はすべて stderr へ出て、`stdout` は純粋（全行 JSON-RPC、LF のみ）だった。代替案（`sys.stdout` を退避 fd のラッパに戻す）は不要。`SetStdHandle` は CPython 3.12 + UCRT の環境では不要と実測した（`dup2` が Win32 の標準ハンドルも付け替える。入れても害は無く数行）。SDK 2.3 の引数なし `stdio_server()` も同様の退避を自前で行うが、行末が CRLF になり、退避が import 後になるため使わない。stdin を閉じると 117〜154 ms で終了コード 0（ADR-16）。
 
 ### ADR-4 出力は「レコード列 → パッカー → レンダラ」の 1 本道
 
@@ -214,20 +218,21 @@ lucianke（ホストが起動する 1 プロセス。寿命はホストのセッ
 ### ADR-12 子プロセスはシェルを介さず、台帳で一元管理する
 
 - 文脈: 仕様書 §12.5、§13.3。
-- 決定: すべての子プロセスは `ProcessRegistry` 経由で起動し（argv 配列、最小の環境変数、作業ディレクトリ = ルート）、終了手順はこの台帳を舐める。Windows では新しいプロセスグループで起動し、`CTRL_BREAK` と `terminate` → `kill` の順に落とす。
-- 帰結: NFR-OPS-2 の検査は台帳が空であることの確認になる。
+- 決定: すべての子プロセスは `ProcessRegistry` 経由で起動し（argv 配列、最小の環境変数、作業ディレクトリ = ルート）、終了手順はこの台帳を舐める。Windows では新しいプロセスグループで起動したうえで **Job Object**（`KILL_ON_JOB_CLOSE`）に入れ、子孫（`npx` や `.cmd` の中継、venv のランチャーが挟む孫）までジョブごと落とす。Lucianke が異常終了してジョブのハンドルが閉じたときも OS が全部落とす。穏やかな終了の合図は `CTRL_BREAK`、そのあと `terminate` → `kill` の順。ジョブに入れられなかった場合（権限など）はリーダーだけを `kill` する縮退になる。POSIX は `start_new_session=True` で起動し、`killpg` で落とす。台帳は `core/procs.py` に置く（core 構築で実装）。
+- 帰結: NFR-OPS-2 の検査は台帳が空であることの確認になる。台帳（`ProcessRegistry`）はスレッド安全ではなく、イベントループのスレッドからだけ使う。
 
-### ADR-13 Tree-sitter の解析はスレッドプール、構文木はバイト列と組で LRU キャッシュ
+### ADR-13 Tree-sitter の解析は期限つき `read_callback`、構文木はバイト列と組で LRU キャッシュ
 
-- 文脈: 構文木のノードは元のバイト列が無いとテキストを取れない。Parser はスレッド安全でない。
-- 決定: スレッドごとに Parser を持つプール。キャッシュのキーは `(workspace_id, path, sha256)`、値は `(source_bytes, tree, line_index)`。上限はファイル数とバイト数の両方（仕様書 §12.8）。
-- 帰結: 同じ版のファイルは 1 回しか解析しない。編集後は新しい `sha256` で再解析（増分解析は MAY）。
+- 文脈: Parser はスレッド安全でない。`parse(bytes)` は解析の全体にわたって GIL を握るため、スレッドプールで走らせても並列化せず（4 スレッドで直列比 0.80〜0.98 倍）、イベントループも止まる（2,000 行で約 8 ms、5 MB で約 750 ms）。`progress_callback` は Windows でアクセス違反（0xC0000005）でプロセスが落ちる。構文木はソースの約 20〜26 倍のメモリを食う（python 20.3 倍、json 25.3 倍、markdown 25.9 倍）。`Node.text` は Tree がソースを保持するので取れるが、`line_index` のためにソースのバイト列は別に持つ（以上 S-2 で確認）。
+- 決定: スレッドごと・言語ごとに Parser を 1 個持つ（共有しても壊れなかったのは GIL による直列化のおかげにすぎず、当てにしない。`Language` / `Query` / `Tree` / `Node` はスレッド間で共有してよく、`QueryCursor` は呼び出しごとに作る）。解析は常に `parse_with_deadline`（`read_callback` で 16 KiB 刻み。期限後に `b""` を返して打ち切り、`timed_out` なら木は捨てる）で行い、プールのスレッドで走らせる。キャッシュのキーは `(workspace_id, path, sha256)`、値は `(source_bytes, tree, line_index)`。上限はファイル数と、**推定木メモリ（ソース長 × 25）** の合計の両方（仕様書 §12.8）。
+- 捨てた案: `parse(bytes)` をスレッドプールで呼ぶだけ（上記の理由で並列化もループの保護もしない）。`progress_callback` による打ち切り（落ちる）。例外を投げて打ち切る方式（`SystemError` になることがあり不安定）。
+- 帰結: 同じ版のファイルは 1 回しか解析しない。`read_callback` 版は速度が `bytes` 版と同等（pdb.py 1,987 行で中央値 8.5 ms 対 8.2〜8.9 ms）で、他スレッド（ループ）の停止が最長約 20 ms に縮む。ただし並列にはならない。並列度が要るなら別プロセス（4 本で約 4 倍）であり、これが R-6 の「プロセスプールは M2 以降」の根拠になる。編集後は新しい `sha256` で再解析（増分解析は MAY。全解析が約 8 ms なので M1 は不要）。（S-2 で確認）
 
 ### ADR-14 位置の単位変換は LSP クライアントの境界でだけ行う
 
 - 文脈: 仕様書 §5.10、§12.2。
 - 決定: Lucianke 内部の位置は「0 始まりの行、0 始まりのコードポイント列」を使い、外部出力の直前で 1 始まりに、LSP との送受信で UTF-16 または UTF-8 単位に変換する。変換には行ごとのテキストを使い、`LineIndex` がバイト・コードポイント・UTF-16 の相互変換表を持つ。
-- 帰結: 変換の誤りは `LineIndex` の単体テスト（非 ASCII・サロゲートペア・結合文字）で捕まえる。
+- 帰結: 変換の誤りは `LineIndex` の単体テスト（非 ASCII・サロゲートペア・結合文字）で捕まえる。Tree-sitter の列は **行頭からのバイト数** なので、コードポイント列への変換は `syntax` の出口（`Range` を作る 1 か所）に置く。`LineIndex` は `\n` だけで行を切る（Tree-sitter と一致。CRLF の `\r` は行末に残り、単独の `\r` は改行にならない）。LSP との境界でだけ、単独 `\r` と BOM（UTF-8 BOM 付きは 1 行目の列が 3 ずれる）の扱いを合わせる。ast-grep の位置は 0 始まりのコードポイントで内部表現と同じなので、変換は要らない（S-2・S-3 で確認）。
 
 ### ADR-15 M1 で LSP を同期で使うのは 5 要求だけ
 
@@ -264,12 +269,13 @@ Lucianke/
 │  ├─ bootstrap_io.py        # ADR-3: fd 1 の退避と差し替え（最初に import される）
 │  ├─ config.py              # 設定モデル（環境変数 / .lucianke.toml / 既定）と cache_root
 │  ├─ logging_setup.py       # stderr + JSON Lines ファイル、ローテーション
-│  ├─ lifecycle.py           # 起動順、終了手順、ProcessRegistry、シグナル
+│  ├─ lifecycle.py           # 起動順、終了手順、シグナル（子プロセス台帳 ProcessRegistry は core/procs.py）
 │  │
 │  ├─ core/                  # 依存なしの中核型。どこからでも import 可、core は他を import しない
-│  │  ├─ model.py            #   Urn, TargetRef, Range, Position, SymbolRecord, Kind, Confidence, Tier, Capability
-│  │  ├─ urn.py              #   URN の構文解析・整形・緩和（仕様書第 7 章）
+│  │  ├─ model.py            #   TargetRef, Range, Position, SymbolRecord, Kind, Confidence, Tier, Capability（Urn は urn.py）
+│  │  ├─ urn.py              #   Urn と Selector（CodeSel / DataSel / CellSel / TagSel / LexSel）の型、URN の構文解析・整形・緩和（仕様書第 7 章）
 │  │  ├─ errors.py           #   LuciankeError(code, message, details, candidates)
+│  │  ├─ procs.py            #   ProcessRegistry（ADR-12）: 子プロセスの起動・台帳・終了、Windows の Job Object、minimal_env
 │  │  ├─ records.py          #   Record, RecordGroup, Summary（ADR-4）
 │  │  ├─ textpos.py          #   LineIndex（ADR-14）、改行・BOM・インデントの検出
 │  │  └─ limits.py            #   時間・件数の上限定数（§6.4）。仕様書 §12 の値をここにだけ置く
@@ -398,7 +404,7 @@ app / lifecycle ─► すべて（合成ルート）
 
 # 5. 中核ドメインモデル
 
-`core/model.py` の主要型。すべて不変（`frozen=True` の dataclass）で、ツール・サービス間の受け渡しに使う。
+`core/model.py` の主要型（`Urn` と `Selector` は `core/urn.py` にあり、`model.py` はそこから import する）。すべて不変（`frozen=True` の dataclass）で、ツール・サービス間の受け渡しに使う。
 
 ```python
 class Confidence(StrEnum):            # 仕様書 §8.3。順序比較できる（exact が最高）
@@ -410,13 +416,18 @@ class Capability(StrEnum):            # エンジン選択の単位（ADR-10）
     SKELETON, SEARCH, DEFINITION, BODY, REFERENCES, IMPLEMENTATIONS, CALL_HIERARCHY,
     DIAGNOSTICS, RENAME, CODE_ACTION, STRUCTURAL_EDIT, SYMBOL_EDIT
 
+class Kind(StrEnum):                  # 仕様書 §6.1 の kind 語彙。値は外部表現（先頭大文字）。File を含む
+    MODULE, CLASS, INTERFACE, STRUCT, ENUM, TRAIT, TYPE, FUNCTION, METHOD, CONSTRUCTOR, FIELD, PROPERTY,
+    VARIABLE, CONSTANT, TABLE, COLUMN, ENDPOINT, MESSAGE, SERVICE, NODE, EDGE, CELL, TAG, KEY, SECTION,
+    FILE                              # ファイル単位の 1 要素（T-18 の Tier 3 / Tier 4）。symbols 表には入れない
+
 @dataclass(frozen=True)
 class Position:  line: int; col: int          # 0 始まり・コードポイント（内部表現。ADR-14）
 @dataclass(frozen=True)
 class Range:     start: Position; end: Position
 
 @dataclass(frozen=True)
-class Urn:                                     # 仕様書第 7 章
+class Urn:                                     # 仕様書第 7 章。core/urn.py
     workspace_id: str; path: str; selector: Selector | None
     # Selector = CodeSel(qualified, arity, sighash) | DataSel(kind, expr) | CellSel(n, qualified) | TagSel(name, line) | LexSel(name, line)
 
@@ -490,13 +501,13 @@ class LuciankeError(Exception):
 | 実行単位 | 数 | 役割 | 備考 |
 |---|---|---|---|
 | メインスレッド / asyncio ループ | 1 | MCP の読み書き、ツールの非同期ハンドラ、LSP クライアントの I/O、監視イベントの受け取り | ブロックする処理を置かない（MUST） |
-| 読み取り用スレッドプール | 既定 8 | SQLite 読み取り、Tree-sitter 解析、ファイル読み込み、ハッシュ計算 | `asyncio.to_thread` |
+| 読み取り用スレッドプール | 既定 8 | SQLite 読み取り、Tree-sitter 解析（`read_callback` 方式。ADR-13）、ファイル読み込み、ハッシュ計算 | `asyncio.to_thread`。Tree-sitter 解析と ast-grep の照合は GIL を握るので、プールでも**並列化しない**（直列比 0.80〜0.98 倍。S-2・S-3 で確認） |
 | `IndexWriter` スレッド | 1 | SQLite の全書き込み | ジョブキュー。1 ジョブ = 1 トランザクション |
 | 編集用の直列区間 | ワークスペースごとに 1 | `EditTransaction` の段 3〜7 | `asyncio.Lock`。待ち上限 5,000 ms |
 | 子プロセス | 言語 × ワークスペースごと | LSP | 標準入出力をパイプで非同期に読む |
 
-- CPU を使う処理（解析・ハッシュ・大きな JSON 生成）はループ上で行わない。p95 を守る鍵は「ループを空けること」である。
-- 初回索引（数千ファイル）はプールで並列に解析し、書き込みはキューで直列化する。**初回索引が重く時間がかかることは許容する**（師匠 2026-10-29。仕様書 §14.4）。索引中もツールは降格応答で答え続ける設計（ADR-6、§7.8）であり、初回の所要を縮める工夫（プロセスプール、`lucianke index` の事前実行）は M1 では必須にしない。
+- CPU を使う処理（解析・ハッシュ・大きな JSON 生成）はループ上で行わない。p95 を守る鍵は「ループを空けること」である。ただし Tree-sitter の `parse(bytes)` は、スレッドで走らせても解析の全体にわたって GIL を握ってループを止める（5 MB で約 750 ms）。このため解析は常に `read_callback` 方式（16 KiB 刻み）で行い、ループの停止を最長約 20 ms に抑える（ADR-13。S-2 で確認）。
+- 初回索引（数千ファイル）はプールのスレッドで解析し（GIL のため並列化はしない。S-2 で確認）、書き込みはキューで直列化する。**初回索引が重く時間がかかることは許容する**（師匠 2026-10-29。仕様書 §14.4）。索引中もツールは降格応答で答え続ける設計（ADR-6、§7.8）であり、初回の所要を縮める工夫（プロセスプール、`lucianke index` の事前実行）は M1 では必須にしない（別プロセスなら 4 本で約 4 倍に伸びる。S-2 で確認）。
 
 ## 6.2 SQLite 接続（ADR-7）
 
@@ -504,7 +515,7 @@ class LuciankeError(Exception):
 |---|---|---|---|
 | 書き込み | 通常。`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000` | `IndexWriter` のみ | 起動時にスキーマ版を確認・移行 |
 | 読み取りプール | 同じファイルを通常モードで開くが、アプリ側で書き込み文を発行しない。`busy_timeout=1000` | ツール、`EngineSelector`、`EditTransaction` の読み | プールから借りて返す。スレッド境界を越えて保持しない |
-| 公開クエリ | `file:...?mode=ro` の URI、`PRAGMA query_only=ON`、`set_authorizer`、`set_progress_handler`、行数上限 | `query_project_db` | 失敗が他接続に波及しないよう独立。1 要求ごとに新しく開いてもよい（MAY。開く費用を測る） |
+| 公開クエリ | `file:...?mode=ro` の URI、`PRAGMA query_only=ON`、`set_authorizer`、`set_progress_handler`、行数上限 | `query_project_db` | 失敗が他接続に波及しないよう独立。1 要求 1 接続で足りる（`open_public` + 1 クエリ + `close` が p50 1.3 ms、書き手が連続コミット中でも p95 約 10 ms。S-7 で確認）。`isolation_level=None`（自動コミット）で開き、読み取りトランザクションを持ち越さない（`wal_checkpoint(TRUNCATE)` を妨げる） |
 
 - WAL のチェックポイントは `IndexWriter` が暇なときと終了時に行う。
 - `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（LSP 由来の `relations` 更新を含む）。`diagnostics` だけの更新では進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
@@ -529,9 +540,15 @@ class LuciankeError(Exception):
 
 起動順:
 
-1. `bootstrap_io`（fd 1 の退避・差し替え）→ 2. ログ → 3. 設定 → 4. キャッシュディレクトリ → 5. `IndexWriter` 起動とスキーマ移行 → 6. MCP サーバーの `initialize` 受付 → 7. `roots/list` → `WorkspaceContext` 登録 → 8. 差分索引ジョブ投入（背景）→ 9. 監視開始。
+1. `bootstrap_io`（fd 1 の退避・差し替え）→ 2. ログ → 3. 設定 → 4. キャッシュディレクトリ → 5. `IndexWriter` 起動とスキーマ移行 → 6. MCP サーバーの `initialize` 受付 → 7. （取れたら）`roots/list` → `WorkspaceContext` 登録 → 8. 差分索引ジョブ投入（背景）→ 9. 監視開始。
 
 LSP はここでは起動しない。
+
+`roots/list` は **取れたら** 使う前提にする（S-1 で確認）。
+- 要求は `initialize` の処理中ではなく `notifications/initialized` のハンドラ内で出し、タイムアウトは 5 s（`initialize` の処理中に待つとデッドロックする。通知ハンドラは別タスクなので待てる）。`notifications/roots/list_changed` は来たら同じ手順で取り直す。
+- ホストが roots 能力を宣言していない場合（`ctx.session.client_capabilities.roots is None`）は要求しない。2026-07-28 版の MCP では `initialized` と roots の `list_changed` が仕様から消え、サーバー起点の `roots/list` もできない（代わりに `tools/call` の結果へ `InputRequiredResult` を載せてクライアントに再呼び出しさせる方式。SDK 2.3 は roots を非推奨とし、呼ぶたび `MCPDeprecationWarning` が出る）。この方式は、ホストが 2026-07-28 を話し始めた時点で M2 以降の課題として扱う。`server/discover` のハンドラを外して旧版に固定する案は不可（`Method not found` を返した時点で接続が 2026-07-28 に確定し、続く `initialize` が拒否される）。Lucianke は両方の版を受ける前提で作る。
+- **取れないとき**（roots 能力なし・2026-07-28 版・タイムアウト）は、カレントディレクトリをルート候補にし、T-00 `set_roots` で登録できる。`roots/list` に頼らなくても動く（仕様書 §5.1）。
+- コールドスタート（プロセス起動 → `initialize` 応答）は中央値約 1.0 s（959〜1030 ms、n=7）で、SDK の import が約 890 ms を占める。初回の重さとして許容する（仕様書 §14.4。S-1 で確認）。
 
 Lucianke はホストが起動する子プロセスであり、寿命はホストのセッションと同じ（`stdin` の EOF で終わる）。常駐デーモンや複数ホストで共有するサービスにはしない（ADR-16）。
 
@@ -540,7 +557,7 @@ Lucianke はホストが起動する子プロセスであり、寿命はホス�
 1. 新規 `tools/call` を `E_UNSUPPORTED`（`details.reason: "shutting_down"`）で拒否 → 2. 実行中の編集トランザクションの完了またはロールバックを最大 5 s 待つ → 3. 監視停止 → 4. `LspPool.shutdown_all()`（`shutdown` → `exit` → 500 ms → `terminate` → `kill`）→ 5. `ProcessRegistry` に残った子を `kill` → 6. `IndexWriter` のキューを空にしてチェックポイント → 7. 終了コード 0。
 
 - Windows では `loop.add_signal_handler` が使えないため、`signal.signal` でフラグを立て、ループ側の監視タスクが拾う。
-- 親プロセスの異常終了は `stdin` の EOF で検知する（MCP SDK のトランスポート終了）。
+- 親プロセスの異常終了は `stdin` の EOF で検知する（MCP SDK のトランスポート終了。S-1 で確認: stdin を閉じると 117〜154 ms で終了コード 0）。
 
 ---
 
@@ -573,8 +590,8 @@ class ToolSpec:
 
 ```
 tools/call(name, arguments)
-  1. spec = registry[name]                      無ければ JSON-RPC エラー（プロトコル違反）
-  2. args = spec.args_model.model_validate(arguments)   失敗 → E_INVALID_ARGUMENT（details.param）
+  1. spec = registry[name]                      無ければ JSON-RPC エラー（`MCPError(INVALID_PARAMS)`、-32602。これだけがプロトコル違反）
+  2. args = spec.args_model.model_validate(arguments)   失敗 → E_INVALID_ARGUMENT（details.param。isError の結果。JSON-RPC エラーにしない）
   3. ctx  = ToolContext(workspace, revision, format, budget, cursor, request_id, started_at)
        - workspace_id の解決（T-00 手順 7 の順序）  → E_WORKSPACE_NOT_CONFIGURED
        - revision の解決（WORKING_TREE / STAGED / HEAD / 名前 / SHA）→ E_REVISION_NOT_FOUND
@@ -589,7 +606,9 @@ tools/call(name, arguments)
         その他の例外 → ログに stack、E_INTERNAL（details.log_ref）
 ```
 
-- `timing_ms` は 1 の直前から 8 の直前まで。
+- `timing_ms` は 1 の直前から 8 の直前まで。パイプライン内の自前計測とし、SDK の `Server.middleware`（暫定 API）は使わない（S-1・S-9 で確認）。
+- **SDK は引数をスキーマで検証せず、ハンドラから漏れた例外も捕捉しない**（漏れると `error.code=0` で例外文面がそのままクライアントへ出る）。したがって 2 の検証と、`LuciankeError` 以外の例外の捕捉（`E_INTERNAL`）は、このパイプラインが最外周で全責任を持つ（S-1 で確認）。結果は `types.CallToolResult(content=[TextContent], structured_content=…, is_error=…)` で返す。
+- 往復の予算: SDK クライアントから見た何もしないツールの往復は p95 1.08 ms（2026-07-28 版でも 1.89 ms）、サーバー内の SDK 処理は約 45 µs、pydantic の検証は 3 µs 前後で、8 KB の応答も差が出ない。往復に p99 で 2.5 ms を見込めば、NFR-PERF-1（p95 < 50 ms）のうちハンドラに 47 ms 以上を割り当てられる（S-9 で確認）。
 - ハンドラは `ctx.reader()`（読み取り接続）、`ctx.services`（各サービス）、`ctx.resolve_target(ref)`（仕様書 §5.3）を使う。
 
 ### 7.1.3 `ToolContext.resolve_target`（仕様書 §5.3）
@@ -771,8 +790,8 @@ class LanguageSupport(Protocol):                 # Tier 1〜2 のコード
     language_id: str
     tier: Tier
     extensions: tuple[str, ...]
-    def grammar(self) -> "tree_sitter.Language"   # 例: Language(tree_sitter_python.language())（S-2）
-    def queries(self) -> LanguageQueries          # tags / skeleton / imports / guards / doc の .scm（遅延コンパイル）
+    def grammar(self) -> "tree_sitter.Language"   # Language(getattr(importlib.import_module(m), fn)())。lang_id → (モジュール, 関数名) の表で持つ（S-2）
+    def queries(self) -> LanguageQueries          # tags / skeleton / imports / guards / doc の .scm（遅延コンパイル。Lucianke が自前で持つ。下記）
     def symbol_kind(self, node) -> Kind
     def definition_range(self, node, parsed: ParsedFile) -> Range     # §7.4.5。既定実装は boundaries.py
     def is_private(self, name: str, node) -> bool
@@ -798,10 +817,16 @@ M1 で登録するもの:
 |---|---|---|
 | Tier 1 必須 | `python`（`.py`, `.pyi`）、`typescript` / `tsx`、`javascript` | 仕様書 OD-7。受入フィクスチャはこの 2 系統 |
 | Tier 1 best effort | `rust`, `go`, `c`, `cpp`, `c_sharp` | PyPI に wheel がある（付録 A）。LSP は見つかれば使う |
-| Tier 1 保留 | `kotlin`, `swift` | PyPI 配布の有無を S-2 で確認。無ければ M1 では未登録（Tier 4 扱い） |
+| Tier 1 保留 | `kotlin`, `swift` | tree-sitter の PyPI 配布は S-2 の確認対象外で未確認。M1 では未登録（Tier 4 扱い）のまま。構文パターン検索だけなら ast-grep が文法を内蔵している（S-3 で確認） |
 | Tier 2〜3 | `ipynb`, `json`, `jsonl`, `yaml`, `toml`, `xml`（`.svg` 含む）, `markdown`, `rst`, `dot`, `mermaid` | §8.6 の M1 範囲（B2 読み取り、B3 出力、B4 骨格・部分取得） |
 
-`typescript` / `cpp` / `json` / `xml` / `toml` の文法パッケージは最終公開が 2024 年で止まっている（付録 A）。`tree-sitter` 0.26 の ABI 範囲で読み込めるかを S-2 で確かめ、読めない文法は登録表から外して Tier 4 に落とす（起動時に `grammar()` を試し、失敗をログと T-00 `status` に出す）。
+`typescript` / `cpp` / `json` / `xml` / `toml` の文法パッケージは最終公開が 2024 年で止まっている（付録 A）。S-2 の結果（合格。[`docs/spikes/S-02.md`](spikes/S-02.md)）:
+
+- 登録表の 18 言語（`python` / `typescript` / `tsx` / `javascript` / `json` / `yaml` / `toml` / `xml` / `dtd` / `markdown` / `markdown_inline` / `rust` / `go` / `c` / `cpp` / `c_sharp` / `rst` / `sql`）はすべて読み込み・解析・クエリができ、ABI は 14 または 15 で、`tree-sitter` 0.26 の範囲（13〜15）に収まる。**登録表から外す文法は無い**。ABI 14 は 9 言語（上の 5 パッケージ + `yaml`・`rst`）で、ABI 15 版が出ていない。
+- `typescript` / `tsx`、`xml` / `dtd`、`markdown` / `markdown_inline` は 1 パッケージ 2 言語なので、`lang_id → (モジュール, 関数名)` の表で持つ（例: `("tree_sitter_typescript", "language_tsx")`）。
+- 起動時検査は `MIN_COMPATIBLE_LANGUAGE_VERSION <= lang.abi_version <= LANGUAGE_VERSION` で足りる。将来の更新で読めなくなった文法は、従来どおり登録表から外して Tier 4 に落とし、失敗をログと T-00 `status` に出す。ABI 14 の文法は `Language.name` と `semantic_version` が `None` なので使わない。
+- `tree-sitter>=0.26,<0.27` に固定し、ロック更新時に S-2 の `run_grammars.py` を回す（CI の煙試験にする）。
+- **パッケージ同梱の `TAGS_QUERY` は当てにしない**（`typescript` は TS 固有構文のみで JS の `TAGS_QUERY` との連結が要る、`c_sharp` は `None`、データ形式・文書の 9 言語には無い）。`.scm` は Lucianke が自前で持つ（`syntax/queries/`）。タグは `QueryCursor.matches()` で取る（`captures()` は `@name` と `@definition.*` の対応が失われる）。`parse(src, None)` と `captures(node, None)` は `TypeError` になるので、`old_tree` と述語は省略する。
 
 ### 7.4.2 Parser プールと TreeCache（ADR-13）
 
@@ -818,12 +843,12 @@ class TreeCache:
     def evict(self, ws, rel) -> None
 ```
 
-1. `Parser` はスレッド安全でないため、スレッドローカルに言語ごとの `Parser` を持つ。解析は常にスレッドプールで行う（ループ上で行わない。MUST）。
+1. `Parser` はスレッド安全でないため、スレッドローカルに言語ごとの `Parser` を持つ（共有しても壊れなかったのは GIL による直列化のおかげで、当てにしない）。`Language` / `Query` / `Tree` / `Node` はスレッド間で共有してよく、`QueryCursor` は呼び出しごとに作る。解析は常にプールのスレッドで行い（ループ上で行わない。MUST）、`parse(bytes)` ではなく **`parse_with_deadline`**（`read_callback` で 16 KiB 刻み。期限〔`STRUCTURAL_SEARCH_MS` 相当〕後に `b""` を返して打ち切り、`timed_out` なら木は捨てる）を使う。理由は ADR-13: `parse(bytes)` は解析の全体にわたって GIL を握り（スレッドプールは並列化せず、2,000 行で約 8 ms、5 MB で約 750 ms ループが止まる）、`read_callback` 版は速度が同等で他スレッドの停止が最長約 20 ms に縮む。`progress_callback` は使わない（Windows でアクセス違反）。例外を投げて打ち切る方式も使わない（不安定）。並列度が要るなら別プロセス（S-2 で確認）。
 2. キーは `(workspace_id, rel, sha256)`。同じキーの解析が進行中なら 2 本目は待つ（二重解析の抑止）。
-3. 上限は `TREE_CACHE_MAX_FILES`（2,000）と `TREE_CACHE_MAX_BYTES`（512 MiB）の両方。LRU で古いものから落とす。
+3. 上限は `TREE_CACHE_MAX_FILES`（2,000）と `TREE_CACHE_MAX_BYTES`（512 MiB）の両方。LRU で古いものから落とす。**構文木はソースの約 20〜26 倍のメモリを食う**ので、`TREE_CACHE_MAX_BYTES` で数えるのはソースのバイト数ではなく推定木メモリ（ソース長 × 25。係数は `core/limits.py` に置く）とする（ソースで数えると実メモリは 10 GiB 超になる。S-2 で確認）。
 4. `MAX_FILE_BYTES`（5 MB）を超えるファイルは解析しない。Tier 3 ならアダプタのストリーミング骨格、それ以外は `files` 行だけ（`lexical_fallback`）。
-5. 構文エラーがあっても木は保持する（`has_errors`）。`error_ranges()` は Indexer が `source: "tree-sitter"` の診断にする。
-6. 増分解析（`tree.edit` → 再解析）は MAY。M1 は全解析。
+5. 構文エラーがあっても木は保持する（`has_errors`）。`error_ranges()`（実体は `error_spans`: `is_error` / `is_missing` を、ERROR の中へは降りずに列挙する）は Indexer が `source: "tree-sitter"` の診断にする。Python は構文が壊れると位置の粗い 1 個の大きな ERROR になるため、位置は参考にとどめる（§7.7.4。S-2 で確認）。
+6. 増分解析（`tree.copy()` → `tree.edit(...)` → 再解析）は MAY。M1 は全解析（約 8 ms）で足りる（増分は約 1.85 ms で全解析と同一結果。`edit` は呼んだ木を直接書き換えるので `copy()` してから）。`Node.text` は Tree がソースを保持するので取れるが、`line_index` のため `ParsedFile.source` は残す（S-2 で確認）。
 
 受入で確かめる点:
 
@@ -901,7 +926,14 @@ def search(language_id: str, pattern: str, files: Sequence[RelPath], constraints
 def rewrite(match: Match, template: str) -> str
 ```
 
-`ast-grep-py` を用いる想定。パターンと `rewrite` を対象言語で解析できなければ `E_SYNTAX_INVALID`（`details.param`）。書き換え API（メタ変数の展開・置換テキストの生成）が `ast-grep-py` に無ければ、`Match.meta_vars` の範囲からテンプレート展開を自前で行う（S-3 で確認）。照合はスレッドプールで走らせ、`STRUCTURAL_SEARCH_MS`（5,000）を超えたら `E_TIMEOUT` に部分結果。結果は T-12 が `edit/plan.py` の `Plan` に変換する（書き込みは `EditTransaction`）。
+`ast-grep-py` 0.51 を用いる。パターンと `rewrite` を対象言語で解析できなければ `E_SYNTAX_INVALID`（`details.param`）。照合はスレッドプールで走らせ、`STRUCTURAL_SEARCH_MS`（5,000）を超えたら `E_TIMEOUT` に部分結果。結果は T-12 が `edit/plan.py` の `Plan` に変換する（書き込みは `EditTransaction`）。S-3 の結果（合格。[`docs/spikes/S-03.md`](spikes/S-03.md)）:
+
+- **書き換え**: `node.replace(new_text) -> Edit` と `root.commit_edits([Edit…])` はあるが、**`replace` はメタ変数を展開せず**文字列をそのまま挿入する。よって `rewrite` のテンプレート展開は自前で行う（`$X` は `get_match` のテキスト、`$$$X` は先頭ノードの開始〜末尾ノードの終了のソース断片で展開し、区切りと空白を保つ。複数行はインデントを挿入先に合わせる。パターンに無い変数の参照は `TemplateError`）。展開済みの文字列を `replace` に渡し、適用は `commit_edits` か `Match` の `start_index` / `end_index` による文字列連結で行う。
+- **入れ子の一致**は外側と内側の両方が返る（`foo(foo(1))` に `foo($X)`）。重なる hunk を作らないため、`outermost` を **必ず** 通してから hunk にする（MUST）。
+- **言語表**: `lang_id → ast-grep の言語名` の登録表で持つ。**非対応は `toml` / `xml` / `dtd` / `rst` / `sql` / `markdown_inline`**（`E_UNSUPPORTED`）。`c_sharp` は ast-grep では `csharp`。未対応名で `SgRoot` を作ると `PanicException`（`BaseException` の子で `Exception` ではない）と stderr 出力が出るので、**登録表で事前に弾く**。
+- **不正パターン**は例外にならず 0 件を返す。例外（`RuntimeError: cannot get matcher`）になるのは、パターンが単独の AST ルートにならないとき（→ `E_SYNTAX_INVALID`）。一致 0 件のときだけ Tree-sitter でパターンを解析し、ERROR なら `details.hint` に「パターンが解析できない可能性」を付ける（ERROR だけで断定すると、Rust・Java・C# の正しいパターンを誤判定する）。Go・C の式パターンは `{"context": …, "selector": …}` 形式で包む必要がある（`LanguageSupport` に「パターン用の包み」を持たせる案。M2 で T-12 の対象言語を決めるときに確定）。
+- **位置**: ast-grep の行・列は 0 始まりのコードポイントで、Lucianke の内部表現と同じ（変換は要らない。ADR-14）。入力は `str` なので、UTF-8 として読めないファイルの書き換えは拒否する。
+- **予算**: ast-grep は `TreeCache` の木を使えず自前で再解析する（約 10 ms / 2,000 行）ので、5 秒で約 400 ファイル。GIL を解放しないのでスレッドプールでは速くならない（並列化するなら別プロセス）。ファイル数が多い検索には、パターン中のリテラルを `bytes.find` で調べてから渡す前ふるいが効くはず（未測定の推奨）。
 
 ### 7.4.8 Tier 3 アダプタと Tier 4 ヒューリスティック
 
