@@ -16,19 +16,18 @@ from __future__ import annotations
 
 import importlib
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 import tree_sitter
 
-from lucianke.core.model import Kind, Range, Tier
+from lucianke.core.model import Kind, Range, SymbolRecord, Tier
 from lucianke.core.textpos import IndentSpec
 from lucianke.syntax.types import LanguageQueries, Match, ParsedFile, SkeletonOptions
 
 if TYPE_CHECKING:
     from lucianke.core.records import Record
-    from lucianke.core.urn import Selector
 
 __all__ = [
     "ADAPTERS",
@@ -71,7 +70,11 @@ class LanguageSupport(Protocol):
 
 
 class FormatAdapter(Protocol):
-    """Tier 3〜4、および .ipynb / DOT / Mermaid。骨格・部分取得・置換（M2）。"""
+    """Tier 3〜4、および .ipynb / DOT / Mermaid。骨格・部分取得・置換（M2）。
+
+    ``selector`` はセレクタの式の文字列（``"jsonpath:$.a"``。URN の ``DataSel`` なら ``f"{sel.kind}:{sel.expr}"``）。
+    ``skeleton_record`` と ``symbols`` は呼び手（T-02、索引）が使う入口で、``skeleton`` が持てない ``rel`` と ``sha256`` を受ける。
+    """
 
     language_id: str
     tier: Tier
@@ -79,11 +82,26 @@ class FormatAdapter(Protocol):
 
     def skeleton(self, source: bytes, opts: SkeletonOptions) -> list[Record]: ...
 
+    def skeleton_record(
+        self,
+        source: bytes,
+        opts: SkeletonOptions,
+        *,
+        rel: str,
+        sha256: str,
+        estimate: Callable[[str], int] | None = None,
+        python_symbols: Callable[[bytes], Sequence[Any]] | None = None,
+    ) -> Record: ...  # T-02 の 1 ファイルぶん（file-block）。壊れたファイルは ValueError
+
+    def symbols(
+        self, source: bytes, *, rel: str, workspace_id: str
+    ) -> list[SymbolRecord]: ...  # 索引に出すシンボル。壊れたファイル・持たない形式は空
+
     def select(
-        self, source: bytes, selector: Selector
+        self, source: bytes, selector: str
     ) -> list[Match]: ...  # xpath: / jsonpath: / jq: / toml: / yaml: / cell:
 
-    def replace(self, source: bytes, selector: Selector, new: bytes) -> bytes: ...  # M2
+    def replace(self, source: bytes, selector: str, new: bytes) -> bytes: ...  # M2
 
 
 # --- 具体の登録用データ ------------------------------------------------------------------
@@ -267,7 +285,8 @@ SUPPORT: dict[str, LanguageSpec]
 _UNAVAILABLE: dict[str, str]
 SUPPORT, _UNAVAILABLE = build_registry(_SPECS)
 
-ADAPTERS: dict[str, FormatAdapter] = {}  # language_id -> アダプタ（Tier 3 のデータファイルと .ipynb。末尾で ``register_adapter`` する）
+# language_id -> アダプタ（Tier 3 のデータファイルと .ipynb。末尾で ``register_adapter`` する）
+ADAPTERS: dict[str, FormatAdapter] = {}
 
 _EXT_TO_LANG: dict[str, str] = {}
 _lock = threading.Lock()
@@ -329,7 +348,7 @@ def _register_builtin_adapters() -> None:
     from lucianke.syntax.adapters import REGISTERED
 
     for adapter in REGISTERED:
-        register_adapter(adapter)  # type: ignore[arg-type]  # DataAdapter.select は式の文字列を受ける（Protocol は Selector）
+        register_adapter(adapter)
 
 
 _register_builtin_adapters()

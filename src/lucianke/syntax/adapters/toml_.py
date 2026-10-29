@@ -19,6 +19,7 @@ import tomllib
 from collections.abc import Callable
 from typing import Any
 
+from lucianke.core.model import Kind
 from lucianke.core.records import Record
 from lucianke.syntax.adapters._common import (
     SAMPLE_LARGE,
@@ -296,4 +297,4 @@ def select(source: bytes, selector: str) -> list[Match]:
     return out
 
 
-ADAPTER = DataAdapter("toml", (".toml",), skeleton, select, ("toml",))
+ADAPTER = DataAdapter("toml", (".toml",), skeleton, select, ("toml",), symbol_kind=Kind.KEY)

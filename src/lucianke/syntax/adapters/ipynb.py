@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from lucianke.core.compact_lines import attr_line, file_block_header, one_line
-from lucianke.core.model import Confidence, Range, Tier
+from lucianke.core.model import Confidence, Range, SymbolRecord, Tier
 from lucianke.core.records import Record
 from lucianke.syntax.types import Match, SkeletonOptions
 
@@ -323,6 +323,7 @@ def skeleton(
         rel, lines=line_count, cells=len(cmap.cells), skeleton_lines=len(body), sha12=sha256
     )
     data: Mapping[str, Any] = {
+        "ok": True,
         "path": rel,
         "language": "ipynb",
         "tier": int(Tier.T2),
@@ -382,12 +383,12 @@ def select(source: bytes, selector: str) -> list[Match]:
 
 
 class IpynbAdapter:
-    """``FormatAdapter``（設計書 §7.4.8）。``ADAPTERS`` への登録は ``syntax/adapters/__init__.py`` が行う。"""
+    """``FormatAdapter``（設計書 §7.4.8）。登録は ``syntax/support.py`` が import の末尾で行う。"""
 
-    language_id = "ipynb"
-    tier = Tier.T2
-    extensions = (".ipynb",)
-    selectors = ("cell",)  # 受け付けるセレクタの接頭辞（DataAdapter と同じ形）
+    language_id: str = "ipynb"
+    tier: Tier = Tier.T2
+    extensions: tuple[str, ...] = (".ipynb",)
+    selectors: tuple[str, ...] = ("cell",)  # 受け付けるセレクタの接頭辞（DataAdapter と同じ形）
 
     def skeleton(self, source: bytes, opts: SkeletonOptions) -> list[Record]:
         """``rel`` と ``sha256`` の受け口が Protocol に無いため、``rel`` は空・``sha256`` は ``source`` から計算する。
@@ -395,6 +396,23 @@ class IpynbAdapter:
         呼び出し側（T-02）は ``skeleton()`` 関数に ``rel`` / ``sha256`` / ``python_symbols`` を渡して直接呼ぶこと。
         """
         return [skeleton(source, opts, rel="", sha256=hashlib.sha256(source).hexdigest())]
+
+    def skeleton_record(
+        self,
+        source: bytes,
+        opts: SkeletonOptions,
+        *,
+        rel: str,
+        sha256: str,
+        estimate: Callable[[str], int] | None = None,  # noqa: ARG002 - DataAdapter と受け口をそろえる（縮退しない）
+        python_symbols: Callable[[bytes], Sequence[Any]] | None = None,
+    ) -> Record:
+        """T-02 の 1 ファイルぶん。``python_symbols`` は仮想 Python ファイル → 定義の一覧（``skeleton()`` を参照）。"""
+        return skeleton(source, opts, rel=rel, sha256=sha256, python_symbols=python_symbols)
+
+    def symbols(self, source: bytes, *, rel: str, workspace_id: str) -> list[SymbolRecord]:  # noqa: ARG002
+        """索引にシンボルは出さない。行が仮想 Python ファイル上のもので、実ファイル（JSON）の行ではないため（``files`` 行だけ）。"""
+        return []
 
     def select(self, source: bytes, selector: str) -> list[Match]:
         return select(source, selector)

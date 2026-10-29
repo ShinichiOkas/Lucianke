@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from xml.parsers import expat
 
+from lucianke.core.model import Kind
 from lucianke.core.records import Record
 from lucianke.syntax.adapters._common import (
     STREAM_BYTES,
@@ -220,4 +221,12 @@ def select(source: bytes, selector: str) -> list[Match]:
     return out
 
 
-ADAPTER = DataAdapter("xml", (".xml", ".xsd", ".xsl", ".xslt", ".wsdl", ".svg"), skeleton, select, ("xpath",))
+ADAPTER = DataAdapter(
+    "xml",
+    (".xml", ".xsd", ".xsl", ".xslt", ".wsdl", ".svg"),
+    skeleton,
+    select,
+    ("xpath",),
+    symbol_kind=Kind.TAG,
+    symbol_depth=2,  # 根要素だけでは名前検索の手がかりにならないので、直下の子要素まで
+)

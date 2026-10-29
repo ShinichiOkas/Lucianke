@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
+from lucianke.core.model import Kind
 from lucianke.core.records import Record
 from lucianke.syntax.adapters._common import (
     SAMPLE_LARGE,
@@ -222,4 +223,4 @@ def select(source: bytes, selector: str) -> list[Match]:
     return out
 
 
-ADAPTER = DataAdapter("yaml", (".yaml", ".yml"), skeleton, select, ("yaml",))
+ADAPTER = DataAdapter("yaml", (".yaml", ".yml"), skeleton, select, ("yaml",), symbol_kind=Kind.KEY)

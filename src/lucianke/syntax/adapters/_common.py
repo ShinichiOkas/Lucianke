@@ -21,9 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lucianke.core.compact_lines import file_block_header, note
-from lucianke.core.model import Confidence, Position, Range, Tier
+from lucianke.core.model import Confidence, Kind, Position, Range, SymbolRecord, Tier
 from lucianke.core.records import Record
 from lucianke.core.textpos import LineIndex
+from lucianke.syntax.adapters._symbols import data_symbols
 from lucianke.syntax.types import Match, SkeletonOptions
 
 STREAM_BYTES = (
@@ -518,7 +519,10 @@ class DataAdapter:
     """``FormatAdapter``（``syntax.support``）の実装。``language_id`` / ``extensions`` と 2 つの関数を束ねる。
 
     ``skeleton`` は ``rel`` / ``sha256`` の受け口が Protocol に無いため、``rel`` は空・``sha256`` は ``source`` から計算する。
-    呼び出し側（T-02）はモジュールの ``skeleton()`` 関数に ``rel`` / ``sha256`` を渡して直接呼ぶこと。置換は M2。
+    呼び出し側（T-02）は ``skeleton_record`` に ``rel`` / ``sha256`` を渡して呼ぶこと。置換は M2。
+
+    ``symbols`` は索引（``engine.indexer``）が拾うシンボル（骨格の最上位の節。``_symbols`` の docstring を参照）。
+    ``symbol_kind`` が ``None`` のアダプタ（JSONL）はシンボルを持たない。``symbol_depth`` は拾う階層（XML だけ 2）。
     """
 
     tier = Tier.T3
@@ -530,15 +534,55 @@ class DataAdapter:
         skeleton_fn: Callable[..., Record],
         select_fn: Callable[[bytes, str], list[Match]],
         selectors: tuple[str, ...],
+        *,
+        symbol_kind: Kind | None = None,
+        symbol_depth: int = 1,
     ) -> None:
         self.language_id = language_id
         self.extensions = extensions
         self.selectors = selectors  # 受け付けるセレクタの接頭辞（``"jsonpath"`` など。``jq`` は M2）
+        self.symbol_kind = symbol_kind
+        self.symbol_depth = symbol_depth
         self._skeleton = skeleton_fn
         self._select = select_fn
 
     def skeleton(self, source: bytes, opts: SkeletonOptions) -> list[Record]:
         return [self._skeleton(source, opts, rel="", sha256=hashlib.sha256(source).hexdigest())]
+
+    def skeleton_record(
+        self,
+        source: bytes,
+        opts: SkeletonOptions,
+        *,
+        rel: str,
+        sha256: str,
+        estimate: Callable[[str], int] | None = None,
+        python_symbols: Callable[[bytes], Sequence[Any]] | None = None,  # noqa: ARG002 - ipynb だけが使う（受け口をそろえる）
+    ) -> Record:
+        """T-02 の 1 ファイルぶん。``estimate`` は予算に入らないときの縮退（``shrink``）の見積もり。壊れたファイルは ``ValueError``。"""
+        return self._skeleton(source, opts, rel=rel, sha256=sha256, estimate=estimate)
+
+    def symbols(self, source: bytes, *, rel: str, workspace_id: str) -> list[SymbolRecord]:
+        """索引用のシンボル（最上位の節）。壊れたファイル・シンボルを持たない形式は空（呼び手は ``files`` 行だけにする）。"""
+        if self.symbol_kind is None:
+            return []
+        try:
+            record = self._skeleton(
+                source,
+                SkeletonOptions(max_depth=self.symbol_depth),
+                rel=rel,
+                sha256=hashlib.sha256(source).hexdigest(),
+            )
+        except (ValueError, RecursionError):  # 各アダプタは構文の誤りを ValueError にそろえる
+            return []
+        return data_symbols(
+            record,
+            scheme=self.selectors[0],
+            kind=self.symbol_kind,
+            rel=rel,
+            workspace_id=workspace_id,
+            depth=self.symbol_depth,
+        )
 
     def select(self, source: bytes, selector: str) -> list[Match]:
         return self._select(source, selector)

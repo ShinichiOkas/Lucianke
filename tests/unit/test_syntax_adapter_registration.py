@@ -31,7 +31,9 @@ def test_registered_matches_the_adapters_package() -> None:
     assert {a.language_id for a in adapters.REGISTERED} == set(LANGS)
     for a in adapters.REGISTERED:
         assert ADAPTERS[a.language_id] is a
-    assert all(adapters.ADAPTERS[ext] is get_adapter(a.language_id) for a in adapters._ALL for ext in a.extensions)
+    assert all(
+        adapters.ADAPTERS[ext] is get_adapter(a.language_id) for a in adapters._ALL for ext in a.extensions
+    )
 
 
 @pytest.mark.parametrize(

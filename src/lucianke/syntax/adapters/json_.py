@@ -20,6 +20,7 @@ from typing import Any
 from jsonpath_ng import jsonpath as _jp
 from jsonpath_ng.ext import parse as _jsonpath_parse
 
+from lucianke.core.model import Kind
 from lucianke.core.records import Record
 from lucianke.syntax.adapters._common import (
     SAMPLE_LARGE,
@@ -365,5 +366,5 @@ def select_jsonl(source: bytes, selector: str) -> list[Match]:
     return out
 
 
-ADAPTER = DataAdapter("json", (".json",), skeleton, select, ("jsonpath",))
+ADAPTER = DataAdapter("json", (".json",), skeleton, select, ("jsonpath",), symbol_kind=Kind.KEY)
 JSONL_ADAPTER = DataAdapter("jsonl", (".jsonl", ".ndjson"), skeleton_jsonl, select_jsonl, ("jsonpath",))
