@@ -34,7 +34,8 @@ _FALLBACK_INDENT = IndentSpec("space", 4)
 def default_indent(language_id: str) -> IndentSpec:
     """言語の慣例のインデント単位（Python 4、JS/TS 2、Rust 4、Go タブ）。未登録の言語は 4 スペース。"""
     support = get_support(language_id)
-    return support.indent_default if support is not None else _FALLBACK_INDENT
+    spec = getattr(support, "indent_default", None)  # FormatAdapter（Tier 3 以下）は持たない
+    return spec if isinstance(spec, IndentSpec) else _FALLBACK_INDENT
 
 
 def blank_lines_between(language_id: str, *, toplevel: bool) -> int:
