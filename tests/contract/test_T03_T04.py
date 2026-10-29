@@ -156,9 +156,15 @@ async def test_t03_exact_postcondition_1(pipeline: Pipeline) -> None:
     )
 
 
-async def test_t03_exact_by_qualified_name(pipeline: Pipeline) -> None:
-    r = await search(pipeline, query="PaymentProcessor.process_charge", match="exact")
-    assert names(r) == ["PaymentProcessor.process_charge"]
+async def test_t03_exact_compares_name_only(pipeline: Pipeline) -> None:
+    """exact は name の等価比較。限定名（ドット付き）では当たらない。限定名で探すときは fuzzy（完全一致が先頭）。"""
+    ex = await search(pipeline, query="PaymentProcessor.process_charge", match="exact", fallback_grep=False)
+    assert not ex.is_error and names(ex) == [] and ex.structured["data"]["fallback_used"] is False
+    fz = await search(pipeline, query="PaymentProcessor.process_charge")
+    assert (
+        names(fz)[0] == "PaymentProcessor.process_charge"
+        and fz.structured["data"]["symbols"][0]["score"] == 1.0
+    )
 
 
 async def test_t03_limit_postcondition_2(pipeline: Pipeline) -> None:

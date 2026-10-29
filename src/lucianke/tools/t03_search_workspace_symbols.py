@@ -323,6 +323,10 @@ def _search_index(
         syms = _regex_symbols(conn, ws_id, rx, kinds, scope, args.include_tests, result)
     else:
         syms = queries.search_symbols_fts(conn, ws_id, query, args.match, kinds, limit=CANDIDATE_CAP)
+        if (
+            args.match == "exact"
+        ):  # 仕様書 T-03 手順 1・事後条件 1: exact は name の等価比較（限定名では当てない）
+            syms = [s for s in syms if s.name == query]
     infos: dict[str, FileInfo | None] = {}
 
     def info_of(path: str) -> FileInfo | None:
