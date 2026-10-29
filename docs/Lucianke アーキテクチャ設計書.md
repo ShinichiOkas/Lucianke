@@ -323,7 +323,7 @@ Lucianke/
 │  │  ├─ schema.sql          #   仕様書 §9.2 の DDL（正本はそのコピー。差分はテストで検出）
 │  │  ├─ connection.py       #   接続の開き方（WAL、pragmas、ro URI）、ReaderPool
 │  │  ├─ writer.py           #   IndexWriter スレッド、ジョブキュー、data_version
-│  │  ├─ ingest.py           #   ファイル単位の取り込み（files/symbols/relations/diagnostics の差分更新）
+│  │  ├─ ingest.py           #   ファイル単位の取り込み（files/symbols/relations/diagnostics の差分更新）。解析結果は FileFacts で受け取り、呼び手のトランザクション内で実行（index は syntax/lsp を import しない）
 │  │  ├─ queries.py          #   ツールが使うパラメータ化クエリ（名前つき）
 │  │  ├─ public.py           #   query_project_db 用: 文の検査、authorizer、progress handler、行数上限
 │  │  └─ migrate.py          #   スキーマ版管理
@@ -338,7 +338,8 @@ Lucianke/
 │  │  └─ lock.py             #   ワークスペース単位の書き込みロック
 │  │
 │  ├─ engine/
-│  │  └─ selector.py         #   EngineSelector（ADR-10）、警告文の雛形
+│  │  ├─ selector.py         #   EngineSelector（ADR-10）、警告文の雛形
+│  │  └─ indexer.py          #   Indexer: 走査・解析（スレッド）・バッチ化・背景ジョブ・_settle_relations。DB への書き込みは index/ingest.py へ渡す（§7.6.2。実装で確定 2026-10-29）
 │  │
 │  ├─ git/                   # M2。M1 ではリビジョン解決と blob 取得（T-02/T-05 の revision 対応）だけ
 │  │  ├─ repo.py             #   dulwich ラッパ: 参照解決、blob、ツリー差分、log --follow 相当
@@ -396,7 +397,8 @@ app / lifecycle ─► すべて（合成ルート）
 | `mcp/render/compact.py` | `Record.lines` を §6.1 の文法で連結し、ヘッダ・警告・トレーラを付ける | 行の中身の生成（ツールと syntax が作る） |
 | `workspace/paths.py` | 相対化・正規化・実体解決・ルート配下検査。失敗は `E_INVALID_ARGUMENT` | ファイルの読み書き |
 | `syntax/symbols.py` | 構文木 → `SymbolRecord`。修飾名・種別・範囲・選択範囲・修飾子・doc 要約・`body_sha256` | DB 書き込み |
-| `index/ingest.py` | 1 ファイルの差分取り込みを 1 トランザクションで。`data_version` を進める | 構文解析 |
+| `index/ingest.py` | `FileFacts` を受けて 1 ファイルの差分取り込みを（呼び手が開いた）トランザクションの中で。`ingest_file` / `remove_file` / `upsert_workspace` / `upsert_exact_relations` / `replace_lsp_diagnostics`。`data_version` は `IndexWriter` が進める | 構文解析、走査 |
+| `engine/indexer.py` | ワークスペースの走査（`.gitignore` と `exclude_globs`）、1 ファイルの解析（`syntax`）→ `FileFacts`、バッチ化（`INGEST_BATCH_FILES` = 50）、背景ジョブ（T-00 `reindex`）、取り込み後の `_settle_relations` | DB の SQL（`ingest.py` と `IndexWriter` に任せる） |
 | `lsp/pool.py` | 状態機械・再起動・バックオフ・待機解放 | 要求の意味 |
 | `lsp/features.py` | 各要求の呼び出し、結果の `SymbolRecord` / `relations` 化、PaaD への書き込み要求 | 直列化形式 |
 | `edit/transaction.py` | 8 段の順序と失敗時の不変条件 | hunk の内容 |
@@ -933,7 +935,7 @@ def blank_lines_around(kind: Kind, scope: Literal["module", "class"], cfg) -> in
 
 1. Python: 絶対 import はルートと `src/` 配下、相対 import は当該ファイルからの相対で、`<mod>.py` / `<mod>/__init__.py` / `<mod>.pyi` の順に探す。
 2. TypeScript / JavaScript: 相対パスに `.ts/.tsx/.js/.jsx/.mjs` と `/index.*` を補う。`tsconfig.json` の `paths` は M2（MAY）。
-3. 解決できたら `relations(IMPORTS, structural)`。解決できなければ外部として `lk://_ext/<名前>` を `target_urn` にする。
+3. 解決できたら `relations(IMPORTS, structural)`。解決できなければ外部として `lk://_ext/<パッケージ>#<名前>` を `target_urn` にする（決定 2026-10-29。T-06 / T-07 が外部ノードを要るため。現状の `engine/indexer.py` は捨てている → §7.6.2 の「実装との差」）。
 4. 呼び出し関係の `structural` 行は、呼び出し式の識別子を「同一ファイルの定義 → import で取り込んだ名前 → 解決先ファイルの公開シンボル」の順で引いて作る。同名の別シンボルを区別しないため `confidence_level = structural`。
 
 ### 7.4.7 構文パターン（structural.py）
@@ -1210,12 +1212,23 @@ class IndexWriter:
 3. チェックポイントは、キューが空になり前回から 1,000 コミット以上たったとき `PASSIVE`、終了時に `TRUNCATE`。
 4. 起動時の差分索引では、1 トランザクションに最大 50 ファイルをまとめ、`data_version` はトランザクションごとに 1 回だけ進める。
 
-### 7.6.2 取り込みパイプライン（ingest.py）と data_version（ADR-8）
+### 7.6.2 取り込みパイプライン（engine/indexer.py と index/ingest.py）と data_version（ADR-8）
 
 ```python
-async def ingest_file(ws: Workspace, rel: RelPath, *, reason: str) -> None
-async def remove_file(ws, rel) -> None
-async def rescan(ws) -> JobHandle          # §7.6.5 と同じ差分索引
+# engine/indexer.py（実装で確定 2026-10-29。当初の ingest_file(ws, rel) / rescan(ws) を分けた）
+INGEST_BATCH_FILES = 50                       # 起動時の差分索引は 1 トランザクションに最大 50 ファイル。data_version はトランザクションごとに +1
+class Indexer:                                # ワークスペース 1 つ分
+    async def index_file(self, rel) -> IngestStats | None      # 1 ファイルの再取り込み。sha256 が同じなら何もしない。消えた・除外になったなら remove
+    async def remove(self, rel) -> bool
+    async def scan(self, *, progress_cb=None) -> ScanReport    # 起動時の差分索引と全体の再索引（§7.6.5 と同じ処理）。進捗 0〜100 は単調増加
+    def start_scan_job(self) -> str; def job_status(job_id); def jobs(); async def wait_job(job_id)   # 背景ジョブ（T-00 reindex、status の jobs[]）
+
+# index/ingest.py（書き手スレッドのトランザクションの中で呼ぶ。外では RuntimeError）
+def ingest_file(conn, facts: FileFacts, *, now=None) -> IngestStats    # files / symbols / relations / diagnostics の差分更新
+def remove_file(conn, workspace_id, path) -> bool
+def upsert_workspace(conn, ws_row) -> None
+def upsert_exact_relations(conn, rows: Sequence[RelationFact]) -> int  # LSP の結果（§7.5.6 の反映 1）
+def replace_lsp_diagnostics(conn, …)                                   # (file_id, source) 単位の全置換（§7.5.5 の 1）
 ```
 
 1 ファイルの手順:
@@ -1230,6 +1243,15 @@ async def rescan(ws) -> JobHandle          # §7.6.5 と同じ差分索引
    - `diagnostics` の `(file_id, 'tree-sitter')` を全置換。
    - `symbols_fts` は `symbols` への INSERT / UPDATE / DELETE トリガで追従させる（`schema.sql` にトリガを足す。仕様書 §9.2 の DDL への追記。親に報告）。
 5. 完了後、Watcher 経由なら LSP への通知（§7.3.6 手順 5）。
+
+実装との差（実装で確定 2026-10-29）:
+
+- **分担**: `Indexer`（`engine/indexer.py`）が走査・解析・バッチ化を担い、`index/ingest.py` は解析結果 `FileFacts`（`RelationFact` / `DiagnosticFact` を含む）を受けて DB を更新するだけ。`index` が `syntax` / `lsp` を import しないための分け方（§4.2）。
+- **バッチ**: 起動時の差分索引は 1 トランザクションに最大 `INGEST_BATCH_FILES`（50）ファイル。走査中は 1 バッチの書き込みを待たず次のバッチの解析へ進む（書き込みは常に 1 バッチだけ先行）。`data_version` はトランザクションごとに 1 回だけ進む。
+- **import 表から作った関係の後始末（`_settle_relations`）**: import の解決は定義元の存在を確かめずに URN を作る（走査の順序に依存させないため）。そこで、取り込み後に同じトランザクションの中で (1) `symbols` に無いシンボルを指す目標（`#` を含む URN）の行を消し、(2) `target_file_id` を目標のシンボルの持ち主で埋める（目標のファイルが後から取り込まれた場合に備える）。外部シンボル（`lk://_ext/`）は `ingest_file` が `symbols` に最小の行（`is_external`）を作る（`_ensure_external`）ので消えない。
+- **未解決の import は外部扱いにする（決定 2026-10-29）**: 解決できない import（標準ライブラリ・`site-packages` / `node_modules` の第三者・解決失敗）は、**捨てずに** `lk://_ext/<パッケージ>#<名前>`（`<パッケージ>` は import 先の最上位モジュール名。§7.4.3 項 9）を `target_urn` にして `relations` に残す。理由: T-06 / T-07 が外部ノードを必要とする（外部の呼び先を返す）。**現状の実装は捨てている**（`engine/indexer.py` の `_relations` が解決できない名前の関係を落とす）。実装は別の役（7j）が本書に合わせて直す。
+- **Tier 3**: `FormatAdapter` は M1 ではシンボルを返さず `files` 行だけを作る（`confidence = lexical_fallback`）。アダプタが `symbols(source, *, rel, workspace_id)` を持てばそのシンボルも入れる（任意。持てば `structural`）。
+- 秘密ファイル・バイナリ・`MAX_FILE_BYTES` 超過・タグクエリの無い言語は、`files` 行だけ（本文は解析しない）か Tier 4 の `heuristic.outline` に回す。
 
 並列度: 解析はスレッドプール（`READER_POOL_SIZE`=8 と同じ数）で行うが、Tree-sitter の解析は GIL を握るため並列化しない（ADR-13。S-2 で確認）。書き込みはキューで直列。バースト（`WATCH_BURST_FILES` 超）と起動時は `rescan` に切り替える。
 
