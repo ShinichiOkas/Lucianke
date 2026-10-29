@@ -30,9 +30,9 @@ from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.syntax.parsers import parse_source
 from lucianke.tools import register_tools
+from lucianke.tools._edit_output import diag_records
 from lucianke.tools._runtime import WiredServices
 from lucianke.tools._services import ToolServices
-from lucianke.tools.t10_edit_symbol_body import _diag_records  # pyright: ignore[reportPrivateUsage]
 
 POLY = Path(__file__).resolve().parents[1] / "fixtures" / "poly"
 PAY = "src/shop/services/payment.py"
@@ -665,7 +665,7 @@ def test_diagnostic_sections_render_as_diag_lines() -> None:
             },
         ),  # fmt: skip
     )
-    records = _diag_records(svc, "resolved", delta.resolved, 2, Confidence.EXACT) + _diag_records(
+    records = diag_records(svc, "resolved", delta.resolved, 2, Confidence.EXACT) + diag_records(
         svc, "added", delta.added, 1, Confidence.EXACT
     )
     text = "\n".join(line for rec in records for line in rec.lines) + "\n"
