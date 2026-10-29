@@ -26,3 +26,5 @@
 ## 確認
 - 票の実測のスクリプトを直す前に実行して `('a/',) ('a/',)` → `() ('a/',)` を再現し、直したあとは `('a/',) ('a/',)` のまま。
 - `tests/unit/test_workspace_context_reregister.py`・`tests/unit/test_workspace_context.py` を 3 回続けて green（89 件・1 skip）。
+- `tests/contract/test_T00_configure.py`（32 件）と `tests/unit/test_import_graph.py` は、HEAD に直しだけを載せた別ワークツリーで 3 回続けて green（上の単体 2 本と合わせて 122 件・1 skip）。共有の作業ツリーでは、他の役が `mcp/budget.py`・`mcp/fit.py` を作業中で `Packer.pack() got an unexpected keyword argument 'record_text'` により T-00 の契約テストが落ちる状態だった（この直しとは無関係）。
+- `tests/unit` と `tests/contract` のうち hub・runtime・workspace・roots・configure に関わる 571 件も同じワークツリーで green。
