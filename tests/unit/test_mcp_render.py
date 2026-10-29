@@ -535,3 +535,37 @@ def test_build_meta_lsp_progress_only_when_indexing():
     assert build_meta(out, _page(out.records)).lsp_progress == 100
     ready = EngineChoice(engine="x", confidence=Confidence.EXACT, lsp_status="ready", lsp_progress=40)
     assert build_meta(_out([_record(0)], engine=ready), None).lsp_progress is None
+
+
+# --- 予算との整合（パッカーの数え方とレンダラの出力が一致すること）-------------------------------------
+
+
+@pytest.mark.parametrize("max_tokens", [200, 260, 400, 800, 2000])
+def test_render_output_within_budget_when_packed(max_tokens):
+    from lucianke.mcp.budget import Packer, TokenEstimator
+
+    est = TokenEstimator().count
+    recs = [
+        Record(kind="ref", key=f"r{i}", priority=i, group=f"src/m{i % 3}.py", confidence=Confidence.EXACT,
+               lines=(c.ref_line(f"src/m{i % 3}.py", i + 1, 5, use="call", enclosing=f"fn_{i}",
+                                 snippet=f"結果 = await processor.process_charge(request_{i}, retry={i})"),),
+               data={"line": i + 1})
+        for i in range(60)
+    ]
+    out = _out(recs, head_kv=[("target", "lk://app/src/services/payment.py#PaymentProcessor.process_charge")])
+    meta = build_meta(out, _page(recs))
+    warnings = ["引数 x は無視されました"]
+    # 呼び手（パイプライン）がやるとおり、ヘッダ・警告・head_kv を最大幅で描いて reserved に数える
+    probe = c.render(RenderInput(call=_call(max_tokens=max_tokens), meta=meta, out=out,
+                                 page=_page([], used=max_tokens), warnings=warnings))
+    page = Packer().pack(out, max_tokens=max_tokens, reserved_tokens=est(probe.text),
+                         cursor_factory=lambda off: f"cursor{off}")
+    r = c.render(RenderInput(call=_call(max_tokens=max_tokens), meta=meta, out=out, page=page, warnings=warnings))
+    assert est(r.text) <= max_tokens
+    assert page.used_tokens_est <= max_tokens
+    assert grammar.validate(r.text) == []
+    if page.next_cursor:
+        assert page.remaining > 0 and r.text.splitlines()[-1].startswith("# more: cursor=cursor")
+        assert r.text.splitlines()[-1].endswith(f"remaining≈{page.remaining}")
+    else:
+        assert "# more:" not in r.text

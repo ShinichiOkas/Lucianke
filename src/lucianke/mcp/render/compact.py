@@ -23,6 +23,7 @@ from typing import Any
 
 from lucianke.core.model import Confidence, Kind
 from lucianke.core.records import ResolutionMeta
+from lucianke.mcp.budget import trailer_lines
 from lucianke.mcp.envelope import collect_warnings
 from lucianke.mcp.types import Rendered, RenderInput
 
@@ -461,15 +462,17 @@ def trailer_summary(text: object) -> str:
 
 
 def _trailer_lines(inp: RenderInput) -> list[str]:
+    """``# summary:`` と ``# more:``。続きがあるときは ``budget.trailer_lines`` の出力そのまま。
+
+    パッカーはその関数の出力でトレーラを数えて ``Page.used_tokens_est`` を決めるので、文言を変えない
+    （変えると予算の保証が崩れる）。続きが無いのに ``summary`` があるときだけ、要約行を単独で出す。
+    """
     page = inp.page
     if page is None:
         return []
-    lines: list[str] = []
-    if page.summary:
-        lines.append(trailer_summary(page.summary))
     if page.next_cursor:
-        lines.append(trailer_more(page.next_cursor, page.remaining if page.remaining > 0 else None))
-    return lines
+        return list(trailer_lines(page.summary, page.next_cursor, page.remaining))
+    return [trailer_summary(page.summary)] if page.summary else []
 
 
 def _record_lines(inp: RenderInput) -> list[str]:
