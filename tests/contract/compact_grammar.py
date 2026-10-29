@@ -48,7 +48,7 @@ RE_FILE = re.compile(
 RE_IMPORT = re.compile(r"^imports: \[.*\]$")
 RE_SYMBOL = re.compile(
     rf"^{_INDENT}\[(?P<kind>[A-Za-z]+)\] (?P<rest>.+?) @L(?P<start>\d+)(?:-(?P<end>\d+))?"
-    r"(?P<fold> \{ \.\.\.\d+ lines omitted \})?$"
+    r"(?P<fold> \{ \.\.\.\d+ (?:lines|nodes) omitted \})?$"
 )
 RE_ATTR = re.compile(rf"^(?P<indent>(?:  )+)(?P<key>{_KEY}): (?P<text>.+)$")
 RE_REF = re.compile(
@@ -256,7 +256,7 @@ def _check_indented(line: str, add) -> None:
 def _check_symbol(line: str, add) -> None:
     m = RE_SYMBOL.match(line)
     if not m:
-        add("symbol-block 見出しが `[Kind] [mods ]name[(sig)] @L<a>[-<b>][ { ...N lines omitted }]` の形でない")
+        add("symbol-block 見出しが `[Kind] [mods ]name[(sig)] @L<a>[-<b>][ { ...N lines|nodes omitted }]` の形でない")
         return
     if m["kind"] not in KINDS:
         add(f"未知の kind {m['kind']!r}")

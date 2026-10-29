@@ -101,6 +101,14 @@ def _assert_rejects(text: str, needle: str) -> None:
     assert any(needle in p for p in problems), problems
 
 
+def test_fold_accepts_lines_and_nodes_omitted():
+    """仕様書 §T-02 処理規約 4: 本体は `{ ...N lines omitted }`、データファイルの深さ超過は `{ ...N nodes omitted }`。"""
+    assert g.validate(HEADER + "[Tag] testsuite @L3-44 { ...2 nodes omitted }\n") == []
+    assert g.validate(HEADER + "[Function] f() @L3-44 { ...2 lines omitted }\n") == []
+    _assert_rejects(HEADER + "[Tag] testsuite @L3-44 { ...2 rows omitted }\n", "symbol-block")
+    _assert_rejects(HEADER + "[Tag] testsuite @L3-44 { ...nodes omitted }\n", "symbol-block")
+
+
 def test_rejects_symbol_without_range():
     broken = EXAMPLE_SKELETON.replace("process_charge(self, req: PaymentRequest) -> Receipt @L40-115", "process_charge(self, req: PaymentRequest) -> Receipt")
     _assert_rejects(broken, "symbol-block")
