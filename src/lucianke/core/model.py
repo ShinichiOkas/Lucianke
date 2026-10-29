@@ -128,7 +128,11 @@ class Capability(StrEnum):
 
 
 class Kind(StrEnum):
-    """シンボルの種別（仕様書 §6.1 の ``kind`` 語彙。追加は仕様書の改版で行う）。値は外部表現（先頭大文字）。"""
+    """シンボルの種別（仕様書 §6.1 の ``kind`` 語彙。追加は仕様書の改版で行う）。値は外部表現（先頭大文字）。
+
+    ``FILE`` は応答上の要素（シンボルに分解せずファイル全体を 1 要素で扱う Tier 3 / Tier 4 の変更要素。
+    T-18 の ``modified_symbols[].kind``。仕様書 §6.1 規則 7）で、``symbols`` テーブルには格納しない。
+    """
 
     MODULE = "Module"
     CLASS = "Class"
@@ -155,6 +159,7 @@ class Kind(StrEnum):
     TAG = "Tag"
     KEY = "Key"
     SECTION = "Section"
+    FILE = "File"
 
     @classmethod
     def parse(cls, text: str) -> Kind:

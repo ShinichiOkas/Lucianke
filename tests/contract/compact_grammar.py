@@ -22,7 +22,7 @@ import re
 
 KINDS = frozenset(
     "Module Class Interface Struct Enum Trait Type Function Method Constructor Field Property Variable "
-    "Constant Table Column Endpoint Message Service Node Edge Cell Tag Key Section".split()
+    "Constant Table Column Endpoint Message Service Node Edge Cell Tag Key Section File".split()
 )
 ATTR_KEYS = frozenset(
     "sig doc urn type body when conf scip decorators raises refs rank sha declared_in change".split()

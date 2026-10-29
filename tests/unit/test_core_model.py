@@ -105,13 +105,13 @@ SPEC_KINDS = {
     "Module", "Class", "Interface", "Struct", "Enum", "Trait", "Type",
     "Function", "Method", "Constructor", "Field", "Property", "Variable", "Constant",
     "Table", "Column", "Endpoint", "Message", "Service", "Node", "Edge",
-    "Cell", "Tag", "Key", "Section",
+    "Cell", "Tag", "Key", "Section", "File",
 }  # fmt: skip
 
 
 def test_kind_vocabulary_matches_spec() -> None:
     assert {k.value for k in Kind} == SPEC_KINDS
-    assert len(Kind) == 25
+    assert len(Kind) == 26
 
 
 def test_kind_vocabulary_matches_spec_document() -> None:
@@ -129,8 +129,10 @@ def test_kind_parse_is_case_insensitive() -> None:
     assert Kind.parse("Method") is Kind.METHOD
     assert Kind.parse("CLASS") is Kind.CLASS
     assert Kind.METHOD.value.lower() == "method"
+    assert Kind.parse("file") is Kind.FILE  # 仕様書 §6.1 の kind 語彙に File がある（応答上の要素）
+    assert Kind.parse("File") is Kind.FILE
     with pytest.raises(ValueError):
-        Kind.parse("File")
+        Kind.parse("Klass")
     with pytest.raises(ValueError):
         Kind("method")  # 厳密な変換は外部表現（先頭大文字）だけ
 
