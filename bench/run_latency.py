@@ -272,7 +272,7 @@ async def warm_up(client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn
     deadline = time.perf_counter() + timeout_s
     stable = 0
     last_n: int | None = None
-    probe_file = pool.files[0] if pool.files else None
+    standby_since: float | None = None
     while True:
         info["polls"] += 1
         lsp: str | None = None
@@ -290,12 +290,29 @@ async def warm_up(client: S.McpStdioClient, tools: set[str], pool: Pool, t_spawn
                     index_state = "index_missing" if r.get("error_reason") == "index_missing" else "not_wired"
                 else:
                     index_state = f"error:{r['error']}"
-        if lsp is None and probe_file and "get_file_skeleton" in tools:
-            r = await call_once(client, "get_file_skeleton", {"paths": [probe_file]}, probe_file)
-            lsp = r["lsp"]
+        # LSP の状態は、LSP を使うツールの応答で見る（T-20 は適用外の ``n/a`` を返す）。standby の LSP はこの呼び出しで遅延起動される
+        for cand in ("resolve_symbols", "get_diagnostics", "get_file_skeleton"):
+            if cand in tools and pool.symbols:
+                probe_plan = next(p for p in PLANS if p.tool == cand)
+                a, tgt = probe_plan.args(random.Random(0), pool)
+                r = await call_once(client, cand, a, tgt)
+                if r["lsp"] is not None:
+                    lsp = r["lsp"]
+                if r["error"] in ("CLIENT_TIMEOUT", "CONNECTION_CLOSED"):
+                    info["server_unresponsive_during_warmup"] = True
+                    info["ready_ms"] = round((time.perf_counter() - t_spawn) * 1000, 1)
+                    return info
+                break
         info["lsp_status"] = lsp
         info["index"] = {"state": index_state, "files": n}
-        lsp_done = lsp in (None, "ready", "n/a", "unavailable")
+        if lsp == "standby":
+            standby_since = standby_since or time.perf_counter()
+        else:
+            standby_since = None
+        # standby が 15 秒続くなら LSP は起動されない（待っても変わらない）: そこで待つのをやめて報告に残す
+        lsp_done = lsp in (None, "ready", "n/a", "unavailable") or (
+            standby_since is not None and time.perf_counter() - standby_since > 15.0
+        )
         if index_state in ("not_wired", "unknown") or index_state.startswith("error:"):
             index_done = True  # 索引が結線されていない（または読めない）: 待っても変わらない
         else:
@@ -428,6 +445,9 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
         out["server"] = client.server_info
         out["warmup"] = await warm_up(client, names, pool, t_spawn, args.warmup_timeout)
         planned = {p.tool for p in PLANS}
+        hung = ""  # 応答が止まったサーバー（直前のツール名）。以降のツールは待たずにスキップする
+        if out["warmup"].get("server_unresponsive_during_warmup"):
+            hung = "warm-up probe"
         out["unplanned_tools"] = sorted(names - planned)
         for plan in PLANS:
             if args.tools and plan.tool not in args.tools:
@@ -435,8 +455,15 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
             if plan.tool not in names:
                 out["tools"][plan.tool] = {"verdict": "skip", "reason": "not_in_tools_list", "path": plan.path}
                 continue
+            if hung:
+                out["tools"][plan.tool] = {"verdict": "skip", "path": plan.path,
+                                           "reason": f"server unresponsive (no reply to {hung} within {CALL_TIMEOUT_S:.0f}s)"}  # fmt: skip
+                print(f"  [{spec.name}] {plan.tool}: skip {out['tools'][plan.tool]['reason']}", flush=True)
+                continue
             out["tools"][plan.tool] = await run_tool(client, plan, pool, spec.name, args)
             t = out["tools"][plan.tool]
+            if "CLIENT_TIMEOUT" in str(t.get("reason", "")) or t.get("errors", {}).get("CLIENT_TIMEOUT", 0) >= 3:
+                hung = plan.tool
             print(f"  [{spec.name}] {plan.tool}: {t['verdict']} {t.get('reason', '')}", flush=True)
     finally:
         rep = await client.close()
@@ -445,8 +472,10 @@ async def run_fixture(spec: FixtureSpec, args: argparse.Namespace) -> dict[str, 
         out["watch"] = client.watch_report()
         out["shutdown"] = rep
         with contextlib.suppress(OSError):
-            tail = (tmp / "server.stderr.log").read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
-            out["server_stderr_tail"] = tail if not out["watch"]["ok"] else []
+            lines = (tmp / "server.stderr.log").read_text(encoding="utf-8", errors="replace").splitlines()
+            bad = [ln for ln in lines if " ERROR " in ln or "Traceback" in ln]
+            out["server_stderr_errors"] = bad[:20]  # サーバーのログに出たエラー行（E_INTERNAL の原因の手がかり）
+            out["server_stderr_tail"] = lines[-15:] if (bad or not out["watch"]["ok"]) else []
         shutil.rmtree(tmp, ignore_errors=True)
     ran = [t["verdict"] for t in out["tools"].values()]
     if not out["watch"]["ok"]:
@@ -516,38 +545,45 @@ def main() -> int:
     names = [n for n in (args.fixtures or ",".join(default_fixture_names())).split(",") if n.strip()]
     specs, skipped = resolve_fixtures(names)
 
-    async def go() -> dict[str, Any]:
-        runs = []
+    stamp = R.now_stamp()
+    t0 = time.perf_counter()
+
+    def build(runs: list[dict[str, Any]], *, complete: bool) -> dict[str, Any]:
+        verdicts = [r["verdict"] for r in runs]
+        overall = "fail" if "fail" in verdicts else ("pass" if "pass" in verdicts else "skip")
+        m1: dict[str, str] = {}
+        for tool in M1_TOOLS:
+            states = [r["tools"][tool]["verdict"] for r in runs if tool in r.get("tools", {})]
+            m1[tool] = (
+                "not_implemented" if not states else "fail" if "fail" in states else "pass" if "pass" in states else states[0]
+            )
+        return {
+            "spec": {"section": "14.4", "nfr": ["NFR-PERF-1", "NFR-PERF-2"], "exit_condition": "M1-3",
+                     "population_rule": "ok && !is_degraded (at the tool's ceiling, §5.5); exact-only and degraded reported separately",
+                     "judged_on": "server timing_ms (integer ms); client round trip is reported alongside",
+                     "thresholds_ms": THRESHOLD_MS, "calls_per_tool": args.calls, "seed": args.seed, "prime_calls": PRIME_CALLS},  # fmt: skip
+            "note": args.note,
+            "complete": complete,
+            "verdict": overall,
+            "m1_3_by_tool": m1,
+            "skipped_fixtures": skipped,
+            "elapsed_s": round(time.perf_counter() - t0, 1),
+            "runs": runs,
+        }
+
+    async def go() -> list[dict[str, Any]]:
+        runs: list[dict[str, Any]] = []
         for spec in specs:
             print(f"== {spec.name} ({spec.root})", flush=True)
             runs.append(await run_fixture(spec, args))
-        return {"runs": runs}
+            R.write_result("latency", build(runs, complete=False), stamp=stamp)  # 途中でも残す
+        return runs
 
-    t0 = time.perf_counter()
-    body = asyncio.run(go())
-    verdicts = [r["verdict"] for r in body["runs"]]
-    overall = "fail" if "fail" in verdicts else ("pass" if "pass" in verdicts else "skip")
-    m1 = {}
-    for tool in M1_TOOLS:
-        states = [r["tools"][tool]["verdict"] for r in body["runs"] if tool in r.get("tools", {})]
-        m1[tool] = (
-            "not_implemented" if not states else "fail" if "fail" in states else "pass" if "pass" in states else states[0]
-        )
-    payload = {
-        "spec": {"section": "14.4", "nfr": ["NFR-PERF-1", "NFR-PERF-2"], "exit_condition": "M1-3",
-                 "population_rule": "ok && !is_degraded (at the tool's ceiling, §5.5); exact-only and degraded reported separately",
-                 "judged_on": "server timing_ms (integer ms); client round trip is reported alongside",
-                 "thresholds_ms": THRESHOLD_MS, "calls_per_tool": args.calls, "seed": args.seed, "prime_calls": PRIME_CALLS},  # fmt: skip
-        "note": args.note,
-        "verdict": overall,
-        "m1_3_by_tool": m1,
-        "skipped_fixtures": skipped,
-        "elapsed_s": round(time.perf_counter() - t0, 1),
-        **body,
-    }
-    path = R.write_result("latency", payload)
-    print(f"verdict: {overall}\nresult: {path}")
-    return 0 if overall != "fail" else 1
+    runs = asyncio.run(go())
+    payload = build(runs, complete=True)
+    path = R.write_result("latency", payload, stamp=stamp)
+    print(f"verdict: {payload['verdict']}", f"result: {path}", sep="\n")
+    return 0 if payload["verdict"] != "fail" else 1
 
 
 if __name__ == "__main__":
