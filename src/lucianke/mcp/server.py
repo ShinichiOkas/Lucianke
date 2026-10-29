@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import warnings
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -49,10 +51,22 @@ class RootsState:
     paths: list[str] = field(default_factory=list)
     uris: list[str] = field(default_factory=list)
     source: str = "cwd"  # "cwd" | "client"
+    listeners: list[Callable[[RootsState], Awaitable[None] | None]] = field(default_factory=list)
+    """``roots/list`` の取得が済んだ（取れた・取れない・要求しない、のどれでも）たびに呼ぶ。合成ルートがワークスペースの登録に使う。"""
 
     @classmethod
     def from_cwd(cls) -> RootsState:
         return cls(paths=[os.getcwd()], uris=[], source="cwd")
+
+    async def notify(self) -> None:
+        """``listeners`` を呼ぶ（同期でも非同期でもよい）。1 つの失敗が他と接続を止めない。"""
+        for fn in list(self.listeners):
+            try:
+                result = fn(self)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                _log.warning("roots listener failed", exc_info=True, extra={"event": "roots_listener_failed"})
 
     def set_from_client(self, uris: list[str]) -> None:
         paths = [p for u in uris if (p := file_uri_to_path(u))]
@@ -133,6 +147,7 @@ def build_server(
             await refresh_roots(ctx)
         except Exception:  # noqa: BLE001  取れなくても動き続ける（cwd と T-00 set_roots に退避）
             _log.warning("roots/list failed; keeping %s", roots.source, exc_info=True, extra={"event": "roots_failed"})
+        await roots.notify()  # 取れても取れなくても、根が決まったので合成ルートに知らせる（索引の起動。設計書 §6.5 手順 7〜8）
 
     server: Server[Any] = Server(
         "lucianke", version=version, on_list_tools=on_list_tools, on_call_tool=on_call_tool

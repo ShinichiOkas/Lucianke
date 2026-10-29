@@ -117,6 +117,7 @@ class Pipeline:
         current_milestone: str = "M1",
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        shutdown_guard: Callable[[], None] | None = None,
     ) -> None:
         if current_milestone not in MILESTONES:
             raise ValueError(f"unknown milestone {current_milestone!r}")
@@ -129,6 +130,7 @@ class Pipeline:
         self.current_milestone = current_milestone
         self._logger = logger or _log
         self._clock = clock
+        self._shutdown_guard = shutdown_guard  # 終了が始まっていれば LuciankeError を投げる（lifecycle.make_shutdown_guard）
 
     # --- 入口 ---------------------------------------------------------------------------
 
@@ -168,6 +170,8 @@ class Pipeline:
     async def _run(
         self, spec: ToolSpec, raw: dict[str, Any], request_id: str, log: CallLogger, state: _CallState, t0: float
     ) -> tuple[Rendered, ResolutionMeta]:
+        if self._shutdown_guard is not None:
+            self._shutdown_guard()  # 終了処理中の新規 tools/call は E_UNSUPPORTED（details.reason=shutting_down）
         if MILESTONES.index(spec.milestone) > MILESTONES.index(self.current_milestone):
             raise LuciankeError(
                 ErrorCode.E_UNSUPPORTED,
