@@ -27,5 +27,11 @@
 - 単体: `tests/unit/test_lsp_documents_router.py`（17 件）。両サーバーへの `didOpen` / `didChange`・サーバーごとの版（types 版 4・lint 版 2 のとき両方の受信を待つ）・一方が沈黙すれば `False`・同時に待つ（直列だとデッドロックする仕掛け）・依存元は lint を待たない・止まったサーバーは待たない・開き直しで版が戻っても待てる・偽 LSP 2 本の結線（`LspPool.router`）。
 - 結線の確認（残り）: 上の 2 か所を直したあと、Python のワークスペースで ruff と basedpyright を `ready` にし、T-13 の ruff の QuickFix 適用の応答で、basedpyright の `source` の診断が `new_diagnostics` の `resolved` / `added` に現れることを見る（再現手順 3）。
 
+## 結線と確認(16b、`7b4fa68`・本コミット)
+- 1(`tools/_runtime.py` の `edit_transaction` の `lsp=` 枝): `lsp` は「LSP で検証する」手がかりにとどめ、口は `LspPool.router(ws)` の `DocumentRouter`(`documents=router`、`diagnostics_hub=router.diagnostics_hub`)、`lsp_status` は READY。ルーターを出せないプール(偽物)のときだけ、渡されたハンドルの 1 サーバー。`on_diagnostics` は `(path, diags, version, source, ws)` の 5 引数で済み(`b24f766`)。
+- 実機の確認: `tests/contract/test_T13_two_servers.py`。結線済みの `RuntimeHub` / `WiredServices` / 実物の `LspPool` で、Python のワークスペースの basedpyright と ruff を両方 `ready` にし、T-13 の ruff の QuickFix(未使用 import `missing_mod_x` の削除)を適用した。応答の `new_diagnostics`(`status: complete`)の `resolved` に、ruff の `F401` に加えて basedpyright の `reportMissingImports` と `reportUnusedImport` が入り、`added` は空。3 回続けて green。
+- この確認で別の不具合を 1 つ見つけて直した(同じ結線の持ち場): `RuntimeHub.on_diagnostics` が診断自身の `source` を使っていて、ruff の `"Ruff"` が行の置換の範囲(サーバー名 `ruff`。`replace_lsp_diagnostics` の `source`)と食い違い、ruff の診断が PaaD の `diagnostics` 表に 1 件も入っていなかった(T-13 の `resolved` に ruff の診断が出なかった)。サーバー名で揃えた。単体: `tests/unit/test_tools_runtime.py`。
+
 ## 状態
-- 部品済み・結線待ち（上の 1 と 2）。結線が済むまで閉じない。
+- T-13 の経路は結線・確認済みで、この票の症状(ruff が供給した編集の `new_diagnostics` に basedpyright の診断が入らない)は解消した。
+- 残り 1 か所: `tools/t11_rename_symbol.py` の `_transaction` の `overrides`(`documents=handle.documents, diagnostics_hub=handle.diagnostics`)。19g が直す(ファクトリがあるときは `documents` / `diagnostics_hub` を渡さず `lsp_status` だけ渡す)。

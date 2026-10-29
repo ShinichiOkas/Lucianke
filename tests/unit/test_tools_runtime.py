@@ -473,6 +473,14 @@ async def test_diagnostics_go_to_the_bundle_of_the_workspace_that_sent_them(proj
         assert (count(ws_a.workspace_id), count(ws_b.workspace_id)) == (1, 1)
         await hub.on_diagnostics(RelPath("pkg/a.py"), [], 2, "ruff", ws_b)  # 空の発行は消す
         assert (count(ws_a.workspace_id), count(ws_b.workspace_id)) == (1, 0)
+        # 診断自身の source の綴りがサーバー名と違っても（ruff は "Ruff"、tsserver は "ts"）、サーバー名の行として入り、次の発行で置き換わる
+        shouting = {**diag, "source": "Ruff"}
+        await hub.on_diagnostics(RelPath("pkg/a.py"), [shouting, shouting | {"message": "second"}], 3, "ruff", ws_b)
+        assert count(ws_b.workspace_id) == 2
+        await hub.on_diagnostics(RelPath("pkg/a.py"), [shouting], 4, "ruff", ws_b)
+        assert count(ws_b.workspace_id) == 1
+        await hub.on_diagnostics(RelPath("pkg/a.py"), [], 5, "ruff", ws_b)
+        assert count(ws_b.workspace_id) == 0
         gone = dataclasses.replace(ws_b, workspace_id="not-open")
         await hub.on_diagnostics(RelPath("pkg/a.py"), [diag], 3, "ruff", gone)  # 束の無い ws は捨てる（例外にしない）
     finally:

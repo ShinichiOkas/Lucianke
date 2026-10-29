@@ -32,7 +32,7 @@ from lucianke.index.connection import ReaderPool, db_path_for
 from lucianke.index.ingest import DiagnosticFact, replace_lsp_diagnostics
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.action_store import CodeActionStore
-from lucianke.lsp.pool import FileChangeType, LspPool
+from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool
 from lucianke.syntax.parsers import TreeCache
 from lucianke.tools._services import ToolServices
 from lucianke.tools.t00_configure_workspace import load_known_roots, restore_settings
@@ -217,7 +217,7 @@ def _diagnostic_facts(diags: Sequence[dict[str, Any]], source: str) -> list[Diag
             facts.append(
                 DiagnosticFact(
                     severity=int(d.get("severity") or 1),
-                    source=str(d.get("source") or source),
+                    source=source,  # サーバー名で揃える（ruff は診断に "Ruff" と書く。行の置換の範囲〔replace_lsp_diagnostics の source〕と同じでないと落ちる・残る）
                     message=str(d.get("message", "")),
                     start_line=int(rng["start"]["line"]),
                     start_col=int(rng["start"]["character"]),
@@ -359,34 +359,39 @@ class RuntimeHub:
             _log.warning("could not restore the saved settings", exc_info=True)
         return [self.context.get(ws.workspace_id) for ws in registered]
 
-    async def workspace_changed(self, ws: Workspace) -> None:
+    async def workspace_changed(self, ws: Workspace) -> list[LspHandle]:
         """設定を変えた ``Workspace``（T-00 の ``set_excludes`` / ``set_python_env`` / ``default_base_ref``）を束と LSP に渡し直す。
 
-        束（``Indexer``・``Watcher``・通知の宛先）は新しい規則に差し替える。LSP のハンドルは ``LspHandle.rebind`` があればそれを呼ぶ。
+        束（``Indexer``・``Watcher``・通知の宛先）は新しい規則に差し替える。LSP のハンドルは ``LspPool.rebind`` があればそれを、
+        無ければハンドルごとの ``LspHandle.rebind`` を呼ぶ。**LSP を再起動する責任はここ（``rebind``）にある**: Python 環境が変わって
+        再起動した（止めて起動し直した）ハンドルを返す。呼び手（T-00 ``set_python_env``）は、返ったハンドルをもう一度再起動してはならない
+        （BUG-0035: 二重に起動し直していた）。
         """
         rt = self._runtimes.get(ws.workspace_id)
         if rt is not None:
             rt.rebind(ws)
         pool = self.lsp_pool
         if pool is None:
-            return
+            return []
         try:
             pool_rebind = getattr(pool, "rebind", None)
             if pool_rebind is not None:  # ``LspPool.rebind``: ハンドルごとの差し替えと、Python 環境が変われば Python 系の再起動
-                await _maybe_await(pool_rebind(ws))
-                return
+                return list(await _maybe_await(pool_rebind(ws)) or [])
         except Exception:  # noqa: BLE001  LSP 側の差し替えの失敗で設定の変更を止めない
             _log.warning("could not rebind the LSP pool for %s", ws.workspace_id, exc_info=True)
-            return
+            return []
+        restarted: list[LspHandle] = []
         for handle in pool.handles(ws):
             rebind = getattr(handle, "rebind", None)
             if rebind is None:
                 _log.debug("LspHandle.rebind is not available; %s keeps its Workspace", handle.language_id)
                 continue
             try:
-                await _maybe_await(rebind(ws))
+                if await _maybe_await(rebind(ws)) is True:  # ``LspHandle.rebind`` は再起動したら ``True``
+                    restarted.append(handle)
             except Exception:  # noqa: BLE001
                 _log.warning("could not rebind the LSP handle %s", handle.language_id, exc_info=True)
+        return restarted
 
     # --- LSP の診断 → PaaD ---
 
