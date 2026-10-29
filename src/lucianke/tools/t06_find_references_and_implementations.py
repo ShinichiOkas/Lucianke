@@ -382,6 +382,10 @@ def _work(db_path: Any, ws: Workspace, args: FindReferencesArgs) -> _Found:
             found.subtypes = _by_location(_direct_subtypes(conn, str(sym.urn), files, args.include_tests))[
                 :LIST_MAX
             ]
+        if info is None and found.refs:  # 外部シンボルは自分のファイルが無い。参照元の言語で代える
+            first = queries.file_by_path(conn, ws.workspace_id, found.refs[0].path)
+            if first is not None:
+                found.language, found.tier = first.language, first.tier
         return found
 
 
