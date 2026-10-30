@@ -106,20 +106,22 @@ requires_files = ["src/lucianke/tools/t01_get_repo_map.py"]
 id = "M1-1.contract-fpy-fts"
 criterion = "M1-1"
 spec = "§14.2 F-PY・F-TS（bench/fixtures.toml）、§15.2 M1-1"
-title = "F-PY（httpx）と F-TS（ky）に対して契約テストを回す仕組み"
+title = "F-PY（httpx）に対して契約テストを回す仕組み（F-TS は次バージョンへ繰り越し。BUG-0057）"
 kind = "pytest"
 cmd = ["tests/contract_fixtures"]
-pass = "取得済みの F-PY・F-TS を対象に、14 ツールの事後条件の試験が通る（契約テストを F-POLY 以外のワークスペースで回す仕組みが前提）"
+pass = "取得済みの F-PY を対象に、14 ツールの事後条件の試験が通る（契約テストを F-POLY 以外のワークスペースで回す仕組みが前提）"
 min_tests = 28
-skips = "fail"
+skips = "report"
 slow = true
 timeout_s = 1800
 est_min = 10
-needs = ["fixture:F-PY", "fixture:F-TS"]
+needs = ["fixture:F-PY"]
 requires_files = ["tests/contract_fixtures"]
 # 整備済み（BUG-0036、2026-10-29）: tests/contract_fixtures/ が F-PY・F-TS を tmp_path に複製して結線済みのサーバー（RuntimeHub + LspPool +
-# Pipeline）を組み、T-00〜T-08・T-10・T-11・T-13・T-19・T-20 の事後条件を確かめる。取得されていなければ rig が理由つきで skip する（skips = "fail" が未検証と扱う）。
-# TypeScript の LSP が無い環境の F-TS は、exact 水準だけが条件の事後条件を降格応答の約束で確かめる（BUG-0057）。
+# Pipeline）を組み、T-00〜T-08・T-10・T-11・T-13・T-19・T-20 の事後条件を確かめる。取得されていなければ rig が理由つきで skip する。
+# TypeScript の LSP が無い環境の F-TS は exact 水準の事後条件を降格応答の約束だけで確かめる。本バージョンは F-TS の exact 検証を
+# 受入ゲートから外す（師匠の判断 2026-10-30、BUG-0057）: skips = "report" にして F-TS の skip を未検証扱いにしない。F-TS の降格
+# 応答の試験（契約テストの分岐）は回帰防止のため残す。次バージョンで TS LSP を入れて exact 側を通す。
 
 # ======================================================================================
 # M1-2  §10.10 の EP-1〜EP-9 を満たす
@@ -176,24 +178,24 @@ lsp = ["ruff"]
 id = "M1-3.latency"
 criterion = "M1-3"
 spec = "§14.4、NFR-PERF-1（Fast Path は p95 < 50 ms）"
-title = "14 ツール x 200 回（F-POLY と F-PY・F-TS）のサーバー内 timing_ms の p95 < 50 ms"
+title = "14 ツール x 200 回（F-POLY と F-PY）のサーバー内 timing_ms の p95 < 50 ms（F-TS は次バージョンへ繰り越し。BUG-0057）"
 kind = "script"
-cmd = ["{py}", "bench/run_latency.py"]
+cmd = ["{py}", "bench/run_latency.py", "--fixtures", "poly,F-PY"]
 result_kind = "latency"
 pass = "全フィクスチャ・14 ツールが pass（not_implemented・skip・fail が無い）。stdout 純度と子プロセスの監視も通る"
 expect = [
   { path = "verdict", op = "eq", value = "pass" },
   { path = "m1_3_by_tool.*", op = "eq", value = "pass" },
   { path = "m1_3_by_tool.*", op = "count_ge", value = 14 },
-  { path = "runs.*.fixture.name", op = "contains_all", value = ["F-POLY", "F-PY", "F-TS"] },
+  { path = "runs.*.fixture.name", op = "contains_all", value = ["F-POLY", "F-PY"] },
   { path = "runs.*.verdict", op = "eq", value = "pass" },
 ]
 slow = true
 timeout_s = 3600
 est_min = 20
-needs = ["fixture:F-PY", "fixture:F-TS", "exe:uv"]
+needs = ["fixture:F-PY", "exe:uv"]
 quiet = true
-lsp = ["ruff", "basedpyright", "typescript"]
+lsp = ["ruff", "basedpyright"]
 requires_files = ["bench/run_latency.py"]
 
 # ======================================================================================
@@ -204,19 +206,19 @@ requires_files = ["bench/run_latency.py"]
 id = "M1-4.tokens"
 criterion = "M1-4"
 spec = "§14.3、NFR-TOK-1（削減率 >= 75%）"
-title = "S1・S2・S4 x F-PY・F-TS の 6 件で 1 - L/B >= 0.75（o200k_base）"
+title = "S1・S2・S4 x F-PY の 3 件で 1 - L/B >= 0.75（o200k_base）（F-TS は次バージョンへ繰り越し。BUG-0057）"
 kind = "script"
-cmd = ["uv", "run", "--with", "tiktoken", "python", "bench/run_tokens.py", "-s", "S1", "-s", "S2", "-s", "S4"]
+cmd = ["uv", "run", "--with", "tiktoken", "python", "bench/run_tokens.py", "-s", "S1", "-s", "S2", "-s", "S4", "-f", "F-PY"]
 result_kind = "tokens"
-pass = "6 件すべて pass（skip・error・fail が無い）"
+pass = "3 件すべて pass（skip・error・fail が無い）"
 expect = [
   { path = "scenarios.*.verdict", op = "eq", value = "pass" },
-  { path = "scenarios.*.verdict", op = "count_ge", value = 6 },
+  { path = "scenarios.*.verdict", op = "count_ge", value = 3 },
 ]
 slow = true
 timeout_s = 2400
 est_min = 15
-needs = ["fixture:F-PY", "fixture:F-TS", "exe:uv", "exe:npm"]
+needs = ["fixture:F-PY", "exe:uv"]
 quiet = false
 requires_files = ["bench/run_tokens.py"]
 
@@ -228,9 +230,9 @@ requires_files = ["bench/run_tokens.py"]
 id = "M1-5.safe1-edit-syntax"
 criterion = "M1-5"
 spec = "§14.5、NFR-SAFE-1（構文妥当 >= 99.9%、恒等編集は 100%）"
-title = "1,000 件の編集操作の構文妥当性・恒等編集のバイト一致 100%・ジャーナル復元 50 件"
+title = "1,000 件の編集操作の構文妥当性・恒等編集のバイト一致 100%・ジャーナル復元 50 件（F-PY のみ。F-TS は次バージョンへ繰り越し。BUG-0057）"
 kind = "script"
-cmd = ["{py}", "bench/run_edit_safety.py"]
+cmd = ["{py}", "bench/run_edit_safety.py", "--fixtures", "F-PY"]
 result_kind = "edit-safety"
 pass = "結果 JSON の verdict が pass（partial = 未実装の操作を合否から外した合格は、M1 では不合格として扱う）"
 expect = [
@@ -239,7 +241,7 @@ expect = [
 slow = true
 timeout_s = 3600
 est_min = 20
-needs = ["fixture:F-PY", "fixture:F-TS"]
+needs = ["fixture:F-PY"]
 requires_files = ["bench/run_edit_safety.py"]
 
 [[check]]

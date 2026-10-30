@@ -7,3 +7,10 @@
   - T-11 の存在しない対象は、LSP が無い言語では E_TARGET_NOT_FOUND ではなく E_UNSUPPORTED（details.reason = no_lsp_for_language）を返す（対象を探す前に断る）。
 - 影響: M1-1 の F-TS 側は exact の事後条件が未検証。skips = "fail" のため skip にはしていない（条件分岐）。
 - 直す役への手がかり（調査ではなく受入側の期待）: TypeScript の LSP を CI / この機械に入れる（`npm i -g typescript-language-server typescript`）か、bench/fetch_fixtures.py --install で ky の node_modules に入れて、tests/contract_fixtures が `lsp_ready` の分岐側を通ることを確かめる。
+
+## 師匠の判断（2026-10-30）
+
+- **本バージョンでは TypeScript（F-TS）の exact 検証を受入ゲートから外す（「検証ゲートのみ」ドロップ）。次バージョンで対応する。** TS は使用頻度が低いため。
+- **TS の構文層・索引・編集のコードはそのまま残す**（将来入れるので捨てない。3 択の「コードごと撤去」は選ばない）。
+- やること: exit_criteria.toml の F-TS 依存の検査から `fixture:F-TS` / TS LSP 前提を外し、F-PY のみ必須にする。契約テストの F-TS 分岐（降格応答の約束を確かめる現状）はそのまま残す（回帰防止）。
+- この PC には node/npm が無いことを実機で確認（`node`/`npm` が bash・PowerShell の PATH にも、`C:\Program Files\nodejs`・`%APPDATA%\npm` にも不在）。ローカルでの TS LSP 導入はこの判断により不要。
