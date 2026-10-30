@@ -9,6 +9,8 @@
   DB にあって消えたファイルは消し、``sha256`` が変わった・新しいファイルだけ取り込む。1 トランザクションに最大
   ``INGEST_BATCH_FILES`` ファイルをまとめ、``data_version`` はトランザクションごとに 1 回だけ進む（設計書 §7.6.1 項 4）。
 * ``start_scan_job()`` / ``job_status()``: 背景ジョブ（T-00 ``reindex``、``status`` の ``jobs[]``）。
+* ``building()`` / ``ingest_ahead(rel)``: 走査の途中の進み（ファイル数）と、走査がまだ届いていない 1 ファイルの先取り（BUG-0070）。
+  ツールは対象のファイルを先取りしてから解決し、「索引に無い」とは答えない。先取りは関係を整えない（走査が取り込み直して整える）。
 
 並列度（設計書 §6.1、スパイク S-2）: 構文解析は GIL を握るので並列化しない。ファイル 1 つの解析はスレッド
 （``asyncio.to_thread``）で走らせてイベントループを止めず、書き込みは ``IndexWriter`` の 1 本のキューに積む。
@@ -88,6 +90,7 @@ __all__ = [
     "Indexer",
     "JobState",
     "JobStatus",
+    "ScanProgress",
     "ScanReport",
 ]
 
@@ -120,6 +123,23 @@ class ScanReport:
         default_factory=list
     )  # (パス, 理由)。解析に失敗して files 行だけにしたもの
     duration_s: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ScanProgress:
+    """走査（初回・差分の索引）の途中の進み（``Indexer.building``。BUG-0070）。
+
+    ``files_total`` は列挙の前は ``None``。``percent`` は終わるまで 99 で止める（全ファイルを見た後も、関係の整えと順位の計算が残る）。
+    """
+
+    files_done: int
+    files_total: int | None
+
+    @property
+    def percent(self) -> int:
+        if not self.files_total:
+            return 0
+        return min(99, (self.files_done * 100) // self.files_total)
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +269,12 @@ class Indexer:
         self.ingest_calls = 0  # ``ingest_file`` に渡したファイル数（受入検査のカウンタ。設計書 §7.6.5）
         self.reingested_importers = 0  # 定義元の変化で取り込み直した import 元のファイル数（``ingest_calls`` には入れない。engine/reresolve.py）
         self._rank_scheduler = RankScheduler(self._scheduled_refresh, delay=rank_delay_s, sleep=rank_sleep)
+        # 走査の途中の進み（``building``）と、走査より先に取り込んだファイル（``ingest_ahead``。BUG-0070）
+        self._scans = 0  # 走っている ``scan`` の数（ジョブと監視のバーストの走査が重なりうる）
+        self._scan_done = 0
+        self._scan_total: int | None = None
+        self._ahead: set[str] = set()  # 先取りしたが、まだ走査が取り込み直して整えていないパス
+        self._scan_ingested: set[str] = set()  # 最後に終わった走査が取り込んだパス
 
     @property
     def workspace(self) -> Workspace:
@@ -276,6 +302,10 @@ class Indexer:
 
         ファイルが無くなっていた、または ``exclude_globs`` / ``.gitignore`` の対象になっていたら ``remove`` する。
         """
+        return await self._index_file(rel)
+
+    async def _index_file(self, rel: str | RelPath, *, as_new: bool = False) -> IngestStats | None:
+        """``index_file`` の本体。``as_new`` は DB の ``sha256`` を見ず、新しいファイルとして取り込む（import 元も解き直す）。"""
         path = await asyncio.to_thread(confine, self._ws, str(rel))
         if str(path) == ".":
             return None
@@ -283,7 +313,7 @@ class Indexer:
         if self._is_skipped(path, ignore):
             await self.remove(path)
             return None
-        known = await asyncio.to_thread(self._known_sha, path)
+        known = None if as_new else await asyncio.to_thread(self._known_sha, path)
         prepared = await self._prepare(path, known)
         if prepared == "gone":
             await self.remove(path)
@@ -310,6 +340,54 @@ class Indexer:
         self._rank_scheduler.touch()  # 順位は約 1 秒おとなしくなってから 1 回だけ計算し直す（engine/rank_scheduler.py）
         return stats
 
+    def building(self) -> ScanProgress | None:
+        """走査（初回・差分の索引）の途中なら、その進み。走査も待っているジョブも無ければ ``None``（索引は走査を終えている）。
+
+        ジョブを投入してから走査が始まるまで（``queued``）は ``ScanProgress(0, None)``。
+        """
+        if self._scans:
+            return ScanProgress(self._scan_done, self._scan_total)
+        if any(j.state in ("queued", "running") for j in self._jobs.values()):
+            return ScanProgress(0, None)
+        return None
+
+    async def ingest_ahead(self, rel: str | RelPath) -> Literal["present", "indexed", "skipped"]:
+        """まだ ``files`` に無い 1 ファイルを、走査が届く前に取り込む（ツールの対象を「索引に無い」と答えないため。BUG-0070）。
+
+        * ``"present"``: 既に索引にある（何もしない）。``"indexed"``: 取り込んだ。
+        * ``"skipped"``: 対象外（``exclude_globs`` / ``.gitignore``）・ディスクに無い・ファイルでない。索引に無いのは正しい。
+
+        走査の途中は ``ingest_file`` だけを行い、関係の整え（``_settle_relations``）・import 元の解き直し・順位の予約はしない。
+        整えると、まだ取り込まれていない定義元を指す行が消える。走査は、始めに読んだ ``files`` に無かったファイルを必ず取り込み直して
+        最後に整える。取り込み直さなかった分（列挙の後に作られた等）は、走査の終わりに新しいファイルとして取り込み直す（``scan``）。
+        走査が無いときは ``index_file`` と同じ（関係も整える）。読めない・書けないときは例外。
+        """
+        path = await asyncio.to_thread(confine, self._ws, str(rel))
+        if str(path) == ".":
+            return "skipped"
+        if await asyncio.to_thread(self._known_sha, path) is not None:
+            return "present"
+        ignore = await asyncio.to_thread(self._make_ignore)
+        if self._is_skipped(path, ignore):
+            return "skipped"
+        if self.building() is None:
+            await self._index_file(path)
+        else:
+            prepared = await self._prepare(path, None)
+            if not isinstance(prepared, _Prepared):
+                return "skipped"  # 消えていた・通常ファイルでない
+            await self._ensure_workspace()
+            self.ingest_calls += 1
+            self._ahead.add(str(path))
+            facts = prepared.facts
+            await self._writer.asubmit(
+                lambda conn: ingest_file(conn, facts),  # type: ignore[arg-type]
+                bumps_version=True,
+                label=f"ingest_ahead:{path}",
+            )
+            _log.info("ingested %s ahead of the running scan", path, extra={"event": "ingest_ahead"})
+        return "indexed" if await asyncio.to_thread(self._known_sha, path) is not None else "skipped"
+
     async def remove(self, rel: str | RelPath) -> bool:
         """``rel`` を PaaD から消す。消したら ``True``、元から無ければ ``False``。"""
         path = str(rel)
@@ -335,7 +413,35 @@ class Indexer:
         return removed
 
     async def scan(self, *, progress_cb: Callable[[int], None] | None = None) -> ScanReport:
-        """差分索引。進捗 0〜100 を ``progress_cb`` に渡す（単調増加。最後は必ず 100）。"""
+        """差分索引。進捗 0〜100 を ``progress_cb`` に渡す（単調増加。最後は必ず 100）。
+
+        走っている間は ``building()`` が進み（ファイル数）を返す。終わったら、走査より先に取り込んだ（``ingest_ahead``）のに
+        走査が取り込み直さなかったファイルを、新しいファイルとして取り込み直す（関係を整え、import 元を解き直す。BUG-0070）。
+        """
+        self._scans += 1
+        if self._scans == 1:
+            self._scan_done, self._scan_total = 0, None
+        try:
+            report = await self._scan(progress_cb)
+            if self._scans == 1:  # 最後の走査（重なっていない）。整え終わるまで ``building()`` は進みを返し続ける
+                await self._settle_ahead()
+            return report
+        finally:
+            self._scans -= 1
+
+    async def _settle_ahead(self) -> None:
+        """先取りしたが走査が取り込み直さなかったファイルを、新しいファイルとして取り込み直す（その間に先取りされた分も）。"""
+        ingested, self._scan_ingested = self._scan_ingested, set()
+        while self._ahead:
+            paths, self._ahead = self._ahead - ingested, set()
+            ingested = set()
+            for path in sorted(paths):
+                try:
+                    await self._index_file(path, as_new=True)
+                except Exception:  # 1 ファイルの失敗で走査の終わりを止めない（次の監視のイベントか走査で直る）
+                    _log.warning("could not settle %s (ingested ahead of the scan)", path, exc_info=True)
+
+    async def _scan(self, progress_cb: Callable[[int], None] | None) -> ScanReport:
         t0 = time.monotonic()
         report = ScanReport()
         last = -1
@@ -352,6 +458,9 @@ class Indexer:
         listing, report.gitignore = await asyncio.to_thread(self._walk)
         report.files_seen = len(listing)
         known = await asyncio.to_thread(self._known_files)
+        for path in self._ahead:  # 先取りしたまま整えていないファイルは、この走査で取り込み直して整える（BUG-0070）
+            known.pop(RelPath(path), None)
+        self._scan_total = len(listing)
         progress(2)
 
         gone = sorted(set(known) - set(listing))
@@ -363,6 +472,7 @@ class Indexer:
         pending: asyncio.Future[list[IngestStats]] | None = None
         batch: list[FileFacts] = []
         file_ids: list[int] = []
+        ingested: set[str] = set()
         # 既存でシンボルの集合が変わったファイル（import している側を解き直す。BUG-0034）
         names_changed: list[str] = []
 
@@ -371,6 +481,7 @@ class Indexer:
             if pending is not None:
                 for s in await self._collect(pending, report):
                     file_ids.append(s.file_id)
+                    ingested.add(s.path)
                     if s.symbol_set_changed and not s.file_created:
                         names_changed.append(s.path)
                 pending = None
@@ -397,8 +508,10 @@ class Indexer:
                 if len(batch) >= INGEST_BATCH_FILES:
                     await flush()
             progress(5 + (i * 90) // total)
+            self._scan_done = i
         await flush()
         await flush()  # 最後に積んだバッチの完了を待つ
+        self._scan_ingested |= ingested
         report.unchanged -= len(report.errors)  # 失敗は「変わらなかった」に数えない
         if file_ids:
             await self._writer.asubmit(

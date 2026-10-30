@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 from collections.abc import Mapping, Sequence
@@ -64,6 +65,7 @@ from lucianke.index import queries
 from lucianke.lsp.pool import LspHandle, LspState, PoolStatus
 from lucianke.lsp.servers import servers_for
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._building import ensure_indexed
 from lucianke.tools._nav import db_path_of, reader, workspace_of
 from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.workspace.paths import confine, to_abs
@@ -741,6 +743,9 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
     warnings: list[str] = []
 
     rels = None if args.paths is None else [confine(ws, p, param="paths") for p in args.paths]
+    for rel in rels or ():  # 索引の走査の途中は、まだ届いていないファイルを先取りする（BUG-0070）。できなければ下の「索引に無い」の警告
+        with contextlib.suppress(LuciankeError):
+            await ensure_indexed(ctx, ws, str(rel))
     scope = await asyncio.to_thread(_load_scope, db_path, ws, rels)
     warnings.extend(scope.warnings)
 
@@ -937,5 +942,6 @@ SPEC = ToolSpec(
     milestone="M1",
     page_unit="diagnostic",
     records_key="diagnostics",
+    reads_index=True,
 )
 TOOL_SPEC = SPEC

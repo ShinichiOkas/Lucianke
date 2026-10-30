@@ -49,6 +49,7 @@ from lucianke.lsp import features
 from lucianke.syntax.heuristic import lexical_scan
 from lucianke.tools import _lsp_exact as lx
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._building import ensure_target_indexed
 from lucianke.tools._nav import (
     SourceLines,
     TargetRefArg,
@@ -620,6 +621,7 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]
+    await ensure_target_indexed(ctx, ws, args.target)  # 走査がまだ届いていないファイルは先取りする（BUG-0070）
     pre = await asyncio.to_thread(_pre, db_path, ws, args)
 
     # 経路: PaaD の exact 行（2 回目以降）→ LSP（1 回目）→ structural（降格）
@@ -731,6 +733,7 @@ TOOL_SPEC = ToolSpec(
     milestone="M1",
     page_unit="site",
     records_key="references",
+    reads_index=True,
 )
 SPEC = TOOL_SPEC
 

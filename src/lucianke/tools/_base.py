@@ -120,3 +120,5 @@ class ToolSpec:
     accepts_revision: bool = True  # False なら revision を無視して warnings
     page_unit: str = "record"
     records_key: str = "items"
+    # 索引（PaaD）から答える。走査の途中は、パイプラインが進みつきの警告を添える（tools/_building.py。BUG-0070）
+    reads_index: bool = False

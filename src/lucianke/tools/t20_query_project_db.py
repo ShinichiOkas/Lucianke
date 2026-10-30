@@ -315,4 +315,5 @@ TOOL_SPEC = ToolSpec(
     accepts_revision=False,
     page_unit="row",
     records_key="rows",
+    reads_index=True,
 )

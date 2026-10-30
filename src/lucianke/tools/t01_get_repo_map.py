@@ -477,4 +477,5 @@ SPEC = ToolSpec(
     milestone="M1",
     page_unit="file",
     records_key="files",
+    reads_index=True,
 )

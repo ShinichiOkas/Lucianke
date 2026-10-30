@@ -286,6 +286,8 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 
 LSP は起動時には立ち上げない。該当言語への最初の要求で遅延起動する（§12.3）。
 
+手順 4 の索引（と T-00 `reindex`、§12.4 のバーストの差分索引）の走査が終わるまでも、ツールは待たずに答える。対象のファイルは §5.3 規則 6 のとおりその場で索引する。索引から答えるツール（T-01・T-03・T-04・T-06・T-07・T-08・T-20）は得られた分で答え、`warnings[]` に進みを入れる（MUST。例 `index building: 412/1300 files (31%); results may be incomplete - call again when done`、列挙の前は `listing files`。全ファイルを見た後も関係の整えが終わるまで 99% にとどめる）。索引の途中の 0 件の検索は、これで本当の 0 件と見分けられる。走査を終えた後は付けない。理由: 呼ぶ側の AI が「無い」と「まだ索引していない」を応答だけで区別し、呼び直す時期を決められるようにする（BUG-0070）。
+
 ### 4.3.2 読み取り要求
 
 1. 引数を検証し、TargetRef を URN に解決する（§5.3）。
@@ -388,6 +390,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 3. **`path` + `line`（+ `character`）指定**: その位置を範囲に含む最も内側のシンボルを選ぶ。`character` 省略時はその行の最初の非空白文字位置とする。
 4. 3 形式のうち 2 つ以上が同時に与えられた場合は `urn` > `line` > `symbol_name` の優先順位で 1 つだけを使い、残りは無視して `warnings[]` に記録する。
 5. `path` はワークスペースルートからの相対パスで、区切りは `/` に正規化する。ルート配下の絶対パスも受け付けて相対化する。**いずれのルートにも含まれないパス、および `..` でルート外へ出るパスは `E_INVALID_ARGUMENT`**（第 13 章の封じ込め）。
+6. **索引の途中**: 索引の走査（§4.3.1 手順 4）がまだ届いていないファイルでも、ディスクにあり除外（`.gitignore`・`exclude_globs`）されていなければ、索引に無いことを理由に `E_TARGET_NOT_FOUND` を返してはならない（MUST）。解決の前にそのファイル（`urn` ならその URN のファイル、import をたどる T-04 ならたどった先のファイルも）をその場で索引してから解決する（1 ファイルの解析は数 ms）。その場で索引できなかったときは `E_TIMEOUT`（`details.reason: "index_building"`、`details.retry_after_ms`、`details.files_done` / `details.files_total`）で再試行を促す。ディスクに無い・除外されたファイルは従来どおり `E_TARGET_NOT_FOUND`。理由: 呼ぶ側の AI は not found を「指定の誤り」と読み、索引待ちと知らずに別の探し方へ移る（BUG-0070。仕様は呼ぶ AI への有用性で決める、2026-10-31）。
 
 ## 5.4 レスポンスエンベロープ
 
@@ -508,7 +511,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `E_MUTATION_BLOCKED` | 降格ファイルへの編集で、`allow_heuristic_mutation: true` があっても安全に確定できない（推定した境界が一意に決まらない、改名後の名前が対象ファイルに既出。第 10.5 節）、または Windows で対象が読み取り専用属性を持つ（`details.reason: "read_only_file"`。第 10.6 節）。許可フラグが無いだけならエラーにせず dry_run に切り替える | 範囲を `get_symbol_bodies` で確かめ、対象を絞って再実行 | `details.confidence_level`, `details.reason` |
 | `E_QUERY_REJECTED` | `query_project_db` に SELECT / WITH 以外、または禁止関数を含む文 | 文を直す | `details.reason` |
 | `E_CURSOR_EXPIRED` | `cursor` が無効または基データが更新済み | 先頭から呼び直す | |
-| `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる | 範囲を狭める | `details.partial` |
+| `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる。待てば直る状態: 起動の最中で索引がまだ開いていない（`details.reason: "index_opening"`。BUG-0046）、索引の走査の途中で対象のファイルをその場で索引できなかった（`"index_building"`。§5.3 規則 6、BUG-0070） | 範囲を狭める。`index_opening` / `index_building` は `details.retry_after_ms` の後に同じ呼び出しを再試行する | `details.partial`、`details.reason`、`details.retry_after_ms` |
 | `E_UNSUPPORTED` | 対象ティアではその操作を提供しない（例: Tier 3 への `rename_symbol`） | | `details.tier`、`details.reason`（`invalid_data_file`: 構文が壊れたデータファイル〔T-02〕、`revision_not_supported_until_M2`、`not_in_milestone`〔`details.milestone`〕、`file_too_large`、`secret_file`、`binary_file` など） |
 | `E_INTERNAL` | 上記以外の内部エラー。スタックはログにのみ出す | | `details.log_ref` |
 

@@ -34,6 +34,7 @@ from lucianke.mcp.render import graph as graph_render
 from lucianke.mcp.render import json_out as json_render
 from lucianke.mcp.types import CallInfo, Rendered, RenderInput
 from lucianke.tools._base import GRAPH_FORMATS, WORKING_TREE, Services, ToolContext, ToolSpec
+from lucianke.tools._building import building_of, building_warning
 
 Renderer = Callable[[RenderInput], Rendered]
 
@@ -224,7 +225,11 @@ class Pipeline:
 
         ctx = ToolContext(call=call, services=self.services, args=args, log=log, request_id=request_id,
                           cursor_offset=cursor_offset)  # fmt: skip
+        # 索引を読むツールは、走査（初回・差分）の途中なら進みつきの警告を添える（0 件と「まだ索引していない」を見分ける。BUG-0070）
+        building = building_of(self.services, workspace_id) if spec.reads_index else None
         out = await spec.handler(ctx, args)
+        if building is not None:
+            warnings.append(building_warning(building_of(self.services, workspace_id) or building))
         warnings.extend(out.warnings)  # ハンドラの警告（§5.4.4 の失敗件数など）はパイプラインの警告の後ろへ
         if out.workspace_id is not None and out.workspace_id != call.workspace_id:
             call = dataclasses.replace(call, workspace_id=out.workspace_id)  # ハンドラが確定した ID（set_roots の登録後。BUG-0019）

@@ -45,6 +45,7 @@ from lucianke.index import queries
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
 from lucianke.tools import _lsp_exact as lx
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._building import ensure_target_indexed
 from lucianke.tools._nav import (
     TargetRefArg,
     db_path_of,
@@ -431,6 +432,7 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]
+    await ensure_target_indexed(ctx, ws, args.target)  # 走査がまだ届いていないファイルは先取りする（BUG-0070）
     pre = await asyncio.to_thread(_pre, db_path, ws, args)
 
     # 経路: LSP の呼び出し階層（PaaD の exact 行が新しければそれ）→ structural（降格）
@@ -547,6 +549,7 @@ TOOL_SPEC = ToolSpec(
     milestone="M1",
     page_unit="tree-line",
     records_key="nodes",
+    reads_index=True,
 )
 SPEC = TOOL_SPEC
 

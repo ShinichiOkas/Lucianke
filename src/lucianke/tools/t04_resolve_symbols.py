@@ -31,7 +31,9 @@ import ast
 import inspect
 import re
 import sqlite3
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from pydantic import Field
@@ -45,13 +47,14 @@ from lucianke.engine import selector
 from lucianke.index import queries
 from lucianke.syntax.imports import ImportFact, extract_imports, imported_name_map, make_resolver
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
+from lucianke.tools._building import building_of, ensure_indexed, ensure_targets_indexed
 from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.tools._services import FileAnalysis, ToolServices, analyze_file, services_of
 from lucianke.tools._t04_exact import ExactLifter
 from lucianke.tools.t02_get_file_skeleton import failure_record
 from lucianke.tools.t03_search_workspace_symbols import index_reader
 from lucianke.tools.t05_get_symbol_bodies import TargetRefArg, body_lines
-from lucianke.workspace.paths import confine
+from lucianke.workspace.paths import confine, is_excluded
 from lucianke.workspace.types import Workspace
 
 MAX_HOPS = 5
@@ -113,6 +116,8 @@ class _Env:
     files: dict[str, FileInfo | None] = field(default_factory=dict)
     lifter: ExactLifter | None = None
     choices: list[EngineChoice] = field(default_factory=list)  # 項目ごとのエンジン選択（応答の代表を決める）
+    # 索引の走査の途中だけ: まだ索引に無いファイルを先取りする（import の先。BUG-0070）。終えていれば ``None``
+    ahead: Callable[[str], Awaitable[None]] | None = None
 
     @property
     def ws_id(self) -> str:
@@ -124,7 +129,17 @@ class _Env:
         return self.files[path]
 
     def exists(self, rel: RelPath) -> bool:
-        return self.file_info(str(rel)) is not None
+        if self.file_info(str(rel)) is not None:
+            return True
+        # 走査の途中は、まだ索引に無い import の先もディスクで確かめる（たどった先で ``ensure`` が先取りする）
+        return self.ahead is not None and (self.ws.root / str(rel)).is_file() and not is_excluded(self.ws, rel)
+
+    async def ensure(self, path: str) -> None:
+        """走査の途中で ``path`` がまだ索引に無ければ先取りし、引き直せるようにする（BUG-0070）。"""
+        if self.ahead is None or self.file_info(path) is not None:
+            return
+        await self.ahead(path)
+        self.files.pop(path, None)
 
     async def analysis(self, path: str) -> FileAnalysis | None:
         """構文木で解析したファイル。読めない・未対応の言語は ``None``（索引の情報だけで答える）。"""
@@ -242,6 +257,7 @@ async def _follow(env: _Env, rel: str, name: str) -> _Target:
                 return _Target(external=module, name=cur_name, via=tuple(hops), warnings=(msg,))
             break
         target_file, orig = entry
+        await env.ensure(str(target_file))
         hops.append(f"{cur_path}: {head} -> {target_file}")
         if orig == "*":  # モジュールそのもの（import a.b as c / import * as ns / from . import x）
             if not rest:
@@ -669,12 +685,19 @@ async def handler(ctx: ToolContext, args: ResolveSymbolsArgs) -> ToolOutput:
     errors: list[LuciankeError] = []
     languages: list[str] = []
     tier = Tier.T1
+    # 索引の走査の途中は、走査がまだ届いていない対象のファイルを先に取り込む。できなかった項目は再試行を促す失敗（BUG-0070）
+    not_ahead = await ensure_targets_indexed(ctx, ws, args.targets)
+    building = building_of(svc, ws.workspace_id) is not None
     with index_reader(svc) as conn:
         env = _Env(svc=svc, ws=ws, conn=conn, args=args, lifter=ExactLifter(svc, ws, conn))
+        if building:
+            env.ahead = partial(ensure_indexed, ctx, ws)
         for i, ref in enumerate(args.targets):
             request = ref.model_dump(exclude_none=True)
             label = _ref_label(ref)
             try:
+                if i in not_ahead:
+                    raise not_ahead[i]
                 target, warnings = await _resolve(env, ref)
                 info: FileInfo | None = None
                 if target.sym is not None:
@@ -728,5 +751,6 @@ TOOL_SPEC = ToolSpec(
     milestone="M1",
     page_unit="target",
     records_key="items",
+    reads_index=True,
 )
 SPEC = TOOL_SPEC  # tools/__init__.register_tools の命名（SPEC）に合わせる別名

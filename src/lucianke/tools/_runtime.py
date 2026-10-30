@@ -27,7 +27,7 @@ from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import LspStatus, RelPath
 from lucianke.edit.lock import WorkspaceLocks
 from lucianke.edit.transaction import EditTransaction
-from lucianke.engine.indexer import Indexer
+from lucianke.engine.indexer import Indexer, ScanProgress
 from lucianke.index.connection import ReaderPool, db_path_for
 from lucianke.index.ingest import DiagnosticFact, replace_lsp_diagnostics
 from lucianke.index.writer import IndexWriter
@@ -470,6 +470,16 @@ class WiredServices(ToolServices):
 
     def runtime(self, workspace_id: str | None = None) -> WorkspaceRuntime | None:
         return None if self.hub is None else self.hub.runtime(workspace_id)
+
+    def index_building(self, workspace_id: str | None = None) -> ScanProgress | None:
+        """そのワークスペースの索引が走査（初回・差分）の途中なら進み、終えていれば（束が無ければ）``None``（BUG-0070）。"""
+        rt = self.runtime(workspace_id)
+        return None if rt is None else rt.indexer.building()
+
+    async def ingest_ahead(self, ws: Workspace, rel: str) -> str:
+        """まだ索引に無い 1 ファイルを走査より先に取り込む（``Indexer.ingest_ahead``）。束が無ければ ``"skipped"``。"""
+        rt = self.runtime(ws.workspace_id)
+        return "skipped" if rt is None else await rt.indexer.ingest_ahead(rel)
 
     @property
     def db_path(self) -> Path | None:

@@ -530,5 +530,6 @@ TOOL_SPEC = ToolSpec(
     milestone="M1",
     page_unit="symbol",
     records_key="symbols",
+    reads_index=True,
 )
 SPEC = TOOL_SPEC  # tools/__init__.register_tools の命名（SPEC）に合わせる別名
