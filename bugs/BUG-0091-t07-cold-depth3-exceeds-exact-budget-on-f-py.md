@@ -170,3 +170,22 @@ F-PY の rig（`tests/contract_fixtures/_rig.open_rig`。本番と同じ結線�
   `test_T06_ts_outside_tsconfig.py`・`test_T07_*.py`・`test_revision_reads.py`・`test_unsupported_tools.py`、
   `tests/unit/test_engine_selector*.py`・`test_lsp_exact_degrade.py`・`test_lsp_features.py`・`test_lsp_prime.py`・
   `test_mcp_graph.py`・`test_tools_index_building.py`）: 476 passed, 6 skipped（skip は TypeScript の LSP が入っていない 6 件）。
+- `tests/contract_fixtures`（`uv run pytest -q -p no:cacheprovider -rfsw tests/contract_fixtures`）: 45 passed, 6 skipped（671 秒、
+  計測と同じ時間帯）。skip は F-TS の 5 件（TypeScript の LSP が無い: T-04#4・T-06#1・T-07#2・T-11#2-3・T-13#1-3）と、F-TS には
+  当てはまらない BUG-0079 の試験 1 件。F-PY の exact の事後条件（T-07#2 を含む）は通った。T-07 の depth 3（事後条件 1・3・4・6）は
+  どちらの経路（exact・部分 exact・structural）で答えても同じ検査。
+- `uv run ruff check`（引数なし）: All checks passed。
+
+### 確認（追記: 載せ直した後）
+
+- `98e67ea`（BUG-0090）に載せ直した。BUG-0090 は `lsp/features.py` の `_call`（エラー応答を `restarting` / `lsp_error` に分ける）と
+  セレクター（`restarting` の警告）を変えていたので、`_call` は両方（期限切れは `LspRequestTimeout`、エラー応答は BUG-0090 の分け方）
+  にした。T-07 は `restarting`（LSP を起動し直している）も LSP に聞くのをやめる理由に入れ（`_STOP_REASONS`）、その後は
+  「起動（再起動）・索引の完了後に呼び直す」と書く。根の子でそれが起きたときはセレクターの BUG-0090 の雛形のまま。
+- 載せ直した後: T-06・T-07 の契約テスト一式と関係する単体テスト（上の一覧に `tests/unit/test_lsp_pool.py` を足した）: 562 passed,
+  6 skipped（skip は TypeScript の LSP が無い 6 件）。`tests/contract_fixtures`: 45 passed, 6 skipped（288 秒。skip は上と同じ 6 件）。
+  `uv run ruff check`: All checks passed。
+
+### 見つけた別の不具合
+
+- なし。
