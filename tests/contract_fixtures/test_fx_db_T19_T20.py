@@ -3,6 +3,12 @@
 
 DB は ``bench/.cache`` の F-PY・F-TS を複製して本物の索引器で作ったもの（合成の DB ではない）。結線・skip の扱いは
 ``test_fx_read_T00_T08.py`` と同じ。DB のバイト列とビューの行数は、索引が落ち着いた（``_rig.open_rig`` が差分索引の完了を待った）あとに比べる。
+
+DB は WAL なので、索引が終わっても本体のバイト列はまだ動く: 書き手は書き込みが途切れて ``IDLE_CHECKPOINT_S``（2 秒）たつと
+``wal_checkpoint(PASSIVE)`` で WAL の頁を本体へ写す。LSP の準備がその 2 秒より早く済むと、写しが T-20 の試験の最中に起き、
+本体の SHA-256 が変わって落ちていた（BUG-0092。``query_project_db`` は書いていない）。比べる前に ``settle_db`` で書き手の
+キューを空にし、WAL を ``TRUNCATE`` で本体へ写し切る（以後の暇なときのチェックポイントには写す頁が無い）。比べるのは
+本体・``-wal``・``-journal`` のバイト列。
 """
 
 from __future__ import annotations
@@ -35,6 +41,30 @@ def db_path(rig: Rig) -> Path:
     rt = rig.hub.runtime()
     assert rt is not None
     return rt.db_path
+
+
+async def settle_db(rig: Rig) -> Path:
+    """書き手に積まれたジョブを済ませ、WAL を本体へ写し切って空にする（BUG-0092）。DB のパスを返す。
+
+    書き手のキューは先入れ先出しなので、何もしないジョブの完了 = それより前に積まれたジョブのコミット済み。
+    そのあと別の接続で ``wal_checkpoint(TRUNCATE)`` を流す。写し切れない（読み手が止めた）なら比べる前提が無いので落とす。
+    """
+    rt = rig.hub.runtime()
+    assert rt is not None
+    await rt.writer.asubmit(lambda _conn: None, bumps_version=False, label="test:settle_db")
+    with closing(sqlite3.connect(rt.db_path, isolation_level=None)) as conn:
+        result = tuple(conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+    assert result == (0, 0, 0), result  # (busy, WAL の頁数, 写した頁数)
+    return rt.db_path
+
+
+def file_state(path: Path) -> dict[str, str | None]:
+    """本体・``-wal``・``-journal`` の SHA-256（無いファイルは ``None``）。``-shm`` は読み手も書くので数えない。"""
+    out: dict[str, str | None] = {}
+    for suffix in ("", "-wal", "-journal"):
+        f = path.with_name(path.name + suffix)
+        out[suffix or "db"] = sha(f.read_bytes()) if f.exists() else None
+    return out
 
 
 def counts(path: Path, views: list[str]) -> dict[str, int]:
@@ -76,15 +106,17 @@ async def test_t19_postcondition_1_2_3_4_5_schema(rig: Rig) -> None:
 
 async def test_t20_postcondition_1_2_writes_are_rejected_and_the_db_is_untouched(rig: Rig) -> None:
     """PC:T-20#1 PC:T-20#2 — 書き込み文・複文は E_QUERY_REJECTED で、DB ファイルの SHA-256 と公開ビューの行数は変わらない。"""
-    path = db_path(rig)
+    path = await settle_db(rig)
     views = list(t19.PUBLIC_VIEWS)
-    before_hash, before_counts = sha(path.read_bytes()), counts(path, views)
+    before_files, before_counts = file_state(path), counts(path, views)
+    assert before_files["-wal"] in (None, sha(b""))  # 写し切った（後で本体へ写す頁が無い）
     for sql in WRITES:
         r = await query(rig, sql)
         assert r.is_error and r.structured["error"]["code"] == "E_QUERY_REJECTED", (sql, r.text[:300])
     ok = await query(rig, "SELECT count(*) AS n FROM symbols")
     assert ok.structured["ok"] is True
-    assert sha(path.read_bytes()) == before_hash and counts(path, views) == before_counts
+    assert file_state(path) == before_files
+    assert counts(path, views) == before_counts
 
 
 async def test_t20_postcondition_3_4_5_limits_timeout_and_params(rig: Rig) -> None:
