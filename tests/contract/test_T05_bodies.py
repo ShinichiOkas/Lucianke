@@ -1,8 +1,8 @@
 """T-05 ``get_symbol_bodies`` の契約テスト（仕様書 §11 T-05 の事後条件 1・2・5 ほか）。
 
 パイプライン経由でツールを呼ぶ。ルートは ``tests/fixtures/poly``。構文木だけ（``structural``）の縦切りの試験で、
-``cell:<n>``（事後条件 3）と ``lexical_fallback`` の窓（事後条件 4）は BUG-0049 で結線した。セレクタ ``xpath:`` など
-はツールが未対応（``E_UNSUPPORTED``）。
+``cell:<n>``（事後条件 3）と ``lexical_fallback`` の窓（事後条件 4）は BUG-0049 で結線した。
+データセレクタ（xpath: / jsonpath: / toml: / yaml:）は BUG-0056 で結線した。
 """
 
 from __future__ import annotations
@@ -526,3 +526,91 @@ async def test_lexical_fallback_windows_are_at_most_three_and_do_not_overlap(tmp
     assert all(w["end_line"] - w["start_line"] + 1 <= 31 for w in windows)
     assert [w["match_line"] for w in windows] == [10, 60, 100]  # 11 行目は 10 行目の窓に入っている
     assert r.structured["_resolution_meta"]["is_degraded"] is True
+
+
+# --- BUG-0056: data file selectors (xpath/jsonpath/toml/yaml) -----------------------------------------------
+
+
+CONF_JSON = "conf/settings.json"
+CONF_YAML = "conf/app.yaml"
+CONF_TOML = "pyproject.toml"
+JUNIT_XML = "reports/junit.xml"
+
+
+async def test_t05_postcondition_3_jsonpath_selector_returns_value(pipeline: Pipeline) -> None:
+    """PC:T-05#3 jsonpath: が JSON ファイルから値を返す（E_UNSUPPORTED にならない）。"""
+    r = await call(pipeline, "json", targets=[{"path": CONF_JSON, "symbol_name": "jsonpath:$.service.name"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["ok"] is True
+    assert item["confidence_level"] == "structural"
+    assert item["match_count"] == 1
+    assert "shop" in item["code"]
+
+
+async def test_t05_postcondition_3_yaml_selector_returns_value(pipeline: Pipeline) -> None:
+    """PC:T-05#3 yaml: が YAML ファイルから値を返す。"""
+    r = await call(pipeline, "json", targets=[{"path": CONF_YAML, "symbol_name": "yaml:retry.max_attempts"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["ok"] is True
+    assert item["match_count"] == 1
+    assert "3" in item["code"]
+
+
+async def test_t05_postcondition_3_toml_selector_returns_value(pipeline: Pipeline) -> None:
+    """PC:T-05#3 toml: が TOML ファイルから値を返す。"""
+    r = await call(pipeline, "json", targets=[{"path": CONF_TOML, "symbol_name": "toml:project.name"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["ok"] is True
+    assert item["match_count"] == 1
+    assert "shop" in item["code"]
+
+
+async def test_t05_postcondition_3_xpath_selector_returns_value(pipeline: Pipeline) -> None:
+    """PC:T-05#3 xpath: が XML ファイルから値を返す。"""
+    r = await call(pipeline, "json", targets=[{"path": JUNIT_XML, "symbol_name": "xpath:.//testsuite"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["ok"] is True
+    assert item["match_count"] == 1
+
+
+async def test_t05_postcondition_3_xpath_multiple_matches_capped_at_20(pipeline: Pipeline) -> None:
+    """PC:T-05#3 複数一致は最初の 20 件に絞り、match_count に総数を書く。"""
+    r = await call(pipeline, "json", targets=[{"path": JUNIT_XML, "symbol_name": "xpath:.//testcase"}])
+    assert not r.is_error, r.text
+    item = r.structured["data"]["items"][0]
+    assert item["match_count"] == 40  # junit.xml には testcase が 40 件
+    assert len(item["matches"]) == 20  # 表示は最初の 20 件まで
+
+
+async def test_t05_postcondition_3_selector_type_mismatch_is_e_unsupported(pipeline: Pipeline) -> None:
+    """PC:T-05#3 ファイル種別に合わないセレクタは E_UNSUPPORTED（xpath: on JSON, yaml: on XML）。"""
+    r_xpath_json = await call(pipeline, "json", targets=[{"path": CONF_JSON, "symbol_name": "xpath:/settings"}])
+    assert r_xpath_json.is_error
+    assert r_xpath_json.structured["error"]["code"] == "E_UNSUPPORTED"
+
+    r_yaml_xml = await call(pipeline, "json", targets=[{"path": JUNIT_XML, "symbol_name": "yaml:testsuite"}])
+    assert r_yaml_xml.is_error
+    assert r_yaml_xml.structured["error"]["code"] == "E_UNSUPPORTED"
+
+
+async def test_t05_postcondition_3_bad_selector_syntax_is_e_invalid_argument(pipeline: Pipeline) -> None:
+    """PC:T-05#3 セレクタの構文誤りは E_INVALID_ARGUMENT。"""
+    # bad jsonpath expression
+    r = await call(pipeline, "json", targets=[{"path": CONF_JSON, "symbol_name": "jsonpath:[invalid"}])
+    # may come back as item-level error (partial failure) or top-level error
+    if r.is_error:
+        assert r.structured["error"]["code"] == "E_INVALID_ARGUMENT"
+    else:
+        item = r.structured["data"]["items"][0]
+        assert not item["ok"] and item["error"]["code"] == "E_INVALID_ARGUMENT"
+
+
+async def test_t05_postcondition_3_xpath_on_code_file_is_e_unsupported(pipeline: Pipeline) -> None:
+    """PC:T-05#3 .py ファイルへの xpath: は E_UNSUPPORTED（既存の振る舞いを壊していない）。"""
+    r = await call(pipeline, "json", targets=[{"path": PAY_PY, "symbol_name": "xpath:/a/b"}])
+    assert r.is_error
+    assert r.structured["error"]["code"] == "E_UNSUPPORTED"

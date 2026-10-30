@@ -37,8 +37,9 @@ from lucianke.core.limits import BATCH_MAX_ITEMS, CANDIDATES_MAX
 from lucianke.core.model import Confidence, EngineChoice, Kind, Range, RelPath, SymbolRecord, Tier
 from lucianke.core.records import Record, ToolOutput, split_offset
 from lucianke.core.textpos import LineIndex
-from lucianke.core.urn import CellSel, CodeSel, LexSel, TagSel, Urn, parse, relax
+from lucianke.core.urn import CellSel, CodeSel, DataSel, LexSel, TagSel, Urn, parse, relax
 from lucianke.syntax.adapters import ipynb
+from lucianke.syntax.adapters._common import SelectorError, UnsupportedSelectorError
 from lucianke.syntax.boundaries import definition_range
 from lucianke.syntax.heuristic import BLOCK_WINDOW_RADIUS, block_window, lexical_find
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
@@ -374,8 +375,9 @@ def _plan(ws: Any, ref: TargetRefArg) -> tuple[str, str | None, int | None, bool
     if ref.line is not None:
         return ref.path, ref.symbol_name, ref.line, False
     name = ref.symbol_name
-    if name is None or name.startswith(_OTHER_SELECTOR_PREFIXES):
+    if name is None:
         return None
+    # xpath: / jsonpath: / jq: / toml: / yaml: selectors: pass through to _non_code for adapter dispatch
     return ref.path, name, None, False
 
 
@@ -387,11 +389,129 @@ def _not_applicable(selector: str, rel: str) -> LuciankeError:
     )
 
 
+# --- セレクタ（xpath:/jsonpath:/jq:/toml:/yaml:）とファイル種別の対応 -----------
+
+# selector prefix -> acceptable adapter language_ids
+_SELECTOR_ADAPTER_MAP: dict[str, frozenset[str]] = {
+    "xpath": frozenset({"xml"}),
+    "jsonpath": frozenset({"json", "jsonl"}),
+    "jq": frozenset({"json", "jsonl"}),
+    "toml": frozenset({"toml"}),
+    "yaml": frozenset({"yaml"}),
+}
+
+_SELECTOR_PREFIXES_DATA = tuple(_SELECTOR_ADAPTER_MAP.keys())
+
+
+def _data_selector_prefix(name: str) -> str | None:
+    """``name`` が ``xpath:`` などのデータセレクタなら接頭辞（``"xpath"`` など）を返す。違えば ``None``。"""
+    col = name.find(":")
+    if col < 0:
+        return None
+    pfx = name[:col].lower()
+    return pfx if pfx in _SELECTOR_ADAPTER_MAP else None
+
+
+async def _selector(
+    svc: ToolServices, ws: Any, loaded: Any, selector: str, prefix: str, adapter: Any,
+    args: GetSymbolBodiesArgs, request: dict[str, Any], priority: int,
+) -> _Done:  # fmt: skip
+    """xpath: / jsonpath: / toml: / yaml: をアダプタの select() に委譲し、一致を 1 件にまとめて返す。
+
+    * 一致が 0 件: ``E_TARGET_NOT_FOUND``
+    * 一致が複数: 最初の 20 件を 1 項目内に並べ、``match_count`` に総数を書く（仕様書 §11 T-05 処理規約 3）
+    * ファイル種別に合わないセレクタ: ``E_UNSUPPORTED``
+    * 構文誤り: ``E_INVALID_ARGUMENT``
+    """
+    rel = str(loaded.rel)
+    accepted = _SELECTOR_ADAPTER_MAP[prefix]
+    if adapter.language_id not in accepted:
+        raise LuciankeError(
+            ErrorCode.E_UNSUPPORTED,
+            f"selector {prefix}: does not apply to {adapter.language_id} files ({rel})",
+            details={"reason": "selector_not_applicable", "path": rel},
+        )
+    try:
+        matches = await asyncio.to_thread(adapter.select, loaded.data, selector)
+    except UnsupportedSelectorError as exc:
+        raise LuciankeError(
+            ErrorCode.E_UNSUPPORTED,
+            str(exc),
+            details={"reason": "selector_not_supported", "path": rel},
+        ) from exc
+    except SelectorError as exc:
+        raise LuciankeError(
+            ErrorCode.E_INVALID_ARGUMENT,
+            f"targets.symbol_name: {exc}",
+            details={"param": "targets.symbol_name"},
+        ) from exc
+    if not matches:
+        raise LuciankeError(
+            ErrorCode.E_TARGET_NOT_FOUND,
+            f"selector {selector!r} matched nothing in {rel}",
+            details={"path": rel, "symbol_name": selector},
+        )
+    match_count = len(matches)
+    displayed = matches[:20]
+    # Build a SymbolRecord from the first match for the key / URN
+    first = displayed[0]
+    first_start, first_end = first.range.line_span_external()
+    first_kind = Kind.parse(first.kind)
+    sym = SymbolRecord(
+        urn=Urn(ws.workspace_id, rel, DataSel(prefix, selector.split(":", 1)[1])),
+        path=RelPath(rel),
+        name=selector,
+        qualified_name=selector,
+        kind=first_kind,
+        range=Range.from_line_span_external(first_start, first_end),
+        confidence=Confidence.STRUCTURAL,
+    )
+    L = svc.lines
+    source_lines_list = loaded.data.decode("utf-8", errors="replace").splitlines()
+    lang = re.sub(r"[\s`]", "", adapter.language_id) or None
+    lines_out: list[str] = []
+    items_data: list[dict[str, Any]] = []
+    for k, m in enumerate(displayed):
+        s, e = m.range.line_span_external()
+        rows = source_lines_list[s - 1 : e]
+        match_kind = Kind.parse(m.kind)
+        match_name = m.name or selector
+        lines_out.append(L.symbol_line(match_kind, f"{rel}#{match_name}", start_line=s, end_line=e))
+        if k == 0:
+            lines_out.append(L.attr_line("sha", loaded.sha256[:12], indent=0))
+        lines_out += L.code_block(rows, lang=lang, start_line=s, with_line_numbers=args.with_line_numbers)
+        items_data.append({"name": match_name, "range": {"start_line": s, "end_line": e}, "code": "\n".join(rows), **m.data})
+    item = {
+        "ok": True,
+        "request": request,
+        "symbol": sym.to_json(),
+        "range_returned": {"start_line": first_start, "end_line": first_end},
+        "file_sha256": loaded.sha256,
+        "context_before_lines": 0,
+        "code": items_data[0]["code"],
+        "truncated": False,
+        "referenced_symbols": [],
+        "confidence_level": Confidence.STRUCTURAL.value,
+        "match_count": match_count,
+        "matches": items_data,
+    }
+    rec = Record(
+        kind="code",
+        key=f"{rel}#{selector}",
+        priority=priority,
+        lines=tuple(lines_out),
+        data=item,
+        confidence=Confidence.STRUCTURAL,
+        group=rel,
+    )
+    return _Done(rec, adapter.language_id, Tier.T3, f"adapter:{adapter.language_id}")
+
+
 async def _non_code(
     svc: ToolServices, ws: Any, view: RevisionView, ref: TargetRefArg, args: GetSymbolBodiesArgs,
     request: dict[str, Any], priority: int, resume: int | None,
 ) -> _Done | None:  # fmt: skip
-    """``cell:<n>`` と Tier 4 の窓。コードの経路に任せる対象は ``None``（従来どおり ``_resolve`` が解決・断りを返す）。"""
+    """``cell:<n>``、データセレクタ（xpath:/jsonpath:/toml:/yaml:）、Tier 4 の窓。コードの経路に任せる対象は ``None``。"""
     plan = _plan(ws, ref)
     if plan is None:
         return None
@@ -407,6 +527,18 @@ async def _non_code(
             raise _not_applicable(name, rel)
         loaded = await read_checked(view, ws, path, param="targets", max_bytes=DATA_FILE_MAX_BYTES)
         return await _cell(svc, ws, loaded, name, args, request, priority, resume)
+    # --- データセレクタ（xpath: / jsonpath: / jq: / toml: / yaml:） ---
+    if name is not None:
+        sel_prefix = _data_selector_prefix(name)
+        if sel_prefix is not None:
+            if adapter is None:
+                raise LuciankeError(
+                    ErrorCode.E_UNSUPPORTED,
+                    f"selector {sel_prefix}: does not apply to this file type ({rel})",
+                    details={"reason": "selector_not_applicable", "path": rel},
+                )
+            loaded = await read_checked(view, ws, path, param="targets", max_bytes=DATA_FILE_MAX_BYTES)
+            return await _selector(svc, ws, loaded, name, sel_prefix, adapter, args, request, priority)
     loaded = await read_checked(view, ws, path, param="targets")
     language_id = loaded.detected.language_id
     if not from_urn and (language_id in SYMBOL_LANGUAGES or adapter is not None or language_id in _MARKUP):
