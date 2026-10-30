@@ -11,6 +11,9 @@ LSP は PaaD を更新する供給者（設計書 ADR-6・R-11）。ツールは
    ``IndexWriter`` へ **1 回のジョブで** 書き戻す（``upsert_exact_relations`` は ``(元, 先, 種別)`` ごとの置換なので、
    同じ組を別ジョブで書くと互いに消す）。書けて読み戻した指紋が一致したときだけ ``MEMO`` に目印を置く。
 3. **降格**: LSP が ``ready`` でない・時間切れ・``E_LSP_UNAVAILABLE`` なら ``structural``（今までどおり ``relations`` の全行）。
+   T-07 は木のノードごと: 1 問い合わせの予算 ``EXACT_BUDGET_S`` を使い切る・要求が期限で切れると、LSP が答えたノードは
+   ``exact`` のまま、残りのノードの子を ``relations`` で補う（``mixed``。根の子が取れなければ木ごと ``structural``）。警告には
+   切れたのが予算か要求の期限か・その値・どこまで ``exact`` か・次に何をすればよいかを書く（``CallEdgeSource``。BUG-0091）。
 
 使用種別・囲みのシンボル・ガード条件は LSP からは来ないので、参照箇所のファイルを構文木にかけて（``syntax.relations`` の
 ``extract_relations``。索引器と同じ分類）位置から引く。引けない位置は ``REFERENCES`` / ``r`` で囲みはファイルの URN。
@@ -68,10 +71,13 @@ _log = logging.getLogger("lucianke.tools.lsp_exact")
 
 __all__ = [
     "EXACT_BUDGET_S",
+    "EXACT_LANES",
     "FIRST_DIAGNOSTIC_LANGUAGES",
     "FIRST_DIAGNOSTIC_WAIT_S",
     "MEMO",
     "CallEdgeSource",
+    "ExactBudgetExceeded",
+    "ExactCut",
     "PRIME_LANGUAGES",
     "PRIME_MAX",
     "LspRoute",
@@ -516,16 +522,24 @@ class SiteInfo:
 
 @dataclass(slots=True)
 class SiteIndex:
-    """ファイルごとに ``(行, 列)``（0 始まり）→ ``SiteInfo``。ファイルは 1 度だけ構文木にかける。"""
+    """ファイルごとに ``(行, 列)``（0 始まり）→ ``SiteInfo``。ファイルは 1 度だけ構文木にかける（並行に聞かれても 1 度。BUG-0091）。"""
 
     services: Any
     ws: Workspace
     _cache: dict[str, dict[tuple[int, int], SiteInfo]] = field(default_factory=dict)
+    _loading: dict[str, asyncio.Future[dict[tuple[int, int], SiteInfo]]] = field(default_factory=dict)
 
     async def of(self, rel: str) -> dict[tuple[int, int], SiteInfo]:
-        if rel not in self._cache:
-            self._cache[rel] = await self._load(rel)
-        return self._cache[rel]
+        if rel in self._cache:
+            return self._cache[rel]
+        task = self._loading.get(rel)
+        if task is None:
+            task = self._loading[rel] = asyncio.ensure_future(self._load(rel))
+        # 1 つの待ち手が取り消されても、同じファイルを待つ他のノードの分は続ける
+        out = await asyncio.shield(task)
+        self._cache[rel] = out
+        self._loading.pop(rel, None)
+        return out
 
     async def _load(self, rel: str) -> dict[tuple[int, int], SiteInfo]:
         try:
@@ -602,10 +616,71 @@ def row_of(fact: RelationFact, path: str, *, is_test: bool = False) -> queries.R
 # --- T-07: 呼び出し階層の辺の供給 --------------------------------------------------------------
 
 EXACT_BUDGET_S = 10.0
-"""1 回の ``query_call_hierarchy`` で LSP に使う時間の合計。超えたら ``TimeoutError`` → ``structural`` に降格する。"""
+"""1 回の ``query_call_hierarchy`` で LSP に使う時間の合計。使い切ったら、LSP が答えたノードは ``exact`` のまま、残りのノードの
+子は ``structural``（``relations``）で補う（根の子が取れていなければ木ごと ``structural``。BUG-0091）。"""
+
+EXACT_LANES = 1
+"""同時に LSP に送る呼び出し階層の要求（prepare → incoming / outgoing の組）の数。basedpyright は要求を 1 本ずつ処理するので、
+増やしても LSP の仕事は速くならず、待ち行列の分だけ要求 1 つの期限（``LSP_TIMEOUT_CALL_HIERARCHY_MS``）に近づく（その時間切れは
+連続 3 回で LSP を落とす）。重ねるのは LSP を待たない仕事（最初の診断の待ち・呼び出し箇所の構文木）だけにする（BUG-0091 の実測）。"""
 
 _ASK_SLOW_S = 0.5
 """BUG-0058: 1 ノードの LSP 呼び出し（``_ask``）がこの秒数を超えたら、各段の内訳をログに落とす（閾値ガード付きの計時）。"""
+
+_BACKSTOP_S = 2.0
+"""ワーカースレッドがイベントループの答えを待つ上限の上乗せ（ループ側が予算で打ち切るので、通常は使わない歯止め）。"""
+
+_NAMES_SHOWN = 3
+"""警告に名前を出す、構文木で補ったノードの数（残りは件数だけ）。"""
+
+
+class ExactBudgetExceeded(TimeoutError):
+    """T-07 の 1 問い合わせの LSP の予算（``EXACT_BUDGET_S``）を使い切った。要求 1 つの期限（``features.LspRequestTimeout``）とは別。"""
+
+    def __init__(self, budget_s: float) -> None:
+        super().__init__(f"the LSP call hierarchy budget of {budget_s:g} s was used up")
+        self.budget_s = budget_s
+
+
+class _NotAsked(Exception):
+    """この問い合わせが LSP に聞くのをやめた後のノード（聞かずに構文木で補う）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ExactCut:
+    """1 問い合わせが LSP に聞くのをやめた理由（最初の 1 つ）。降格の警告の材料（BUG-0091）。
+
+    * ``kind``: ``budget``（1 問い合わせの予算）/ ``request_timeout``（要求 1 つの期限）/ ``down``（LSP が使えなくなった・
+      ``ready`` でない。``reason`` に ``E_LSP_UNAVAILABLE`` の ``details.reason`` か LSP の状態）。
+    """
+
+    kind: str
+    elapsed_s: float
+    node: str | None = None
+    method: str | None = None
+    timeout_ms: float | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True)
+class _Job:
+    """LSP に聞くノード 1 つ（ワーカースレッドで用意し、イベントループで聞く）。"""
+
+    key: tuple[str, str]  # (urn, direction)
+    sym: Any
+    depth: int
+    prime: PrimeSet | None
+    item: features.CallItem | None = None
+    """親の答えにあった、このノードの項目（あれば ``prepareCallHierarchy`` を送らずに使う）。"""
+
+
+@dataclass(slots=True)
+class _Level:
+    """深さ（子の深さ）ごとの、子を求めたノードの数え。"""
+
+    answered: int = 0  # LSP が答えた
+    cached: int = 0  # PaaD の exact 行（目印が新しい）で答えた
+    filled: int = 0  # LSP に聞けず、構文木（relations）で補った
 
 
 def _external_urn(item: features.CallItem) -> str:
@@ -625,6 +700,27 @@ def _external_urn(item: features.CallItem) -> str:
     return str(Urn.external(package, None, item.name))
 
 
+_STOP_REASONS = frozenset({"standby", "unavailable", "disconnected", "restarting"})
+"""この ``E_LSP_UNAVAILABLE`` の ``details.reason`` の後は、同じ問い合わせで LSP に聞かない（LSP が使えない・起動し直している）。"""
+
+
+def _stops_lsp(exc: BaseException) -> bool:
+    """この失敗のあと、同じ問い合わせで LSP に新しい要求を送らない（時間切れ・LSP が使えない）。ノード固有の失敗は続ける。"""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, LuciankeError) and str(exc.details.get("reason", "")) in _STOP_REASONS
+
+
+def _names_text(names: Sequence[str]) -> str:
+    shown = ", ".join(names[:_NAMES_SHOWN])
+    return shown + (f" ほか {len(names) - _NAMES_SHOWN} 件" if len(names) > _NAMES_SHOWN else "")
+
+
+def _names_text_en(names: Sequence[str]) -> str:
+    shown = ", ".join(names[:_NAMES_SHOWN])
+    return shown + (f" and {len(names) - _NAMES_SHOWN} more" if len(names) > _NAMES_SHOWN else "")
+
+
 class CallEdgeSource:
     """T-07 の ``exact`` の辺（``CALLS``）の供給。ワーカースレッドから同期で呼ぶ（``asyncio.to_thread`` の中）。
 
@@ -632,7 +728,13 @@ class CallEdgeSource:
     （``prepareCallHierarchy`` -> ``incomingCalls`` / ``outgoingCalls``。イベントループへ ``run_coroutine_threadsafe``）から
     ``references_to`` / ``references_from`` と同じ形の行を返す。LSP から取った分は ``staged`` / ``staged_rows`` に溜め、
     木ができたあと呼び手が 1 回のジョブで書き戻して目印を置く（``flush``）。
-    失敗（時間切れ・``E_LSP_UNAVAILABLE``）はそのまま上げる（呼び手が木ごと ``structural`` に降格する）。
+
+    木は深さごとに聞く（``prefetch``。BUG-0091）: LSP への要求は ``EXACT_LANES`` 本ずつ、呼び出し箇所の構文木は要求と重ねる。
+    最初の診断を待つのは根のファイルだけ（``_needs_settle``）、深いノードの項目は親の答えのものを使う（``_item_for``。
+    ``prepareCallHierarchy`` を省く）。1 問い合わせの予算（``EXACT_BUDGET_S``）を使い切る・要求が
+    期限で切れる・LSP が使えなくなると、以降のノードは LSP に聞かず ``relations`` の行で補う（``filled``）。根の子
+    （``required``）が取れないときだけ失敗を上げる（呼び手が木ごと ``structural`` に降格する）。補ったノードは警告に書く
+    （``cut`` が理由、``degradation_warning`` / ``cut_note`` が文面）。
     """
 
     def __init__(
@@ -652,38 +754,283 @@ class CallEdgeSource:
         self.route, self.token = route, token
         self.roots = set(roots)
         # 省略時は作るときの ``EXACT_BUDGET_S``（定義時に固定しない。契約テストが真値を取る間だけ延ばせるように。BUG-0080）
-        self.deadline = time.monotonic() + (EXACT_BUDGET_S if budget_s is None else budget_s)
+        self.budget_s = EXACT_BUDGET_S if budget_s is None else budget_s
+        self.started = time.monotonic()
+        self.deadline = self.started + self.budget_s
         self.sites = SiteIndex(services, ws)
         self.staged: list[RelationFact] = []
         self.staged_rows: dict[tuple[str, str], list[queries.ReferenceRow]] = {}
         self.skipped = 0
         self.from_lsp = 0
+        self.from_cache = 0
+        self.wrote = False
+        """``flush`` が LSP の答えを PaaD に書き戻せたか（警告の「呼び直すと続きから」の根拠）。"""
+        self.cut: ExactCut | None = None
+        """LSP に聞くのをやめた最初の理由（無ければ ``None``）。"""
+        self.filled: dict[tuple[str, str], tuple[str, str]] = {}
+        """構文木で補ったノード ``(urn, direction)`` → ``(修飾名, 理由)``。"""
+        self.levels: dict[int, _Level] = {}
         self.warnings: list[str] = []
         """exact 経路で足す警告（LSP に開かせるファイルの上限など）。呼び手は exact で答えたときだけ出す。"""
         self._rows: dict[tuple[str, str], list[queries.ReferenceRow]] = {}
         self._test: dict[str, bool] = {}
-        self._settled: dict[str, bool] = {}
-        """ノードの定義ファイル → LSP がそのファイルの最初の診断を出したか（解析が済んだ合図。出ていないノードの答えは目印にしない）。"""
-        self._node_path: dict[tuple[str, str], str] = {}
+        self._settle_tasks: dict[str, asyncio.Future[bool]] = {}
+        self._memo_ok: dict[tuple[str, str], bool] = {}
+        """``(urn, direction)`` → LSP が解析を済ませた後に聞いた答えか（目印を置いてよいか）。"""
+        self._analysed: bool | None = None
+        """根の子を聞く前に根のファイルの最初の診断が届いたか（LSP の解析が済んだ合図）。根の子を LSP に聞いていなければ ``None``。"""
+        self._items: dict[str, features.CallItem] = {}
+        """URN → 親の答えにあったその項目（incoming の ``from`` / outgoing の ``to``）。"""
+        self._stop = False
+        self._asking: str | None = None
+        """イベントループ側: いま LSP に聞いているノードの修飾名（予算が切れたときの警告に書く）。"""
+        """イベントループ側: 新しい要求を送らない（``cut`` が決まった）。"""
 
     # --- 公開 ---
 
     def rows(self, urn: str, direction: str, include_tests: bool) -> list[queries.ReferenceRow]:
         key = (urn, direction)
         if key not in self._rows:
-            self._rows[key] = self._load(urn, direction)
+            self.prefetch([key], depth=0, required=urn in self.roots)
         rows = self._rows[key]
         return rows if include_tests else [r for r in rows if not r.is_test]
+
+    def filled_in(self, urn: str, direction: str) -> bool:
+        """``(urn, direction)`` の子を LSP に聞けず構文木で補ったか。"""
+        return (urn, direction) in self.filled
+
+    def prefetch(self, keys: Iterable[tuple[str, str]], *, depth: int, required: bool = False) -> None:
+        """``keys`` のノードの子の行を揃える（深さ ``depth`` の子。木の 1 段ぶんを一度に）。
+
+        PaaD の ``exact`` 行（目印が新しい）があればそれ、無ければ LSP に聞く（予算の内で、要求は ``EXACT_LANES`` 本ずつ）。
+        LSP に聞けなかったノードは ``relations`` の行で補う。``required``（根の子）が取れなければ失敗を上げる。
+        """
+        level = self.levels.setdefault(depth, _Level())
+        jobs: list[_Job] = []
+        for key in dict.fromkeys(keys):
+            if key in self._rows:
+                continue
+            job = self._plan(key, depth, level, required=required)
+            if job is not None:
+                jobs.append(job)
+        if not jobs:
+            return
+        if self.cut is not None:
+            if required:
+                raise self._cut_error()
+            for job in jobs:
+                self._fill(job, level, "not asked: " + self._cut_reason_en())
+            return
+        results = self._run(jobs)
+        if depth <= 1 and self._analysed is None:
+            asked = [self._memo_ok[job.key] for job in jobs if job.key in self._memo_ok]
+            self._analysed = all(asked) if asked else None
+        first: BaseException | None = None
+        for job in jobs:
+            res = results.get(job.key)
+            if res is None:
+                res = ExactBudgetExceeded(self.budget_s)
+            if isinstance(res, tuple):
+                urn, direction = job.key
+                rows = self._assemble(urn, direction, *res)
+                if not rows and urn in self.roots and self._structural_count(urn, direction):
+                    # 起動直後の LSP は ready でも解析が済まず 0 件を返すことがある。索引に呼び出しがあるのに 0 件なら信用しない。
+                    # 信用しない答えは書き戻さない（同じ問い合わせの他のノードを書き戻すとき「0 件」の目印を置かないように）
+                    self.staged_rows.pop((self._kind(direction), urn), None)
+                    res = LuciankeError(
+                        ErrorCode.E_LSP_UNAVAILABLE,
+                        "the LSP found no calls although the index has some; it may not have finished analysing",
+                        details={"reason": "indexing"},
+                    )
+                else:
+                    self.from_lsp += 1
+                    level.answered += 1
+                    self._rows[job.key] = rows
+                    continue
+            if not isinstance(res, _NotAsked) and not is_lsp_failure(res):
+                raise res
+            if required:
+                first = first or (res if not isinstance(res, _NotAsked) else None)
+                continue
+            self._fill(job, level, self._why_en(res))
+        if required and any(job.key not in self._rows for job in jobs):
+            raise first if first is not None else self._cut_error()
 
     async def flush(self) -> bool:
         """LSP から取った辺を書き戻し、読み戻して一致したノードに目印を置く。書けたら ``True``。"""
         if not self.staged or not await write_facts(self.services, self.staged, label="lsp:call_hierarchy"):
             return False
+        self.wrote = True
         confirmed = await asyncio.to_thread(self._confirm_all)
         await persist_marks(
             self.services, self.db_path, self.ws.workspace_id, confirmed, label="lsp:call_hierarchy:marks"
         )
         return True
+
+    # --- 降格の警告（BUG-0091） ---
+
+    def exact_counts(self) -> tuple[int, int]:
+        """``(LSP か PaaD の exact 行で子を求めたノード, 子を求めたノード)``。"""
+        done = sum(lv.answered + lv.cached for lv in self.levels.values())
+        return done, done + sum(lv.filled for lv in self.levels.values())
+
+    def exact_depth(self) -> int:
+        """この深さまでは、子を求めたノードがすべて ``exact`` で答えた（補ったノードが無い）。"""
+        depth = 0
+        for d in sorted(k for k in self.levels if k > 0):
+            if self.levels[d].filled:
+                break
+            depth = d
+        return depth
+
+    def degradation_warning(self, *, whole_tree: bool, direction: str) -> str | None:
+        """``accuracy_warning``（日本語）。何が切れたか（実際の予算・期限）・どこまで ``exact`` か・次に何をすればよいか。
+
+        ``whole_tree``: 根の子も取れず、木ごと ``structural`` で答えた。補ったノードも ``cut`` も無ければ ``None``。
+        """
+        if self.cut is None and not self.filled and not whole_tree:
+            return None
+        side = {"outgoing": "呼び出し先", "both": "呼び出し元・呼び出し先"}.get(direction, "呼び出し元")
+        reason = self._cut_reason_ja()
+        if whole_tree:
+            what = f"根の{side}を LSP から取れなかったため、木全体を構文木（relations）で解決しました。"
+        else:
+            done, total = self.exact_counts()
+            names = [name for name, _ in self.filled.values()]
+            what = (
+                f"子を求めた {total} ノードのうち {done} ノードは LSP の答え（exact）で、depth {self.exact_depth()} までは"
+                f"すべて exact です。残り {len(names)} ノード（{_names_text(names)}）の{side}は構文木（relations）で"
+                "補いました（そのノードの子は confidence_level が structural か heuristic。動的ディスパッチと同名メソッドの"
+                "区別が落ちます）。"
+            )
+        return (reason + "。" if reason else "") + what + self._next_step_ja(whole_tree)
+
+    def cut_note(self, *, whole_tree: bool, direction: str) -> str | None:
+        """``warnings[]`` の 1 行（英語）。``degradation_warning`` と同じ事実を短く。exact だけで答えたときも補ったノードを示す。"""
+        if self.cut is None and not self.filled and not whole_tree:
+            return None
+        side = {"outgoing": "callees", "both": "callers/callees"}.get(direction, "callers")
+        why = self._cut_reason_en()
+        if whole_tree:
+            head = f"exact call hierarchy unavailable ({why}); the whole tree comes from the syntax index"
+        else:
+            done, total = self.exact_counts()
+            names = [name for name, _ in self.filled.values()]
+            head = (
+                f"exact LSP answers for {done}/{total} expanded nodes (complete to depth {self.exact_depth()})"
+                + (f"; {why}" if why else "")
+                + f"; the {side} of {len(names)} node(s) ({_names_text_en(names)}) come from the syntax index"
+                " (conf=structural, nodes[].children_confidence_level)"
+            )
+        return head + self._next_step_en(whole_tree)
+
+    def _server(self) -> str:
+        """LSP のサーバー名（``basedpyright`` など）。分からなければ ``LSP``。"""
+        handle = self.route.handle
+        name = getattr(handle, "server_name", None) if handle is not None else None
+        return str(name or "LSP")
+
+    def _lsp(self) -> str:
+        """文中の LSP の呼び名（``LSP（basedpyright）``。サーバー名が分からなければ ``LSP``）。"""
+        name = self._server()
+        return "LSP" if name == "LSP" else f"LSP（{name}）"
+
+    def _cut_reason_ja(self) -> str:
+        cut = self.cut
+        if cut is None:
+            if not self.filled:
+                return ""
+            why = next(iter(self.filled.values()))[1]
+            return f"{self._lsp()}が {len(self.filled)} ノードの呼び出し階層に答えられませんでした（{why}）"
+        if cut.kind == "budget":
+            return (
+                f"{self._lsp()}の呼び出し階層に使う 1 問い合わせの予算 {self.budget_s:g} 秒（この問い合わせで LSP に"
+                f"使える時間の合計）を使い切りました（{cut.node or '?'} を聞いている途中）"
+            )
+        if cut.kind == "request_timeout":
+            limit = cut.timeout_ms if cut.timeout_ms is not None else self._request_limit_ms()
+            return (
+                f"{self._lsp()}が {cut.method or '呼び出し階層'} の要求に、要求 1 つの期限 {limit:.0f} ms 内に"
+                f"答えませんでした（{cut.node or '?'}。問い合わせの開始から {cut.elapsed_s:.1f} 秒の時点。"
+                f"1 問い合わせの予算は {self.budget_s:g} 秒）"
+            )
+        return f"{self._lsp()}が使えないため、続きを聞けませんでした（{cut.reason or 'unavailable'}）"
+
+    def _cut_reason_en(self) -> str:
+        cut = self.cut
+        if cut is None:
+            if not self.filled:
+                return ""
+            why = next(iter(self.filled.values()))[1]
+            return f"the LSP could not answer {len(self.filled)} node(s) ({why})"
+        if cut.kind == "budget":
+            return f"the {self.budget_s:g} s exact budget for one query ran out after {cut.elapsed_s:.1f} s"
+        if cut.kind == "request_timeout":
+            limit = cut.timeout_ms if cut.timeout_ms is not None else self._request_limit_ms()
+            return (
+                f"{self._server()} did not answer {cut.method or 'a call hierarchy request'} within the"
+                f" {limit:.0f} ms per-request limit ({cut.node or '?'}, {cut.elapsed_s:.1f} s into the query)"
+            )
+        return f"the LSP is {cut.reason or 'unavailable'}"
+
+    def _next_step_ja(self, whole_tree: bool) -> str:
+        cut = self.cut
+        if cut is not None and cut.kind == "down":
+            if cut.reason in ("indexing", "restarting"):
+                return "LSP の起動（再起動）・索引の完了後に呼び直すと exact になります。"
+            return "`configure_workspace status` で LSP の状態を確認してください。"
+        if cut is None:
+            return ""  # ノード固有の失敗だけ（LSP がそのノードの項目を返さない）。呼び直しても変わらない
+        saved = "LSP が答えた分は PaaD に書き戻したので、" if self.wrote else ""
+        if whole_tree:
+            return (
+                "LSP は動いています（起動直後で解析が冷えているか、負荷が高い）。今の要求で解析が進んだので、"
+                f"{saved}同じ問い合わせを呼び直すと exact になる見込みです。"
+            )
+        return (
+            "LSP は動いています（起動直後で解析が冷えているか、負荷が高い）。"
+            f"{saved}同じ問い合わせを呼び直すと残りのノードだけを LSP に聞き、exact で答えきれる見込みです。"
+        )
+
+    def _next_step_en(self, whole_tree: bool) -> str:
+        cut = self.cut
+        if cut is not None and cut.kind == "down":
+            if cut.reason in ("indexing", "restarting"):
+                return "; call again when the LSP is ready (it is starting or indexing)"
+            return "; check `configure_workspace status`"
+        if cut is None:
+            return ""
+        saved = " and the answered nodes are saved" if self.wrote else ""
+        if whole_tree:
+            return f"; the LSP is up and warmer now{saved} - call again for an exact tree"
+        return f"; the LSP is up and warmer now{saved} - call again to finish the rest exact"
+
+    @staticmethod
+    def _request_limit_ms() -> float:
+        return float(features.LSP_TIMEOUT_CALL_HIERARCHY_MS)  # 実行時の値（試験が延ばすことがある）
+
+    def _cut_error(self) -> BaseException:
+        cut = self.cut
+        if cut is None or cut.kind == "budget":
+            return ExactBudgetExceeded(self.budget_s)
+        if cut.kind == "request_timeout":
+            return features.LspRequestTimeout(
+                cut.method or "callHierarchy", cut.timeout_ms or self._request_limit_ms(), self._server()
+            )
+        return LuciankeError(
+            ErrorCode.E_LSP_UNAVAILABLE,
+            f"the LSP became {cut.reason} during the query",
+            details={"reason": cut.reason or "unavailable"},
+        )
+
+    def _why_en(self, exc: BaseException) -> str:
+        if isinstance(exc, _NotAsked):
+            return "not asked: " + self._cut_reason_en()
+        if isinstance(exc, ExactBudgetExceeded):
+            return "the exact budget ran out"
+        if isinstance(exc, TimeoutError):
+            return "the request timed out"
+        return str(exc)
 
     # --- 内部（スレッド） ---
 
@@ -703,44 +1050,72 @@ class CallEdgeSource:
             self._test[path] = bool(info and info.is_test)
         return self._test[path]
 
-    def _load(self, urn: str, direction: str) -> list[queries.ReferenceRow]:
-        ws_id = self.ws.workspace_id
-        loader = self._loader(urn, direction)
+    def _plan(self, key: tuple[str, str], depth: int, level: _Level, *, required: bool) -> _Job | None:
+        """PaaD の exact 行・シンボルの無いノードはここで行を入れて ``None``。LSP に聞くノードは ``_Job``。"""
+        urn, direction = key
         cached = cached_rows(
-            self.conn, self.db_path, ws_id, self._kind(direction), urn, loader, token=self.token
+            self.conn,
+            self.db_path,
+            self.ws.workspace_id,
+            self._kind(direction),
+            urn,
+            self._loader(urn, direction),
+            token=self.token,
         )
         if cached is not None:
-            return cached
+            self._rows[key] = cached
+            self.from_cache += 1
+            level.cached += 1
+            return None
         sym = queries.symbol_by_urn(self.conn, urn)
         if sym is None or sym.path is None:
-            return []  # モジュール直下（ファイルの URN）: 呼ばれることはなく、LSP にも項目が無い
+            self._rows[key] = []  # モジュール直下（ファイルの URN）: 呼ばれることはなく、LSP にも項目が無い
+            return None
         if self.route.handle is None:
-            raise LuciankeError(
-                ErrorCode.E_LSP_UNAVAILABLE,
-                "the LSP is not ready and the index has no fresh exact calls for this node",
-                details={"reason": _down_reason(self.route.choice.lsp_status)},
-            )
-        self._node_path[(self._kind(direction), urn)] = str(sym.path)
+            reason = _down_reason(self.route.choice.lsp_status)
+            if required:
+                raise LuciankeError(
+                    ErrorCode.E_LSP_UNAVAILABLE,
+                    "the LSP is not ready and the index has no fresh exact calls for this node",
+                    details={"reason": reason},
+                )
+            if self.cut is None:
+                self.cut = ExactCut("down", time.monotonic() - self.started, reason=reason)
         prime = self._prime_set(sym) if direction == "incoming" else None
+        return _Job(key, sym, depth, prime, self._item_for(urn, sym))
+
+    def _item_for(self, urn: str, sym: Any) -> features.CallItem | None:
+        """親の答えにあった ``urn`` の項目。索引のシンボルと同じファイル・同じ名前の位置のときだけ使う（違えば聞き直す）。"""
+        item = self._items.get(urn)
+        start = (sym.selection or sym.range).start
+        if item is None or item.raw is None or item.rel != sym.path or item.selection_range.start != start:
+            return None
+        return item
+
+    def _fill(self, job: _Job, level: _Level, why: str) -> None:
+        """LSP に聞けなかったノードの子を ``relations`` の行（``structural`` ほか、索引にある水準のまま）で補う。"""
+        urn, direction = job.key
+        self._rows[job.key] = list(self._loader(urn, direction)(self.conn))
+        self.filled[job.key] = (str(job.sym.qualified_name), why)
+        level.filled += 1
+
+    def _run(self, jobs: list[_Job]) -> dict[tuple[str, str], Any]:
+        """``jobs`` をイベントループで聞き、ノードごとの ``(edges, infos)`` か例外を返す。予算を使い切った分は入らない。"""
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("the LSP call hierarchy budget was used up")
-        fut = asyncio.run_coroutine_threadsafe(self._ask(sym, direction, prime), self.loop)
+            if self.cut is None:
+                self.cut = ExactCut(
+                    "budget", time.monotonic() - self.started, node=str(jobs[0].sym.qualified_name)
+                )
+            return {}
+        fut = asyncio.run_coroutine_threadsafe(self._ask_all(jobs), self.loop)
         try:
-            edges, infos = fut.result(timeout=remaining)
+            return fut.result(timeout=remaining + _BACKSTOP_S)
         except TimeoutError:
             fut.cancel()
-            raise
-        rows = self._assemble(urn, direction, edges, infos)
-        if not rows and urn in self.roots and self._structural_count(urn, direction):
-            # 起動直後の LSP は ready でも解析が済まず 0 件を返すことがある。索引に呼び出しがあるのに 0 件なら信用しない。
-            raise LuciankeError(
-                ErrorCode.E_LSP_UNAVAILABLE,
-                "the LSP found no calls although the index has some; it may not have finished analysing",
-                details={"reason": "indexing"},
-            )
-        self.from_lsp += 1
-        return rows
+            if self.cut is None:
+                self.cut = ExactCut("budget", time.monotonic() - self.started)
+            return {}
 
     def _prime_set(self, sym: Any) -> PrimeSet | None:
         """incoming の呼び元になりうるファイル（tsserver 系で、対象の名前を含み、LSP がまだ開いていないもの）。ワーカースレッドで引く。
@@ -791,6 +1166,8 @@ class CallEdgeSource:
             if other_urn is None:
                 self.skipped += 1
                 continue
+            if other.rel is not None:
+                self._items.setdefault(other_urn, other)  # 子のノードを聞くときに prepare を省く
             for rng in edge.from_ranges:
                 info = infos.get(str(home), {}).get((rng.start.line, rng.start.col))
                 if incoming:
@@ -830,9 +1207,9 @@ class CallEdgeSource:
         confirmed: list[tuple[str, str]] = []
         try:
             for (kind, urn), rows in self.staged_rows.items():
-                if not self._settled.get(self._node_path.get((kind, urn), ""), False):
-                    continue  # 解析前の部分的な答えかもしれない: exact で答えるが覚えない
                 direction = "incoming" if kind == "calls_in" else "outgoing"
+                if not self._memo_ok.get((urn, direction), False):
+                    continue  # 解析前の部分的な答えかもしれない: exact で答えるが覚えない
                 if confirm_marker(
                     conn,
                     self.db_path,
@@ -850,24 +1227,105 @@ class CallEdgeSource:
 
     # --- 内部（イベントループ） ---
 
-    async def _settle(self, rel: RelPath) -> bool:
-        """``rel`` の最初の診断を待つ（ファイルごとに 1 度。待ちは ``EXACT_BUDGET_S`` の残りの内）。"""
-        key = str(rel)
-        if key not in self._settled:
-            handle = self.route.handle
-            assert handle is not None
-            if needs_first_diagnostic(self.route.file.language):
-                left = max(self.deadline - time.monotonic(), 0.0)
-                self._settled[key] = await await_first_diagnostic(handle, rel, timeout_s=left)
-            else:
-                self._settled[key] = True
-        return self._settled[key]
+    async def _ask_all(self, jobs: list[_Job]) -> dict[tuple[str, str], Any]:
+        """``jobs`` を聞く。根のファイルの最初の診断の待ちを先に始め、要求は ``EXACT_LANES`` 本ずつ。予算を使い切ったら残りを取り消す。"""
+        for job in jobs:
+            if self._needs_settle(job):
+                self._settle_task(job.sym.path)  # 根のファイルを開いて、最初の診断の待ちを始める
+        lane = asyncio.Semaphore(max(1, EXACT_LANES))
+        out: dict[tuple[str, str], Any] = {}
 
-    async def _ask(
-        self, sym: Any, direction: str, prime: PrimeSet | None = None
-    ) -> tuple[list[features.CallEdge], dict[str, dict[tuple[int, int], SiteInfo]]]:
+        async def run(job: _Job) -> None:
+            try:
+                out[job.key] = await self._ask(job, lane)
+            except _NotAsked as exc:
+                out[job.key] = exc
+            except LSP_FAILURES as exc:
+                out[job.key] = exc
+                if _stops_lsp(exc) and is_lsp_failure(exc):
+                    self._stop = True
+                    if self.cut is None:
+                        self.cut = self._cut_of(exc, job)
+
+        tasks = {asyncio.ensure_future(run(job)): job for job in jobs}
+        done, pending = await asyncio.wait(tasks, timeout=max(self.deadline - time.monotonic(), 0.0))
+        if pending:
+            self._stop = True
+            if self.cut is None:
+                first = next(job for task, job in tasks.items() if task in pending)
+                node = self._asking or str(first.sym.qualified_name)
+                self.cut = ExactCut("budget", time.monotonic() - self.started, node=node)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in pending:
+                out.setdefault(tasks[task].key, ExactBudgetExceeded(self.budget_s))
+        if self._stop:  # 以降は LSP に聞かない: 残っている最初の診断の待ちも止める
+            for settle in self._settle_tasks.values():
+                settle.cancel()
+        for task in done:
+            task.result()  # 握らなかった例外（降格の合図でない誤り）はそのまま上げる
+        return out
+
+    def _cut_of(self, exc: BaseException, job: _Job) -> ExactCut:
+        elapsed = time.monotonic() - self.started
+        node = str(job.sym.qualified_name)
+        if isinstance(exc, ExactBudgetExceeded):
+            return ExactCut("budget", elapsed, node=node)
+        if isinstance(exc, TimeoutError):
+            method = getattr(exc, "method", None)
+            limit = getattr(exc, "timeout_ms", None)
+            return ExactCut(
+                "request_timeout",
+                elapsed,
+                node=node,
+                method=method if isinstance(method, str) else None,
+                timeout_ms=float(limit) if isinstance(limit, (int, float)) else None,
+            )
+        reason = exc.details.get("reason") if isinstance(exc, LuciankeError) else None
+        return ExactCut("down", elapsed, node=node, reason=str(reason or "unavailable"))
+
+    def _settle_task(self, rel: RelPath) -> asyncio.Future[bool]:
+        """``rel`` の最初の診断の待ち（ファイルごとに 1 つ。同じ問い合わせのノードで共有する）。"""
+        key = str(rel)
+        task = self._settle_tasks.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._first_diagnostic(rel))
+            # 待ち手が取り消されても、待ちの例外は拾っておく（「取り出されなかった例外」のログを出さない）
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._settle_tasks[key] = task
+        return task
+
+    async def _first_diagnostic(self, rel: RelPath) -> bool:
         handle = self.route.handle
         assert handle is not None
+        if not needs_first_diagnostic(self.route.file.language):
+            return True
+        left = max(self.deadline - time.monotonic(), 0.0)  # 待ちは EXACT_BUDGET_S の残りの内
+        return await await_first_diagnostic(handle, rel, timeout_s=left)
+
+    async def _settle(self, rel: RelPath) -> bool:
+        """``rel`` の最初の診断を待つ（共有の待ち。取り消されても待ちそのものは他のノードのために残す）。"""
+        return await asyncio.shield(self._settle_task(rel))
+
+    def _needs_settle(self, job: _Job) -> bool:
+        """このノードを聞く前に、そのファイルの最初の診断を待つか。
+
+        待つのは根の子を聞くとき（根のファイル）だけ。最初の診断は「LSP が解析を済ませた」合図で、起動直後の部分的な答えを
+        目印にしないためのもの（BUG-0012・20e）。LSP 全体の状態なので、根のファイルで 1 度確かめれば足りる（T-06 も対象の
+        ファイルだけを待つ）。深いノードのファイルごとに待つと、LSP がそのファイルを検査するあいだ要求が遅れ、冷えた LSP では
+        1 問い合わせの予算の 3 割ほどを使っていた（BUG-0091 の実測）。根の子が PaaD から来てまだ確かめていない
+        （``_analysed`` が ``None``）ときは、そのノードのファイルで確かめる。
+        """
+        return job.depth <= 1 or self._analysed is None
+
+    async def _ask(
+        self, job: _Job, lane: asyncio.Semaphore
+    ) -> tuple[list[features.CallEdge], dict[str, dict[tuple[int, int], SiteInfo]]]:
+        handle = self.route.handle
+        if handle is None or self._stop:
+            raise _NotAsked
+        sym, direction, prime = job.sym, job.key[1], job.prime
         # BUG-0058: LSP 経路の各段の所要（秒）。合計が閾値を超えた呼び出しだけ内訳をログに落とす（閾値ガード付き）。
         spans: dict[str, float] = {}
         t = time.monotonic()
@@ -877,27 +1335,38 @@ class CallEdgeSource:
             if note and note not in self.warnings:
                 self.warnings.append(note)
         spans["prime"], t = time.monotonic() - t, time.monotonic()
-        await self._settle(sym.path)
+        if self._needs_settle(job):
+            self._memo_ok[job.key] = await self._settle(sym.path)
+        else:
+            self._memo_ok[job.key] = bool(self._analysed)
         spans["settle"], t = time.monotonic() - t, time.monotonic()
-        start = (sym.selection or sym.range).start
-        items = await features.prepare_call_hierarchy(handle, sym.path, start)
-        spans["prepare"], t = time.monotonic() - t, time.monotonic()
-        item = next(
-            (i for i in items if i.rel == sym.path and i.selection_range.start == start),
-            next((i for i in items if i.rel == sym.path), None),
-        )
-        if item is None:
-            raise LuciankeError(
-                ErrorCode.E_LSP_UNAVAILABLE,
-                f"the LSP has no call hierarchy item for {sym.qualified_name}",
-                details={"reason": "lsp_error"},
-            )
-        call = features.incoming_calls if direction == "incoming" else features.outgoing_calls
-        edges = await call(handle, item)
-        spans["calls"], t = time.monotonic() - t, time.monotonic()
-        infos: dict[str, dict[tuple[int, int], SiteInfo]] = {}
-        for rel in sorted({str(e.from_rel) for e in edges if e.from_rel is not None}):
-            infos[rel] = await self.sites.of(rel)
+        async with lane:
+            if self._stop:
+                raise _NotAsked
+            spans["queue"], t = time.monotonic() - t, time.monotonic()
+            self._asking = str(sym.qualified_name)
+            item = job.item
+            if item is None:
+                start = (sym.selection or sym.range).start
+                items = await features.prepare_call_hierarchy(handle, sym.path, start)
+                item = next(
+                    (i for i in items if i.rel == sym.path and i.selection_range.start == start),
+                    next((i for i in items if i.rel == sym.path), None),
+                )
+            spans["prepare"], t = time.monotonic() - t, time.monotonic()
+            if item is None:
+                raise LuciankeError(
+                    ErrorCode.E_LSP_UNAVAILABLE,
+                    f"the LSP has no call hierarchy item for {sym.qualified_name}",
+                    details={"reason": "lsp_error"},
+                )
+            call = features.incoming_calls if direction == "incoming" else features.outgoing_calls
+            edges = await call(handle, item)
+            spans["calls"], t = time.monotonic() - t, time.monotonic()
+        rels = sorted({str(e.from_rel) for e in edges if e.from_rel is not None})
+        # 呼び出し箇所の構文木はスレッドで、ファイルごとに並行（LSP の要求の枠の外。次のノードの要求と重なる）
+        loaded = await asyncio.gather(*(self.sites.of(rel) for rel in rels))
+        infos = dict(zip(rels, loaded, strict=True))
         spans["sites"] = time.monotonic() - t
         total = sum(spans.values())
         if total >= _ASK_SLOW_S:

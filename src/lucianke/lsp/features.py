@@ -14,7 +14,8 @@
    内部の ``Position`` に直すには、その位置を含むファイルの内容が要るので、ディスクから読む（呼び出し 1 回の間だけ覚える）。
    ワークスペース外の URI は ``RelPath`` にできないので ``external_uri`` として返す（``from_file_uri`` が ``None`` を返すもの。
    ドライブ文字が小文字・``:`` が ``%3A`` の URI も ``from_file_uri`` が正規化する）。
-4. 要求は ``LSP_TIMEOUT_*_MS`` で打ち切る。超過は ``TimeoutError`` をそのまま上げる（``$/cancelRequest`` は client が送る。
+4. 要求は ``LSP_TIMEOUT_*_MS`` で打ち切る。超過は ``LspRequestTimeout``（``TimeoutError`` の派生。どの要求が何 ms の期限で切れた
+   かを持つ。降格の警告に使う: BUG-0091）で上げる（``$/cancelRequest`` は client が送る。
    ``LspServerDef.no_cancel_methods`` の method には送らない。BUG-0090）。
    連続タイムアウトの計数（3 回で ``unavailable``）はここで ``LspHandle.record_timeout`` / ``record_ok`` に伝える。
    サーバーのエラー応答は ``lsp_error``。そのうち ``LspServerDef.restart_on_errors`` の印を含むもの（プロセスがその method に以後
@@ -66,6 +67,7 @@ __all__ = [
     "CallItem",
     "CommandOutcome",
     "Location",
+    "LspRequestTimeout",
     "RefLocation",
     "code_actions",
     "definition",
@@ -417,8 +419,22 @@ def _breaks_the_server(handle: LspHandle, message: str) -> bool:
     return any(marker in message for marker in markers)
 
 
+class LspRequestTimeout(TimeoutError):
+    """要求 1 つが期限（``LSP_TIMEOUT_*_MS``）内に答えなかった。``TimeoutError`` の派生なので、握る側はそのままでよい。
+
+    降格の警告に「どの要求が、実際に何 ms の期限で切れたか」を書くために持つ（定数ではなく、その要求に渡した期限。BUG-0091）。
+    """
+
+    def __init__(self, method: str, timeout_ms: float, server: str | None = None) -> None:
+        super().__init__(f"LSP {server or '?'} did not answer {method} within {timeout_ms:.0f} ms")
+        self.method = method
+        self.timeout_ms = timeout_ms
+        self.server = server
+
+
 async def _call(handle: LspHandle, client: LspClient, method: str, params: Any, timeout_ms: int) -> Any:
-    """要求を 1 つ送る。タイムアウトは数えて ``TimeoutError`` のまま上げ、切断・サーバーのエラーは ``E_LSP_UNAVAILABLE`` にする。
+    """要求を 1 つ送る。タイムアウトは数えて ``LspRequestTimeout`` で上げ（実際に渡した期限を持つ。BUG-0091）、切断・サーバーの
+    エラーは ``E_LSP_UNAVAILABLE`` にする。
 
     サーバーのエラーは ``details.reason="lsp_error"``（``server`` / ``method`` / ``lsp_code`` / ``lsp_message`` 付き。LSP は動いている）。
     ただしエラーが ``LspServerDef.restart_on_errors`` の印を含むとき（プロセスがその method に以後答えられない。BUG-0090）は
@@ -427,9 +443,9 @@ async def _call(handle: LspHandle, client: LspClient, method: str, params: Any, 
     """
     try:
         result = await client.request(method, params, timeout_ms=timeout_ms)
-    except TimeoutError:
+    except TimeoutError as e:
         handle.record_timeout()
-        raise
+        raise LspRequestTimeout(method, timeout_ms, getattr(handle, "server_name", None)) from e
     except ConnectionError as e:
         raise _unavailable(handle, "disconnected", str(e)) from e
     except LspError as e:

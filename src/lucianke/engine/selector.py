@@ -428,24 +428,26 @@ def select(
     return _make_choice(cell, reported, progress, language=file.language, lsp_name=lsp_name)
 
 
-def on_lsp_timeout(choice: EngineChoice, cap: Capability) -> EngineChoice:
+def on_lsp_timeout(choice: EngineChoice, cap: Capability, *, timeout_ms: float | None = None) -> EngineChoice:
     """``WAIT_SHORT`` の LSP 要求が上限（``LSP_TIMEOUT_MS[cap]``）を超えたとき、その要求に限り右隣の列へ降格する。
 
     ``lsp_status`` は ``ready`` のまま（LSP プロセスは落とさない。連続 3 回で ``unavailable`` にするのは ``LspPool``）。
-    警告は ``lsp_timeout`` の雛形。降格先が ``lsp_unavailable``（RENAME / CODE_ACTION）のときは警告なしで、
-    ツールが ``E_LSP_UNAVAILABLE`` を返す。LSP を待っていない選択（``ready`` 以外、``exact`` でない、
-    ``LSP_TIMEOUT_MS`` に無い能力）には何もせず ``choice`` を返す。
+    警告は ``lsp_timeout`` の雛形。``timeout_ms`` は実際に切れた要求の期限（``lsp.features.LspRequestTimeout.timeout_ms``）で、
+    省略時は ``LSP_TIMEOUT_MS[cap]``（警告には実際に切れた期限を書く。BUG-0091）。降格先が ``lsp_unavailable``（RENAME /
+    CODE_ACTION）のときは警告なしで、ツールが ``E_LSP_UNAVAILABLE`` を返す。LSP を待っていない選択（``ready`` 以外、
+    ``exact`` でない、``LSP_TIMEOUT_MS`` に無い能力）には何もせず ``choice`` を返す。
     """
-    timeout_ms = LSP_TIMEOUT_MS.get(cap)
+    limit = LSP_TIMEOUT_MS.get(cap)
     if (
-        timeout_ms is None
+        limit is None
         or choice.lsp_status != LspStatus.READY.value
         or choice.confidence is not Confidence.EXACT
     ):
         return choice
     cell = _TABLE[cap][Column.INDEXING]
     warning = None if cell.engine in NOT_PROVIDED_ENGINES else WarningReason.LSP_TIMEOUT
-    return _make_choice(replace(cell, warning=warning), LspStatus.READY, None, timeout_ms=timeout_ms)
+    shown = round(limit if timeout_ms is None else timeout_ms)
+    return _make_choice(replace(cell, warning=warning), LspStatus.READY, None, timeout_ms=shown)
 
 
 POSITION_CLAMPED_WARNING: Final = (
@@ -527,7 +529,8 @@ def is_lsp_degradation(exc: BaseException) -> bool:
 def on_lsp_failure(choice: EngineChoice, cap: Capability, exc: BaseException) -> EngineChoice:
     """LSP に要求を送った結果が失敗（降格の合図）だったとき、その要求に限り右隣の列（構文木・索引）へ降格する。
 
-    * ``TimeoutError``: ``on_lsp_timeout``（``lsp_status`` は ``ready`` のまま、``lsp_timeout`` の警告）。
+    * ``TimeoutError``: ``on_lsp_timeout``（``lsp_status`` は ``ready`` のまま、``lsp_timeout`` の警告。例外が ``timeout_ms``
+      〔``lsp.features.LspRequestTimeout``〕を持てば、実際に切れたその期限を書く）。
     * ``E_LSP_UNAVAILABLE`` の ``reason``:
         - ``indexing``: 列 2（起動・索引中）。``lsp_status`` は ``indexing``、警告は ``lsp_indexing``（進捗は不明なので省く）。
         - ``restarting``: サーバーがその method に以後答えられない壊れ方をしたので ``LspPool`` が起動し直している（BUG-0090）。
@@ -547,7 +550,8 @@ def on_lsp_failure(choice: EngineChoice, cap: Capability, exc: BaseException) ->
     if not is_lsp_degradation(exc):
         raise exc
     if isinstance(exc, TimeoutError):
-        return on_lsp_timeout(choice, cap)
+        limit = getattr(exc, "timeout_ms", None)  # lsp.features.LspRequestTimeout: 実際に切れた要求の期限
+        return on_lsp_timeout(choice, cap, timeout_ms=limit if isinstance(limit, (int, float)) else None)
     if (
         cap not in _REQUESTS_LSP
         or choice.lsp_status != LspStatus.READY.value

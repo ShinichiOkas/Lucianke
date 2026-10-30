@@ -1837,7 +1837,7 @@ json の `data`:
 **処理規約**:
 
 1. `target` を §5.3 で解決する。`Variable` / `Constant` / `Type` 等の呼び出せない種別は `E_UNSUPPORTED`。
-2. `exact`: LSP の呼び出し階層（prepare → incoming / outgoing）を幅優先で `depth` まで辿る。辺は `relations` に `exact` で書き戻し（`data_version` は進めない）、2 回目以降はノードごとに、書き戻した行がまだ新しい（索引のどのファイルも変わっていない）間は LSP を呼ばず PaaD の `exact` 行だけで答える。根について LSP が 0 件と答えたのに索引に呼び出しがあるときは信用せず `structural` に降格する（設計書 §7.5.6。実装で確定 2026-10-29、1d8700d）。LSP が呼び出し階層を提供しない、または索引中のときは `relations` の `CALLS` エッジで代替し `structural` とする。
+2. `exact`: LSP の呼び出し階層（prepare → incoming / outgoing）を幅優先で `depth` まで辿る。辺は `relations` に `exact` で書き戻し（`data_version` は進めない）、2 回目以降はノードごとに、書き戻した行がまだ新しい（索引のどのファイルも変わっていない）間は LSP を呼ばず PaaD の `exact` 行だけで答える。根について LSP が 0 件と答えたのに索引に呼び出しがあるときは信用せず `structural` に降格する（設計書 §7.5.6。実装で確定 2026-10-29、1d8700d）。LSP が呼び出し階層を提供しない、または索引中のときは `relations` の `CALLS` エッジで代替し `structural` とする。 **LSP の時間の上限で切れたとき**（1 問い合わせで LSP に使える時間の合計 `EXACT_BUDGET_S` = 10 秒、または §12.3 の要求 1 つの期限 5,000 ms）: それまでに LSP（または PaaD の `exact` 行）が答えたノードは `exact` のまま返し、残りのノードの子だけを `relations` で補う（そのノード以下は `structural`。処理規約 9 の名前の判定も補った分にだけ使う。応答は `mixed: true`）。補ったノードには json で `children_confidence_level: "structural"`、compact で `- children: from the syntax index (conf=structural; the LSP did not answer)` を付ける。根の子を取れなければ木ごと `structural`。木は深さごとに聞く（幅優先。切れても浅い段は揃う）。`accuracy_warning`（降格したとき）と `warnings[]` の 1 行には、切れたのが 1 問い合わせの予算か要求の期限か・その実際の値（要求の期限ならその要求とノード）・`exact` で答えたノードの数と全部 `exact` の深さ・次にすること（LSP は動いているので呼び直す。答えた分は書き戻し済みなので、呼び直すと残りだけを LSP に聞く）を書く。（実装で確定 2026-10-31、BUG-0091。理由: 冷えた LSP への最初の問い合わせが予算に届くと、以前は答えた分も捨てて木ごと `structural` にし、警告は使い切った予算ではなく要求の期限「5000 ms」を書いていた。呼ぶ側の AI は答えた分を `exact` のまま使え、警告から「呼び直せば exact になる」と分かり、呼び直しは前の問い合わせの続きから進む。）
 3. `heuristic` / `lexical_fallback`: `name(` の単語境界 grep で呼び出し元候補を集め、1 段のみ返す。`depth ≥ 2` を要求されても 1 段で打ち切り、`accuracy_warning` にその旨を書く。
 4. ガード条件: 呼び出し箇所から囲みの関数本体まで AST の祖先を遡り、`if` / `elif` / `else`（否定で表す）/ `match`・`case` / `try`・`except`（`on: 例外型`）/ `while` / 三項演算 / 短絡 `and`・`or` の条件式のソーステキストを `&&` で連ねる。120 文字で省略する。囲みに条件が無ければ `when:` を付けない。否定は言語によらず `!(条件)` と書き、`elif` の中の呼び出しは「前の分岐の条件の否定」と「その `elif` の条件」を連ねる（例: `if a: … elif b: f()` の `f` は `when: !(a) && b`）。`or` などを最上位に持つ条件は、ほかと連ねるとき `(条件)` で囲む。書き方は `exact` でも `structural` でも同じ（どちらも同じ構文木から作る）。理由: 呼ぶ側の AI が言語ごとの否定の書き方を知らずに、その呼び出しが実行される条件をそのまま読めるようにする（BUG-0074）。
 5. 循環: 根からそのノードまでの経路に既に現れた URN は `(cycle)` を付けて 1 回だけ表示し、展開しない（MUST）。
@@ -1867,7 +1867,7 @@ json の `data`:
 |---|---|---|
 | `root` | SymbolRecord | |
 | `direction`, `depth` | string, integer | |
-| `nodes[]` | object[] | `urn`, `name`, `path`, `call_site_line`, `depth`, `parent_urn`, `when`, `is_test`, `is_external`, `cycle`, `children_truncated`, `confidence_level`。すべての呼び出し箇所を名前だけで結んだノード（処理規約 9）にだけ `match: "name"`。`call_sites[]` の各要素も同じ条件で `match` |
+| `nodes[]` | object[] | `urn`, `name`, `path`, `call_site_line`, `depth`, `parent_urn`, `when`, `is_test`, `is_external`, `cycle`, `children_truncated`, `confidence_level`。すべての呼び出し箇所を名前だけで結んだノード（処理規約 9）にだけ `match: "name"`。`call_sites[]` の各要素も同じ条件で `match`。`exact` の木で子を LSP から取れず構文木で補ったノード（処理規約 2）にだけ `children_confidence_level: "structural"` |
 | `edges[]` | object[] | `source_urn`, `target_urn`, `call_site_line`, `guard`（dot / mermaid の元）。名前だけで結んだ辺にだけ `match: "name"` |
 | `unattributed_calls[]` | object[] | 処理規約 9 で結ばなかった型不明の呼び出し（あるときだけ）。T-06 の同名の欄と同じ形に `direction` を足したもの |
 
@@ -1879,7 +1879,7 @@ json の `data`:
 - `E_TIMEOUT`: 降格時の grep が 2,000 ms を超えた。
 - `E_WORKSPACE_NOT_CONFIGURED`, `E_REVISION_NOT_FOUND`, `E_CURSOR_EXPIRED`: §5.8 のとおり。
 
-**精度と降格**: `exact` は型解決済みの呼び出し関係を `depth` まで返す。`structural` は `relations` の名前解決済みエッジを使い、動的ディスパッチと同名メソッドの区別が落ちる旨を `accuracy_warning` に書く。加えて処理規約 9 で名前だけで結んだノードは個別に `conf=heuristic` を付け、応答は `mixed: true`。`exact` の木には混ぜない。`heuristic` / `lexical_fallback` は 1 段のみで `when:` を付けない。
+**精度と降格**: `exact` は型解決済みの呼び出し関係を `depth` まで返す。`structural` は `relations` の名前解決済みエッジを使い、動的ディスパッチと同名メソッドの区別が落ちる旨を `accuracy_warning` に書く。加えて処理規約 9 で名前だけで結んだノードは個別に `conf=heuristic` を付け、応答は `mixed: true`。`exact` の答えには混ぜない（LSP の時間の上限で切れて構文木で補ったノードの子には使う。処理規約 2）。LSP の時間の上限で切れたときは、答えた分の `exact` のノードと補った分の `structural` のノードが 1 つの木に混ざる（`mixed: true`、ノードごとの `confidence_level`。処理規約 2。BUG-0091）。`heuristic` / `lexical_fallback` は 1 段のみで `when:` を付けない。
 
 **事後条件**:
 

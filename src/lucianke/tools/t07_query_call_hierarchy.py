@@ -126,6 +126,7 @@ class _Node:
     cycle: bool = False
     children_truncated: int = 0
     children: list[_Node] = field(default_factory=list)
+    children_filled: bool = False  # exact の木で、このノードの子を LSP に聞けず構文木（relations）で補った（BUG-0091）
 
     @property
     def site(self) -> _Site:
@@ -169,7 +170,9 @@ class _Symbols:
     ) -> None:
         self.conn, self.ws = conn, workspace_id
         self.source = source  # exact 経路の辺の供給（無ければ relations の全行）
-        self.names = names  # structural の木で、型の分からない受け手の呼び出しを名前で足す（BUG-0071）
+        # 型の分からない受け手の呼び出しを名前で足す（BUG-0071）。structural の木の全ノードと、exact の木で LSP に聞けず
+        # 構文木で補ったノード（BUG-0091）にだけ使う（exact の答えには混ぜない）
+        self.names = names
         self._sym: dict[str, SymbolRecord | None] = {}
         self._test: dict[str, bool] = {}
         # 名前で足した呼び出し箇所（向き, パス, 行, 列）と、結ばなかったもの（向き, *Verdict.key()）→ 集まり
@@ -186,6 +189,12 @@ class _Symbols:
             info = queries.file_by_path(self.conn, self.ws, path)
             self._test[path] = bool(info and info.is_test)
         return self._test[path]
+
+    def by_names(self, urn: str, direction: str) -> nc.NameIndex | None:
+        """``urn`` の子に名前で結んだ呼び出しを足すなら ``NameIndex``。exact の木では構文木で補ったノードだけ。"""
+        if self.names is None or (self.source is not None and not self.source.filled_in(urn, direction)):
+            return None
+        return self.names
 
 
 def _start_urns(conn: sqlite3.Connection, ws_id: str, sym: SymbolRecord, direction: str) -> list[str]:
@@ -233,9 +242,10 @@ def _call_edges(
             grouped.setdefault(child, {}).setdefault(
                 key, _Site(path=key[0], line=key[1], guard=r.guard_condition, confidence=r.confidence)
             )
-    if syms.names is not None:
-        for urn in urns:
-            for child, key, site in _name_edges(syms, syms.names, urn, direction, include_tests):
+    for urn in urns:
+        names = syms.by_names(urn, direction)
+        if names is not None:
+            for child, key, site in _name_edges(syms, names, urn, direction, include_tests):
                 if key not in grouped.get(child, {}):
                     grouped.setdefault(child, {})[key] = site
                     syms.by_name.add((direction, *key))
@@ -313,17 +323,15 @@ def _make_node(
     )
 
 
-def _expand(
+def _children(
     syms: _Symbols,
-    tree: _Tree,
     urns: Sequence[str],
     direction: str,
     depth: int,
-    ancestors: frozenset[str],
     args: QueryCallHierarchyArgs,
     parent_urn: str,
 ) -> tuple[list[_Node], int]:
-    """``urns`` の子を展開する。``(残したノード, max_children で省いた数)``。"""
+    """``urns`` の子のノード（深さ ``depth``）。``(残したノード, max_children で省いた数)``。"""
     edges = _call_edges(syms, urns, direction, args.include_tests)
     nodes: list[_Node] = []
     for child_urn, sites in edges.items():
@@ -335,19 +343,68 @@ def _expand(
         nodes.append(node)
     nodes.sort(key=lambda n: (n.site.path, n.site.line, n.name))
     kept = nodes[: args.max_children]
-    for node in kept:
-        tree.count += 1
-        if node.urn in ancestors:  # 経路上に既出: 1 回だけ表示して展開しない
-            node.cycle = True
-        elif node.external or depth >= args.depth:
-            continue
-        elif tree.count >= NODE_CAP:
-            tree.capped = True
-        else:
-            node.children, node.children_truncated = _expand(
-                syms, tree, [node.urn], direction, depth + 1, ancestors | {node.urn}, args, node.urn
-            )
     return kept, len(nodes) - len(kept)
+
+
+@dataclass(slots=True)
+class _Open:
+    """子を求めるノード（根は ``owner=None``）。"""
+
+    owner: _Node | None
+    urns: list[str]
+    ancestors: frozenset[str]
+    parent_urn: str
+
+
+def _expand(
+    syms: _Symbols,
+    tree: _Tree,
+    urns: Sequence[str],
+    direction: str,
+    ancestors: frozenset[str],
+    args: QueryCallHierarchyArgs,
+    parent_urn: str,
+) -> tuple[list[_Node], int]:
+    """根（``urns``）から ``args.depth`` まで、深さごとに（幅優先で）子を展開する。``(根の子, max_children で省いた数)``。
+
+    exact の木では、1 つの深さで子を求めるノードを先にまとめて ``CallEdgeSource.prefetch`` に渡す（LSP の最初の診断の待ちを
+    一度に始め、構文木の仕事を要求と重ねる）。予算が尽きたら、それまでの深さは exact のまま、残りを構文木で補う（BUG-0091）。
+    木の形（循環・外部の葉・``max_children``・``NODE_CAP``）の規則は深さ優先のときと同じ。表示はノードの前順（``_preorder``）。
+    """
+    first: tuple[list[_Node], int] = ([], 0)
+    frontier = [_Open(None, list(urns), ancestors, parent_urn)]
+    depth = 1
+    while frontier:
+        if syms.source is not None:
+            syms.source.prefetch(
+                [(u, direction) for item in frontier for u in item.urns], depth=depth, required=depth == 1
+            )
+        nxt: list[_Open] = []
+        for item in frontier:
+            if item.owner is not None and tree.count >= NODE_CAP:
+                tree.capped = True
+                continue
+            kept, skipped = _children(syms, item.urns, direction, depth, args, item.parent_urn)
+            if item.owner is None:
+                first = (kept, skipped)
+            else:
+                item.owner.children, item.owner.children_truncated = kept, skipped
+                item.owner.children_filled = syms.source is not None and syms.source.filled_in(
+                    item.owner.urn, direction
+                )
+            for node in kept:
+                tree.count += 1
+                if node.urn in item.ancestors:  # 経路上に既出: 1 回だけ表示して展開しない
+                    node.cycle = True
+                elif node.external or depth >= args.depth:
+                    continue
+                elif tree.count >= NODE_CAP:
+                    tree.capped = True
+                else:
+                    nxt.append(_Open(node, [node.urn], item.ancestors | {node.urn}, node.urn))
+        frontier = nxt
+        depth += 1
+    return first
 
 
 @dataclass(slots=True)
@@ -366,11 +423,13 @@ def _pre(db_path: Any, ws: Any, args: QueryCallHierarchyArgs) -> _Pre:
 
 @dataclass(slots=True)
 class _ExactCtx:
-    """``exact`` 経路でスレッドの中の ``CallEdgeSource`` を作るための材料。"""
+    """``exact`` 経路でスレッドの中の ``CallEdgeSource`` を作るための材料。作った ``source`` は、木ごと降格したときも
+    呼び手が警告（何が切れたか・次に何をすればよいか）と書き戻しに使う（BUG-0091）。"""
 
     loop: asyncio.AbstractEventLoop
     services: Any
     route: lx.LspRoute
+    source: lx.CallEdgeSource | None = None
 
 
 def _roots_of(conn: sqlite3.Connection, ws_id: str, sym: SymbolRecord) -> list[str]:
@@ -396,8 +455,9 @@ def _work(
                 token=queries.files_fingerprint(conn, ws.workspace_id),
                 roots=_roots_of(conn, ws.workspace_id, sym),
             )
+            exact.source = source
         names = nc.NameIndex(conn, ws.workspace_id)
-        syms = _Symbols(conn, ws.workspace_id, source, names=None if exact is not None else names)
+        syms = _Symbols(conn, ws.workspace_id, source, names=names)
         tree = _Tree(
             root=sym,
             language=info.language if info is not None else "n/a",
@@ -409,14 +469,14 @@ def _work(
             urns = _start_urns(conn, ws.workspace_id, sym, direction)
             if urns:
                 tree.roots[direction], skipped = _expand(
-                    syms, tree, urns, direction, 1, frozenset({root_urn, *urns}), args, root_urn
+                    syms, tree, urns, direction, frozenset({root_urn, *urns}), args, root_urn
                 )
                 if skipped:
                     tree.root_truncated[direction] = skipped
             else:
                 tree.roots[direction] = []
+        _name_notes(syms, tree)  # exact の木では、構文木で補ったノードの分だけ（BUG-0091）
         if exact is None:
-            _name_notes(syms, tree)
             if "incoming" in directions:
                 _blocked_notes(conn, ws.workspace_id, sym, tree, args.include_tests)
         elif "incoming" in directions and sym.kind is Kind.METHOD:
@@ -509,6 +569,7 @@ def _node_json(n: _Node, include_guard: bool) -> dict[str, Any]:
         "cycle": n.cycle,
         "children_truncated": n.children_truncated,
         "confidence_level": n.confidence.value,
+        **({"children_confidence_level": Confidence.STRUCTURAL.value} if n.children_filled else {}),
         **({"match": n.match} if n.match else {}),
     }
 
@@ -588,21 +649,31 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
     )
     tree: _Tree | None = None
     source: lx.CallEdgeSource | None = None
+    cut_note: str | None = None  # LSP に聞くのをやめた理由と、どこまで exact か（warnings[] の 1 行。BUG-0091）
     if route is not None:
         engine = replace(route.choice, warning=(route.choice.warning or "") + ACCURACY_NOTE)
+        ectx = _ExactCtx(asyncio.get_running_loop(), ctx.services, route)
         try:
-            tree, source = await asyncio.to_thread(
-                _work, db_path, ws, args, pre, _ExactCtx(asyncio.get_running_loop(), ctx.services, route)
-            )
+            tree, source = await asyncio.to_thread(_work, db_path, ws, args, pre, ectx)
         except lx.LSP_FAILURES as exc:
             if not lx.is_lsp_failure(exc):
                 raise
             _log.info("LSP call hierarchy failed; answering from the index: %r", exc)
+            failed = ectx.source
+            if failed is not None and failed.from_lsp:
+                await failed.flush()  # LSP が答えた分（both の片方の根など）は書き戻して、次の問い合わせで使う
             if route.exact:
                 engine = lx.degraded_choice(route, exc)
-                engine = replace(engine, warning=(engine.warning or "") + ACCURACY_NOTE)
+                # 時間切れは、切れたのが 1 問い合わせの予算か要求 1 つの期限か・その値・次に何をすればよいかを書く
+                # （selector の雛形は要求の期限しか知らない）。それ以外（索引中・利用不可）はセレクターの雛形のまま
+                why: str | None = None
+                if failed is not None and failed.cut is not None and failed.cut.kind != "down":
+                    why = failed.degradation_warning(whole_tree=True, direction=args.direction)
+                    cut_note = failed.cut_note(whole_tree=True, direction=args.direction)
+                engine = replace(engine, warning=(why or engine.warning or "") + ACCURACY_NOTE)
         else:
-            if source is not None and source.from_lsp:
+            assert source is not None
+            if source.from_lsp:
                 await source.flush()
                 engine = route.choice
             else:
@@ -611,6 +682,11 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
                     confidence=Confidence.EXACT,
                     lsp_status=lx.lsp_status_of(ctx.services, ws, pre.info),
                 )
+            # LSP が一部のノードに答えられなかった: 答えた分は exact のまま、残りは構文木で補った（mixed）
+            partial = source.degradation_warning(whole_tree=False, direction=args.direction)
+            if partial is not None:
+                engine = replace(engine, warning=partial)
+                cut_note = source.cut_note(whole_tree=False, direction=args.direction)
     if tree is None:
         tree, source = await asyncio.to_thread(_work, db_path, ws, args, pre, None)
     root_urn = str(tree.root.urn)
@@ -636,6 +712,8 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
             ]
             if n.children_truncated:
                 lines.append(L.note(f"children: {n.children_truncated} more"))
+            if n.children_filled:
+                lines.append(L.note("children: from the syntax index (conf=structural; the LSP did not answer)"))
             records.append(
                 Record(
                     kind="tree",
@@ -668,6 +746,8 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
         warnings.append(f"{source.skipped} call edge(s) were left out: the caller/callee is not in the index")
     if source is not None:
         warnings.extend(source.warnings)  # exact で答えたときだけ溜まる（LSP に開かせるファイルの上限など）
+    if cut_note:
+        warnings.append(cut_note)
     warnings.extend(tree.warnings)
     return ToolOutput(
         records=records,

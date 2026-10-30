@@ -23,6 +23,8 @@ from lucianke.engine.selector import (
     WaitPolicy,
     WarningReason,
     is_degraded,
+    is_lsp_degradation,
+    on_lsp_failure,
     on_lsp_timeout,
     on_nothing_found,
     select,
@@ -378,6 +380,18 @@ def test_timeout_demotes_to_the_right_neighbour_column(cap: Capability) -> None:
 def test_timeout_warning_uses_each_limit() -> None:
     assert "3000 ms" in (on_lsp_timeout(_select_col(C.DEFINITION, READY), C.DEFINITION).warning or "")
     assert "5000 ms" in (on_lsp_timeout(_select_col(C.CALL_HIERARCHY, READY), C.CALL_HIERARCHY).warning or "")
+
+
+def test_timeout_warning_names_the_limit_that_actually_fired() -> None:
+    """BUG-0091: 要求に実際に渡した期限（``LspRequestTimeout.timeout_ms``）を書く。表の定数（``LSP_TIMEOUT_MS``）ではない。"""
+    from lucianke.lsp.features import LspRequestTimeout
+
+    exc = LspRequestTimeout("textDocument/references", 120_000, "basedpyright")
+    assert isinstance(exc, TimeoutError) and is_lsp_degradation(exc)
+    demoted = on_lsp_failure(_select_col(C.REFERENCES, READY), C.REFERENCES, exc)
+    assert "120000 ms" in (demoted.warning or "") and "3000 ms" not in (demoted.warning or ""), demoted.warning
+    plain = on_lsp_failure(_select_col(C.REFERENCES, READY), C.REFERENCES, TimeoutError())
+    assert "3000 ms" in (plain.warning or ""), plain.warning  # 期限を持たない時間切れは表の値
 
 
 def test_timeout_keeps_the_pyright_style_engine_name_out_of_the_demoted_choice() -> None:
