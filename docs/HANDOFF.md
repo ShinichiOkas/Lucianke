@@ -87,3 +87,15 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 - 新 .venv で `uv run pytest -q` が `tree_sitter_rust` の収集エラーで止まることを確認 → `uv sync --extra langs` で解消（BUG-0062）
 - langs 同期後・フィクスチャ未取得だと `3734 passed / 71 skipped / 0 failed`。契約テスト単独は `6 skipped`（= 未検査）。`fetch_fixtures.py` で F-PY・F-TS を取得すると `2 failed, 4 passed`（BUG-0061 が見える）→ BUG-0062
 - BUG-0061 を直す役が `default_max_tokens` を 2500→6000 に（`2a42a50`）。`tests/contract_fixtures/test_fx_db_T19_T20.py` が **6 passed** になることを自分の環境で確認。仕様 5.19（全 10 テーブルを 1 回で返す）と照らして妥当と判断
+
+## 6. exe 配布（2026-10-31・師匠の判断「配布は exe 形式」）
+
+- 入口は `.\build.ps1`（Windows PowerShell 5.1 で動く。UTF-8 BOM）。ビルド（`packaging\lucianke.spec`、PyInstaller 6.22.3 固定、onedir）→
+  `tools\smoke_exe.py`（`--version`・`doctor`・`tools/list` がソースと同じ・`tests/fixtures/poly` で T-00/T-02/T-03/T-07・stdout の純度・
+  stdin EOF で終了コード 0）→ インストール（`-InstallDir` → `AGENT_INSTALL_DIR` → `~/.local/bin`）。`-Zip` で `dist\lucianke-<版>-windows-<arch>.zip` と sha256。
+- onefile にしない（起動 3.4〜4.2 秒。onedir は 0.7〜0.8 秒）。実行時の中身は `lucianke_internal\`（PATH の bin に直接置いても他の PyInstaller 製 exe とぶつからない）
+- インストール先の exe が動いている（MCP のホストが使っている）と置き換えられない。`build.ps1` は止めずにエラーにし、`-Force` で止めて置き換える
+- exe では `sys.executable` が Python ではない。`doctor` の自己診断は隠しサブコマンド `_doctor-selftest`（`cli/selftest.py`）で exe 自身を起動する
+- リリース: `v*` のタグを push すると `.github/workflows/release.yml` が Windows でビルド・smoke・Release に zip を上げる（python.org の Python に固定して、その LICENSE.txt を同梱）
+- 確かめたこと（2026-10-31、このPC）: `build.ps1 -Zip -InstallDir <一時>` が smoke 13 項目すべて ok、zip は 394 項目・区切りは `/`・展開した exe が動く。
+  動いている exe があると exit 1 で止まり、`-Force` で止めて置き換え、`-Uninstall` で消える。リリースのワークフローはまだ一度も走らせていない（初回のタグで確かめる）

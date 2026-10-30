@@ -1,0 +1,48 @@
+name: release
+# 配布は exe 形式（師匠の判断 2026-10-31）。v* のタグを push すると、Windows で exe（PyInstaller・onedir）をビルドし、
+# tools/smoke_exe.py で確かめてから、zip と sha256 を GitHub Release に上げる。手動の起動（workflow_dispatch）は
+# 成果物（artifact）に上げるだけで、Release は作らない。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Release を作る
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # exe は Python の実行系を同梱して再配布する。python.org の版を使い、その LICENSE.txt（同梱の OpenSSL・SQLite などの
+      # 告知を含む）を spec が licenses/python/ に入れる（uv が落とす管理版の Python ではなく setup-python の版に固定する）
+      UV_PYTHON_PREFERENCE: only-system
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: 版とタグを照らす
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path src/lucianke/__init__.py -Pattern '^__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match __version__ $version" }
+      - name: ビルド・確かめ・zip（build.ps1）
+        shell: pwsh
+        run: ./build.ps1 -Zip -NoInstall
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lucianke-windows-exe
+          path: |
+            dist/lucianke-*.zip
+            dist/lucianke-*.zip.sha256
+          if-no-files-found: error
+      - name: GitHub Release に上げる
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" (Get-ChildItem dist/lucianke-*.zip*).FullName --generate-notes --title "${{ github.ref_name }}"

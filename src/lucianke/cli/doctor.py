@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Final, Literal, TextIO
 
 from lucianke import __version__
+from lucianke.cli.selftest import SUBCOMMAND as SELFTEST_SUBCOMMAND
 from lucianke.core.procs import minimal_env
 from lucianke.lsp.servers import SERVERS, LspServerDef, find_command, find_tsserver
 
@@ -172,8 +173,14 @@ def _dist_version(name: str) -> str | None:
         return None
 
 
-def check_dependencies() -> list[Check]:
-    """必須の依存（欠けは fail）と、extras ごとの導入状況（欠けは warn）。"""
+def check_dependencies(*, frozen: bool | None = None) -> list[Check]:
+    """必須の依存（欠けは fail）と、extras ごとの導入状況（欠けは warn）。
+
+    exe（PyInstaller。``sys.frozen``）では extras を後から pip で足せないので、欠けた extras は ``info``（この exe に
+    同梱していない）にして ``pip install`` の案内は出さない。LSP（basedpyright・ruff）は ``[lsp]`` の節が外部から探す。
+    """
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
     requires = metadata.requires("lucianke") if _dist_version("lucianke") else None
     core: list[str] = []
     extras: dict[str, list[str]] = {}
@@ -205,7 +212,14 @@ def check_dependencies() -> list[Check]:
         )
     for extra, names in sorted(extras.items()):
         gone = [n for n in names if _dist_version(n) is None]
-        if gone:
+        if gone and frozen:
+            checks.append(
+                Check(
+                    "dependencies", f"extra:{extra}", "info",
+                    f"not bundled in this exe: {', '.join(gone)} ({len(names) - len(gone)}/{len(names)} bundled)",
+                )
+            )  # fmt: skip
+        elif gone:
             checks.append(
                 Check(
                     "dependencies", f"extra:{extra}", "warn",
@@ -220,32 +234,31 @@ def check_dependencies() -> list[Check]:
     return checks
 
 
-# 子プロセスで実行する自己診断。``bootstrap_io`` の後に重い import と各経路の出力を行い、本物の stdout には
-# 退避 fd のトランスポートの 1 行だけが届くことを親が確かめる。
+# 子プロセスで実行する自己診断（本体は ``cli/selftest.py``）。本物の stdout には退避 fd のトランスポートの 1 行だけが
+# 届くことを親が確かめる。
 _SELFTEST_CODE: Final = r"""
-import os, sys
+import sys
 sys.path.insert(0, sys.argv[1])
-from lucianke.bootstrap_io import bootstrap_io, open_transport_streams
-fds = bootstrap_io()
-try:
-    import mcp.server, pydantic, tree_sitter, watchfiles, yaml, jsonpath_ng, dulwich.repo  # noqa: F401
-except ImportError as exc:
-    sys.stderr.write("import failed: %s\n" % exc)
-    raise SystemExit(3)
-print("doctor-noise-print")
-os.write(1, b"doctor-noise-fd1\n")
-sys.__stdout__.write("doctor-noise-dunder\n")
-sys.__stdout__.flush()
-_, out = open_transport_streams(fds)
-out.write(sys.argv[2] + "\n")
-out.flush()
+from lucianke.cli.selftest import main
+raise SystemExit(main(sys.argv[2]))
 """
+
+
+def selftest_argv(*, frozen: bool | None = None) -> list[str]:
+    """自己診断の子プロセスの argv。exe（PyInstaller。``sys.frozen``）には ``-c`` を受ける Python が無いので、exe 自身を
+    隠しサブコマンド（``selftest.SUBCOMMAND``）で起動する。ソースからは ``python -I -c`` で利用者の環境を見ずに起動する。
+    """
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        return [sys.executable, SELFTEST_SUBCOMMAND, SELFTEST_MARKER]
+    pkg_root = str(Path(__file__).resolve().parents[2])  # .../src（lucianke の親）
+    return [sys.executable, "-I", "-c", _SELFTEST_CODE, pkg_root, SELFTEST_MARKER]
 
 
 def check_stdout_isolation(*, timeout_s: float = SELFTEST_TIMEOUT_S) -> list[Check]:
     """子プロセスで ``bootstrap_io`` を試し、本物の stdout が純粋であることを確かめる（必須）。"""
-    pkg_root = str(Path(__file__).resolve().parents[2])  # .../src（lucianke の親）
-    argv = [sys.executable, "-I", "-c", _SELFTEST_CODE, pkg_root, SELFTEST_MARKER]
+    argv = selftest_argv()
     name = "stdout isolation"
     try:
         cp = subprocess.run(  # noqa: S603  自分自身の Python を起動する（シェルを介さない）

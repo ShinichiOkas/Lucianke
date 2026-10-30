@@ -19,6 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     if args[:1] == ["doctor"]:
         return _run_doctor(args[1:])
     if args:
+        from lucianke.cli import selftest  # 軽い（bootstrap_io だけ）
+
+        if args[0] == selftest.SUBCOMMAND:  # doctor が exe 自身を起動する隠しサブコマンド（stdout 隔離の自己診断）
+            return selftest.main(args[1] if len(args) > 1 else "")
         print(f"lucianke: unknown subcommand {args[0]!r} (not implemented yet)", file=sys.stderr)
         return 2
     from lucianke.app import run_stdio  # 遅延 import: --version を軽く保つ

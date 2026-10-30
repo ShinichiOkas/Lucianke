@@ -77,6 +77,8 @@ include = [
   "/src",
   "/tests",
   "/tools",
+  "/packaging",
+  "/build.ps1",
   "/docs",
   "/LICENSE",
   "/THIRD_PARTY_NOTICES.md",

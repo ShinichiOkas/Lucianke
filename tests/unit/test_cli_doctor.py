@@ -199,9 +199,40 @@ def test_missing_required_dependency_fails(monkeypatch: pytest.MonkeyPatch):
     assert doctor.exit_code(checks) == 1
 
 
+def test_missing_extras_in_an_exe_are_info_without_a_pip_hint(monkeypatch: pytest.MonkeyPatch):
+    # exe には extras を後から pip で足せない。欠けた extras は「同梱していない」の info にする（warn・pip の案内を出さない）
+    real = doctor._dist_version
+
+    def fake(name: str):
+        return None if name in ("z3-solver", "sqlglot") else real(name)
+
+    monkeypatch.setattr(doctor, "_dist_version", fake)
+    frozen = by_name(doctor.check_dependencies(frozen=True), "extra:verify")
+    assert frozen.status == "info" and "not bundled in this exe" in frozen.detail and "pip" not in frozen.detail
+    source = by_name(doctor.check_dependencies(frozen=False), "extra:verify")
+    assert source.status == "warn" and "lucianke[verify]" in source.detail
+
+
 def test_stdout_isolation_self_test_passes():
     (check,) = doctor.check_stdout_isolation()
     assert check.status == "ok", check.detail
+
+
+def test_selftest_argv_in_an_exe_starts_the_exe_itself_with_the_hidden_subcommand():
+    # exe（PyInstaller）には -c を受ける Python が無い。exe 自身を隠しサブコマンドで起動する
+    assert doctor.selftest_argv(frozen=True) == [sys.executable, "_doctor-selftest", doctor.SELFTEST_MARKER]
+    assert doctor.selftest_argv(frozen=False)[1:3] == ["-I", "-c"]
+
+
+def test_hidden_selftest_subcommand_keeps_stdout_pure():
+    # exe が通る経路（``lucianke _doctor-selftest <marker>``）を、ソースの入口で同じように通す
+    cp = subprocess.run(
+        [sys.executable, "-m", "lucianke", "_doctor-selftest", doctor.SELFTEST_MARKER],
+        capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=False,
+    )  # fmt: skip
+    assert cp.returncode == 0, cp.stderr[-500:]
+    assert cp.stdout == (doctor.SELFTEST_MARKER + "\n").encode()
+    assert b"doctor-noise-print" in cp.stderr and b"doctor-noise-fd1" in cp.stderr
 
 
 def test_main_writes_only_to_the_given_stream_and_json_parses(tmp_path: Path, empty_env, capfd):
