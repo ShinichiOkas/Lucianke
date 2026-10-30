@@ -10,7 +10,14 @@ from __future__ import annotations
 from typing import Final
 
 # --- 共通パラメータ・件数（仕様書 §5） -------------------------------------------------
-MIN_MAX_TOKENS: Final = 200  # §5.2: max_tokens の最小値。下回る指定は E_INVALID_ARGUMENT
+# §5.2: max_tokens に固定の最小値は置かない（師匠の判断 2026-10-30）。固定下限は前置き量（accuracy_warning・
+# head_kv・json 封筒）と無関係に決め打ちするため、実装で前置きが伸びると §5.7（used_tokens_est <= max_tokens）と
+# 衝突して溢れる（BUG-0063）。下限は呼び出しごとに動的に決まる: 実際に詰めて前置きすら入らなければ、出口（mcp/fit.py・
+# budget.py の 0 件経路）がその呼び出しに必要な max_tokens の実測値を warnings で返して呼び直させる（BUG-0015）。
+# 公開 API はどんな正の max_tokens も受ける。これはツール作者が default_max_tokens を 0 や負に設定するのを登録時に
+# 弾く絶対最小の床にすぎない（公開の下限ではない。封筒・ヘッダの最小が必ず 1 トークン以上要ることから 1）。
+REGISTRY_MIN_DEFAULT_MAX_TOKENS: Final = 1  # ToolSpec.default_max_tokens の登録時の床（作者のミス検出。公開下限ではない）
+BUDGET_FLOOR_FOR_PAGING: Final = 200  # 内部用（ページング検証の床）。公開の max_tokens の下限ではない。小刻みな cursor ページングのテストが使う
 BATCH_MAX_ITEMS: Final = 20  # §11 T-02 / T-04 / T-05: paths[] / targets[] は 1〜20 件
 CANDIDATES_MAX: Final = 10  # §5.3 / §5.8: E_TARGET_AMBIGUOUS の candidates[] の最大件数
 SNIPPET_MAX_CHARS: Final = 200  # §6.1 規約 6 / §12.6 / §13.5: snippet・doc・when の最大文字数（超過は「…」）

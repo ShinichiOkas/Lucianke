@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 from urllib.parse import unquote
 
 from lucianke.core.errors import ErrorCode, LuciankeError
@@ -419,7 +419,6 @@ def _render(inp: RenderInput, prefix: str, body: Callable[[RenderInput, _Graph],
         total_tok = count("\n".join([*[f"{prefix}{line}" for line in _head_lines(inp, None)], *body_lines, *tail_lines_g]) + "\n")
         if total_tok > max_tokens:
             # head already exceeds budget or graph body is too large: binary-search node count
-            budget = max_tokens - head_tok
             lo, hi = 0, len(graph.nodes)
             best_n = 0
             for _ in range(_MAX_GRAPH_TRIM_ROUNDS):

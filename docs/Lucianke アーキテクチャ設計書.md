@@ -604,7 +604,7 @@ tools/call(name, arguments)
   3. ctx  = ToolContext(workspace, revision, format, budget, cursor, request_id, started_at)
        - workspace_id の解決（T-00 手順 7 の順序）  → E_WORKSPACE_NOT_CONFIGURED
        - revision の解決（WORKING_TREE / STAGED / HEAD / 名前 / SHA）→ E_REVISION_NOT_FOUND
-       - format の可否（allows_graph）、max_tokens ≥ 200、writes なら revision == WORKING_TREE
+       - format の可否（allows_graph）、max_tokens > 0（固定の下限なし。BUG-0063）、writes なら revision == WORKING_TREE
        - cursor があれば復号し data_version を照合 → E_CURSOR_EXPIRED
   4. out  = await spec.handler(ctx, args)         LuciankeError はここで捕捉
   5. page = Packer.pack(out, ctx.budget, ctx.cursor_offset)   レコードを詰め、残りを要約、next_cursor

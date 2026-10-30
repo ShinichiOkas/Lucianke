@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 import pytest
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.limits import MIN_MAX_TOKENS
+from lucianke.core.limits import BUDGET_FLOOR_FOR_PAGING
 from lucianke.core.model import Confidence, EngineChoice
 from lucianke.core.records import Record, ToolOutput
 from lucianke.mcp.budget import (
@@ -235,6 +235,19 @@ def test_pack_empty_records() -> None:
     assert page.warnings == ()
     assert page.used_tokens_est == 20
     assert page.total_estimate == 0
+
+
+def test_pack_empty_records_with_preamble_over_budget_names_required_max_tokens() -> None:
+    # BUG-0064: レコードが元から 0 件で前置きだけが予算を超えても、呼び直しに要る max_tokens を warnings で名指しする
+    page = Packer().pack(make_out([]), max_tokens=200, reserved_tokens=365, cursor_factory=cursor_factory())
+    assert page.records == ()
+    assert page.next_cursor is None
+    assert page.truncated is False
+    assert len(page.warnings) == 1
+    assert "raise max_tokens to ~365" in page.warnings[0]
+    assert page.used_tokens_est == 365 + EST.count("! " + page.warnings[0] + "\n")
+    # 前置きが入る予算なら警告は出さない（境界）
+    assert Packer().pack(make_out([]), max_tokens=365, reserved_tokens=365).warnings == ()
 
 
 def test_pack_stops_when_full_and_never_cuts_a_record() -> None:
@@ -504,7 +517,7 @@ def test_used_tokens_never_exceed_max_tokens_random() -> None:
     zero_pages = 0
     for case in range(200):
         n = rng.randint(0, 60)
-        max_tokens = rng.randint(MIN_MAX_TOKENS, 1500)
+        max_tokens = rng.randint(BUDGET_FLOOR_FOR_PAGING, 1500)
         reserved = rng.randint(0, 100)
         recs = _random_records(rng, n, rng.choice([5, 30, 120]))
         out = make_out(recs, summarize=rng.choice(SUMMARIZERS))
@@ -549,7 +562,7 @@ def test_pagination_concatenation_equals_original_random() -> None:
     packer = Packer()
     for case in range(60):
         n = rng.randint(0, 80)
-        max_tokens = rng.randint(MIN_MAX_TOKENS, 700)
+        max_tokens = rng.randint(BUDGET_FLOOR_FOR_PAGING, 700)
         recs = _random_records(rng, n, 12)
         out = make_out(recs, summarize=SUMMARIZERS[case % len(SUMMARIZERS)])
         args = {"case": case}

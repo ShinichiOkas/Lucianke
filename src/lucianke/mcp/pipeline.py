@@ -23,7 +23,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.limits import MIN_MAX_TOKENS, SNIPPET_MAX_CHARS
+from lucianke.core.limits import SNIPPET_MAX_CHARS
 from lucianke.core.records import ResolutionMeta
 from lucianke.mcp.budget import CursorCodec, Packer
 from lucianke.mcp.envelope import build_meta
@@ -188,8 +188,8 @@ class Pipeline:
         except ValidationError as exc:
             raise _from_validation_error(exc) from None
 
-        if args.max_tokens is not None and args.max_tokens < MIN_MAX_TOKENS:
-            raise invalid_argument("max_tokens", f"max_tokens: must be >= {MIN_MAX_TOKENS}", minimum=MIN_MAX_TOKENS)
+        # max_tokens に固定の下限は置かない（BUG-0063）。正の整数ならそのまま受け、前置きすら入らなければ出口
+        # （fit.py・budget.py の 0 件経路）が必要な実測値を warnings で返す。pydantic の gt=0 で非正は既に弾く。
         max_tokens = args.max_tokens if args.max_tokens is not None else spec.default_max_tokens
         args = args.model_copy(update={"max_tokens": max_tokens})
         call = CallInfo(tool=spec.name, revision=args.revision, workspace_id=args.workspace_id,
@@ -288,7 +288,7 @@ class Pipeline:
             revision=revision if isinstance(revision, str) else WORKING_TREE,
             workspace_id=workspace_id if isinstance(workspace_id, str) else None,
             format=fmt if isinstance(fmt, str) and fmt in _FORMATS else "compact",
-            max_tokens=max_tokens if isinstance(max_tokens, int) and max_tokens >= MIN_MAX_TOKENS
+            max_tokens=max_tokens if isinstance(max_tokens, int) and max_tokens > 0
             and not isinstance(max_tokens, bool) else spec.default_max_tokens,
         )  # fmt: skip
 

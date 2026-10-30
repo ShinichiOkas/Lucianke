@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from lucianke.core.limits import MIN_MAX_TOKENS
+from lucianke.core.limits import BUDGET_FLOOR_FOR_PAGING
 from lucianke.core.model import Confidence, EngineChoice
 from lucianke.core.records import Record, ToolOutput
 from lucianke.mcp.budget import CursorCodec, Packer, TokenEstimator, default_summary
@@ -172,7 +172,7 @@ def test_lazy_window_trailer_is_counted_even_when_the_records_fit_exactly() -> N
 
 def test_lazy_window_budget_never_exceeded_across_budgets() -> None:
     recs = [rec(f"r{i}", size=3 + i % 5, group=f"f{i % 3}.py") for i in range(12)]
-    for max_tokens in range(MIN_MAX_TOKENS, 400, 7):
+    for max_tokens in range(BUDGET_FLOOR_FOR_PAGING, 400, 7):
         page = pack(make_out(recs, 40), max_tokens=max_tokens, reserved=20)
         assert page.used_tokens_est <= max_tokens, max_tokens
         assert page.next_cursor is not None
@@ -240,7 +240,7 @@ def test_walk_pages_random() -> None:
             for i in range(n)
         ]
         limit = rng.randint(1, 20)
-        max_tokens = rng.randint(MIN_MAX_TOKENS, 900)
+        max_tokens = rng.randint(BUDGET_FLOOR_FOR_PAGING, 900)
         pages = walk(everything, limit=limit, max_tokens=max_tokens, reserved=rng.randint(0, 60))
         keys = [r.key for p in pages for r in p.records]
         assert keys == [r.key for r in everything], case
@@ -261,7 +261,7 @@ def test_a_page_with_a_cursor_always_advances_the_offset_random() -> None:
         limit = rng.randint(1, 10)
         page = pack(
             tool_window(everything, offset, limit),
-            max_tokens=rng.randint(MIN_MAX_TOKENS, 500),
+            max_tokens=rng.randint(BUDGET_FLOOR_FOR_PAGING, 500),
             offset=offset,
             reserved=rng.randint(0, 150),
         )

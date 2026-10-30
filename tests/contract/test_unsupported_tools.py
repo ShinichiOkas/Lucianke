@@ -101,7 +101,7 @@ def test_schema_has_the_required_arguments_of_the_spec(registry: ToolRegistry, n
     assert schema["type"] == "object" and schema["additionalProperties"] is False
     props = schema["properties"]
     assert {"workspace_id", "revision", "format", "max_tokens", "cursor"} <= set(props)  # 共通パラメータ
-    assert props["max_tokens"]["default"] == DEFAULT_TOKENS[name] and props["max_tokens"]["minimum"] == 200
+    assert props["max_tokens"]["default"] == DEFAULT_TOKENS[name] and props["max_tokens"]["exclusiveMinimum"] == 0
     formats = set(props["format"]["enum"])
     assert ({"dot", "mermaid"} <= formats) is (name in GRAPH_TOOLS), name
 

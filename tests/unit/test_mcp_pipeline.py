@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.limits import MIN_MAX_TOKENS
+from lucianke.core.limits import REGISTRY_MIN_DEFAULT_MAX_TOKENS
 from lucianke.core.model import Confidence, EngineChoice
 from lucianke.core.records import Record, ToolOutput
 from lucianke.mcp.budget import CursorState
@@ -146,8 +146,8 @@ async def test_none_arguments_are_empty():
 
 async def test_explicit_max_tokens_and_json_format():
     h = Harness()
-    await h.pipeline().call_tool("echo_tool", {"max_tokens": MIN_MAX_TOKENS, "format": "json"})
-    assert h.capture.last.call.max_tokens == MIN_MAX_TOKENS and h.capture.last.call.format == "json"
+    await h.pipeline().call_tool("echo_tool", {"max_tokens": 1, "format": "json"})
+    assert h.capture.last.call.max_tokens == 1 and h.capture.last.call.format == "json"
 
 
 async def test_default_renderers_smoke():
@@ -274,8 +274,9 @@ async def test_invalid_argument_does_not_echo_values():
     assert err is not None and SECRET not in json.dumps(err.to_json())
 
 
-@pytest.mark.parametrize("value", [0, 199, -5])
-async def test_max_tokens_below_minimum(value):
+@pytest.mark.parametrize("value", [0, -5])
+async def test_non_positive_max_tokens_is_invalid_argument(value):
+    # 固定下限は廃止（BUG-0063）。非正（0 以下）だけを弾く。正の値はどれだけ小さくても受理する
     h = Harness()
     rendered = await h.pipeline().call_tool("echo_tool", {"max_tokens": value})
     err = h.capture.last.error
@@ -283,9 +284,10 @@ async def test_max_tokens_below_minimum(value):
     assert rendered.is_error and h.calls == []
 
 
-async def test_max_tokens_boundary_is_accepted():
+async def test_small_positive_max_tokens_is_accepted():
+    # 1 のような小さな正値も受理する（前置きすら入らなければ出口が実測値を warnings で返す。BUG-0063）
     h = Harness()
-    assert (await h.pipeline().call_tool("echo_tool", {"max_tokens": 200})).is_error is False
+    assert (await h.pipeline().call_tool("echo_tool", {"max_tokens": 1})).is_error is False
 
 
 async def test_graph_format_on_non_graph_tool_is_invalid_argument():
@@ -523,7 +525,7 @@ def test_registry_rejects_duplicates_and_bad_defaults():
     with pytest.raises(ValueError, match="already registered"):
         reg.register(_spec())
     with pytest.raises(ValueError, match="default_max_tokens"):
-        ToolRegistry([_spec(default_max_tokens=100)])
+        ToolRegistry([_spec(default_max_tokens=REGISTRY_MIN_DEFAULT_MAX_TOKENS - 1)])
     with pytest.raises(ValueError, match="milestone"):
         ToolRegistry([_spec(milestone="M9")])
 
@@ -534,7 +536,7 @@ def test_input_schema_is_closed_and_carries_per_tool_defaults():
     for schema in (a, b):
         assert schema["type"] == "object" and schema["additionalProperties"] is False
         assert set(schema["properties"]) >= {"workspace_id", "revision", "format", "max_tokens", "cursor", "n", "label"}
-        assert schema["properties"]["max_tokens"]["minimum"] == MIN_MAX_TOKENS
+        assert schema["properties"]["max_tokens"]["exclusiveMinimum"] == 0
         assert schema["properties"]["revision"]["default"] == "WORKING_TREE"
         assert schema["properties"]["format"]["default"] == "compact"
         assert "required" not in schema  # 共通パラメータはすべて省略可能

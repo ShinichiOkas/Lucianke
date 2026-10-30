@@ -3,7 +3,7 @@
 この文書は、セッションが中断した（トークンクォータ等）ときに、**別の PC・別のエージェントが続きを拾うため**の現在地。
 作業が進んだらこの文書を更新してコミットする（履歴は git に残る）。
 
-最終更新: 2026-10-29 / 対象: `main`（この文書を含むコミット） / 直前のコミット: `6ade29e` BUG-0062 票 + HANDOFF §0 に 2 コマンド明記（BUG-0061 は `2a42a50` で解消済み）
+最終更新: 2026-10-31 / 対象: `main`（この文書を含むコミット） / 直前のコミット: `87d9451`。このコミットで BUG-0063（`max_tokens` の固定下限 200 の廃止）・BUG-0064（前置きだけで予算超過のとき必要な `max_tokens` を名指し）を解消
 
 ---
 
@@ -27,51 +27,44 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | 全 green（BUG-0061 は `2a42a50` で解消）。langs extra 同期・フィクスチャ取得が前提（BUG-0062） |
+| 全体テスト | `7 failed, 3774 passed, 32 skipped`（2026-10-31・989 秒）。落ちる 7 件は T-02 skeleton の json の形（BUG-0065・対応中）。langs extra 同期・フィクスチャ取得が前提（BUG-0062） |
 | 索引 DB のスキーマ | v4（`_exact_marks`、`index/exact_marks.py`、ADR-16） |
 
 ## 2. このコミットで入ったもの
 
-前セッションが中断した時点の作業ツリーを、**そのまま捨てずに完成させてから**入れた。テーマは 2 つ。
+テーマは「`max_tokens` の下限を固定値から呼び出しごとの実測値へ」（師匠の判断 2026-10-30）。
 
-### (a) 関数の中の `require` の束縛（BUG-0052。BUG-0048 の TS/JS 版）
+### (a) 固定下限 200 の廃止（BUG-0063）
 
-`function f() { const { foo } = require("./foo"); return foo(1); }` の `foo` の使用が、参照（T-06）に載るようにした。
-モジュール直下の `require` と同じ扱いで、別関数で同名を別モジュールから require していても巻き込まない。
+前置き（ヘッダ・accuracy_warning・`head_kv`・json の封筒）だけで 200 を超える応答があり、仕様 §5.2（最小 200）と §5.7（`used_tokens_est <= max_tokens`）が衝突していた。
 
-- `src/lucianke/syntax/imports.py`
-  - `JS_FUNCTION_NODES`（関数ノードの集合）を公開。`_JS_FUNCTIONS` の定義元を 1 か所に寄せた
-  - 関数の中の `require` を `ImportFact.nested=True` に
-  - `js_require_bindings(declarator, src)` を追加（`relations.py` と共有）
-- `src/lucianke/syntax/relations.py`
-  - `_js_scoped_require` で、関数の中で require が束縛した名前を「ローカル変数」でなく「import」として控える
-  - `object_assignment_pattern`（`{ foo = 1 }`）のキーも対象に
-- テスト: `tests/unit/test_syntax_relations_scoped_imports.py` に 14 本、
-  `tests/contract/test_T06_T07.py::test_real_t06_use_after_a_function_local_require_is_a_reference`（実索引で F 相当を作り T-06 を通す）
+- `core/limits.py`: `MIN_MAX_TOKENS` を廃止。`REGISTRY_MIN_DEFAULT_MAX_TOKENS = 1`（`ToolSpec.default_max_tokens` の登録時の床。作者のミス検出用で公開下限ではない）と、テスト用の `BUDGET_FLOOR_FOR_PAGING = 200`
+- `tools/_base.py`: `max_tokens: int | None = Field(default=None, gt=0)`。非正だけ `E_INVALID_ARGUMENT`
+- `mcp/pipeline.py`: 200 未満を弾く検査を削除。`mcp/registry.py`: `tools/list` のスキーマは `exclusiveMinimum: 0`
+- 仕様書 §5.2 の表・§5.6-4、設計書の検査一覧を更新
 
-### (b) `Node.text` の全廃（BUG-0020・BUG-0051）
+### (b) 前置きだけで超過したときに必要な `max_tokens` を名指しする（BUG-0064）
 
-py-tree-sitter 0.26.0 の `Node.text` は、`read_callback` で解析した木では**読み取り関数を呼び直し**（解析期限を過ぎると空回りして戻らない）、返した `bytes` を解放してから読む（アクセス違反）。ノードの綴りは必ず `source[node.start_byte : node.end_byte]` で切る。
+レコードが元から 0 件で前置きが予算を超えると、`warnings` が空で「いくつに上げればよいか」が伝わらなかった。
 
-- `syntax/boundaries.py`・`syntax/imports.py`・`syntax/relations.py`・`tools/_t11_scope.py` から `node.text` を除去
-- `tests/unit/test_syntax_skeleton_realfiles.py` に**番人テスト**を追加: `src/` を AST で走査し、`.text` の読み取りが残っていないことを検査する（ノードでない `.text` は `_NOT_A_NODE` に名前で登録して除外）
-- 前セッションが残した壊れたテスト（文字列リテラルの `\n` が実改行に化けて collection error）を修復した
+- `mcp/budget.py` の `Packer.pack`（`start >= n` の経路）: `reserved_tokens > max_tokens` なら
+  `the response preamble alone needs ~N tokens, over max_tokens=M; raise max_tokens to ~N or more ...` を `warnings` に入れる
+  （`_fit` の `m == 0` の警告と同じ形）。dot・mermaid もこの経路を通る
+- 実測（`tests/fixtures/poly`、`bench/_budget_probe2.py`）: T-07 json は max_tokens=200 で警告 `~365`、365 で呼び直すと used=365・警告なし。T-06 json は `~384` → 384 で used=384・警告なし
 
 ### (c) その他
 
-- `tools/t07_query_call_hierarchy.py`: `exclude_external` の説明文を実装に合わせた（`other stdlib/package callees`）
-- `bench/e2e/records/20261029-151430-windows.jsonl`: e2e の記録（前セッションの実行分）
-- `bench/dogfood/out/` はスクラッチ（344 KB の探針ログ）なので `.gitignore` に足して追跡しない
-- `BUG-0061` の票を追加（下記）
+- `mcp/render/graph.py`: ruff の 2 件（`Final` の import 漏れ・未使用変数）を修正。`ruff check src tests` clean
+- `tests/contract/test_unsupported_tools.py`: スキーマの `minimum == 200` を `exclusiveMinimum == 0` に
+- `bench/_budget_probe2.py`: T-06 の引数を `target` に直し（`urn` は存在しない引数で E_INVALID_ARGUMENT だった）、名指しした値で呼び直して収まることを確かめる検査を追加
+- 前セッションの一時スクリプト `tools/_restore_default_max_tokens.py` は、HEAD と同じ値に戻すだけ（実質は CRLF 化だけ）だったので捨てた
 
 ## 3. 次にやること（優先順）
 
-1. ~~**BUG-0061**（T-19 が公開ビュー 2 個しか返さない）~~ — **解消済み**（`2a42a50`。既定 `max_tokens` 2500→6000。契約テスト 6 件 green）
-2. **BUG-0058**（レイテンシ）— F-PY・F-TS で T-06・T-07・T-08 のサーバー内 p95 が Fast Path の 50 ms を大きく超える。要約は `.pair-agent/acceptance/M1-3-latency-20261029-154219.md`
-3. **BUG-0059** — `bench/run_latency.py` の台本に T-00・T-01・T-10・T-11・T-13 が無く、14 ツールで判定できない
-4. **BUG-0060** — 計測対象の選び方: F-TS で `E_TARGET_AMBIGUOUS` が 20〜33/200、F-PY の T-07 で `E_UNSUPPORTED` 13/200
-5. **BUG-0057** — TypeScript の LSP が無い環境では F-TS の exact 水準の事後条件を確かめられない（検証の仕組みの穴）
-6. BUG-0041〜0056 の未処理分。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する（票に状態欄は無い）
+1. **BUG-0065**（T-02 skeleton 系の 7 件が落ちる。`KeyError: 'children'` など）— 並行で直す役が対応中。直るまで全体テストの基準は「この 7 件以外 green」
+2. **BUG-0062**（新 .venv で langs extra・フィクスチャを手で入れないと全体テストに届かない）— 並行で直す役が対応中。入ったら §0 の手順が変わる
+3. **BUG-0058**（レイテンシ）— 師匠判断（2026-10-30）で優先度を下げた。再開は「毎回別シンボル＋exact 経路強制」で計時ログを拾うところから（票の末尾）
+4. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する（2026-10-31 時点で BUG-0041〜0064 はすべて対応コミットあり（BUG-0065 は対応中）。BUG-0058 は実測の記録のみ）
 
 ## 4. 触るときの注意
 

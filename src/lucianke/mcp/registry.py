@@ -12,7 +12,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from lucianke.core.limits import MIN_MAX_TOKENS
+from lucianke.core.limits import REGISTRY_MIN_DEFAULT_MAX_TOKENS
 from lucianke.tools._base import (
     GRAPH_FORMATS,
     WORKING_TREE,
@@ -69,8 +69,8 @@ class ToolRegistry:
             raise TypeError(f"{spec.name}: args_model must subclass CommonArgs")
         if spec.args_model.model_config.get("extra") != "forbid":
             raise TypeError(f"{spec.name}: args_model must set extra='forbid'")
-        if spec.default_max_tokens < MIN_MAX_TOKENS:
-            raise ValueError(f"{spec.name}: default_max_tokens must be >= {MIN_MAX_TOKENS}")
+        if spec.default_max_tokens < REGISTRY_MIN_DEFAULT_MAX_TOKENS:
+            raise ValueError(f"{spec.name}: default_max_tokens must be >= {REGISTRY_MIN_DEFAULT_MAX_TOKENS}")
         if spec.milestone not in MILESTONES:
             raise ValueError(f"{spec.name}: unknown milestone {spec.milestone!r}")
         self._specs[spec.name] = spec
@@ -164,7 +164,7 @@ def build_input_schema(spec: ToolSpec) -> dict[str, Any]:
     for name, prop in list(props.items()):
         props[name] = _unwrap_optional(prop)
     _unwrap_nested(schema)
-    props["max_tokens"] = {"type": "integer", "minimum": MIN_MAX_TOKENS, "default": spec.default_max_tokens}
+    props["max_tokens"] = {"type": "integer", "exclusiveMinimum": 0, "default": spec.default_max_tokens}
     formats = ["compact", "json", *(GRAPH_FORMATS if spec.allows_graph else ())]
     props["format"] = {**props["format"], "enum": formats}
     if not spec.accepts_revision:

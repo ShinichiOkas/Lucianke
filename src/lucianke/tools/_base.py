@@ -29,7 +29,9 @@ class CommonArgs(BaseModel):
     """全ツール共通のパラメータ（仕様書 §5.2）。各ツールの引数モデルはこれを継承する。
 
     ``max_tokens`` の既定はツールごと（``ToolSpec.default_max_tokens``）。未指定は ``None`` で受け、パイプラインが埋める。
-    最小値（200）は ``tools/list`` のスキーマには ``minimum`` として載せ、検査はパイプラインが ``E_INVALID_ARGUMENT`` で行う。
+    固定の最小値は置かない（BUG-0063）。正の整数ならそのまま受け、前置き（ヘッダ・``head_kv``・json 封筒）すら入らなければ、
+    出口（``mcp/fit.py``・``budget.py`` の 0 件経路）がその呼び出しに必要な ``max_tokens`` の実測値を ``warnings`` で返す。
+    非正（0 以下）だけは ``gt=0`` でスキーマが弾く（``tools/list`` の ``exclusiveMinimum``・``E_INVALID_ARGUMENT``）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -38,7 +40,7 @@ class CommonArgs(BaseModel):
     workspace_id: str | None = Field(default=None)
     revision: str = Field(default=WORKING_TREE, description="Git ref or WORKING_TREE.")
     format: FormatName = Field(default="compact")
-    max_tokens: int | None = Field(default=None)
+    max_tokens: int | None = Field(default=None, gt=0)
     cursor: str | None = Field(default=None)
 
 

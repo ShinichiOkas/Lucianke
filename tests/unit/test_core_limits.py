@@ -5,7 +5,8 @@ from __future__ import annotations
 from lucianke.core import limits
 
 EXPECTED: dict[str, object] = {
-    "MIN_MAX_TOKENS": 200,
+    "REGISTRY_MIN_DEFAULT_MAX_TOKENS": 1,
+    "BUDGET_FLOOR_FOR_PAGING": 200,
     "BATCH_MAX_ITEMS": 20,
     "CANDIDATES_MAX": 10,
     "SNIPPET_MAX_CHARS": 200,

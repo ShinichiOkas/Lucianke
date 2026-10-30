@@ -368,7 +368,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `workspace_id` | string | アクティブなワークスペース | 第 7.2 節の識別子。未登録の ID は `E_WORKSPACE_NOT_CONFIGURED` |
 | `revision` | string | `"WORKING_TREE"` | `"WORKING_TREE"` \| `"STAGED"` \| `"HEAD"` \| ブランチ名 \| タグ名 \| コミット SHA（短縮可）。解決できなければ `E_REVISION_NOT_FOUND`。**編集系ツール（カテゴリ D）は `"WORKING_TREE"` 以外を受け付けず `E_INVALID_ARGUMENT`** |
 | `format` | enum | `"compact"` | `"compact"` \| `"json"` \| `"dot"` \| `"mermaid"`。`dot` / `mermaid` はグラフ出力を持つツール（第 6.4 節）に限る。非対応ツールへの指定は `E_INVALID_ARGUMENT` |
-| `max_tokens` | integer | ツール別（第 11 章） | 応答全体の上限。最小値 200。下回る指定は `E_INVALID_ARGUMENT` |
+| `max_tokens` | integer | ツール別（第 11 章） | 応答全体の上限。正の整数（0 以下は `E_INVALID_ARGUMENT`）。固定の最小値は置かない（BUG-0063、2026-10-30）: 前置き（ヘッダ・警告・`head_kv`・json の封筒）すら入らない値なら、レコード 0 件・`warnings` に呼び直しに要る `max_tokens` の実測値を入れた成功応答になる（第 5.6 節 4、BUG-0064） |
 | `cursor` | string | なし | 第 5.6 節のページネーション継続トークン |
 
 ## 5.3 対象指定（TargetRef）
@@ -484,7 +484,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 1. サーバーは `max_tokens` を超えない範囲でレコードを **先頭から順に** 詰める。レコード（1 シンボル、1 参照箇所、1 診断など）を途中で切ってはならない（MUST）。
 2. 次のレコードが入らなくなった時点で `next_cursor` を発行し、残りを `page.total_estimate` と `# summary:` 行（ファイル別の残件数）に要約する。ツールが `limit` で打ち切った遅延列を渡し、`page.total_estimate` が渡した件数より大きいときは、渡された分が全部入っても `next_cursor` と `# more: … remaining≈N`（N は入らなかった分 + 渡されなかった分）を出す（BUG-0008、f0f328e）。
 3. `cursor` は不透明な文字列（base64url）で、同じセッション・同じ引数でのみ有効。基になるデータが変わっていれば `E_CURSOR_EXPIRED` を返す。
-4. ヘッダ・警告行・トレーラもトークン予算に含める。予算が小さすぎてレコードが 1 件も入らない場合は、レコード 0 件・`next_cursor` なし・`warnings` に理由と必要な `max_tokens` の目安を入れて成功応答とする（BUG-0015: オフセットが進まないカーソルは同じ呼び出しの繰り返しになるので出さない。`cursor` は `max_tokens` を含まない引数で結ばれているので、呼び出しに付けたカーソルは `max_tokens` を上げた呼び直しにそのまま使える）。`next_cursor` を返すページは必ず 1 件以上を含む。
+4. ヘッダ・警告行・トレーラもトークン予算に含める。予算が小さすぎてレコードが 1 件も入らない場合（レコードが元から 0 件で前置きだけで予算を超える場合を含む。BUG-0064）は、レコード 0 件・`next_cursor` なし・`warnings` に理由と必要な `max_tokens` の目安を入れて成功応答とする（BUG-0015: オフセットが進まないカーソルは同じ呼び出しの繰り返しになるので出さない。`cursor` は `max_tokens` を含まない引数で結ばれているので、呼び出しに付けたカーソルは `max_tokens` を上げた呼び直しにそのまま使える）。`next_cursor` を返すページは必ず 1 件以上を含む。
 
 ## 5.7 トークン計数
 

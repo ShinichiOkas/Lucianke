@@ -200,8 +200,9 @@ class Packer:
     """レコード列を予算内に詰める（設計書 §7.2.2、仕様書 §5.6）。
 
     契約: ``reserved_tokens``（ヘッダ・``head_kv``・呼び手が出す警告の分）は呼び手が数えて渡す。
-    ``reserved_tokens`` とトレーラの最小形だけで ``max_tokens`` を超える（``MIN_MAX_TOKENS`` 未満の指定など）場合は
-    保証できず、レコード 0 件で返す（``used_tokens_est`` は超過した実測値）。
+    ``reserved_tokens`` とトレーラの最小形だけで ``max_tokens`` を超える（前置きだけで予算を使い切る小さすぎる
+    ``max_tokens`` など）場合は保証できず、レコード 0 件で返す（``used_tokens_est`` は超過した実測値）。レコードが元から
+    0 件でも、``warnings`` に呼び直しに要る ``max_tokens`` を名指しする（BUG-0064）。
 
     レコードが 1 件も入らないとき（仕様書 §5.6-4）は、レコード 0 件・``warnings`` に理由と必要な ``max_tokens`` の目安の
     成功応答で、``next_cursor`` は出さない（BUG-0015）。オフセットが進まないカーソルは同じ呼び出しの繰り返しで、辿る
@@ -244,7 +245,16 @@ class Packer:
         avail = max_tokens - reserved_tokens
 
         if start >= n:  # 詰めるものが無い（続きも無い）
-            return self._page((), reserved_tokens, max_tokens, total, 0, None, None, ())
+            if reserved_tokens <= max_tokens:
+                return self._page((), reserved_tokens, max_tokens, total, 0, None, None, ())
+            # 前置きだけで予算を超える（BUG-0064）。レコードが元から無くても、``_fit`` の ``m == 0`` と同じく呼び直しに
+            # 要る ``max_tokens`` を名指しする（固定の下限は無いので、下限はこの実測値で呼び出しごとに伝える。BUG-0063）
+            warning = (
+                f"the response preamble alone needs ~{reserved_tokens} tokens, over max_tokens={max_tokens};"
+                f" raise max_tokens to ~{reserved_tokens} or more and call again with the same arguments"
+            )
+            used = reserved_tokens + self.estimator.count("! " + warning + "\n")
+            return self._page((), used, max_tokens, total, 0, None, None, (warning,))
 
         tok: dict[int, int] = {}
 
