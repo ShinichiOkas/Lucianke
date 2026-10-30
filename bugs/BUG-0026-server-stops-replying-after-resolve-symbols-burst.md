@@ -17,3 +17,38 @@
 - BUG-0020 の原因 1（解析から 5 秒後の `Node.text` が戻らず、イベントループ〈か索引器のスレッド〉が空回りする）と症状が重なる: 「約 100 回で止まる（＝最初の解析から 5 秒後）」「`--calls 20` では再現しない」「止まったあと全ツールが応答しない」「stdin を閉じても終わらない」。ただし **同じ原因とは確かめられていない**。
 - 確かめたこと: 020a19e + BUG-0020 の直し（作業ツリー）で `bench/run_latency.py --fixtures poly --tools resolve_symbols`（200 回）は 11 秒で完走（`pass server p95 8.0 ms`）。直しを外した 020a19e でも同じ台本が完走した（再現しなかった）。`t04_resolve_symbols.py` 自身は `definition_range`・`Node.text` を通らない。
 - なので、この票は閉じない。解析後の `Node.text` の空回りが、索引器のスレッド（`relations.py`・`imports.py`）で起きたのか、別の原因なのかは、止まった瞬間の `py-spy dump`（`uvx py-spy dump --pid <python.exe の pid>`。`lucianke.exe` は起動の殻で、本体は子の python.exe）で決まる。BUG-0020 の直しを入れた作業ツリーでもう一度 18b の台本を流し、止まれば py-spy で取ってほしい。
+
+## 再現確認（2026-10-30）
+
+現 HEAD `e85c249b9173abe04d9e91966d0c943cbab8d779`（BUG-0020 の Node.text 全廃 9839053 を含むコミットチェーン）で再現を試みた。
+
+### 実行内容
+
+以下のコマンドを 3 回繰り返した（各回 200 呼び出し）:
+
+```
+uv run python bench/run_latency.py --fixtures poly --warmup-timeout 90 --tools resolve_symbols --calls 200
+```
+
+加えて、票の「search_workspace_symbols 200 回直後の resolve_symbols」の状況も 1 回試した:
+
+```
+uv run python bench/run_latency.py --fixtures poly --warmup-timeout 90 --tools search_workspace_symbols,resolve_symbols --calls 200
+```
+
+### 結果
+
+| 実行 | 結果 | CLIENT_TIMEOUT | 結果 JSON |
+|------|------|---------------|----------|
+| run 1（resolve_symbols のみ、200 回） | pass server p95 10.0 ms | 0 件 | `bench/results/20261030-164621-windows-latency.json` |
+| run 2（resolve_symbols のみ、200 回） | pass server p95 12.0 ms | 0 件 | `bench/results/20261030-164707-windows-latency.json` |
+| run 3（resolve_symbols のみ、200 回） | pass server p95 14.0 ms | 0 件 | `bench/results/20261030-164747-windows-latency.json` |
+| run 4（search_workspace_symbols 200 回 → resolve_symbols 200 回） | pass（両ツール） | 0 件 | `bench/results/20261030-165033-windows-latency.json` |
+
+4 回すべて応答停止なし。CLIENT_TIMEOUT 3 連続は起きなかった。py-spy dump を取る条件に到達しなかった。
+
+### 結論
+
+**現 HEAD（e85c249、BUG-0020 の Node.text 全廃後）で BUG-0026 は再現しない。** BUG-0020 の直し（Node.text 全廃、コミット 9839053）によって本バグの原因も解消された可能性が高い。票の調査メモが示す「BUG-0020 の原因と症状が重なる」という仮説を支持する結果である。
+
+ただし 4 回の実行はいずれも単一マシンでの連続実行であり、元の観測（「CPU 100%・多数の役が並行編集中」）の負荷状況とは異なる。高負荷環境での再現可能性はゼロではないが、通常条件では消えた。
