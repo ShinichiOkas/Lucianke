@@ -783,7 +783,7 @@ class Watcher:
     async def run(self, ws: Workspace, sink: IngestSink, stop: asyncio.Event) -> None
     mode: Literal["native", "polling"]
     async def drain(self, paths: Sequence[RelPath] | None = None) -> None   # 未処理イベントを同期で処理し切る（EditTransaction 段 3、§7.7.1）
-    def expect(self, path: RelPath, sha256_after: str) -> None             # 自分の書き込みイベントを 1 回だけ無視する（§7.7.1 Reindexed）
+    def expect(self, path: RelPath, sha256_after: str) -> None             # 自分の書き込みのイベントを、内容が一致する間無視する（§7.7.1 Reindexed）
 ```
 
 1. `watchfiles.awatch(ws.root, debounce=WATCH_DEBOUNCE_MS, step=WATCH_STEP_MS, watch_filter=…, stop_event=stop)` を用いる（S-6 で Windows の挙動を確認）。**`step=10` が必須**: 既定の `step=50` では単発変更の p95 が 100.6 ms で NFR-PERF-3 の境界に当たり、`step=10` なら p50 18.8 / p95 19.9 ms（遅延はほぼ 1〜2×`step`）。`WATCH_STEP_MS = 10`、`WATCH_DEBOUNCE_MS = 1000`。`debounce` の意味は「パスが増え続ける間にグループ化する最大時間」で、単発の遅延には効かない（同じファイルを 3 ms ごとに書き続けても 21 ms 前後ごとに配信される）。フィルタは Python 側で全イベントに対して呼ばれる（Rust 側に除外手段は無い。2,000 件を含む 2.2 s の操作で支障なし）: `.git/` 配下（`.git/HEAD` だけ通してブランチ切替を直接拾う案は MAY）、EditTransaction の一時名 `.lucianke-tmp-*`（これで `expect()` が対象にするのは最終パスのイベントだけになる）、`.gitignore`（`dulwich.ignore.IgnoreFilterManager`。S-8 で確認。1,000 パスで 50 ms 以下。ディレクトリは末尾 `/` を付けて渡す。fnmatch の自前サブセットは要らない）、`exclude_globs`。`awatch` を `wait_for` で包んで期限を付けてはならない（キャンセルで監視が終わる）。期限が要るときは下の手順 3 のようにキューを挟む。
@@ -793,7 +793,7 @@ class Watcher:
 5. `IndexWriter` の取り込みが完了したら、`LspPool.notify_watched(changes)`（`workspace/didChangeWatchedFiles`）と、開いている文書には `documents.on_external_change(path)`（全文 `didChange`）を送る。`TreeCache` の該当エントリは新しい `sha256` で自然に置き換わる。
 6. 監視が開始できない（存在しないパスは `FileNotFoundError` で表れるので `try/except OSError` で受ける。ネットワークドライブなど）ときは `mode="polling"` にし、`force_polling=True` は使わない（0.5 秒おきの書き換え 8 回のうち 3 回が 3 秒待っても届かなかった。S-6）。ネットワークドライブは環境が無く未検証。背景のポーリングは行わず、要求時に対象ファイルの `sha256` を照合する遅延検証（`ToolContext.resolve_target` と `EditTransaction` 段 3）に切り替える。T-00 `status` に `watcher: "polling"` を出す。
 7. NFR-PERF-3 の測定のため、イベント受信・DB コミット・LSP 通知の各時刻を `debug` ログに残す。
-8. `drain(paths)` はデバウンス窓に溜まっているイベントのうち指定パス（省略時は全部）を即座に処理し、取り込みの完了まで待つ。`EditTransaction` が前提検証の直前に呼ぶ。`expect(path, sha256_after)` は、直後に届く自分の書き込みイベントを `sha256` が一致する場合に 1 回だけ捨てる（二重取り込みの抑止）。
+8. `drain(paths)` はデバウンス窓に溜まっているイベントのうち指定パス（省略時は全部）を即座に処理し、取り込みの完了まで待つ。`EditTransaction` が前提検証の直前に呼ぶ。`expect(path, sha256_after)` は、自分の書き込みのイベントを `sha256` が一致する間（`WATCH_EXPECT_TTL_S` まで）捨て、一致しない内容を見たら期待を消費してそのイベントを渡す（二重取り込みの抑止。1 回の書き込みは複数のイベントで届き〈`os.replace` は deleted と added〉、負荷の高いときは別々の窓に割れるので、1 回で消費すると 2 つ目が二重取り込みになる。BUG-0083）。
 
 受入で確かめる点:
 
@@ -1844,7 +1844,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 外部（エージェントの別ツール / エディタ / git checkout）がファイルを書く
  1. workspace.watcher   watchfiles のイベント（.gitignore と exclude_globs で除外）
  2. デバウンス           パスごとに 50 ms まとめる
- 3. 自分の書き込みか     Watcher.expect に (path, sha) が登録済みなら消費して終わり（§8.4 の 7b で登録）
+ 3. 自分の書き込みか     Watcher.expect に (path, sha) が登録済みで内容が一致すれば捨てて終わり（一致しなければ期待を消費して取り込む。§8.4 の 7b で登録）
  4. 読込 + sha256        to_thread。files.sha256 と同じなら終わり（内容が変わっていない保存）
  5. 解析                 syntax.parsers（プール）→ 構文木。解析エラーがあっても続行（tree-sitter 診断になる）
  6. 取り込み             index.ingest（writer）: files / symbols / relations(IMPORTS, 構文木由来) / diagnostics(tree-sitter) を 1 トランザクションで差分更新 → data_version++

@@ -181,10 +181,12 @@ class Watcher:
         await done
 
     def expect(self, rel: RelPath, sha256_after: str) -> None:
-        """自分の書き込みのイベントを 1 回だけ捨てる（二重取り込みの抑止）。
+        """自分の書き込みのイベント（こだま）を捨てる（二重取り込みの抑止）。
 
-        次にこのパスのイベントが届いたとき、現在の内容の ``sha256`` が ``sha256_after`` と一致すれば捨てる。
-        一致しなくても期待は消費する（その後の別の変更を取りこぼさないため）。削除を期待するときは ``sha256_after = ""``。
+        このパスのイベントが届いたとき、現在の内容の ``sha256`` が ``sha256_after`` と一致すれば捨てる。1 回の書き込みが
+        複数のイベントで届き（``os.replace`` は deleted と added。S-06）、負荷の高いときはそれらが別々の窓に割れるので、
+        **一致する間は期待を残す**（BUG-0083）。一致しない内容を見たら期待を消費してそのイベントを渡す（その変更と、
+        その後の別の変更を取りこぼさないため）。削除を期待するときは ``sha256_after = ""``（不在の間は捨てる）。
         期待は ``WATCH_EXPECT_TTL_S`` 秒で失効する。
         """
         now = time.monotonic()
@@ -368,23 +370,38 @@ class Watcher:
     async def _without_expected(
         self, files: set[RelPath], removed: set[RelPath]
     ) -> tuple[set[RelPath], set[RelPath]]:
-        """``expect`` 済みのパスのうち、内容が期待どおりのものを落とす。期待は 1 回で消費する。"""
+        """``expect`` 済みのパスのうち、ディスクの今の状態が期待どおりのものを落とす。
+
+        期待は一致する間は残し（失効まで）、食い違ったら消費する。1 回の書き込みのイベントが複数の窓に割れて届いても、
+        こだまは全部捨てる（BUG-0083。1 回で消費すると 2 つ目の窓が二重取り込みになっていた）。
+        """
         if not self._expected:
             return files, removed
         now = time.monotonic()
         keep_files: set[RelPath] = set()
         for rel in files:
-            exp = self._expected.pop(rel, None)
-            if exp is not None and exp[1] >= now and exp[0]:
-                if await asyncio.to_thread(_sha256_file, to_abs(self._ws, rel)) == exp[0]:
-                    continue
+            want = self._live_expectation(rel, now)
+            if want and await asyncio.to_thread(_sha256_file, to_abs(self._ws, rel)) == want:
+                continue
+            self._expected.pop(rel, None)
             keep_files.add(rel)
-        keep_removed = {
-            rel
-            for rel in removed
-            if not ((exp := self._expected.pop(rel, None)) is not None and exp[1] >= now and exp[0] == "")
-        }
+        keep_removed: set[RelPath] = set()
+        for rel in removed:
+            if self._live_expectation(rel, now) == "":
+                continue
+            self._expected.pop(rel, None)
+            keep_removed.add(rel)
         return keep_files, keep_removed
+
+    def _live_expectation(self, rel: RelPath, now: float) -> str | None:
+        """``rel`` の失効していない期待の ``sha256``（削除の期待は ``""``）。無い・失効していれば ``None``（失効分は消す）。"""
+        exp = self._expected.get(rel)
+        if exp is None:
+            return None
+        if exp[1] < now:
+            del self._expected[rel]
+            return None
+        return exp[0]
 
     # --- ディスクの状態 ---------------------------------------------------------------------
 
