@@ -19,5 +19,22 @@
 ## 再現
 `uv run python bench/fetch_fixtures.py` のあと、typescript-language-server が PATH にある状態で `uv run python bench/run_latency.py --fixtures F-PY,F-TS --tools find_references_and_implementations,query_call_hierarchy,get_diagnostics`。
 
+## 追試（2026-10-30・HEAD `dccf78e`・別 PC）— 見たことだけ
+`uv run python bench/run_latency.py --fixtures F-PY --tools find_references_and_implementations,query_call_hierarchy,get_diagnostics --calls 200`（各 200 回）。サーバー内 p95（judged = 成功かつ非降格）:
+
+| ツール | p95 | p50 | min | max |
+|---|---|---|---|---|
+| T-06 `find_references_and_implementations` | 5923 ms | 486 ms | 11 ms | 8329 ms |
+| T-07 `query_call_hierarchy` | 5852 ms | 154 ms | 6 ms | 10034 ms |
+| T-08 `get_diagnostics` | 2026 ms | - | - | - |
+
+- 分布は**二峰性**。速い群（`tests/...` 配下の末端シンボル）は 6〜40 ms、遅い群（`httpx/...` 本体の中核シンボル: `_client.py`・`_models.py`・`_urls.py`・`_decoders.py` 等）は 5000〜8000 ms。遅延は**対象シンボルのファンイン（被参照数）**に相関して見える。
+- 遅い群は `confidence: exact`・`lsp: ready`。`EXACT_BUDGET_S=10.0` のタイムアウトに当たって structural 降格した群が max 側（8000〜10034 ms）。
+- **狙い撃ちプローブ（`bench/probe_bug0058.py`。同一対象を各 12 回連続）では遅延が再現しなかった**（ほぼ全て structural・5〜100 ms、計時計装 `lsp_call_hierarchy_slow` は 0 件）。同一対象の反復で LSP/キャッシュが温まり、かつ structural に落ちて計時計装点（exact 経路の `CallEdgeSource`）を通らなかったため。→ 遅延は「**毎回別シンボルの exact 経路コールド解決**」で出るテール問題。
+- `a04937c` の計時計装（prime/settle/prepare/calls/sites の段別内訳）は exact 経路に入った呼び出ししか計時しない。段別の主犯（prepare / calls / sites）は**未確定**（この追試では exact のコールドを狙い撃ちでログに残せていない）。
+
+## 優先度
+師匠判断（2026-10-30）: 初回分析に数分待てば済む性質なら優先度は高くない。深掘りは後回し。本票は実測の記録として残し、直す役は「毎回別シンボル＋exact 経路強制」で計時計装ログを拾うところから再開する。
+
 ## 仕様書
 §14.4（Fast Path は p95 < 50 ms）、§3.2 NFR-PERF-1、§15.2 M1-3。
