@@ -55,6 +55,7 @@ from lucianke.tools.t02_get_file_skeleton import failure_record
 from lucianke.tools.t03_search_workspace_symbols import index_reader
 from lucianke.tools.t05_get_symbol_bodies import TargetRefArg, body_lines
 from lucianke.workspace.paths import confine, is_excluded
+from lucianke.workspace.pyenv import PytestImports, detect_pytest_imports
 from lucianke.workspace.types import Workspace
 
 MAX_HOPS = 5
@@ -114,6 +115,7 @@ class _Env:
     analyses: dict[str, FileAnalysis | None] = field(default_factory=dict)
     imports: dict[str, _Imports | None] = field(default_factory=dict)
     files: dict[str, FileInfo | None] = field(default_factory=dict)
+    pytest: dict[str, PytestImports] = field(default_factory=dict)  # プロジェクト -> pytest の設定（import の根。BUG-0082）
     lifter: ExactLifter | None = None
     choices: list[EngineChoice] = field(default_factory=list)  # 項目ごとのエンジン選択（応答の代表を決める）
     # 索引の走査の途中だけ: まだ索引に無いファイルを先取りする（import の先。BUG-0070）。終えていれば ``None``
@@ -133,6 +135,12 @@ class _Env:
             return True
         # 走査の途中は、まだ索引に無い import の先もディスクで確かめる（たどった先で ``ensure`` が先取りする）
         return self.ahead is not None and (self.ws.root / str(rel)).is_file() and not is_excluded(self.ws, rel)
+
+    def pytest_imports(self, project: str) -> PytestImports:
+        """索引と同じ import の根を使うため、プロジェクトの pytest の設定を読む（この呼び出しの中で覚える。BUG-0082）。"""
+        if project not in self.pytest:
+            self.pytest[project] = detect_pytest_imports(self.ws.root, project)
+        return self.pytest[project]
 
     async def ensure(self, path: str) -> None:
         """走査の途中で ``path`` がまだ索引に無ければ先取りし、引き直せるようにする（BUG-0070）。"""
@@ -157,7 +165,12 @@ class _Env:
                 self.imports[path] = None
             else:
                 facts = extract_imports(an.parsed, language_id=an.language_id)
-                resolve = make_resolver(from_rel=an.rel, language_id=an.language_id, exists=self.exists)
+                resolve = make_resolver(
+                    from_rel=an.rel,
+                    language_id=an.language_id,
+                    exists=self.exists,
+                    pytest_imports=self.pytest_imports,
+                )
                 self.imports[path] = _Imports(
                     imported_name_map(facts, resolve, include_reexports=True), facts
                 )

@@ -5,7 +5,10 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
 * ``extract_imports``: ``ParsedFile`` から ``ImportFact`` を文書順に集める。Python（``import`` / ``from ... import``、``__future__`` を含む）と
   TypeScript / JavaScript（``import`` / ``export ... from`` / ``import x = require()`` / ``require()``）。
 * ``resolve_module``: モジュール名 1 つをワークスペース内のファイルに対応づける。ファイルの存在は呼び手が ``exists`` で教える
-  （workspace に依存しない）。``node_modules``・tsconfig の ``paths``・Python の site-packages は扱わない（外部は ``None``）。
+  （ファイルシステムを直接読まない）。``node_modules``・tsconfig の ``paths``・Python の site-packages は扱わない（外部は ``None``）。
+* ``python_import_roots``: Python の絶対 import を探す根を、そのファイルについて実際に ``sys.path`` に載るものの順に決める
+  （pytest が足すテストのディレクトリ・``pythonpath`` の設定・テストフィクスチャのルート・ルートと ``src``。BUG-0082）。
+  ``make_resolver`` は ``source_roots`` を渡されなければこれを使う。
 * ``imported_name_map``: ファイル内で使える名前 → ``(定義元ファイル, 元の名前)``。解決できた import だけが入る。
 * ``external_name_map``: 解決できなかった import の名前 → 外部シンボルの URN（``lk://_ext/<pkg>#<qualified>``。設計書 §7.4.6 項 3、
   仕様書 §9.3）。パッケージは Python が最上位のモジュール名（``from os.path import join`` → ``lk://_ext/os#path.join``）、
@@ -26,7 +29,9 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
 
 from __future__ import annotations
 
+import functools
 import posixpath
+import sys
 from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -35,17 +40,23 @@ from tree_sitter import Node, Query, QueryCursor
 
 from lucianke.core.model import Range, RelPath
 from lucianke.core.urn import Urn
+from lucianke.syntax.support import get_support
 from lucianke.syntax.types import ParsedFile
+from lucianke.workspace.languages import fixture_roots, is_test
+from lucianke.workspace.pyenv import PytestImports
 
 __all__ = [
     "DEFAULT_SOURCE_ROOTS",
+    "PYTEST_PRELOADED",
     "ImportFact",
     "ImportKind",
+    "ImportRoot",
     "external_name_map",
     "extract_imports",
     "imported_name_map",
     "js_require_bindings",
     "make_resolver",
+    "python_import_roots",
     "resolve_module",
     "wildcard_sources",
 ]
@@ -411,6 +422,107 @@ def _norm_root(root: str) -> str:
     return "" if root == "." else root.strip("/")
 
 
+@dataclass(frozen=True, slots=True)
+class ImportRoot:
+    """Python の絶対 import を探すディレクトリ 1 つ（ワークスペース相対。``""`` = ルート）。
+
+    ``stdlib=False`` は pytest が ``sys.path`` に足す根（テストのディレクトリ・``pythonpath``）。ここでは標準ライブラリと pytest
+    自身の名前（``PYTEST_PRELOADED``）を解かない: pytest がその根を足すのはテストを集める時点で、そのときには標準ライブラリの多くが
+    ``sys.modules`` に読み込み済みなので、``import json`` は手元の ``json.py`` でなく標準ライブラリを返す（``sys.modules`` が
+    ``sys.path`` より先）。実測（pytest 9.2・Python 3.12）で標準ライブラリの最上位 301 個のうち 159 個（``json``・``types`` を含む）が
+    収集の前に読み込み済み。まだ読み込まれていない名前（``sqlite3`` など）では実行時に手元のファイルが勝つが、どれが読み込み済みかは
+    版で変わるので、決定的に保つため一律に標準ライブラリ側（外部）に倒す。
+    """
+
+    path: str
+    stdlib: bool = True
+
+
+PYTEST_PRELOADED: frozenset[str] = frozenset(sys.stdlib_module_names) | {"pytest", "_pytest", "pluggy"}
+"""``ImportRoot.stdlib`` が偽の根で解かない最上位のモジュール名（標準ライブラリと、pytest の実行中は必ず読み込み済みのもの）。"""
+
+
+@functools.cache
+def _py_test_globs() -> tuple[str, ...]:
+    return tuple(getattr(get_support("python"), "test_path_globs", ()) or ())
+
+
+def _pytest_basedir(directory: str, project: str, exists: Callable[[RelPath], bool]) -> str:
+    """``directory`` から上へ、``__init__.py`` を持たない（か名前が識別子でない）最初のディレクトリ。``project`` より上には出ない。
+
+    pytest の ``resolve_package_path`` の親（prepend のとき ``sys.path`` に足すディレクトリ）と同じ。
+    """
+    cur = directory
+    while (
+        cur
+        and cur != project
+        and posixpath.basename(cur).isidentifier()
+        and exists(RelPath(_join(cur, "__init__.py")))
+    ):
+        cur = posixpath.dirname(cur)
+    return cur
+
+
+def _pytest_inserted(rel: str, project: str, exists: Callable[[RelPath], bool]) -> list[str]:
+    """pytest（prepend / append）が ``rel`` を集めるときに ``sys.path`` に足すディレクトリ（先に探すものから）。
+
+    テストモジュール自身の basedir、続いて ``rel`` のディレクトリから ``project`` までの祖先にある ``conftest.py`` の basedir
+    （近いものから。conftest は外側から順に読まれて先頭に足されるので、内側が先になる）。
+    """
+    start = posixpath.dirname(rel)
+    dirs = [_pytest_basedir(start, project, exists)]
+    cur = start
+    while True:
+        if exists(RelPath(_join(cur, "conftest.py"))):
+            dirs.append(_pytest_basedir(cur, project, exists))
+        if not cur or cur == project:
+            break
+        cur = posixpath.dirname(cur)
+    return dirs
+
+
+def python_import_roots(
+    from_rel: RelPath | str,
+    *,
+    exists: Callable[[RelPath], bool],
+    pytest_imports: Callable[[str], PytestImports] | None = None,
+) -> tuple[ImportRoot, ...]:
+    """``from_rel`` の Python の絶対 import を探す根（先に探すものから。BUG-0082）。
+
+    根の「プロジェクト」は、``from_rel`` を含むテストフィクスチャのルート（``workspace.languages.fixture_roots``。内側から）と、
+    最後にワークスペースのルート ``""``。フィクスチャは入れ子のワークスペースとして自分を根に動くので、中の絶対 import
+    （``from app.engine import Packer``）はまずフィクスチャの中で探す。各プロジェクト ``P`` について次の順:
+
+    1. （いちばん内側の ``P`` だけ）``from_rel`` が ``P`` から見てテストのパス（``is_test``。``conftest.py`` を含む）で、
+       ``P`` の pytest の ``--import-mode`` が ``importlib`` でなければ、pytest が足すディレクトリ（``_pytest_inserted``:
+       テストモジュールの basedir ＝ ``__init__.py`` を持たない最初の祖先、続いて祖先の ``conftest.py`` の basedir）。
+       ``tests/unit/test_a.py`` の ``import helpers`` は ``tests/unit/helpers.py``（``tests/unit/__init__.py`` があれば、
+       その上の ``__init__.py`` の無いディレクトリから ``unit.helpers`` で探す）。
+    2. ``P`` の pytest の設定の ``pythonpath``（``pytest_imports(P)``。``workspace.pyenv.detect_pytest_imports``）。
+    3. ``P`` と ``P/src``（``DEFAULT_SOURCE_ROOTS``）。
+
+    1 と 2 は ``ImportRoot(stdlib=False)``（標準ライブラリと同じ名前はそこで解かない。``ImportRoot`` の説明）。同じディレクトリが
+    2 度出たら最初の位置に置き、どちらかが ``stdlib=True`` なら ``True``（ルート直下のテストファイルでも、ルートの扱いは今までどおり）。
+    ``pytest_imports`` を渡さなければ設定は既定値（``pythonpath`` なし・``prepend``）。
+    """
+    rel = str(from_rel)
+    globs = _py_test_globs()
+    projects = [*reversed(fixture_roots(rel, globs)), ""]
+    out: list[ImportRoot] = []
+    for depth, project in enumerate(projects):
+        config = pytest_imports(project) if pytest_imports is not None else PytestImports()
+        if depth == 0 and config.import_mode != "importlib":
+            inner = rel[len(project) + 1 :] if project else rel
+            if is_test(inner, globs):
+                out.extend(ImportRoot(d, stdlib=False) for d in _pytest_inserted(rel, project, exists))
+        out.extend(ImportRoot(p, stdlib=False) for p in config.pythonpath)
+        out.extend(ImportRoot(_join(project, str(r))) for r in DEFAULT_SOURCE_ROOTS)
+    merged: dict[str, bool] = {}
+    for root in out:
+        merged[root.path] = merged.get(root.path, False) or root.stdlib
+    return tuple(ImportRoot(path, stdlib) for path, stdlib in merged.items())
+
+
 def resolve_module(
     module: str,
     *,
@@ -418,13 +530,14 @@ def resolve_module(
     language_id: str,
     is_relative: bool = False,
     level: int = 0,
-    source_roots: Sequence[RelPath] | None = None,
+    source_roots: Sequence[RelPath | ImportRoot] | None = None,
     exists: Callable[[RelPath], bool],
 ) -> RelPath | None:
     """``module`` をワークスペース内のファイルに対応づける。見つからない・外部・対応外の言語は ``None``。
 
-    * Python: 絶対は ``source_roots``（既定 ``""``（ルート）と ``src``）の順に、相対は ``from_rel`` の親から ``level - 1`` 段上の
-      ディレクトリで、``<mod>.py`` → ``<mod>/__init__.py`` → ``<mod>.pyi`` → ``<mod>/__init__.pyi`` の順に探す。
+    * Python: 絶対は ``source_roots``（既定 ``""``（ルート）と ``src``。``make_resolver`` は ``python_import_roots``）の順に、
+      相対は ``from_rel`` の親から ``level - 1`` 段上のディレクトリで、``<mod>.py`` → ``<mod>/__init__.py`` → ``<mod>.pyi`` →
+      ``<mod>/__init__.pyi`` の順に探す。``ImportRoot(stdlib=False)`` の根は、最上位の名前が ``PYTEST_PRELOADED`` なら飛ばす。
       ``module == ""``（``from . import x``）は、そのパッケージの ``__init__.py(i)``。
     * TS / JS: 相対指定子（``./`` ``../`` で始まるもの）だけ。拡張子を補い（``.ts .tsx .js .jsx .mjs``）、``/index.*`` を試す。
       ``"./x.js"`` は ``x.ts`` / ``x.tsx`` も探す。裸の指定子（``react``）・tsconfig の ``paths`` は ``None``（M1 の範囲外）。
@@ -456,7 +569,7 @@ def _resolve_python(
     from_rel: RelPath,
     relative: bool,
     level: int,
-    source_roots: Sequence[RelPath] | None,
+    source_roots: Sequence[RelPath | ImportRoot] | None,
     exists: Callable[[RelPath], bool],
 ) -> RelPath | None:
     parts = module.split(".") if module else []
@@ -472,9 +585,15 @@ def _resolve_python(
     if not parts:
         return None
     roots = DEFAULT_SOURCE_ROOTS if source_roots is None else source_roots
+    preloaded = parts[0] in PYTEST_PRELOADED
     seen: set[str] = set()
     for root in roots:
-        base = _norm_root(str(root))
+        if isinstance(root, ImportRoot):
+            if preloaded and not root.stdlib:
+                continue
+            base = _norm_root(root.path)
+        else:
+            base = _norm_root(str(root))
         if base in seen:
             continue
         seen.add(base)
@@ -508,9 +627,32 @@ def make_resolver(
     from_rel: RelPath,
     language_id: str,
     exists: Callable[[RelPath], bool],
-    source_roots: Sequence[RelPath] | None = None,
+    source_roots: Sequence[RelPath | ImportRoot] | None = None,
+    pytest_imports: Callable[[str], PytestImports] | None = None,
 ) -> Callable[[ImportFact], RelPath | None]:
-    """``imported_name_map`` に渡す ``resolve`` を作る（1 つのファイルの import を解決する）。"""
+    """``imported_name_map`` に渡す ``resolve`` を作る（1 つのファイルの import を解決する）。
+
+    Python の絶対 import の根は、``source_roots`` を渡せばそれ、渡さなければ ``python_import_roots``（``pytest_imports`` は
+    プロジェクトのディレクトリ → pytest の設定。最初の絶対 import で 1 回だけ決める）。``exists`` の答えはこの resolve の中で
+    覚えて使い回す（同じパスを何度も調べない）。
+    """
+    known: dict[str, bool] = {}
+
+    def cached(rel: RelPath) -> bool:
+        key = str(rel)
+        hit = known.get(key)
+        if hit is None:
+            hit = known[key] = bool(exists(rel))
+        return hit
+
+    computed: list[tuple[ImportRoot, ...]] = []
+
+    def roots_for(fact: ImportFact) -> Sequence[RelPath | ImportRoot] | None:
+        if source_roots is not None or language_id not in _PY_FAMILY or fact.is_relative or fact.level > 0:
+            return source_roots
+        if not computed:
+            computed.append(python_import_roots(from_rel, exists=cached, pytest_imports=pytest_imports))
+        return computed[0]
 
     def resolve(fact: ImportFact) -> RelPath | None:
         return resolve_module(
@@ -519,8 +661,8 @@ def make_resolver(
             language_id=language_id,
             is_relative=fact.is_relative,
             level=fact.level,
-            source_roots=source_roots,
-            exists=exists,
+            source_roots=roots_for(fact),
+            exists=cached,
         )
 
     return resolve

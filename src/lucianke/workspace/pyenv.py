@@ -27,11 +27,14 @@ import 解決できない（pyright / basedpyright は ``extraPaths`` が無い�
 
 from __future__ import annotations
 
+import configparser
 import dataclasses
+import hashlib
 import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import sys
 import tomllib
@@ -42,7 +45,13 @@ from typing import Any
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.workspace.types import PythonEnv
 
-__all__ = ["detect_extra_paths", "detect_python_env"]
+__all__ = [
+    "PYTEST_CONFIG_NAMES",
+    "PytestImports",
+    "detect_extra_paths",
+    "detect_pytest_imports",
+    "detect_python_env",
+]
 
 _IS_WINDOWS = sys.platform == "win32"
 _VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?")
@@ -280,3 +289,125 @@ def detect_extra_paths(root: Path | str) -> tuple[str, ...]:
         except OSError:
             continue
     return tuple(out)
+
+
+# --- pytest が足す import の根（BUG-0082） ------------------------------------------------
+
+PYTEST_CONFIG_NAMES: tuple[str, ...] = (
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "pyproject.toml",
+    "tox.ini",
+    "setup.cfg",
+)
+"""pytest が設定を探すファイルの名前（1 つのディレクトリの中での優先順。pytest 9 の ``CONFIG_LOADERS_BY_NAME`` と同じ）。"""
+
+_IMPORT_MODES = frozenset({"prepend", "append", "importlib"})
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PytestImports:
+    """pytest の設定のうち import の根に効くもの（``detect_pytest_imports``。BUG-0082）。
+
+    * ``pythonpath``: ``pythonpath`` の項目をワークスペース相対（``"/"`` 区切り、``""`` = ルート）に直したもの（書いた順。
+      ワークスペースの外を指すもの・絶対パスは捨てる）。
+    * ``import_mode``: ``addopts`` の ``--import-mode``（``prepend`` / ``append`` / ``importlib``。既定 ``prepend``）。
+    """
+
+    pythonpath: tuple[str, ...] = ()
+    import_mode: str = "prepend"
+
+    def fingerprint(self) -> str:
+        """内容の短い指紋（同じ設定なら同じ値。``engine/reresolve.py`` が設定の変化を見分けるのに使う）。"""
+        text = json.dumps([list(self.pythonpath), self.import_mode], ensure_ascii=False)
+        return hashlib.sha1(text.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
+
+
+def _ini_section(text: str, section: str) -> dict[str, str] | None:
+    """INI 形式の ``section`` の鍵と値。節が無い・読めないときは ``None``。"""
+    parser = configparser.ConfigParser(interpolation=None, strict=False, comment_prefixes=("#", ";"))
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return None
+    if not parser.has_section(section):
+        return None
+    return dict(parser.items(section, raw=True))
+
+
+def _pytest_config(directory: Path) -> Mapping[str, Any] | None:
+    """``directory`` の中で pytest が採る設定（``PYTEST_CONFIG_NAMES`` の順で最初に当たったファイルの pytest の表）。無ければ ``None``。"""
+    for name in PYTEST_CONFIG_NAMES:
+        text = _read_text(directory / name)
+        if text is None:
+            continue
+        if name.endswith(".toml"):
+            try:
+                doc = tomllib.loads(text)
+            except tomllib.TOMLDecodeError:
+                continue
+            if name != "pyproject.toml":
+                return _table(doc, "pytest")  # pytest.toml は ``[pytest]`` が無くても設定ファイル
+            if "pytest" not in _table(doc, "tool"):
+                continue
+            tool = _table(doc, "tool", "pytest")  # ``[tool.pytest]``（TOML の型のまま）か ``[tool.pytest.ini_options]``
+            return {k: v for k, v in tool.items() if k != "ini_options"} or _table(tool, "ini_options")
+        if name in ("pytest.ini", ".pytest.ini"):
+            return _ini_section(text, "pytest") or {}  # 節が無くても設定ファイル
+        section = _ini_section(text, "tool:pytest" if name == "setup.cfg" else "pytest")
+        if section is not None:
+            return section
+    return None
+
+
+def _words(value: Any) -> list[str]:
+    """INI の値（空白区切りの文字列。複数行を含む）・TOML の配列を語の列にする。"""
+    if isinstance(value, str):
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return value.split()
+    if isinstance(value, (list, tuple)):
+        return [w for v in value if isinstance(v, str) for w in _words(v)]
+    return []
+
+
+def _import_mode(addopts: Any) -> str:
+    """``addopts`` の ``--import-mode=X`` / ``--import-mode X``（後のものが勝つ）。無ければ ``prepend``。"""
+    mode = "prepend"
+    words = _words(addopts)
+    for i, word in enumerate(words):
+        value = None
+        if word.startswith("--import-mode="):
+            value = word.partition("=")[2]
+        elif word == "--import-mode" and i + 1 < len(words):
+            value = words[i + 1]
+        if value in _IMPORT_MODES:
+            mode = value
+    return mode
+
+
+def detect_pytest_imports(root: Path | str, project: str = "") -> PytestImports:
+    """``root`` の下のディレクトリ ``project``（ワークスペース相対。``""`` = ルート。テストフィクスチャのルートなど）に置かれた
+    pytest の設定から、import の根に効くもの（``pythonpath``・``--import-mode``）を読む。設定が無い・読めないときは既定値。
+
+    ``pythonpath`` は設定ファイルの置き場（``project``）からの相対。ワークスペースの外を指すもの・絶対パスは捨てる。
+    """
+    base = _rel(project) or ""
+    config = _pytest_config(Path(root) / base if base else Path(root))
+    if not config:
+        return PytestImports()
+    paths: list[str] = []
+    for raw in _words(config.get("pythonpath")):
+        text = raw.strip().replace("\\", "/")
+        if not text or "\x00" in text or text.startswith("/") or re.match(r"^[A-Za-z]:", text):
+            continue
+        norm = posixpath.normpath(posixpath.join(base, text))
+        if norm == ".." or norm.startswith("../"):
+            continue
+        rel = "" if norm == "." else norm
+        if rel not in paths:
+            paths.append(rel)
+    return PytestImports(tuple(paths), _import_mode(config.get("addopts")))

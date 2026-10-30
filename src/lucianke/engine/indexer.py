@@ -85,6 +85,7 @@ from lucianke.syntax.support import get_adapter, get_support
 from lucianke.syntax.symbols import extract_detailed, load_query_source
 from lucianke.workspace.languages import Detected, detect, is_test
 from lucianke.workspace.paths import confine, is_excluded
+from lucianke.workspace.pyenv import PytestImports, detect_pytest_imports
 from lucianke.workspace.types import Workspace
 
 __all__ = [
@@ -277,6 +278,9 @@ class Indexer:
         self._scan_total: int | None = None
         self._ahead: set[str] = set()  # 先取りしたが、まだ走査が取り込み直して整えていないパス
         self._scan_ingested: set[str] = set()  # 最後に終わった走査が取り込んだパス
+        # プロジェクトのディレクトリ（ワークスペースのルート ``""``・テストフィクスチャのルート）→ pytest の設定のうち import の根に
+        # 効くもの（BUG-0082）。設定ファイルの取り込み・削除（engine/reresolve.py）と走査の始まりで捨てる（``forget_pytest_imports``）
+        self._pytest_imports: dict[str, PytestImports] = {}
 
     @property
     def workspace(self) -> Workspace:
@@ -296,6 +300,21 @@ class Indexer:
         if ws.workspace_id != self._ws.workspace_id or ws.root != self._ws.root:
             raise ValueError("rebind needs the same workspace_id and root")
         self._ws = ws
+
+    def pytest_imports(self, project: str) -> PytestImports:
+        """ディレクトリ ``project``（ワークスペース相対）の pytest の設定のうち import の根に効くもの（覚えて使い回す。BUG-0082）。"""
+        found = self._pytest_imports.get(project)
+        if found is None:
+            found = self._pytest_imports[project] = detect_pytest_imports(self._ws.root, project)
+        return found
+
+    def forget_pytest_imports(self, projects: Iterable[str] | None = None) -> None:
+        """覚えた pytest の設定を捨てる（``None`` はすべて）。次に使うときディスクから読み直す。"""
+        if projects is None:
+            self._pytest_imports.clear()
+        else:
+            for project in projects:
+                self._pytest_imports.pop(project, None)
 
     # --- 公開 API ---------------------------------------------------------------------
 
@@ -457,6 +476,7 @@ class Indexer:
 
         progress(0)
         await self._ensure_workspace()
+        self.forget_pytest_imports()  # この走査で解析するファイルは、いまの pytest の設定で import を解く（BUG-0082）
         listing, report.gitignore = await asyncio.to_thread(self._walk)
         report.files_seen = len(listing)
         known = await asyncio.to_thread(self._known_files)
@@ -524,7 +544,12 @@ class Indexer:
         if known:  # 初回の全体走査は、取り込む側が最後のファイルシステムを見て解決済み。差分のときだけ、取り込まなかった側を解き直す
             created = [r for r in listing if r not in known]
             await reresolve.after_scan(
-                self, created=created, removed=gone, skip_file_ids=set(file_ids), changed=names_changed
+                self,
+                created=created,
+                removed=gone,
+                skip_file_ids=set(file_ids),
+                changed=names_changed,
+                configs=sorted(p for p in ingested if reresolve.is_pytest_config(p)),
             )
         if report.indexed or report.removed or not await asyncio.to_thread(self._ranks_ready):
             await self.refresh_ranks_quietly()  # 全体の取り込みの後に 1 回（index/rank.py。T-01 の順位）
@@ -929,8 +954,18 @@ class Indexer:
         nested: dict[relations.ImportKey, list[ImportFact]] = {}
         try:
             facts = extract_imports(parsed, language_id=lang)  # type: ignore[arg-type]
+
+            def pytest_imports(project: str) -> PytestImports:
+                # 使った設定の指紋も語幹として残す（設定が変わったら、違う指紋で解いた側だけを解き直す。engine/reresolve.py）
+                config = self.pytest_imports(project)
+                probes.add(reresolve.config_stem(project, config))
+                return config
+
             resolver = make_resolver(
-                from_rel=rel, language_id=lang, exists=reresolve.ProbeRecorder(self._exists, probes)
+                from_rel=rel,
+                language_id=lang,
+                exists=reresolve.ProbeRecorder(self._exists, probes),
+                pytest_imports=pytest_imports,
             )
             module_facts = [f for f in facts if not f.nested]
             for f in facts:
