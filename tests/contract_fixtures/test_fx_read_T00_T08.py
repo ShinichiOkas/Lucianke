@@ -442,7 +442,7 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
     }
     # LSP があれば最初の答えを exact で得て（BUG-0080）、すぐ真値も取る。以降の問い合わせは PaaD の exact 行から答えるので、
     # 事後条件 2〜6 も LSP の期限（負荷）で経路が揺れない。最初から延ばした期限で聞く: basedpyright は references の要求が
-    # 1 度取り消されると、同じプロセスの references がすべて失敗する（票 BUG-0085）。製品の期限 3 秒で切れたら exact も真値も取れない。
+    # 1 度取り消されると、同じプロセスの references がすべて失敗する（票 BUG-0087）。製品の期限 3 秒で切れたら exact も真値も取れない。
     want: set[tuple[str, int, int]] = set()
     if rig.lsp_ready:
         r = await ask_exact(
@@ -455,15 +455,26 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
     assert refs
     assert r["budget"]["used_tokens_est"] <= 6000  # 事後条件 6
     assert all(uses_ok(x) for x in refs)  # 事後条件 2
-    no_tests = await rig.ok(
-        "find_references_and_implementations",
-        target=tgt,
-        query_type="references",
-        include_tests=False,
-        max_tokens=6000,
+    # 事後条件 3: include_tests=false は is_test の行を含まない。2 つの答えは同じ経路で比べる（BUG-0086）: 負荷で 1 回目だけ
+    # structural に降格すると、F-PY の structural はテストからの呼び出し（受け手の型が分からず、同名の copy_with が 2 つある）を
+    # 結ばないので、テストの参照が 0 件で件数が減らず、落ちていた。
+    second = {**first, "include_tests": False}
+    no_tests = (
+        await ask_exact(
+            rig, "find_references_and_implementations", what=T06_EXACT, product_first=False, **second
+        )
+        if rig.lsp_ready
+        else await rig.ok("find_references_and_implementations", **second)
     )
     nt = no_tests["data"]["references"]
-    assert not any(x["is_test"] for x in nt) and len(nt) < len(refs)  # 事後条件 3
+    paths = (r["_resolution_meta"]["engine_used"], no_tests["_resolution_meta"]["engine_used"])
+    assert meta_level(no_tests) == meta_level(r), ("the two answers took different paths", paths)
+    assert not any(x["is_test"] for x in nt)
+    assert any(x["is_test"] for x in refs), ("no test reference with include_tests=true", paths)
+    assert len(nt) < len(refs), (len(nt), len(refs), paths)
+    if not (r.get("page") or {}).get("next_cursor") and not (no_tests.get("page") or {}).get("next_cursor"):
+        site = {(x["path"], x["line"], x["col"]) for x in refs if not x["is_test"]}
+        assert {(x["path"], x["line"], x["col"]) for x in nt} == site, paths  # 同じ答えからテストを除いたもの
     # 事後条件 4: ページをたどっても (path, line, col) は 1 度しか現れない
     seen: list[tuple[str, int, int]] = []
     cursor: str | None = None
