@@ -422,12 +422,21 @@ def _symbol_json(e: _Entry, doc: str | None, fold: int, children: list[dict[str,
         base = e.sym.to_json()
     except ValueError:  # 複数行にまたがる selection は json に出せない
         base = dataclasses.replace(e.sym, selection=None).to_json()
-    base["doc_summary"] = doc
-    base["children"] = children
-    base["fold_lines"] = fold
-    base["decorators"] = list(e.info.decorators)
-    base["raises"] = list(e.info.raises)
-    return base
+    # Compact: drop null and empty-collection fields to reduce token count (BUG-0055)
+    compact: dict[str, Any] = {k: v for k, v in base.items() if v is not None and v != []}
+    if doc is not None:
+        compact["doc_summary"] = doc
+    else:
+        compact.pop("doc_summary", None)
+    if children:
+        compact["children"] = children
+    if fold:
+        compact["fold_lines"] = fold
+    if e.info.decorators:
+        compact["decorators"] = list(e.info.decorators)
+    if e.info.raises:
+        compact["raises"] = list(e.info.raises)
+    return compact
 
 
 _RECORD_MEMO = BoundedMemo(max_entries=64, max_weight=40_000)  # 直近 64 ファイル・骨格の行 4 万行まで
