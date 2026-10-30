@@ -37,6 +37,10 @@ SUMMARY_MAX_CHARS: Final = (
 )
 SUMMARY_MAX_GROUPS: Final = 5  # 既定の要約に載せる group の最大数。残りは ``others`` にまとめる
 SHRINK_RETRIES: Final = 16  # 別の形式（json）で数えて縮退版が収まらないとき、``Record.shrink`` の ``ask`` を二分探索する回数の上限
+RESUME_RETRIES: Final = 3  # 途中で切れた縮退版の続きのトレーラが見込みより長いとき、見込みを上げて縮め直す回数の上限
+#: ``# summary:`` 行に取り分ける上限（レコードに使える予算の 1/N）。要約がこれより長ければ「…」で切って収める。上限が予算に
+#: 比例する（予算 1 トークンにつき高々 1 トークンしか増えない）ので、予算を上げてもレコードの取り分は減らない（BUG-0067）
+SUMMARY_SHARE_DIVISOR: Final = 4
 
 
 def trailer_lines(summary: str | None, cursor: str | None, remaining: int) -> tuple[str, ...]:
@@ -183,21 +187,21 @@ def _trailer_text(summary: str | None, cursor: str | None, remaining: int) -> st
     return "\n".join(trailer_lines(summary, cursor, remaining)) + "\n"
 
 
-@dataclass(frozen=True, slots=True)
-class _Fit:
-    """トレーラを含めて予算に収まった（または収められなかった）結果。"""
-
-    m: int  # 入れるレコード数
-    summary: str | None
-    cursor: str | None
-    warnings: tuple[str, ...]
-    used: int
-    over: bool  # m = 0 まで減らしても ``max_tokens`` を超える（``reserved_tokens`` が大きすぎる呼び出し側の誤り）
-    remaining: int | None = None  # 最後の 1 件が途中で切れている（``Record.resume``）ときの残り。None なら添字から数える
-
-
 class Packer:
     """レコード列を予算内に詰める（設計書 §7.2.2、仕様書 §5.6）。
+
+    詰め方（仕様書 §5.6-1・BUG-0067）: 先頭から丸ごと詰め、丸ごと入らない最初のレコードだけを縮退させて（``Record.shrink``）
+    そのページの最後の 1 件にする。縮退版・途中で切れた版（``Record.resume``）の後ろには詰めない。ページは、予算に依らない
+    固定の鎖「1 件目の縮退版（浅い段ほど後）→ 1 件目を丸ごと → 2 件目の縮退版 → 2 件目を丸ごと → …」のうち、トレーラ込みで
+    予算に収まる最も先の形である。鎖が予算に依らないので、``max_tokens`` を上げても返るレコードは減らず、どのレコードも
+    小さくならない（単調。``tests/unit/test_mcp_budget_monotone.py``）。以前は縮退版の後ろにも詰めていたため、予算を上げて
+    先頭が丸ごと入ると後ろが次ページに回り、返る件数が減った。
+
+    要約（``# summary:``。仕様書 §5.4.2）は ``# more:`` 行と一緒に取り分けるが、取り分けはレコードに使える予算の
+    1/``SUMMARY_SHARE_DIVISOR`` までで、それより長い要約は「…」で切って収める（ふつうの予算では要約は丸ごと入る）。
+    取り分けの上限が予算に比例するので、予算を上げてもレコードの取り分は減らない。以前は要約の分を丸ごと先に取り分け、
+    1 件も入らないときだけ要約を省いていたので、要約つきで 1 件入る予算に上げると、要約なしで入っていた後ろのレコードを
+    要約が押し出し、件数が減った（max_tokens を 2 上げて 11 件 → 1 件）。
 
     契約: ``reserved_tokens``（ヘッダ・``head_kv``・呼び手が出す警告の分）は呼び手が数えて渡す。
     ``reserved_tokens`` とトレーラの最小形だけで ``max_tokens`` を超える（前置きだけで予算を使い切る小さすぎる
@@ -247,7 +251,7 @@ class Packer:
         if start >= n:  # 詰めるものが無い（続きも無い）
             if reserved_tokens <= max_tokens:
                 return self._page((), reserved_tokens, max_tokens, total, 0, None, None, ())
-            # 前置きだけで予算を超える（BUG-0064）。レコードが元から無くても、``_fit`` の ``m == 0`` と同じく呼び直しに
+            # 前置きだけで予算を超える（BUG-0064）。レコードが元から無くても、1 件も入らないときと同じく呼び直しに
             # 要る ``max_tokens`` を名指しする（固定の下限は無いので、下限はこの実測値で呼び出しごとに伝える。BUG-0063）
             warning = (
                 f"the response preamble alone needs ~{reserved_tokens} tokens, over max_tokens={max_tokens};"
@@ -274,107 +278,102 @@ class Packer:
                 kept = tuple(records[i].with_tokens(tok[i]) for i in range(start, n))
                 return self._page(kept, reserved_tokens + running, max_tokens, total, 0, None, None, ())
 
-        # 2. 先頭から詰める。後ろに続きが残る間はトレーラの見込み分を差し引く。最後の 1 件はトレーラが要らない
-        #    （具体化していない続きがあれば、最後の 1 件にも要る）
-        shrunk: dict[int, Record | None] = {}  # 縮退は 1 レコードにつき一度だけ呼ぶ（2 周目は結果を使い回す）
+        # 要約の取り分の上限（予算 1 トークンにつき高々 1 トークンしか増えない）。要約を数えない形式（json）では使わない
+        share = max(0, avail) // SUMMARY_SHARE_DIVISOR
+        summary_counts = tt("x", None, 1) != tt(None, None, 1)
 
-        def greedy(reserve: int, *, with_summary: bool = True) -> tuple[list[Record], list[int]]:
-            included: list[Record] = []
-            costs: list[int] = []
-            left = avail
-            for i in range(start, n):
-                rec = records[i]
-                budget = left - (reserve if i < n - 1 or unseen else 0)
-                t = cost_of(i)
-                hold = 0  # 途中で切れた縮退のために取り分けるトレーラの見込み
-                if t > budget and rec.shrink is not None:
-                    if budget > 1 and i not in shrunk:
-                        # 縮退は行の本文（終端の改行なし）で測って予算に収める。終端の改行は最大 1 トークンなので、
-                        # その分を引いて渡せば ``_record_text`` で数え直しても収まる
-                        shrunk[i] = self._shrink(rec, budget - 1, rt)
-                    small = shrunk.get(i)
-                    if small is not None and small.resume is not None:
-                        # 途中で切れた縮退は、最後の 1 件でも続きのトレーラ（同じレコードの再開カーソルと要約）が要る。
-                        # そのカーソルは再開位置の分だけ長いので、実際の形で見込み直して収まるまで詰め直す
-                        hold = self._resume_reserve(out, records, i, small.resume, n, unseen, cursor_factory, with_summary, tt)
-                        if est(rt(small)) > left - hold:
-                            small = self._shrink(rec, left - hold - 1, rt) if left - hold > 1 else None
-                            shrunk[i] = small
-                    if small is not None:
-                        rec, t = small, est(rt(small))
-                        if rec.resume is not None:
-                            budget = min(budget, left - hold)
-                if t > budget:
-                    break  # 飛ばして後ろを詰めない（優先順位の順を保つ）
-                included.append(rec.with_tokens(t))
-                costs.append(t)
-                left -= t
-                if rec.resume is not None:
-                    break  # 途中で切れたレコードの後ろは詰めない（続きは同じレコードから。順を保つ）
-            return included, costs
+        def tail_of(m: int, resume: int | None) -> tuple[int, int, int]:
+            """先頭 ``m`` 件（最後の 1 件の再開位置が ``resume``）を入れたときの ``(次のオフセット, 残り件数, トレーラ)``。
 
-        included, costs = greedy(self._trailer_reserve(out, start, n, unseen, cursor_factory, trailer_text=tt))
-        if start + len(included) >= n and not unseen and not (included and included[-1].resume is not None):  # 縮退で全部入った
-            return self._page(
-                tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
-            )
+            トレーラは ``# more:`` 行（json はカーソルの文字列）と、要約の行の ``share`` までの分。続きが無ければ残り 0・トレーラ 0。
+            """
+            last = start + m - 1
+            if resume is not None:  # 途中で切れた版の続きは同じレコードの再開位置から（最後の 1 件でも続きがある）
+                nxt, remaining = join_offset(last, resume), n - last + unseen
+            else:
+                nxt, remaining = last + 1, n - last - 1 + unseen
+            if remaining <= 0:
+                return nxt, 0, 0
+            cursor = cursor_factory(nxt) if cursor_factory is not None else None
+            bare = est(tt(None, cursor, remaining))
+            if not summary_counts:
+                return nxt, remaining, bare
+            rest = records[last if resume is not None else last + 1 :]
+            full = est(tt(self._summary(out, rest, unseen), cursor, remaining))
+            return nxt, remaining, bare + min(max(0, full - bare), share)
 
-        # 3. 実際のトレーラ（カーソル・要約）を作って数え、収まらなければ末尾から外す
-        need_first = cost_of(start)
-        fit = self._fit(
-            out,
-            records,
-            start,
-            n,
-            len(included),
-            costs,
-            reserved_tokens,
-            max_tokens,
-            cursor_factory,
-            unseen=unseen,
-            trailer_text=tt,
-            with_summary=True,
-            need_first=need_first,
-            resumes=[r.resume for r in included],
-        )
-        if fit.m == 0:
-            # 要約（SHOULD）を省けばレコードが入るかもしれない。要約の見込みを引かずに詰め直す
-            included, costs = greedy(
-                self._trailer_reserve(out, start, n, unseen, cursor_factory, with_summary=False, trailer_text=tt), with_summary=False
+        def shrunk_last(m: int, room: int, tail: int) -> tuple[Record, int, int, int, int] | None:
+            """``m`` 件目を縮退させて最後の 1 件にする: 残り ``room`` にトレーラ込みで入る最も大きい縮退版。
+
+            ``(縮退版, そのトークン数, 次のオフセット, 残り件数, トレーラ)``。途中で切れた版は続きのカーソルが再開位置の分だけ
+            長いので、実際の形で数え直し、入らなければ見込みを上げて縮め直す（最大 ``RESUME_RETRIES`` 回）。
+            """
+            rec = records[start + m - 1]
+            if rec.shrink is None:
+                return None
+            for _ in range(RESUME_RETRIES):
+                # 縮退は行の本文（終端の改行なし）で測って収める。終端の改行は最大 1 トークンなので、その分を引いて渡す
+                ask = room - tail - 1
+                if ask < 1:
+                    return None
+                small = self._shrink(rec, ask, rt)
+                if small is None:
+                    return None
+                size = est(rt(small))
+                nxt, remaining, real = tail_of(m, small.resume)
+                if size + real <= room:
+                    return small, size, nxt, remaining, real
+                if small.resume is None:
+                    return None  # 渡した予算に収まらない縮退版（``Record.shrink`` の約束違反）。縮め直さずに止める
+                tail = max(real, tail + 1)
+            return None
+
+        # 2. 鎖の上で予算に収まる最も先の形を探す。先頭 m - 1 件を丸ごと入れた本文が予算を超えない最大の m から下へ見て、
+        #    最初に収まる m（丸ごと、無理なら最も大きい縮退版）を採る。本文の和は m について増えるので、それより先は収まらない
+        prefix = [0]  # prefix[k] = 先頭 k 件を丸ごと入れた本文の和
+        m_top = 0
+        for m in range(1, n - start + 1):
+            if prefix[-1] > avail:
+                break
+            m_top = m
+            prefix.append(prefix[-1] + cost_of(start + m - 1))
+        chosen: tuple[int, Record, int, int, int, int] | None = None  # (件数, 最後の版, そのトークン数, 次のオフセット, 残り, トレーラ)
+        for m in range(m_top, 0, -1):
+            i = start + m - 1
+            room = avail - prefix[m - 1]
+            nxt, remaining, tail = tail_of(m, None)
+            if cost_of(i) + tail <= room:
+                chosen = (m, records[i], cost_of(i), nxt, remaining, tail)
+                break
+            small = shrunk_last(m, room, tail)
+            if small is not None:
+                chosen = (m, *small)
+                break
+
+        if chosen is None:
+            # 1 件も入らない。カーソルは出さない（BUG-0015）: オフセットが進まないカーソルは、同じ呼び出しをもう一度
+            # するだけで、辿るクライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、
+            # 呼び出しに付けたカーソルはそのまま使える。``max_tokens`` を上げて同じ引数で呼び直させる。
+            # トレーラ（要約・``# more:``）も描かれないので数えない。
+            need_first = cost_of(start)
+            warning = (
+                f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens;"
+                f" raise max_tokens to ~{reserved_tokens + need_first} or more and call again with the same arguments"
             )
-            if start + len(included) >= n and not unseen and not (included and included[-1].resume is not None):
-                return self._page(
-                    tuple(included), reserved_tokens + sum(costs), max_tokens, total, 0, None, None, ()
-                )
-            alt = self._fit(
-                out,
-                records,
-                start,
-                n,
-                len(included),
-                costs,
-                reserved_tokens,
-                max_tokens,
-                cursor_factory,
-                unseen=unseen,
-                trailer_text=tt,
-                with_summary=False,
-                need_first=need_first,
-                resumes=[r.resume for r in included],
-            )
-            if alt.m > fit.m or fit.over:
-                fit = alt
-        kept = tuple(included[: fit.m])
-        return self._page(
-            kept,
-            fit.used,
-            max_tokens,
-            total,
-            fit.remaining if fit.remaining is not None else n - (start + fit.m) + unseen,
-            fit.cursor,
-            fit.summary,
-            fit.warnings,
-        )
+            used = reserved_tokens + est("! " + warning + "\n")
+            return self._page((), used, max_tokens, total, n - start + unseen, None, None, (warning,))
+
+        m, last, last_size, nxt, remaining, _ = chosen
+        kept = (*(records[j].with_tokens(cost_of(j)) for j in range(start, start + m - 1)), last.with_tokens(last_size))
+        body = reserved_tokens + prefix[m - 1] + last_size
+        if not remaining:  # 最後のレコードまで入った（最後の 1 件は縮退版でもよい）。トレーラは要らない
+            return self._page(kept, body, max_tokens, total, 0, None, None, ())
+        # 3. 続きがある。カーソル（MUST）と要約の取り分は収まっている。要約は残りに入るだけ（長ければ「…」で切って）付ける
+        cursor = cursor_factory(nxt) if cursor_factory is not None else None
+        rest = records[start + m - 1 if last.resume is not None else start + m :]
+        summary = self._fit_summary(self._summary(out, rest, unseen), cursor, remaining, max_tokens - body, tt)
+        used = body + est(tt(summary, cursor, remaining))
+        return self._page(kept, used, max_tokens, total, remaining, cursor, summary, ())
 
     # -- 内部 -----------------------------------------------------------------------------
 
@@ -430,93 +429,27 @@ class Packer:
                 hi = mid - 1
         return best
 
+    def _fit_summary(
+        self, summary: str, cursor: str | None, remaining: int, room: int, trailer_text: TrailerText
+    ) -> str | None:
+        """``room``（レコードを詰めた残り）にトレーラ込みで入る要約。丸ごと入らなければ末尾を「…」で切った最長の形。
+        それも入らなければ ``None``（``# more:`` 行だけは取り分けてあるので必ず入る）。"""
+        est = self.estimator.count
+        if est(trailer_text(summary, cursor, remaining)) <= room:
+            return summary
+        lo, hi, best = 1, len(summary) - 1, None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            cand = summary[:mid].rstrip() + "…"
+            if est(trailer_text(cand, cursor, remaining)) <= room:
+                best, lo = cand, mid + 1
+            else:
+                hi = mid - 1
+        return best
+
     @staticmethod
     def _summary(out: ToolOutput, rest: Sequence[Record], unseen: int = 0) -> str:
         """``rest`` は具体化した残り、``unseen`` は具体化していない残りの件数。ツールの ``summarize`` は ``rest`` だけを見る
         （``rest`` が空で ``unseen`` だけあるときは既定の要約）。"""
         text = out.summarize(rest) if out.summarize is not None and (rest or not unseen) else ""
         return _one_line(text or default_summary(rest, unseen))
-
-    def _trailer_reserve(
-        self,
-        out: ToolOutput,
-        start: int,
-        n: int,
-        unseen: int,
-        cursor_factory: Callable[[int], str] | None,
-        *,
-        with_summary: bool = True,
-        trailer_text: TrailerText = _trailer_text,
-    ) -> int:
-        """詰める前のトレーラの見込み。実際の値は ``_fit`` が確かめるので、ここは大きめの近似でよい。"""
-        summary = self._summary(out, out.records[start + 1 :], unseen) if with_summary else None
-        cursor = cursor_factory(n - 1) if cursor_factory is not None else None
-        return self.estimator.count(trailer_text(summary, cursor, n - start + unseen))
-
-    def _resume_reserve(
-        self,
-        out: ToolOutput,
-        records: Sequence[Record],
-        i: int,
-        resume: int,
-        n: int,
-        unseen: int,
-        cursor_factory: Callable[[int], str] | None,
-        with_summary: bool,
-        trailer_text: TrailerText = _trailer_text,
-    ) -> int:
-        """``records[i]`` を途中で切って入れるとき（``Record.resume``）のトレーラの見込み。続きは同じレコードの再開位置から。"""
-        rest = records[i:]
-        summary = self._summary(out, rest, unseen) if with_summary else None
-        cursor = cursor_factory(join_offset(i, resume)) if cursor_factory is not None else None
-        return self.estimator.count(trailer_text(summary, cursor, len(rest) + unseen)) + 1  # 数え誤りの余裕 1 トークン
-
-    def _fit(
-        self,
-        out: ToolOutput,
-        records: Sequence[Record],
-        start: int,
-        n: int,
-        m: int,
-        costs: list[int],
-        reserved: int,
-        max_tokens: int,
-        cursor_factory: Callable[[int], str] | None,
-        *,
-        unseen: int,
-        with_summary: bool,
-        need_first: int,
-        resumes: Sequence[int | None] = (),
-        trailer_text: TrailerText = _trailer_text,
-    ) -> _Fit:
-        """先頭 ``m`` 件を入れた形から、トレーラ込みで収まるまで末尾の 1 件ずつ（まとめて）外す。"""
-        est = self.estimator.count
-        while True:
-            if m == 0:
-                # 1 件も入らない。カーソルは出さない（BUG-0015）: オフセットが進まないカーソルは、同じ呼び出しをもう一度
-                # するだけで、辿るクライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、
-                # 呼び出しに付けたカーソルはそのまま使える。``max_tokens`` を上げて同じ引数で呼び直させる。
-                # トレーラ（要約・``# more:``）も描かれないので数えない。
-                warning = (
-                    f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens;"
-                    f" raise max_tokens to ~{reserved + need_first} or more and call again with the same arguments"
-                )
-                used = reserved + est("! " + warning + "\n")
-                return _Fit(
-                    m=0, summary=None, cursor=None, warnings=(warning,), used=used, over=used > max_tokens
-                )
-            # 最後に入れた 1 件が途中で切れているとき（``Record.resume``）、続きは同じレコードの再開位置から
-            resume = resumes[m - 1] if m <= len(resumes) else None
-            next_off = start + m - 1 if resume is not None else start + m
-            rest = records[next_off:]
-            summary = self._summary(out, rest, unseen) if with_summary else None
-            cursor = cursor_factory(join_offset(next_off, resume)) if cursor_factory is not None else None
-            used = reserved + sum(costs[:m]) + est(trailer_text(summary, cursor, len(rest) + unseen))
-            if used <= max_tokens:
-                return _Fit(m=m, summary=summary, cursor=cursor, warnings=(), used=used, over=False,
-                            remaining=len(rest) + unseen if resume is not None else None)
-            deficit = used - max_tokens
-            freed = 0
-            while m > 0 and freed < deficit:  # 少なくとも 1 件は外れる（deficit > 0）
-                m -= 1
-                freed += costs[m]

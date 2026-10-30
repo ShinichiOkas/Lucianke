@@ -269,11 +269,12 @@ def _build_output(
              f"{delta.status} (+{len(delta.added)} -{len(delta.resolved)}) checked={len(delta.checked_files)} files")
         )  # fmt: skip
 
+    # 診断を先に、縮められる diff を最後に置く（縮んだ diff はページの最後の 1 件になる。仕様書 §5.6-5、BUG-0067）
     records: list[Record] = []
+    records += diag_records(svc, "added", delta.added, 0, conf)
+    records += diag_records(svc, "resolved", delta.resolved, 1, conf)
     if result.diff:
-        records.append(diff_record(svc, result.diff, conf))
-    records += diag_records(svc, "added", delta.added, 1, conf)
-    records += diag_records(svc, "resolved", delta.resolved, 2, conf)
+        records.append(diff_record(svc, result.diff, conf, priority=2))
 
     lsp = LspStatus.READY if conf is Confidence.EXACT else LspStatus.UNAVAILABLE
     return ToolOutput(

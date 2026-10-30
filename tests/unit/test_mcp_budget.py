@@ -291,14 +291,16 @@ def test_pack_uses_tool_summary_and_caps_it() -> None:
         cursor_factory=cursor_factory(),
     )
     assert page.summary == f"custom {page.remaining}"
+    # 要約の取り分はレコードに使える予算の 1/4 まで（BUG-0067）。400 文字の上限を確かめるため、取り分が要約より大きい予算で呼ぶ
+    many = [rec(f"r{i}", 30) for i in range(80)]
     long_page = Packer().pack(
-        make_out(recs, summarize=lambda rest: "y" * 1000 + "\nz"), max_tokens=400, cursor_factory=cursor_factory()
+        make_out(many, summarize=lambda rest: "y" * 1000 + "\nz"), max_tokens=1200, cursor_factory=cursor_factory()
     )
     assert long_page.summary is not None
     assert len(long_page.summary) == SUMMARY_MAX_CHARS
     assert long_page.summary.endswith("…")
     assert "\n" not in long_page.summary
-    assert long_page.used_tokens_est <= 400
+    assert long_page.used_tokens_est <= 1200
 
 
 def test_pack_empty_tool_summary_falls_back_to_default() -> None:
@@ -421,20 +423,21 @@ def test_pack_nothing_fits_the_suggested_max_tokens_works() -> None:
     assert page.next_cursor is not None and decode_offset(page.next_cursor) == 1
 
 
-def test_pack_drops_summary_before_giving_up_on_records() -> None:
+def test_pack_cuts_summary_before_giving_up_on_records() -> None:
     # 続きが少ないと長い要約を返すツール（見込みより実際のトレーラが大きくなる）。
-    # 要約（SHOULD）を省けばレコードが入る予算では、0 件にせず要約を省く
+    # 要約は取り分（レコードに使える予算の 1/4）までに「…」で切る。長い要約のためにレコードを 0 件にしない（BUG-0067）
     def summarize(rest: Sequence[Record]) -> str:
         return "z" * 400 if len(rest) <= 8 else ""
 
     recs = [rec(f"r{i}", 20, group=f"file{i}.py") for i in range(10)]
     out = make_out(recs, summarize=summarize)
-    dropped = 0
+    cut = 0
     for max_tokens in range(200, 330):
         page = Packer().pack(out, max_tokens=max_tokens, reserved_tokens=95, cursor_factory=cursor_factory())
         assert page.used_tokens_est <= max_tokens
-        dropped += page.summary is None and bool(page.records) and page.truncated
-    assert dropped > 0
+        assert page.records  # 長い要約のために 0 件にしない
+        cut += page.summary is not None and page.summary.endswith("…") and len(page.summary) < 400
+    assert cut > 0
 
 
 def test_pack_pagination_has_no_duplicates_and_no_gaps() -> None:

@@ -646,16 +646,13 @@ tools/call(name, arguments)
 
 ```
 pack(out, budget, offset):
-  reserved = est(header) + est(head_kv) + est(worst-case trailer)
-  remaining = budget - reserved
-  included = []
-  for rec in out.records[offset:]:
-      t = est(rec)
-      if t > remaining and rec.shrink is not None:
-          rec = rec.shrink(remaining)              # 縮退版を一度だけ試す（T-02 のファイル内省略）
-          t = est(rec) if rec is not None else None
-      if rec is None or t > remaining: break
-      included.append(rec); remaining -= t
+  avail = budget - reserved                        # reserved = 前置き（ヘッダ・head_kv・json の封筒。呼び手が数える）
+  # 鎖「r0 の縮退版 → r0 丸ごと → r1 の縮退版 → r1 丸ごと → …」のうち、トレーラ込みで avail に収まる最も先の形（BUG-0067）
+  for m in (先頭 m-1 件を丸ごと入れた本文 <= avail の最大の m から 1 まで):
+      room = avail - Σ est(r0..r[m-2]) - trailer(m)  # trailer = "# more:" 行 + 要約の行の min(全長, avail // 4)
+      if est(r[m-1]) <= room: included = r0..r[m-1]; break
+      small = r[m-1].shrink(room) if r[m-1].shrink else None   # 縮退版（T-02 のファイル内省略）はページの最後の 1 件
+      if small: included = r0..r[m-2] + [small]; break         # 縮退版の後ろには詰めない
   rest = out.records[offset + len(included):]
   unseen = max(0, out.total_estimate - len(out.records))       # ツールが具体化していない続き（BUG-0008。下の total_estimate の意味）
   if rest or unseen: next_cursor = CursorCodec.encode(tool, args_hash, offset + len(included), data_version)
@@ -666,6 +663,7 @@ pack(out, budget, offset):
 
 - **応答全体の予算（BUG-0014・BUG-0017。`mcp/fit.py` の `pack_and_render`）**: パッカーが詰めるのはレコードとトレーラだけで、ヘッダ・警告・降格の警告行・`head_kv`（compact）や封筒・`_resolution_meta`・`data_static`（json）は `reserved_tokens` で呼び手が渡す。パイプラインは、**レコード 0 件のページを同じレンダラで実際に描いた全文**（`used_tokens_est` と `timing_ms` は最大桁数）を数えて `reserved_tokens` にする。詰めたあと全文を数え直し、`max_tokens` を超えていれば超過分を `reserved_tokens` に足して詰め直す（`returned` の桁数など見積もりの誤差を吸収する）。最後に `used_tokens_est` を数え直しの値に置き換えて描き直す（数字は 1 文字ずつ数えるので、桁数が変わらなければ 1 回で収束する）。数え直しは `timing_ms` を最大桁数にした全文で行う（json の `timing_ms` は全文に入る。同じ入力なら呼び出しごとの処理時間にかかわらず同じ値になり、実際の全文以上の上限になる。差は最大 4 トークン）。この結果、描画後の全文の数え直し ≤ `used_tokens_est` ≤ `max_tokens`（compact は一致。json は上の差だけ上）が全応答で成り立つ。dot / mermaid は対象外（`data_static["graph"]` を丸ごと描くため。別の票）。
 - **形式ごとの見積もり**: `Packer.pack` は `record_text(rec)`（1 レコードが描かれるときの本文）と `trailer_text(summary, cursor, remaining)`（続きがあるときに増える本文）を受ける。既定は compact（`Record.lines` + 行末の改行、`# summary:` / `# more:` の 2 行）。json は `render/json_out.py` の `record_text`（`data` の JSON + 区切りの `,`）と `trailer_text`（`next_cursor` の文字列だけ。json に要約の行は無い）。`Record.shrink` は compact の行で収める約束なので、別の形式で数えて収まらなければ、`ask`（compact の行の予算）を二分探索して json で収まる最大の縮退版を探す（最大 16 回。json の大きさは compact の行に比例しない固定分があるため、比例で縮めても収束しない）。
+- **予算に対する単調性（BUG-0067、仕様書 §5.6-5）**: 上の鎖は予算に依らないので、`max_tokens` を上げても件数は減らず、どのレコードも小さくならない。以前は縮退版の後ろにも詰め（予算を上げて先頭が丸ごと入ると後ろが次ページに回った）、要約の分を丸ごと先に取り分けて 1 件も入らないときだけ省いていた（要約つきで 1 件入る予算に上げると件数が減った）。要約の取り分は avail の 1/4 まで（予算 1 トークンにつき高々 1 トークンしか増えない）で、長い要約は「…」で切る。`tests/unit/test_mcp_budget_monotone.py` が乱数で確かめる。
 - 1 件も入らないときは `included = []`、`next_cursor` なし（進まないカーソルは出さない。BUG-0015）、`warnings` に理由と必要な `max_tokens` の目安（仕様書 §5.6 の 4）。トレーラは描かれないので `used` に数えない。`next_cursor` を返すページは必ず 1 件以上を含み、オフセットが進む。
 - `records` は遅延列でもよい（巨大な参照一覧をすべて具体化しないため、ツールは生成器を渡してよい。`total_estimate` は別途 `COUNT` で与える）。
   - **`total_estimate` の意味（BUG-0008 で確定）**: 並び全体の件数。`records` は全体の先頭 `len(records)` 件（具体化した接頭辞）で、`total_estimate > len(records)` なら差（`unseen`）は具体化していない続きである。パッカーは `unseen` も「続き」に数える: 渡された分が全部入っても `next_cursor`（オフセットは `len(records)` 以降の入らなかった先頭）と `# more: … remaining≈N`（N = 入らなかった分 + `unseen`）を出し、トレーラの分も予算に入れる（最後の 1 件にも要る）。`total_estimate` が `None` または `len(records)` 以下なら従来どおり（`records` が全体）。
@@ -919,7 +917,7 @@ def build(parsed: ParsedFile, symbols: list[SymbolRecord], support, opts: Skelet
 
 1. ファイルブロックのヘッダ行（`=== <path> (<N> lines[, <M> cells], skeleton: <K> lines, sha=<12hex>) ===`）、`imports:` 行（`imports.scm`）、トップレベルから入れ子へ `symbol-block` を組み立てる。本体は `skeleton.scm` の `@body` 捕捉の行数で `{ ...N lines omitted }` に畳む。
 2. 行の生成は `mcp/render/compact.py` の行種関数を呼ぶ（§7.2.4）。ツールと骨格は文法を直接書かない。
-3. **予算内での縮退**: T-02 手順 8（`doc:` → `urn:` → 非公開 → 入れ子の順に落とし、`- truncated: N members omitted`）を実現するため、ファイルブロックのレコードは `shrink(remaining_tokens) -> Record` を持つ。パッカーは「入らないレコード」に `shrink` があればそれを呼び、縮めても入らなければ次ページへ回す。`Record` に任意フィールド `shrink` を足す必要がある（親の §7.2 への突き合わせ点）。
+3. **予算内での縮退**: T-02 手順 8（`doc:` → `urn:` → 非公開 → 入れ子の順に落とし、`- truncated: N members omitted`）を実現するため、ファイルブロックのレコードは `shrink(remaining_tokens) -> Record` を持つ。パッカーは「入らないレコード」に `shrink` があればそれを呼んでページの最後の 1 件にし（後ろは次ページ。予算に対する単調性のため。仕様書 §5.6-5、BUG-0067）、縮めても入らなければ次ページへ回す。`Record` に任意フィールド `shrink` を足す必要がある（親の §7.2 への突き合わせ点）。
 4. Tier 3 の骨格はアダプタの `skeleton()` が同じ `Record` を返す。
 
 ### 7.4.5 定義ノードの境界（boundaries.py）

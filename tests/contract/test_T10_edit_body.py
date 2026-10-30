@@ -22,15 +22,17 @@ import compact_grammar as g
 import pytest
 
 from lucianke.app import build_services
-from lucianke.core.model import Confidence
+from lucianke.core.model import Confidence, EngineChoice
+from lucianke.core.records import ToolOutput
 from lucianke.edit.lock import WorkspaceLocks
 from lucianke.edit.verify import DiagDelta
 from lucianke.index.writer import IndexWriter
+from lucianke.mcp.budget import Packer
 from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.syntax.parsers import parse_source
 from lucianke.tools import register_tools
-from lucianke.tools._edit_output import diag_records
+from lucianke.tools._edit_output import diag_records, diff_record
 from lucianke.tools._runtime import WiredServices
 from lucianke.tools._services import ToolServices
 
@@ -672,3 +674,22 @@ def test_diagnostic_sections_render_as_diag_lines() -> None:
     assert g.validate(text, require_header=False) == [], text
     assert f'resolved:\nW {PAY}:120:9 [pyright:reportUnusedVariable] 変数 "tmp" は使われていません' in text
     assert f"added:\nE {PAY}:3:1 [tree-sitter:-] syntax error" in text
+
+
+def test_shrunk_diff_does_not_push_diagnostics_off_the_page() -> None:
+    """T-10・T-13 は診断を先に、縮められる diff を最後に置く。パッカーは縮退版をページの最後の 1 件にする（仕様書 §5.6-5、
+    BUG-0067）ので、diff が前だと、縮んだ diff の後ろの診断が次ページ（編集ツールでは辿れない）に回っていた。"""
+    svc = build_services(lambda: ["."])
+    added =({"path": PAY, "severity": "error", "source": "pyright", "code": "x", "start_line": 3, "start_col": 1,
+              "message": "undefined name 'x'"},)  # fmt: skip
+    hunks = "".join(
+        f"@@ -{i * 10},3 +{i * 10},3 @@\n" + "".join(f"-old {i} {j} line\n+new {i} {j} line\n" for j in range(6))
+        for i in range(12)
+    )
+    records = [*diag_records(svc, "added", added, 0, Confidence.EXACT), diff_record(svc, hunks, Confidence.EXACT, 2)]
+    out = ToolOutput(records=records, max_confidence=Confidence.EXACT,
+                     engine=EngineChoice(engine="t", confidence=Confidence.EXACT), page_unit="section")  # fmt: skip
+    page = Packer().pack(out, max_tokens=400, reserved_tokens=120)
+    assert [r.key for r in page.records] == ["added", "diff"]
+    assert page.records[1].data["omitted_hunks"] > 0  # diff は縮んで最後に入る
+    assert not page.truncated

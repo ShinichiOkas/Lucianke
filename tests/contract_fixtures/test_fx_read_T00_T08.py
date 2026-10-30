@@ -178,9 +178,18 @@ def tree_spans(rig: Rig, rel: str) -> set[tuple[int, int]]:
 async def test_t02_postcondition_1_2_5_skeleton_matches_the_source(rig: Rig) -> None:
     """PC:T-02#1 PC:T-02#2 PC:T-02#5 — range は Tree-sitter のノードの行と一致し、テキスト行は元ファイルの行で、予算を守る。"""
     t = TARGETS[rig.key]
-    r = await rig.ok("get_file_skeleton", paths=list(t.skeleton), max_tokens=6000)
-    assert r["budget"]["used_tokens_est"] <= 6000  # 事後条件 5
-    items = r["data"]["items"]
+    # 2 ファイルが 1 ページに入るかは json の量で決まる（入らなければ次ページ。仕様書 §5.6・§11 T-02 規約 8）。
+    # カーソルを辿って全ページを集め、各ページで予算を守ることと、全ファイルの事後条件を確かめる（BUG-0067）
+    items: list[dict] = []
+    cursor = None
+    for _ in range(len(t.skeleton) + 1):
+        r = await rig.ok("get_file_skeleton", paths=list(t.skeleton), max_tokens=6000, cursor=cursor)
+        assert r["budget"]["used_tokens_est"] <= 6000  # 事後条件 5
+        items += r["data"]["items"]
+        cursor = r["page"]["next_cursor"]
+        if cursor is None:
+            break
+        assert r["data"]["items"], "進まないページ"
     assert [i["path"] for i in items] == list(t.skeleton) and all(i["ok"] for i in items)
     checked = 0
     for item in items:

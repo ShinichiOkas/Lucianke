@@ -6,6 +6,8 @@
 
 * ``diff_record``: unified diff を 1 つの ``code`` レコードにする。ハンクが 2 つ以上あるときは、予算に収まる最大の数の
   先頭ハンクだけに縮められる（``shrink``。省いた数を ``diff truncated`` の note と ``omitted_hunks`` で伝える）。
+  ツールは診断のレコードの **後ろ** に置く: パッカーは縮退版をページの最後の 1 件にする（仕様書 §5.6-5、BUG-0067）ので、
+  diff が前にあると、縮んだ diff の後ろの診断が次ページ（編集ツールでは辿れない）に回る。
 * ``diag_records``: ``added:`` / ``resolved:`` の見出しの後ろに診断の行を並べる ``diag`` レコード（0 件なら出さない）。
 * ``diag_line``: 診断 1 件の compact の行（T-11 は ``head_kv`` の値として使う）。
 * ``short_sha``: 画面に出す sha256 の短縮（先頭 12 桁 + ``…``）。
@@ -47,7 +49,7 @@ def diag_line(svc: ToolServices, obj: Mapping[str, Any]) -> str:
     )
 
 
-def diff_record(svc: ToolServices, diff: str, confidence: Confidence) -> Record:
+def diff_record(svc: ToolServices, diff: str, confidence: Confidence, priority: int = 0) -> Record:
     rows = diff.rstrip("\n").split("\n")
     hunk_starts = [i for i, row in enumerate(rows) if row.startswith("@@")]
 
@@ -59,7 +61,7 @@ def diff_record(svc: ToolServices, diff: str, confidence: Confidence) -> Record:
             lines.append(svc.lines.note(f"diff truncated: {omitted} of {len(hunk_starts)} hunks omitted"))
         data: dict[str, Any] = {"section": "diff", "hunks": len(hunk_starts), "omitted_hunks": omitted}
         return Record(
-            kind="code", key="diff", priority=0, lines=tuple(lines), data=data, confidence=confidence, group="diff",
+            kind="code", key="diff", priority=priority, lines=tuple(lines), data=data, confidence=confidence, group="diff",
             shrink=shrink if count is None and len(hunk_starts) > 1 else None,
         )  # fmt: skip
 
