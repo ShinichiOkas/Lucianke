@@ -35,3 +35,5 @@ source_sprint: m1-impl-20261029
 
 - 新しい依存・動的 import・データファイル・自己起動を足したら、`.\build.ps1 -NoInstall` を流して smoke が通ることを確かめる。
 - 同梱した依存と Python 実行系のライセンス（`licenses\`・`THIRD_PARTY_NOTICES.md`・`licenses\python\LICENSE.txt`）を配布物に残す。
+
+関連: 仕様の判断は呼ぶ側の AI にとっての有用さで AI が決める（ペア固有 Skill `the-tools-primary-user-decides-its-spec`、師匠の宣言 2026-10-31）。

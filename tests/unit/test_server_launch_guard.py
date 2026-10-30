@@ -63,7 +63,7 @@ def test_bench_server_argv_matches_tests() -> None:
 
 
 def test_host_config_launches_python_dash_m_not_the_console_script() -> None:
-    """ホスト（``.mcp.json``）は ``uv run --directory <repo> python -P -m lucianke``。``lucianke.exe``（コンソールスクリプト）を握らない。
+    """ホスト（``.mcp.json``）は ``uv run --directory . python -P -m lucianke``。``lucianke.exe``（コンソールスクリプト）を握らない。
 
     ``uv run`` の同期は ``pyproject.toml`` が変わると ``Scripts/lucianke.exe`` を消して作り直すが、握られていると Windows では
     消せない（os error 32）。``python`` 以降はテスト・ベンチの ``server_argv`` と同じ形（``-P`` で cwd を ``sys.path`` に足さない）。
@@ -71,7 +71,10 @@ def test_host_config_launches_python_dash_m_not_the_console_script() -> None:
     spec = json.loads((REPO / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["lucianke"]
     args = spec["args"]
     assert spec["command"] == "uv" and args[0] == "run"
-    assert args[1] == "--directory"  # 作業ディレクトリは開発者の環境ごと（パスは見ない）
+    assert args[1] == "--directory"
+    # 作業ディレクトリは「.」（ホストがプロジェクトの根で起動する）。マシン固有の絶対パスを焼き込むと別の PC で起動に失敗し、
+    # MCP がつながらない（2026-10-31: S:/work/develop/Lucianke が入っていて C: の作業ツリーで CONNECTION_CLOSED）
+    assert args[2] == ".", f".mcp.json must not bake a machine-specific path: {args[2]!r}"
     assert args[3:] == ["python", "-P", "-m", "lucianke"]  # コンソールスクリプトの ``lucianke`` を直接起こさない
     assert args[3:] == ["python", *server_argv()[1:]]  # テスト・ベンチと同じ形
     # ``python -m lucianke`` が実行する ``__main__`` は、コンソールスクリプトと同じ ``main`` を呼ぶ

@@ -2,7 +2,7 @@
   "mcpServers": {
     "lucianke": {
       "command": "uv",
-      "args": ["run", "--directory", "S:/work/develop/Lucianke", "python", "-P", "-m", "lucianke"]
+      "args": ["run", "--directory", ".", "python", "-P", "-m", "lucianke"]
     }
   }
 }

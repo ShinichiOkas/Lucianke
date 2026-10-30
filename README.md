@@ -23,7 +23,7 @@ Project Luciankeは、コーディングエージェントにおけるトーク�
 - 同梱した依存・Python のライセンスは `lucianke_internal\licenses\` と zip の根の `THIRD_PARTY_NOTICES.md`。
 
 ## 開発メモ
-- `.mcp.json` の起動は `uv run --directory <repo> python -P -m lucianke`（コンソールスクリプトの `lucianke.exe` を使わない）。Lucianke を MCP でつないだままでも `.venv\Scripts\lucianke.exe` を握らないので、`pyproject.toml` を変えて `uv run` / `uv sync` が `lucianke.exe` を入れ直しても `os error 32` で失敗しない（Windows では動いている exe を消せない。BUG-0030）。握るのは `python.exe` で、同期は python のバージョンが変わらない限り触らない。テスト・ベンチも同じ形（`python -P -m lucianke`。`tests/_server_cmd.py`、`bench/_stdio.py` の `server_argv`）で起こす。`-P` は cwd（解析対象のワークスペース）を `sys.path` に足さないため。ホストの `uv run ... lucianke` に戻さないこと（`tests/unit/test_server_launch_guard.py` が見張る）。
+- `.mcp.json` の起動は `uv run --directory . python -P -m lucianke`（`.` はホストが起動するプロジェクトの根。マシン固有の絶対パスを書かない。コンソールスクリプトの `lucianke.exe` を使わない）。Lucianke を MCP でつないだままでも `.venv\Scripts\lucianke.exe` を握らないので、`pyproject.toml` を変えて `uv run` / `uv sync` が `lucianke.exe` を入れ直しても `os error 32` で失敗しない（Windows では動いている exe を消せない。BUG-0030）。握るのは `python.exe` で、同期は python のバージョンが変わらない限り触らない。テスト・ベンチも同じ形（`python -P -m lucianke`。`tests/_server_cmd.py`、`bench/_stdio.py` の `server_argv`）で起こす。`-P` は cwd（解析対象のワークスペース）を `sys.path` に足さないため。ホストの `uv run ... lucianke` に戻さないこと（`tests/unit/test_server_launch_guard.py` が見張る）。
 
 ---
 *論理的整合性と構造的なエレガンスの追求。*
