@@ -115,5 +115,6 @@ tree-sitter の `node.type` → `SkelNode.type` 332・`node.parent` → `_Def.pa
 - `uv run ruff check`（引数なし）: クリーン。
 - 関係・import・索引器・名前の呼び出し・継承・受け手・スキーマ・T-06 / T-07 の単体と契約（上の新しいテストを含む）: `362 passed, 6 skipped`（`test_T06_T07_lsp.py`・`test_T06_T07_lsp_postconditions.py`・TS の tsconfig の外の T-06 / T-07 を含む 27 ファイル。skip は TS の LSP が無い PC での exact の試験。`51c062d` に載せ直した後）。
 - `tests/contract_fixtures`: `45 passed, 6 skipped`（skip は TS の LSP が無い PC での F-TS の exact の事後条件 5 件と、F-TS には当てはまらない BUG-0079 の試験 1 件）。F-PY の事後条件はすべて通過（`origin/main` の `51c062d` に載せ直した後）。
+- `2aebfc1`（BUG-0091 の追加）に載せ直した後、同じ一式に `tests/contract/test_T07_exact_budget.py` を足した 28 ファイルで `369 passed, 6 skipped`（`0a3a505` として push）。
 - 全体テストは流していない（親が main で 1 回にまとめて流す）。
 - 見つけた別の穴（見たことだけの票）: **BUG-0100**（`__init__.py` が再び公開した関数の `from pkg import flush` の `flush()`・`flush` の読みが `relations` にも `_name_calls` にも残らない）、**BUG-0101**（名前空間パッケージの `import nsp.tools.fmt` の `nsp`・`nsp.tools` の読みが外部 `lk://_ext/nsp`・`lk://_ext/nsp#tools` への `structural` の参照になる）。
