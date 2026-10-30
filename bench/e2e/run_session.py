@@ -210,19 +210,37 @@ def subst(obj: Any, vars_: dict[str, Any]) -> Any:
 # --- 各段の応答から取り出すもの -------------------------------------------------------------------
 
 
+_SYM_NAME_RE = re.compile(r"^(?P<indent>\s*)\[\w+\] (?:(?:pub|priv|prot|static|async|abstract|export) )*(?P<name>[^\s(]+)")
+
+
 def x_skeleton(c: Ctx, r: Resp) -> dict[str, Any]:
+    """骨格から対象の記号の範囲と URN を読む。URN は ``urn:`` 行があればそれ、無ければ仕様書 §6.1 規約 2 のとおり
+    ``lk://<ヘッダの ws>/<ブロックのパス>#<入れ子をたどった修飾名>`` で導く（BUG-0069: 導ける urn: 行は出ない）。"""
     lines = r.lines
     info: dict[str, Any] = {}
     short = c.cfg["symbol"].rsplit(".", 1)[-1]
+    wm = re.search(r" ws=(\S+) ", lines[0]) if lines else None
+    block: str | None = None
+    chain: list[tuple[int, str]] = []  # (インデント, 行が示す名前)
     for i, ln in enumerate(lines):
         m = FILE_RE.match(ln)
-        if m and m["path"] == c.cfg["file"]:
-            info.update(file_lines=int(m["lines"]), sha=m["sha"])
+        if m:
+            block, chain = m["path"], []
+            if m["path"] == c.cfg["file"]:
+                info.update(file_lines=int(m["lines"]), sha=m["sha"])
+        nm = _SYM_NAME_RE.match(ln)
+        if nm:
+            indent = len(nm["indent"])
+            while chain and chain[-1][0] >= indent:
+                chain.pop()
+            chain.append((indent, nm["name"]))
         if re.match(rf"^\s*\[(Method|Function)\] .*\b{re.escape(short)}\(", ln):
             rm = RANGE_RE.search(ln)
             if rm:
                 indent = len(ln) - len(ln.lstrip())
                 info.update(sym_line=ln.strip(), sym_start=int(rm["start"]), sym_end=int(rm["end"] or rm["start"]))
+                if wm is not None and block is not None:
+                    info["urn"] = f"lk://{wm[1]}/{block}#{'.'.join(n for _, n in chain)}"
                 for nxt in lines[i + 1 :]:
                     if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
                         break

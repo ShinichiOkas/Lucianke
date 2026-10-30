@@ -59,7 +59,7 @@ checks = ["skeleton_header", "skeleton_symbol", "skeleton_folds_body"]
 [[stage]]
 name = "bodies"
 tool = "get_symbol_bodies"
-args = { targets = [{ urn = "$urn" }] }    # 骨格の urn: 行で見たシンボルをそのまま渡す
+args = { targets = [{ urn = "$urn" }] }    # 骨格の行から導いた URN（導けないときだけ出る urn: 行の値）をそのまま渡す（仕様書 §6.1 規約 2）
 needs = ["skeleton"]
 checks = ["bodies_match_file", "bodies_sha"]
 
@@ -173,7 +173,7 @@ desc = "ファイルブロックのヘッダの行数と sha= が、ディスク
 [check.skeleton_symbol]
 spec = "T-02 処理規約 2"
 level = "must"
-desc = "対象メソッドの [Method] 行があり、@L の範囲が Python の ast で測った定義の範囲に一致し、urn: 行がある"
+desc = "対象メソッドの [Method] 行があり、@L の範囲が Python の ast で測った定義の範囲に一致し、行から導いた URN（または urn: 行）が対象の修飾名で終わる"
 
 [check.skeleton_folds_body]
 spec = "T-02 処理規約 2"
