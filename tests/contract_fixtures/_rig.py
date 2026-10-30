@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -350,6 +351,10 @@ async def ask_exact(
             with patient_lsp():
                 r = await rig.ok(tool, **args)
         if exact(r):
+            if tries:  # 製品の期限では降格した（検査はした。降格したことは隠さない: 票 BUG-0084）
+                warnings.warn(
+                    f"{rig.key} {what}: exact only after a patient re-ask; {'; '.join(tries)}", stacklevel=2
+                )
             return r
         m = r["_resolution_meta"]
         tries.append(
