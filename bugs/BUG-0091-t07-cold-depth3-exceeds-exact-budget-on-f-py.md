@@ -213,3 +213,27 @@ F-PY の rig（`tests/contract_fixtures/_rig.open_rig`。本番と同じ結線�
 - 確認: T-06・T-07 の契約テスト一式とセレクター・LSP の単体テスト（`test_engine_selector*.py`・`test_lsp_exact_degrade.py`・
   `test_lsp_features.py`・`test_lsp_prime.py`・`test_lsp_pool.py`）: 467 passed, 6 skipped（skip は TypeScript の LSP が無い 6 件）。
   `uv run ruff check`: All checks passed。
+
+### 追記（2026-10-31）: T-06 の参照検索も 1 問い合わせの予算
+
+親の判断で T-06 も同じにした（3 秒を超える冷えた references が 3 回続くと、LSP をセッションの間 `unavailable` にしていた）。上の
+「T-06 を確かめた: …変えていない」は、これで置き換わる。
+
+- T-06 の references の要求（と、同じ答えの宣言の位置を引く definition）は、要求 1 つの期限 3000 ms ではなく 1 問い合わせの予算
+  （`EXACT_BUDGET_S` 10 秒。最初の診断の待ちを含む）の残りまで待つ（`_lsp_exact.ExactBudget`、`features.references` の
+  `timeout_ms` / `strike`）。T-06 は LSP の実装検索を使っていない（実装・型階層は索引の推定）ので、対象は references だけ。
+- 連続時間切れに数えるのは、要求 1 つの期限（3000 ms。definition は 3000 ms）以上待っても答えなかったときだけ。予算の内に遅れて
+  答えた要求は `record_ok`。basedpyright の references に `$/cancelRequest` を送らない（BUG-0090）のはそのまま。
+- 予算の内に答えなければ `structural`。警告は「LSP（basedpyright）が textDocument/references に、1 問い合わせの予算 10 秒（…）の内に
+  答えませんでした（開始から 10.0 秒）。参照を構文木（relations）で解決しました。…呼び直すと exact になる見込みです。」と、
+  `warnings[]` の `exact references unavailable: … within the 10 s exact budget for one query …; call again for exact`。
+- 仕様書 §12.3 と T-06 処理規約 2、設計書 §7.5.2 に書いた。`tests/contract_fixtures/_rig.py` の `patient_lsp` は前から
+  `LSP_TIMEOUT_REFERENCES_MS` と `EXACT_BUDGET_S` の両方を延ばすので、そのまま（docstring だけ T-06 も含むと直した）。`ask_exact` の
+  製品の期限での 1 回目は、T-06 も 10 秒まで待つので exact になりやすい。
+- 試験（`tests/contract/test_T06_T07_exact_budget.py` に改名。偽 LSP に references を足した）: 既定のまま references が 6 秒で
+  答える → exact・数えない／期限（1000 ms に縮めた）を超えて予算（4 秒）の内に答えるのが 3 回続く → 3 回とも exact・LSP は ready
+  ／予算（3 秒）の内に答えず期限（1500 ms）以上待った → 数え 1・structural・警告は予算 3 秒と呼び直すこと。`test_T06_T07_lsp.py`
+  の T-06 の期限切れの試験 2 本（BUG-0090 の試験と、答えない偽サーバー）は、要求の期限ではなく予算を縮めて切るようにした。
+- 確認（`0a3a505`〜`bc63ffa` の BUG-0093・0094・0095 に載せ直して）: T-06・T-07 の契約テスト一式、セレクター・`test_lsp_exact_degrade.py`・
+  `test_lsp_features.py`・`test_lsp_pool.py`、`tests/contract_fixtures/test_fx_read_T00_T08.py`: 489 passed, 8 skipped（skip は TypeScript の
+  LSP が無い 7 件と F-TS に当てはまらない BUG-0079 の試験 1 件。F-PY の T-06#1 は通った）。`uv run ruff check`: All checks passed。

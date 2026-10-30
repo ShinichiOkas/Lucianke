@@ -709,9 +709,18 @@ def _prime_set(db_path: Any, ws: Workspace, handle: Any, sym: SymbolRecord) -> l
 
 
 async def _exact_references(
-    ctx: ToolContext, ws: Workspace, db_path: Any, route: lx.LspRoute, pre: _Pre
+    ctx: ToolContext,
+    ws: Workspace,
+    db_path: Any,
+    route: lx.LspRoute,
+    pre: _Pre,
+    budget: lx.ExactBudget,
 ) -> list[queries.ReferenceRow]:
-    """LSP の ``references`` で集め、``relations`` に ``exact`` で書き戻して、その行を返す（失敗は ``lx.LSP_FAILURES``）。"""
+    """LSP の ``references`` で集め、``relations`` に ``exact`` で書き戻して、その行を返す（失敗は ``lx.LSP_FAILURES``）。
+
+    最初の診断の待ちと references の要求は 1 問い合わせの予算（``budget``）の内。references は要求 1 つの期限ではなく予算の
+    残りまで待ち、時間切れを連続時間切れに数えるのは要求 1 つの期限以上待ったときだけ（``ExactBudget.request``。BUG-0091）。
+    """
     sym = pre.sym
     assert route.handle is not None
     if lx.needs_priming(route.file.language):
@@ -726,9 +735,15 @@ async def _exact_references(
     # 待ってから聞く。待てなかった（上限）ときも exact で答えるが、解析前の部分的な答えかもしれないので目印は置かない。
     settled = True
     if lx.needs_first_diagnostic(route.file.language):
-        settled = await lx.await_first_diagnostic(route.handle, sym.path)
+        settled = await lx.await_first_diagnostic(route.handle, sym.path, timeout_s=budget.left_s())
     sel = sym.selection or sym.range
-    locs = await features.references(route.handle, sym.path, sel.start, include_declaration=False)
+    locs = await features.references(
+        route.handle,
+        sym.path,
+        sel.start,
+        include_declaration=False,
+        **budget.request(features.LSP_TIMEOUT_REFERENCES_MS),
+    )
     target_urn = str(sym.urn)
     sites = lx.SiteIndex(ctx.services, ws)
     facts = []
@@ -776,6 +791,7 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     # 経路: PaaD の exact 行（2 回目以降）→ LSP（1 回目）→ structural（降格）
     engine = EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, warning=ACCURACY_WARNING)
     exact_rows: Sequence[queries.ReferenceRow] | None = None
+    budget_note: str | None = None  # LSP が予算の内に答えなかった（warnings[] の 1 行。BUG-0091）
     if _refs_wanted(args):
         if pre.cached is not None:
             exact_rows = pre.cached
@@ -789,13 +805,17 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
             if route is not None:
                 engine = route.choice
                 if route.exact:
+                    budget = lx.ExactBudget()
                     try:
-                        exact_rows = await _exact_references(ctx, ws, db_path, route, pre)
+                        exact_rows = await _exact_references(ctx, ws, db_path, route, pre, budget)
                     except lx.LSP_FAILURES as exc:
                         if not lx.is_lsp_failure(exc):
                             raise
                         _log.info("LSP references failed; answering from the index: %r", exc)
                         engine = lx.degraded_choice(route, exc)
+                        if isinstance(exc, TimeoutError):  # 要求の期限は予算の残り: 切れたのは予算（BUG-0091）
+                            engine = replace(engine, warning=lx.budget_timeout_warning(budget, exc, what="参照"))
+                            budget_note = lx.budget_timeout_note(budget, exc, what="references")
                 if exact_rows is None:
                     engine = replace(engine, warning=(engine.warning or "") + HIERARCHY_NOTE)
     found = await asyncio.to_thread(_work, db_path, ws, args, pre, exact_rows)
@@ -870,6 +890,7 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
         detected_language=found.language,
         warnings=tuple(found.warnings)
         + tuple(pre.warnings if exact_rows is not None else ())
+        + ((budget_note,) if budget_note else ())
         + tuple(hierarchy_note),
         total_estimate=None,
     )

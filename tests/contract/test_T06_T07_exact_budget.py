@@ -1,6 +1,6 @@
-"""BUG-0091: T-07 の exact 経路が LSP の時間の上限で切れたときの答えと警告（偽 LSP で遅れを決めて起こす）。
+"""BUG-0091: T-06・T-07 の exact 経路が LSP の時間の上限で切れたときの答えと警告、連続時間切れの数え（偽 LSP で遅れを決めて起こす）。
 
-* 偽サーバー（``SCRIPTED_SERVER``）は呼び出し階層だけに答える。遅れはノードの名前ごとに設定ファイル（要求のたびに読み直す）で決める。
+* 偽サーバー（``SCRIPTED_SERVER``）は呼び出し階層と references だけに答える（references の遅れは ``refs_<名前>``）。遅れはノードの名前ごとに設定ファイル（要求のたびに読み直す）で決める。
   遅い答えは別のスレッドで返すので、待っている間も次の要求を受ける（取り消された要求の遅い答えはクライアントが捨てる）。
   ``didOpen`` にはすぐ空の診断を返す（最初の診断の待ちは一瞬）。予算・期限は負荷があっても根の要求が切れない大きさにし、
   遅いノードはそれより十分遅くする（``SLOW_S``）。
@@ -13,6 +13,8 @@
   3. 根の子が取れない（予算の内に根が答えない）: 木ごと structural。警告は予算の値と、呼び直すことを書く。
   4. 根の要求は要求 1 つの期限ではなく予算の残りまで待つ。予算の内に遅れて答えた根・予算が期限より短くて切れた根は連続時間切れ
      （3 回で unavailable）に数えない。要求 1 つの期限以上待っても答えなかった根（本当の無応答）は数える。
+  5. T-06 の references も同じ: 要求 1 つの期限（3000 ms）ではなく予算の残りまで待ち、予算の内の遅れは数えない。予算の内に答えない
+     ときは本当の無応答として数え、警告は予算とその値・呼び直すことを書く。
 """
 
 from __future__ import annotations
@@ -104,6 +106,17 @@ while True:
         found = [it for it in cfg["items"].values()
                  if it["uri"] == uri and it["range"]["start"]["line"] <= line <= it["range"]["end"]["line"]]
         send({"jsonrpc": "2.0", "id": mid, "result": found})
+    elif method == "textDocument/references":
+        cfg = config()
+        uri, line = params["textDocument"]["uri"], params["position"]["line"]
+        name = next((n for n, it in cfg["items"].items()
+                     if it["uri"] == uri and it["range"]["start"]["line"] <= line <= it["range"]["end"]["line"]), "")
+        locs = cfg["refs"].get(name, [])
+        delay = cfg["delay"].get("refs_" + name, 0.0)
+        if delay:
+            threading.Thread(target=answer_later, args=(mid, delay, locs), daemon=True).start()
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "result": locs})
     elif method == "callHierarchy/incomingCalls":
         cfg = config()
         name = params["item"]["name"]
@@ -151,6 +164,7 @@ def _rng(line: int, start: int, end: int) -> dict[str, Any]:
 def write_config(path: Path, ws: Workspace, delay: dict[str, float]) -> None:
     items: dict[str, Any] = {}
     incoming: dict[str, list[dict[str, Any]]] = {}
+    refs: dict[str, list[dict[str, Any]]] = {}
     for name, (rel, line, callee, call_line) in DEFS.items():
         items[name] = {
             "name": name,
@@ -162,7 +176,9 @@ def write_config(path: Path, ws: Workspace, delay: dict[str, float]) -> None:
         if callee is not None and call_line is not None:
             site = _rng(call_line, CALL_COL, CALL_COL + len(callee))
             incoming.setdefault(callee, []).append({"from": name, "ranges": [site]})
-    path.write_text(json.dumps({"items": items, "incoming": incoming, "delay": delay}), encoding="utf-8")
+            refs.setdefault(callee, []).append({"uri": items[name]["uri"], "range": site})
+    body = {"items": items, "incoming": incoming, "refs": refs, "delay": delay}
+    path.write_text(json.dumps(body), encoding="utf-8")
 
 
 class Scripted:
@@ -175,6 +191,11 @@ class Scripted:
     async def tree(self, depth: int = 2, root: str = "target") -> dict[str, Any]:
         rel = DEFS[root][0]
         r = await self.env.calls({"urn": str(Urn("fk", rel, CodeSel(root)))}, "incoming", depth=depth)
+        assert not r.is_error, r.text
+        return r.structured
+
+    async def refs(self, root: str = "target") -> dict[str, Any]:
+        r = await self.env.refs({"urn": str(Urn("fk", DEFS[root][0], CodeSel(root)))})
         assert not r.is_error, r.text
         return r.structured
 
@@ -368,4 +389,57 @@ async def test_a_root_hanging_past_the_budget_still_counts_as_a_strike(
     assert "予算 3 秒（この問い合わせで LSP に使える時間の合計）を使い切りました" in warning, warning
     assert "（target を聞いている途中）" in warning and "木全体を構文木" in warning, warning
     assert "1500 ms" not in warning, warning  # 根は要求の期限で切っていない
+    assert scripted.timeouts() == 1
+
+
+# --- T-06: references も 1 問い合わせの予算（BUG-0091） ------------------------------------------------------------
+
+
+async def test_t06_references_answering_in_6_seconds_is_exact_and_not_a_strike(scripted: Scripted) -> None:
+    """5: 製品の既定（予算 10 秒・references の期限 3000 ms）で references が 6 秒で答える → exact、連続時間切れに数えない。"""
+    assert _lsp_exact.EXACT_BUDGET_S == 10.0 and features.LSP_TIMEOUT_REFERENCES_MS == 3000
+    scripted.delay(refs_target=6.0)
+    started = time.monotonic()
+    r = await scripted.refs("target")
+    assert time.monotonic() - started >= 6.0
+    meta = r["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and "scripted" in meta["engine_used"], meta
+    assert {x["path"] for x in r["data"]["references"]} == {"pkg/b.py"}
+    assert scripted.timeouts() == 0
+
+
+async def test_t06_three_slow_cold_references_in_a_row_keep_the_lsp_ready(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5: references が要求の期限（1000 ms に縮めた）を超えて予算（4 秒）の内に答えるのが 3 回続く → 3 回とも exact、LSP は ready。
+
+    以前は 3 回とも期限切れになり、3 回目で LSP を落としていた（timeout_3x）。"""
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 1000)
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", 4.0)
+    scripted.delay(refs_target=2.0, refs_caller=2.0, refs_top=2.0)
+    for root in ("target", "caller", "top"):  # 別々の対象なので、どれも LSP に聞く（PaaD の目印は無い）
+        r = await scripted.refs(root)
+        meta = r["_resolution_meta"]
+        assert meta["confidence_level"] == "exact" and "scripted" in meta["engine_used"], (root, meta)
+        assert scripted.timeouts() == 0, root
+    assert scripted.env.pool.status("python", scripted.env.ws).status.value == "ready"
+
+
+async def test_t06_a_references_hang_past_the_budget_counts_and_names_the_budget(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5: references が予算（3 秒）の内に答えず、要求の期限（1500 ms）以上待った → 1 回数える。structural、警告は予算 3 秒。"""
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", REQUEST_MS)
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    scripted.delay(refs_target=SLOW_S)
+    r = await scripted.refs("target")
+    meta = r["_resolution_meta"]
+    assert meta["confidence_level"] == "structural" and meta["is_degraded"] is True, meta
+    assert meta["lsp_status"] == "ready", meta  # 1 回では落とさない
+    warning = meta["accuracy_warning"] or ""
+    assert "LSP（scripted）が textDocument/references に" in warning, warning
+    assert "予算 3 秒（この問い合わせで LSP に使える時間の合計）の内に答えませんでした" in warning, warning
+    assert "呼び直すと exact になる見込み" in warning and "1500 ms" not in warning, warning
+    line = note(r, "exact references unavailable")
+    assert "3 s exact budget" in line and "textDocument/references" in line and "call again" in line, line
     assert scripted.timeouts() == 1

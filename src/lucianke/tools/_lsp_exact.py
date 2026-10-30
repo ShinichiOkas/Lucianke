@@ -71,6 +71,9 @@ _log = logging.getLogger("lucianke.tools.lsp_exact")
 
 __all__ = [
     "EXACT_BUDGET_S",
+    "ExactBudget",
+    "budget_timeout_note",
+    "budget_timeout_warning",
     "EXACT_LANES",
     "FIRST_DIAGNOSTIC_LANGUAGES",
     "FIRST_DIAGNOSTIC_WAIT_S",
@@ -610,6 +613,61 @@ def row_of(fact: RelationFact, path: str, *, is_test: bool = False) -> queries.R
         guard_condition=fact.guard_condition,
         confidence=Confidence.EXACT,
         is_test=is_test,
+    )
+
+
+# --- 予算つきの exact の問い合わせ（T-06 の references。BUG-0091） ----------------------------------------
+
+
+@dataclass(slots=True)
+class ExactBudget:
+    """1 問い合わせで LSP に使える時間（``EXACT_BUDGET_S``。作るときの値）。要求の期限は残り、数えるかは残りと要求 1 つの期限で決める。
+
+    T-06 は references の要求 1 つで答えるので、その要求は要求 1 つの期限（``LSP_TIMEOUT_REFERENCES_MS``）ではなく予算の残りまで
+    待つ。連続時間切れ（3 回で ``unavailable``）に数えるのは、要求 1 つの期限以上待っても答えなかったときだけ（本当の無応答）。
+    予算の内に遅れて答えた要求は ``record_ok``、残りが期限より短くて切れた要求は数えない（仕様書 §12.3）。
+    """
+
+    budget_s: float = field(default_factory=lambda: EXACT_BUDGET_S)
+    started: float = field(default_factory=time.monotonic)
+
+    @property
+    def deadline(self) -> float:
+        return self.started + self.budget_s
+
+    def left_s(self) -> float:
+        return max(self.deadline - time.monotonic(), 0.0)
+
+    def elapsed_s(self) -> float:
+        return time.monotonic() - self.started
+
+    def request(self, request_limit_ms: float) -> dict[str, Any]:
+        """``features`` の要求に渡す ``timeout_ms``（予算の残り）と ``strike``（残りが要求 1 つの期限以上か）。"""
+        left_ms = self.left_s() * 1000
+        return {"timeout_ms": left_ms, "strike": left_ms >= request_limit_ms}
+
+
+def budget_timeout_warning(budget: ExactBudget, exc: BaseException, *, what: str) -> str:
+    """予算の内に LSP が答えなかったときの ``accuracy_warning``（日本語）。切れた上限とその値・次にすること（BUG-0091）。"""
+    server = getattr(exc, "server", None)
+    method = getattr(exc, "method", None) or "要求"
+    who = f"LSP（{server}）" if server else "LSP"
+    return (
+        f"{who}が {method} に、1 問い合わせの予算 {budget.budget_s:g} 秒（この問い合わせで LSP に使える時間の合計）の内に"
+        f"答えませんでした（開始から {budget.elapsed_s():.1f} 秒）。{what}を構文木（relations）で解決しました。"
+        "型・オーバーロード・再エクスポート越しの参照は区別されていません。LSP は動いています（起動直後で解析が冷えているか、"
+        "負荷が高い）。今の要求で解析が進んだので、同じ問い合わせを呼び直すと exact になる見込みです。"
+    )
+
+
+def budget_timeout_note(budget: ExactBudget, exc: BaseException, *, what: str) -> str:
+    """同じ事実の ``warnings[]`` の 1 行（英語）。"""
+    server = getattr(exc, "server", None) or "the LSP"
+    method = getattr(exc, "method", None) or "the request"
+    return (
+        f"exact {what} unavailable: {server} did not answer {method} within the {budget.budget_s:g} s exact budget for one"
+        f" query ({budget.elapsed_s():.1f} s); answered from the syntax index (conf=structural); the LSP is up and warmer"
+        " now - call again for exact"
     )
 
 

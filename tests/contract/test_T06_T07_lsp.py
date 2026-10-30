@@ -303,13 +303,14 @@ async def test_t06_a_timed_out_references_request_does_not_degrade_later_calls(
 
     以前は期限切れで送る ``$/cancelRequest`` が basedpyright の references をプロセスが続く間ずっと壊し、以後の T-06 は
     「LSP が利用できない」と言いながら ``lsp_status=ready`` の structural を返し続けた。"""
-    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 0)
+    # T-06 の references は 1 問い合わせの予算の残りまで待つ（BUG-0091）。予算を 0 にして期限切れを起こす
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", 0.0)
     r1 = await real.refs(PC)
     assert not r1.is_error, r1.text
     meta1 = r1.structured["_resolution_meta"]
     assert meta1["confidence_level"] == "structural" and meta1["lsp_status"] == "ready", meta1
-    assert "0 ms" in (meta1["accuracy_warning"] or ""), meta1  # 期限切れの警告（事実どおり）
-    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 30_000)
+    assert "予算 0 秒" in (meta1["accuracy_warning"] or ""), meta1  # 切れたのは予算（警告は事実どおり）
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", 30.0)
     await asyncio.sleep(0.5)  # 打ち切った要求をサーバーが終える間（以前はこの後の要求が壊れていた）
     r = await real.refs(PC)  # 1 回目は降格したので PaaD の目印は無い: LSP に聞く
     assert not r.is_error, r.text
@@ -551,13 +552,18 @@ async def silent(registry: ProcessRegistry, tmp_path: Path):
         yield env
 
 
-async def test_t06_lsp_timeout_degrades_to_structural(silent: Env) -> None:
+async def test_t06_lsp_timeout_degrades_to_structural(silent: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T-06 の references は要求 1 つの期限（3000 ms）ではなく 1 問い合わせの予算の残りまで待つ（BUG-0091）。予算を縮めて速く切る
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", 2.0)
     r = await silent.refs({"urn": TARGET_URN})
     assert not r.is_error, r.text
     meta = r.structured["_resolution_meta"]
     assert meta["confidence_level"] == "structural" and meta["is_degraded"] is True, meta
     assert meta["lsp_status"] == "ready", meta  # LSP は落とさない。その要求に限った降格
-    assert "3000 ms" in (meta["accuracy_warning"] or ""), meta
+    assert "予算 2 秒" in (meta["accuracy_warning"] or ""), meta  # 切れたのは予算（警告は事実どおり）
+    handle = silent.pool.get("python", silent.ws)
+    # 予算（2 秒）が期限（3000 ms）より短くて切れた: 連続時間切れに数えない
+    assert handle is not None and handle.timeouts == 0
     refs = r.structured["data"]["references"]
     assert {x["path"] for x in refs} == {"pkg/b.py"} and "caller" in {x["enclosing_name"] for x in refs}
     assert {x["confidence_level"] for x in refs} == {"structural"}

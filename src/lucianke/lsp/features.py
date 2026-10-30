@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -520,10 +521,19 @@ def _narrow_to_name(locator: _Locator, loc: Location, name: str | None) -> Locat
 
 
 async def _definition_locations(
-    handle: LspHandle, client: LspClient, index: LineIndex, rel: RelPath, uri: str, pos: Position
+    handle: LspHandle,
+    client: LspClient,
+    index: LineIndex,
+    rel: RelPath,
+    uri: str,
+    pos: Position,
+    *,
+    timeout_ms: float | None = None,
+    strike: bool = True,
 ) -> list[Location]:
     params = {"textDocument": {"uri": uri}, "position": _lsp_position(handle, client, index, pos)}
-    result = await _call(handle, client, M_DEFINITION, params, LSP_TIMEOUT_DEFINITION_MS)
+    limit = LSP_TIMEOUT_DEFINITION_MS if timeout_ms is None else timeout_ms
+    result = await _call(handle, client, M_DEFINITION, params, limit, strike=strike)
     locator = _Locator(handle.ws, client, {rel: index})
     name = _identifier_at(index, pos)
     return [_narrow_to_name(locator, loc, name) for loc in locator.locations(result)]
@@ -541,13 +551,23 @@ async def definition(handle: LspHandle, rel: RelPath, pos: Position) -> list[Loc
 
 
 async def references(
-    handle: LspHandle, rel: RelPath, pos: Position, *, include_declaration: bool = False
+    handle: LspHandle,
+    rel: RelPath,
+    pos: Position,
+    *,
+    include_declaration: bool = False,
+    timeout_ms: float | None = None,
+    strike: bool = True,
 ) -> list[RefLocation]:
     """``pos`` の名前の参照（ワークスペース内だけ。外は捨てる）。ファイル・位置の昇順、重複なし。
 
     サーバーには **常に** ``includeDeclaration=true`` で聞き、``include_declaration=False`` のときは ``definition`` の位置を
     こちらで引く。basedpyright は ``false`` のとき、宣言ではなく **カーソルの位置の参照** を落とし、宣言を残す
     （呼び出しの位置から聞くと、その呼び出しが結果から消える）ため。
+
+    ``timeout_ms`` を省くと ``LSP_TIMEOUT_REFERENCES_MS``。T-06 の exact は 1 問い合わせの予算の残りを渡す（宣言の位置の
+    ``definition`` も、その残りから references に使った分を引いた期限で聞く）。``strike`` は時間切れを連続時間切れに数えるか
+    （``_call``。宣言の位置の要求は、残りが ``LSP_TIMEOUT_DEFINITION_MS`` 以上のときだけ数える。BUG-0091）。
     """
     client, index, uri = await _open(handle, rel)
     params = {
@@ -555,7 +575,9 @@ async def references(
         "position": _lsp_position(handle, client, index, pos),
         "context": {"includeDeclaration": True},
     }
-    result = await _call(handle, client, M_REFERENCES, params, LSP_TIMEOUT_REFERENCES_MS)
+    asked = time.monotonic()
+    limit = LSP_TIMEOUT_REFERENCES_MS if timeout_ms is None else timeout_ms
+    result = await _call(handle, client, M_REFERENCES, params, limit, strike=strike)
     found = {
         RefLocation(loc.rel, loc.range)
         for loc in _Locator(handle.ws, client, {rel: index}).locations(result)
@@ -563,7 +585,17 @@ async def references(
     }
     if not include_declaration and found:
         try:
-            declared = await _definition_locations(handle, client, index, rel, uri, pos)
+            left = None if timeout_ms is None else max(timeout_ms - (time.monotonic() - asked) * 1000, 0.0)
+            declared = await _definition_locations(
+                handle,
+                client,
+                index,
+                rel,
+                uri,
+                pos,
+                timeout_ms=left,
+                strike=left is None or left >= LSP_TIMEOUT_DEFINITION_MS,
+            )
         except LuciankeError as e:
             if e.details.get("reason") != "lsp_error":
                 raise

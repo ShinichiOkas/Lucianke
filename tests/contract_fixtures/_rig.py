@@ -292,7 +292,7 @@ def require_exact_lsp(rig: Rig, what: str) -> None:
 
 @contextmanager
 def patient_lsp() -> Iterator[None]:
-    """この間だけ、LSP の要求の期限と T-07 の 1 問い合わせの予算を延ばす（``PATIENT_TARGETS``。製品の既定は変えない）。
+    """この間だけ、LSP の要求の期限と T-06・T-07 の 1 問い合わせの予算を延ばす（``PATIENT_TARGETS``。製品の既定は変えない）。
 
     exact の答えの中身は期限に依らない（LSP の答えそのもの）。期限で変わるのは「exact で答えきれたか」だけなので、
     exact の事後条件を確かめるための問い合わせと、試験が LSP に直に聞く真値にだけ使う。真値を製品の期限で聞くと、
