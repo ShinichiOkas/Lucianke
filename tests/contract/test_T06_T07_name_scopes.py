@@ -153,9 +153,14 @@ async def test_t06_fixture_calls_go_to_the_fixtures_own_class(pipeline: Pipeline
         " (besides 1 in test files)" in w
         for w in warnings_of(r)
     ), warnings_of(r)
-    other = await refs(pipeline, OTHER, "Packer.pack")  # 同じファイルの 1 つの定義は構文木の抽出器が結ぶ（名前の一致ではない）
+    # 注釈の無い引数 ``p`` の ``p.pack()`` は、同じファイルに ``pack`` が 1 つでも構文木の抽出器は結ばない（``structural`` の印で
+    # 確かに見せない。BUG-0085）。名前の一致の同じファイルの段が ``conf=heuristic`` で結ぶ
+    other = await refs(pipeline, OTHER, "Packer.pack")
     assert {(x["path"], x["line"]) for x in other.structured["data"]["references"]} == {(OTHER, line_of(OTHER, "p.pack([])"))}
-    assert by_name(other) == set()
+    assert by_name(other) == {(OTHER, line_of(OTHER, "p.pack([])"))}
+    assert any("Packer.pack is the only method named 'pack' in the calling file" in w for w in warnings_of(other)), (
+        warnings_of(other)
+    )
 
 
 async def test_t06_equally_close_duplicates_in_a_fixture_are_ambiguous(pipeline: Pipeline) -> None:

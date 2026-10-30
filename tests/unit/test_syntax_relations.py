@@ -521,6 +521,108 @@ def test_typescript_attribute_chains():
         assert by_line[line].target_urn is None and by_line[line].name_only
 
 
+# --- 名前の受け手（BUG-0085） ------------------------------------------------------------------------
+
+NAMES_PY = (
+    b"import helpers\nfrom pkg import mod\nfrom pkg.store import Store\nfrom pkg.other import save\n\n\n"
+    b"class Base:\n    def save(self):\n        return 1\n\n\n"
+    b"class Holder:\n    ref: Base\n\n\n"
+    b'def f(x, y: Base, other, z: Store, w: "Base", v: Optional["Base"]):\n'  # 15
+    b"    x.save()\n"  # 16: 注釈の無い引数
+    b"    y.save()\n"  # 17: 注釈
+    b"    b = Base()\n    b.save()\n"  # 19: 同じファイルのクラスの構築
+    b"    s = Store()\n    s.save()\n"  # 21: import したクラスの構築
+    b"    z.save()\n"  # 22: import したクラスの注釈
+    b"    w.save()\n"  # 23: 前方参照の文字列の注釈
+    b"    v.save()\n"  # 24: Optional の中の前方参照
+    b"    other.ref\n"  # 25: 注釈の無い引数の属性の参照
+    b"    mod.save()\n"  # 26: from pkg import mod（モジュール）の関数
+    b"    helpers.save()\n"  # 27: import helpers（モジュール）の関数
+    b"    loc = make()\n    loc.save()\n"  # 29: 型の分からないローカル
+    b"    g.save()\n"  # 30: 型の分からないモジュール直下の変数
+    b"    for item in items:\n        item.save()\n"  # 32: ループ変数
+    b"\n\ng = make()\n\n\n"
+    b"def outside(self):\n    return self.save()\n"  # 39: クラスの外の self
+)
+NAMES_TABLE = {
+    "helpers": f"lk://{WS}/helpers.py",
+    "mod": f"lk://{WS}/pkg/mod.py",
+    "Store": f"lk://{WS}/pkg/store.py#Store",
+    "save": f"lk://{WS}/pkg/other.py#save",
+}
+
+
+def test_untyped_name_receiver_is_left_to_name_matching():
+    """``x.save()`` の ``x`` の型が構文から分からなければ（注釈の無い引数・型の分からないローカル・ループ変数・モジュール直下の変数・
+    クラスの外の ``self``）、同じファイルの唯一の ``Base.save`` にも、import した同名の ``pkg/other.py#save`` にも結ばない。
+    名前だけの呼び出し（``name_only``）にして、問い合わせのときの名前の一致（BUG-0071・BUG-0077）に任せる。"""
+    rels = _relations("python", NAMES_PY, "m.py", NAMES_TABLE.get)
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="save")}
+    for line in (16, 29, 30, 32, 39):
+        assert by_line[line].target_urn is None and by_line[line].name_only, (line, by_line[line])
+    ref = _one(rels, kind="REFERENCES", name="ref")  # 呼び出しでない参照は結ばず、名前の一致にも回さない
+    assert ref.target_urn is None and not ref.name_only
+
+
+def test_name_receiver_with_a_known_type_binds_structurally():
+    """注釈（前方参照の文字列を含む）・同じファイルや import したクラスの構築で型が分かる受け手は、その型のメンバーに ``structural`` で結ぶ。"""
+    rels = _relations("python", NAMES_PY, "m.py", NAMES_TABLE.get)
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="save")}
+    base, store = f"lk://{WS}/m.py#Base.save", f"lk://{WS}/pkg/store.py#Store.save"
+    expected = {17: base, 19: base, 21: store, 22: store, 23: base, 24: base}
+    assert {line: by_line[line].target_urn for line in expected} == expected
+    assert not any(by_line[line].name_only for line in expected)
+
+
+def test_module_receiver_calls_the_module_function():
+    """受け手の名前がモジュール（``import helpers``・``from pkg import mod``・外部の ``os``）なら、メソッドではなくモジュールの関数。"""
+    rels = _relations("python", NAMES_PY, "m.py", NAMES_TABLE.get)
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="save")}
+    assert (by_line[26].target_urn, by_line[26].name_only) == (f"lk://{WS}/pkg/mod.py#save", False)
+    assert (by_line[27].target_urn, by_line[27].name_only) == (f"lk://{WS}/helpers.py#save", False)
+    src = b"import os\n\n\ndef f(a):\n    return os.path.join(a)\n"
+    os_join = _one(_relations("python", src, "o.py", {"os": "lk://_ext/os"}.get), kind="CALLS", name="join")
+    assert (os_join.target_urn, os_join.name_only) == ("lk://_ext/os#path.join", False)
+
+
+NAMES_TS = (
+    b'import { Store } from "./store";\nimport * as util from "./util";\n\n'
+    b"class Base {\n  save(): number { return 1; }\n}\n\n"
+    b"function f(x, y: Base, z: Store, a: any) {\n"  # 7
+    b"  x.save();\n"  # 8: 注釈の無い引数
+    b"  y.save();\n"  # 9: 注釈
+    b"  const b = new Base();\n  b.save();\n"  # 11: new
+    b"  const s = new Store();\n  s.save();\n"  # 13: import したクラスの new
+    b"  z.save();\n"  # 14: import したクラスの注釈
+    b"  util.save();\n"  # 15: 名前空間 import（モジュール）の関数
+    b"  const loc = make();\n  loc.save();\n"  # 17: 型の分からないローカル
+    b"  a.save();\n"  # 18: any
+    b"}\n\n"
+    b"function outside() {\n  return this.save();\n}\n"  # 22: クラスの外の this
+)
+
+
+def test_typescript_name_receivers():
+    """TS も同じ: 型の分からない名前の受け手（注釈の無い引数・``any``・型の分からないローカル・クラスの外の ``this``）は名前だけ、
+    注釈・``new`` で型が分かる受け手と名前空間 import の関数は ``structural``。"""
+    table = {"Store": f"lk://{WS}/web/store.ts#Store", "util": f"lk://{WS}/web/util.ts"}
+    rels = _relations("typescript", NAMES_TS, "web/m.ts", table.get)
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="save")}
+    for line in (8, 17, 18, 22):
+        assert by_line[line].target_urn is None and by_line[line].name_only, (line, by_line[line])
+    base, store = f"lk://{WS}/web/m.ts#Base.save", f"lk://{WS}/web/store.ts#Store.save"
+    expected = {9: base, 11: base, 13: store, 14: store, 15: f"lk://{WS}/web/util.ts#save"}
+    assert {line: by_line[line].target_urn for line in expected} == expected
+
+
+def test_javascript_untyped_parameter_receiver():
+    src = b"class Base {\n  save() { return 1; }\n}\n\nfunction f(x) {\n  x.save();\n  new Base().save();\n}\n"
+    rels = _relations("javascript", src, "m.js")
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="save")}
+    assert by_line[5].target_urn is None and by_line[5].name_only
+    assert by_line[6].target_urn == f"lk://{WS}/m.js#Base.save"
+
+
 # --- super()（BUG-0081） -------------------------------------------------------------------------
 
 

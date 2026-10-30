@@ -22,22 +22,22 @@
      dataclass のフィールド・``self.b = T()``・戻り値の注釈つきの property / getter。同じファイルの基底も C3 の順）だけから決める（BUG-0079）。
      ``super().name``・``super(C, self).name``・TS / JS の ``super.name`` は ``super_of``（``C`` の URN）にし、先は整えが ``C`` の
      線形化の次のクラスから決める（BUG-0081）。
-  2. 同じファイルの定義の修飾名の末尾一致（一意のときだけ）。受け手が名前（``x.name`` の ``x``）のときだけ。受け手が式
-     （``a.b``・``f()``・``x[0]`` など）で型が分からなければ、2・3 を使わず ``name_only`` にする（``url._uri_reference.copy_with()`` を
-     同じファイルの唯一の ``URL.copy_with`` に結ばない。BUG-0079）。
-  3. ``resolve_name(name)``（呼び手が import 表から作る。解決できない import は呼び手が ``lk://_ext/<pkg>#<name>`` にして返す）。
-  4. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
+  2. 受け手の型が構文から分からなければ（受け手が式〈``a.b``・``f()``・``x[0]`` など。BUG-0079〉でも、名前〈注釈の無い引数・
+     ローカル・型の分からないモジュール直下の変数・クラスの外の ``self`` / ``this``。BUG-0085〉でも）、同じファイルの同名にも
+     import した同名にも当てない（``url._uri_reference.copy_with()`` を同じファイルの唯一の ``URL.copy_with`` に、``x.save()`` を
+     同じファイルの唯一の ``Base.save`` に結ばない）。
+  3. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
      （Python の ``builtins``、TS / JS の標準グローバル。``syntax/builtin_names.py``）なら ``lk://_ext/<builtins_package>#<name>``。
-  5. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側は ``relations`` に入れない）。ただし **受け手の型が分からない
-     属性呼び出し**（``x.name(...)`` で ``x`` の型が構文から読めない。注釈が ``Any`` のもの、``self.x`` の型が不明なもの、呼び出しの
-     戻り値などを含む）は ``name_only=True`` にする。取り込み側は内部表 ``_name_calls`` に位置と名前を残し、T-06 / T-07 が問い合わせの
-     ときに名前で対象に結ぶ（BUG-0071。``tools/_name_calls.py``）。受け手の型が分かっていてメンバーが無い（同じファイルのクラスに
-     その名前が無い）ものは ``name_only`` にしない（別のクラスの同名に結ばない）。
+  4. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側は ``relations`` に入れない）。ただし **受け手の型が分からない
+     属性呼び出し**（``x.name(...)`` で ``x`` の型が構文から読めない。注釈の無い引数・ローカル、注釈が ``Any`` のもの、``self.x`` の
+     型が不明なもの、呼び出しの戻り値などを含む）は ``name_only=True`` にする。取り込み側は内部表 ``_name_calls`` に位置と名前を残し、
+     T-06 / T-07 が問い合わせのときに名前で対象に結ぶ（BUG-0071・BUG-0077。``tools/_name_calls.py``）。受け手の型が分かっていて
+     メンバーが無い（同じファイルのクラスにその名前が無い）ものは ``name_only`` にしない（別のクラスの同名に結ばない）。
 
-  外部 URN は属性アクセスの連鎖にも伸びる（``import os`` の ``os.path.join(...)`` → ``lk://_ext/os#path.join``、
-  ``from decimal import Decimal`` の ``Decimal(x).quantize()`` → ``lk://_ext/decimal#Decimal.quantize``）。レシーバの型が分からない
-  ``obj.name`` の最後の手段（``resolve_name(name)``）では外部 URN を使わない（``config.load()`` を ``from json import load`` に
-  結ばないため）。
+  受け手の名前がモジュール（``import m`` / ``from pkg import m`` の ``m``、TS の ``import * as m``）なら、``m.f()`` はメソッドではなく
+  モジュールの関数 ``<m の URN>#f``（1 の ``resolve_name`` が ``#`` なしの URN を返す名前）。外部 URN は属性アクセスの連鎖にも伸びる
+  （``import os`` の ``os.path.join(...)`` → ``lk://_ext/os#path.join``、``from decimal import Decimal`` の ``Decimal(x).quantize()`` →
+  ``lk://_ext/decimal#Decimal.quantize``）。
 
   素の識別子は、囲みの定義を内側から外へたどった修飾名（``outer.name``）→ トップレベルの定義 → ``resolve_name`` の順。
   ローカルに束縛された名前は参照に数えない。ただし ``def`` / ``class`` の中の ``import`` が束縛した名前は、そのスコープ
@@ -626,32 +626,22 @@ class _Extractor:
     def _resolve_member(
         self, recv: Node | None, name: str, node: Node, chain: list[SymbolRecord]
     ) -> tuple[str | None, bool]:
-        """``(URN, 受け手の型が分かったか)``。URN が ``None`` で型も分からないものが ``name_only`` の候補（BUG-0071）。"""
-        if recv is not None:
-            ref = self._type_ref(recv, node, chain)
-            if ref is not None:
-                hit = self._member_of(ref, name)
-                if hit is not None or ref[0] == "local":
-                    return hit, True  # 同じファイルのクラスと分かっているのに無いメンバーは、別のクラスの同名で埋めない
-            if recv.type not in ("identifier", "this"):
-                # 受け手が式（``a.b``・``self.x``・``f()``・``x[0]`` など）で型が構文から分からない: 同じファイルの同名
-                # （``url._uri_reference.copy_with()`` を囲みのクラスの ``URL.copy_with`` に）や import した同名に当てない。
-                # 名前で結ぶか曖昧と書くかは問い合わせのとき（BUG-0071）に任せる（BUG-0079）
-                return None, False
-        suffix = f".{name}"
-        container = chain[-1] if chain else None
-        own = recv is not None and (recv.type == "this" or self._text(recv) in _RECEIVER_SELF)
-        matches = [
-            s
-            for q, s in self.by_qualified.items()
-            if q.endswith(suffix)
-            and s.kind not in _NOT_MEMBER_TARGETS
-            and (own or container is None or s.urn != container.urn)
-        ]
-        if len(matches) == 1:
-            return str(matches[0].urn), False
-        got = self.resolve(name)
-        return (None if got is not None and got.startswith(_EXTERNAL_PREFIX) else got), False
+        """``(URN, 受け手の型が分かったか)``。URN が ``None`` で型も分からないものが ``name_only`` の候補（BUG-0071）。
+
+        受け手の型が構文から分からなければ（式の受け手〈``a.b``・``f()``・``x[0]``〉も、名前の受け手〈注釈の無い引数・ローカル・
+        型の分からないモジュール直下の変数・クラスの外の ``self`` / ``this``〉も）、同じファイルの同名にも import した同名にも当てない。
+        名前で結ぶか曖昧と書くかは問い合わせのとき（BUG-0071・BUG-0077 の近さ）に任せる（式の受け手は BUG-0079、名前の受け手は
+        BUG-0085。``x.save()`` を同じファイルの唯一の ``Base.save`` に ``structural`` で結ぶと、``x`` が別のファイルのクラスでも
+        確かな行に見える）。
+        """
+        if recv is None:
+            return None, False
+        ref = self._type_ref(recv, node, chain)
+        if ref is not None:
+            hit = self._member_of(ref, name)
+            if hit is not None or ref[0] == "local":
+                return hit, True  # 同じファイルのクラスと分かっているのに無いメンバーは、別のクラスの同名で埋めない
+        return None, False
 
     def _super_receiver(
         self, recv: Node, node: Node, chain: list[SymbolRecord]
@@ -929,11 +919,27 @@ class _Extractor:
                 yield from self._py_targets(c)
 
     def _py_ann_name(self, node: Node | None) -> str | None:
+        """注釈の最初の型名（``Optional`` などの包みは飛ばす）。前方参照の文字列（``x: "Foo"``・``Optional["Foo"]``）は中身が
+        名前 1 つのときだけ読む（型の分からない名前の受け手を同じファイルの同名に当てなくなったので、注釈を書いた受け手は型で結ぶ。BUG-0085）。"""
         if node is None:
             return None
-        for n in self._annotation_names(node):
-            name = self._text(n[0])
-            if name not in _ANNOTATION_SKIP:
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if n.type == "identifier":
+                name: str | None = self._text(n)
+            elif n.type == "attribute":
+                attr = n.child_by_field_name("attribute")
+                name = self._text(attr) if attr is not None else None
+            elif n.type == "string":
+                parts = [c for c in n.named_children if c.type == "string_content"]
+                text = self._text(parts[0]).strip() if len(parts) == 1 and len(n.named_children) == 3 else ""
+                name = text if text.isidentifier() else None
+            else:
+                if n.type != "comment":
+                    stack.extend(reversed(n.children))
+                continue
+            if name and name not in _ANNOTATION_SKIP:
                 return name
         return None
 
@@ -1285,9 +1291,6 @@ class _Extractor:
             else:
                 for n in self._js_targets(p):
                     self._bind(n, fn)
-
-
-_NOT_MEMBER_TARGETS = frozenset({Kind.VARIABLE})
 
 
 def _neg_pos(p: Position) -> tuple[int, int]:

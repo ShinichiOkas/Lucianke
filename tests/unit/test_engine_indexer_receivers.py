@@ -223,6 +223,31 @@ async def test_attribute_chain_with_an_annotated_attribute_or_property_binds_to_
     }
 
 
+# --- 名前の受け手（BUG-0085） ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "fn_untyped", "fn_annotated", "fn_built", "fn_module", "mod"),
+    [
+        ("pkg/names.py", "untyped", "annotated", "built", "module_function", "pkg/names_mod.py"),
+        ("web/names.ts", "untyped", "annotated", "built", "moduleFunction", "web/names_mod.ts"),
+    ],
+)
+async def test_untyped_name_receiver_goes_to_name_calls_and_known_types_bind(
+    env: Env, path: str, fn_untyped: str, fn_annotated: str, fn_built: str, fn_module: str, mod: str
+) -> None:
+    """``x.persist()`` は、``x`` が注釈の無い引数なら同じファイルの唯一の ``Ledger.persist`` に結ばず ``_name_calls`` に入れる。
+    ``x: Ledger``・``x = Ledger()`` / ``new Ledger()`` はその型のメンバー、モジュールの名前の ``persist()`` はモジュールの関数。"""
+    untyped = f"{path}#{fn_untyped}"
+    assert env.targets(untyped) == set()
+    assert env.name_calls(untyped) == [("persist", line_of(env, path, "return x.persist()"))]
+    for fn in (fn_annotated, fn_built):
+        assert env.targets(f"{path}#{fn}", "persist") == {f"{path}#Ledger.persist"}, fn
+        assert env.name_calls(f"{path}#{fn}") == []
+    assert env.targets(f"{path}#{fn_module}") == {f"{mod}#persist"}
+    assert env.name_calls(f"{path}#{fn_module}") == []
+
+
 # --- スキーマ v7 ----------------------------------------------------------------------------------
 
 
@@ -267,11 +292,33 @@ def test_migration_6_to_7_adds_via_super_and_reingests_code_files(tmp_path: Path
         )
         conn.execute("UPDATE _meta SET schema_version = 6")
         assert ensure_schema(conn) is SchemaAction.MIGRATED
-        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() == 7
+        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 7
         assert conn.execute("SELECT name, via_super FROM _member_refs").fetchall() == [("m", 0)]
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
             "a.py": "",
             "b.ts": "",
+            "R.md": "a" * 64,
+        }
+    finally:
+        conn.close()
+
+
+def test_migration_7_to_8_reingests_code_files(tmp_path: Path) -> None:
+    """v7 の DB は表を変えず、関係を抽出する言語のファイルの ``sha256`` を空にする（型の分からない名前の受け手 ``x.save()`` を同じ
+    ファイルの唯一の ``.save`` に結んだ誤った行を、次の差分走査で取り込み直して消す。BUG-0085）。"""
+    conn = open_writer(tmp_path / "paad.sqlite")
+    try:
+        ensure_schema(conn)
+        _tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS_ID, "root_path": "/ws"}))
+        for path, language in (("a.py", "python"), ("b.tsx", "tsx"), ("c.js", "javascript"), ("R.md", "markdown")):
+            _tx(conn, lambda c, p=path, lang=language: ingest_file(c, _facts(p, lang)))
+        conn.execute("UPDATE _meta SET schema_version = 7")
+        assert ensure_schema(conn) is SchemaAction.MIGRATED
+        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 8
+        assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
+            "a.py": "",
+            "b.tsx": "",
+            "c.js": "",
             "R.md": "a" * 64,
         }
     finally:

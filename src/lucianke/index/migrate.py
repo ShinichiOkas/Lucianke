@@ -133,6 +133,17 @@ def _migrate_6_to_7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_7_to_8(conn: sqlite3.Connection) -> None:
+    """v8: 表は変えない。v7 までの取り込みは、受け手が型の分からない名前の呼び出し（注釈の無い引数 ``x`` の ``x.save()``）を、
+    同じファイルの唯一の ``.save`` や import した同名に ``structural`` で結んでいた（BUG-0085）。取り込み直さないと誤った行が
+    ``relations`` に残るので、v5〜v7 と同じく関係を抽出する言語（Python / TS / JS）のファイルの ``sha256`` を空にして、次の差分走査で
+    取り込み直させる（その呼び出しは ``_name_calls`` に入り、T-06 / T-07 が名前で判定する）。
+    """
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('python', 'typescript', 'tsx', 'javascript', 'jsx')"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -140,6 +151,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_4_to_5,
     5: _migrate_5_to_6,
     6: _migrate_6_to_7,
+    7: _migrate_7_to_8,
 }
 
 

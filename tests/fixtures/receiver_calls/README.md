@@ -1,4 +1,4 @@
-# receiver_calls（BUG-0079・BUG-0081）
+# receiver_calls（BUG-0079・BUG-0081・BUG-0085）
 
 受け手の決め方を確かめるフィクスチャ（`tests/unit/test_engine_indexer_receivers.py`・`tests/contract/test_T06_T07_receivers.py`）。
 
@@ -27,3 +27,13 @@
 | `pkg/chain.py` `Url.__init__` | `other.raw.copy_with()`（`raw` の型は分からない） | 結ばない（`Url.copy_with` にしない。名前だけの呼び出し） |
 | `pkg/chain.py` `Url.__init__` | `other.parsed.copy_with()`（`parsed: Parsed`） | `Parsed.copy_with` |
 | `pkg/chain.py` `Url.__init__` | `self.view.copy_with()`（`view` は `-> Parsed` の property） | `Parsed.copy_with` |
+
+## 名前の受け手（BUG-0085）: 型が構文から分かるときだけ結ぶ
+
+| 場所 | 呼び出し | 結ぶ先 |
+|---|---|---|
+| `pkg/names.py` `untyped` | `x.persist()`（注釈の無い引数） | 構文木では結ばない（名前だけの呼び出し）。T-06 の名前の一致が同じファイルの唯一の `Ledger.persist` に `conf=heuristic` で結ぶ |
+| `pkg/names.py` `annotated` | `x.persist()`（`x: Ledger`） | `Ledger.persist`（`structural`） |
+| `pkg/names.py` `built` | `x.persist()`（`x = Ledger()`） | `Ledger.persist`（`structural`） |
+| `pkg/names.py` `module_function` | `names_mod.persist()`（`from pkg import names_mod`） | モジュールの関数 `pkg/names_mod.py#persist`（メソッドではない） |
+| `web/names.ts` | 同じ 4 つ（`untyped(x)`・`x: Ledger`・`new Ledger()`・`import * as namesMod`） | 同じ |

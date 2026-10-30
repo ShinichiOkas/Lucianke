@@ -12,8 +12,9 @@ file. Used by `tests/contract/test_T06_T07_name_scopes.py`.
   `self.conn.execute()` is the same file's `FakeConn.execute` (a `self.x` receiver is left to name
   matching even when the file defines the name). `tests/test_other.py`: `conn.execute()` is not
   attributed.
-- A plain `x.name()` whose name the calling file defines once is already resolved by the
-  structural extractor (`tests/fixtures/other/app/mod.py`), so it is not a name match.
+- A plain `x.name()` on an unannotated parameter is a name match even when the calling file defines
+  the name once (`tests/fixtures/other/app/mod.py`: `p.pack()` is the calling file's `Packer.pack`,
+  `conf=heuristic`); the structural extractor binds only receivers whose type it knows (BUG-0085).
 - `tests/fixtures/sample/` has its own `Packer.pack`: its calls are never attributed to
   `app/budget.py#Packer.pack`. `sink.settle()` is ambiguous inside the fixture (`Left.settle`,
   `Right.settle`); `mailer.send()` is not attributed (the fixture has only a test double);

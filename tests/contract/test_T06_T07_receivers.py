@@ -4,6 +4,8 @@
 フィクスチャ ``tests/fixtures/receiver_calls``（README に各呼び出しの意図）を ``Indexer`` で取り込んだ実索引で確かめる。
 ``super()`` の受け手は構文から分かるので、名前の一致（BUG-0071）の「型不明・曖昧」の警告には回らない。中身の分からない外部の基底に
 先に当たって結ばなかった呼び出しは、届くかもしれない対象の答えに理由（``reason: external_base``）つきで書く。
+型の分からない名前の受け手（注釈の無い引数 ``x`` の ``x.persist()``）は、同じファイルに ``persist`` が 1 つでも ``structural`` にせず、
+名前の一致（``conf=heuristic``・``match: name``）に任せる（BUG-0085）。
 """
 
 from __future__ import annotations
@@ -211,3 +213,35 @@ async def test_t07_attribute_chain_does_not_reach_the_enclosing_class_method(pip
         (U(CHAIN, "Parsed.copy_with"), lines_of(CHAIN, "other.parsed.copy_with()")[0]),
         (U(CHAIN, "Parsed.copy_with"), lines_of(CHAIN, "self.view.copy_with()")[0]),
     }
+
+
+@pytest.mark.parametrize(
+    ("path", "fn_untyped", "fn_annotated", "fn_built", "mod", "fn_module"),
+    [
+        ("pkg/names.py", "untyped", "annotated", "built", "pkg/names_mod.py", "module_function"),
+        ("web/names.ts", "untyped", "annotated", "built", "web/names_mod.ts", "moduleFunction"),
+    ],
+)
+async def test_t06_untyped_name_receiver_is_a_heuristic_name_match(
+    pipeline: Pipeline, path: str, fn_untyped: str, fn_annotated: str, fn_built: str, mod: str, fn_module: str
+) -> None:
+    """PC:T-06#2 ``Ledger.persist`` の参照: ``x: Ledger``・``Ledger()`` の受け手は ``structural``、注釈の無い引数の ``x.persist()`` は
+    名前の一致（同じファイルの唯一の ``persist``）で ``heuristic``・``match: name``。モジュールの関数 ``persist`` の呼び出しは入らない。"""
+    r = await refs(pipeline, path, "Ledger.persist")
+    data = r.structured["data"]
+    line = lines_of(path, "return x.persist()")
+    got = {x["enclosing_name"]: (x["line"], x["confidence_level"], x.get("match")) for x in data["references"]}
+    assert got == {
+        fn_untyped: (line[0], "heuristic", "name"),
+        fn_annotated: (line[1], "structural", None),
+        fn_built: (line[2], "structural", None),
+    }
+    assert data["totals"].get("by_name") == 1
+    assert any(
+        "Ledger.persist is the only method named 'persist' in the calling file" in w for w in r.structured["warnings"]
+    ), r.structured["warnings"]
+    module_fn = await refs(pipeline, mod, "persist")
+    assert [x["enclosing_name"] for x in module_fn.structured["data"]["references"]] == [fn_module]
+    out = await calls(pipeline, path, fn_untyped, "outgoing", depth=1)
+    [node] = [n for n in out.structured["data"]["nodes"] if n["urn"].startswith("lk://receiver_calls/")]
+    assert (node["urn"], node["confidence_level"], node.get("match")) == (U(path, "Ledger.persist"), "heuristic", "name")
