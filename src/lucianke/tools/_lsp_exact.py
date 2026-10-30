@@ -604,6 +604,9 @@ def row_of(fact: RelationFact, path: str, *, is_test: bool = False) -> queries.R
 EXACT_BUDGET_S = 10.0
 """1 回の ``query_call_hierarchy`` で LSP に使う時間の合計。超えたら ``TimeoutError`` → ``structural`` に降格する。"""
 
+_ASK_SLOW_S = 0.5
+"""BUG-0058: 1 ノードの LSP 呼び出し（``_ask``）がこの秒数を超えたら、各段の内訳をログに落とす（閾値ガード付きの計時）。"""
+
 
 def _external_urn(item: features.CallItem) -> str:
     """ワークスペース外の呼び先（標準ライブラリ・site-packages）の URN。ファイルのパスからパッケージ名を推定する（最善努力）。"""
@@ -864,14 +867,20 @@ class CallEdgeSource:
     ) -> tuple[list[features.CallEdge], dict[str, dict[tuple[int, int], SiteInfo]]]:
         handle = self.route.handle
         assert handle is not None
+        # BUG-0058: LSP 経路の各段の所要（秒）。合計が閾値を超えた呼び出しだけ内訳をログに落とす（閾値ガード付き）。
+        spans: dict[str, float] = {}
+        t = time.monotonic()
         if prime is not None:
             await prime_documents(handle, prime)
             note = prime.warning(sym.name)
             if note and note not in self.warnings:
                 self.warnings.append(note)
+        spans["prime"], t = time.monotonic() - t, time.monotonic()
         await self._settle(sym.path)
+        spans["settle"], t = time.monotonic() - t, time.monotonic()
         start = (sym.selection or sym.range).start
         items = await features.prepare_call_hierarchy(handle, sym.path, start)
+        spans["prepare"], t = time.monotonic() - t, time.monotonic()
         item = next(
             (i for i in items if i.rel == sym.path and i.selection_range.start == start),
             next((i for i in items if i.rel == sym.path), None),
@@ -884,7 +893,19 @@ class CallEdgeSource:
             )
         call = features.incoming_calls if direction == "incoming" else features.outgoing_calls
         edges = await call(handle, item)
+        spans["calls"], t = time.monotonic() - t, time.monotonic()
         infos: dict[str, dict[tuple[int, int], SiteInfo]] = {}
         for rel in sorted({str(e.from_rel) for e in edges if e.from_rel is not None}):
             infos[rel] = await self.sites.of(rel)
+        spans["sites"] = time.monotonic() - t
+        total = sum(spans.values())
+        if total >= _ASK_SLOW_S:
+            _log.info(
+                "slow LSP call hierarchy: %s %s total=%.0fms %s",
+                sym.qualified_name,
+                direction,
+                total * 1000,
+                " ".join(f"{k}={v * 1000:.0f}ms" for k, v in spans.items()),
+                extra={"event": "lsp_call_hierarchy_slow"},
+            )
         return edges, infos
