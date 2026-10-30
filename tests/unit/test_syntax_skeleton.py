@@ -194,6 +194,47 @@ def test_json_item_shape() -> None:
         assert key in first
 
 
+#: 仕様書 §6.2 の SymbolRecord のキー（null でも出す。例の ``"scip_symbol": null``）と、§11 T-02 で加えるキー。
+SPEC_SYMBOL_KEYS = frozenset(
+    {
+        "urn",
+        "scip_symbol",
+        "path",
+        "name",
+        "qualified_name",
+        "kind",
+        "modifiers",
+        "range",
+        "selection_range",
+        "signature",
+        "return_type",
+        "doc_summary",
+        "confidence_level",
+        "children",
+        "fold_lines",
+        "decorators",
+        "raises",
+    }
+)
+
+
+@pytest.mark.parametrize(("rel", "lang"), [(PY_REL, "python"), (TS_REL, "typescript")])
+def test_json_symbols_keep_null_and_empty_keys(rel: str, lang: str) -> None:
+    """BUG-0065: null・空の値でもキーを省かない（全段・縮退版も）。子の無い記号にも ``children: []`` がある。"""
+    rec = build(rel, lang)[0]
+    shrunk = rec.shrink(10_000) if rec.shrink else None
+    assert shrunk is not None
+    for r in (rec, shrunk):
+        symbols = flatten(r.data["symbols"])
+        assert symbols
+        for s in symbols:
+            assert set(s) >= SPEC_SYMBOL_KEYS, (s["qualified_name"], sorted(SPEC_SYMBOL_KEYS - set(s)))
+    leaves = [s for s in flatten(rec.data["symbols"]) if s["kind"] in ("Field", "Property")]
+    assert leaves  # null・空の値を持つ記号で確かめている
+    assert all(s["children"] == [] and s["decorators"] == [] and s["raises"] == [] for s in leaves)
+    assert any(s["signature"] is None for s in flatten(rec.data["symbols"]))
+
+
 # --- オプション ------------------------------------------------------------------------------------
 
 

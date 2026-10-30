@@ -10,3 +10,9 @@
 - 頻度: 骨格の json 呼び出しの全部。`tests/contract/test_perf_reuse.py` など、json の既定の予算で PAY_PY（`tests/fixtures/poly/src/shop/services/payment.py`）を呼ぶテストが 0 件の応答になっていた（`max_tokens: 20000` に上げた）。
 - 備考: T-02 の縮退（`Record.shrink`）は compact の行で段を選ぶ。json の `data` は段が同じでも compact の 3 倍あるので、`Packer._shrink` が `ask` を二分探索して収まる段を探しているが、段の最小でも json が既定の予算を超える。
 - 調査はしていない（直す役の仕事）。
+
+## 追記（2026-10-31・BUG-0065）
+
+- `1e1a9aa` の直し（T-02 の json で null・空のキーを省く）は、仕様書 §6.2 の SymbolRecord の形（null のキーも出す）と §11 T-02 の `children[]` などに合わず、`tests/unit/test_syntax_skeleton.py` の 6 件と F-PY の契約テスト 1 件を落としたので、BUG-0065 で省かない形に戻した。
+- 仕様書 §5.7 は「同じ内容でも JSON は compact の数倍になるので、同じ `max_tokens` で入る件数は json のほうが少ない」とし、入らないときは §5.6-4（0 件・`warnings` に必要な `max_tokens`）で返す。戻した後の `src/lucianke/core/urn.py` は json 10,203 トークン（compact 3,449）、既定の 2,000 では 0 件と `raise max_tokens to ~10203` の警告。
+- json で null・空のキーを省くかは、仕様書 §6.2 の改訂（全ツール一律）として師匠が決める（BUG-0065 の票。推奨は「省かない」）。
