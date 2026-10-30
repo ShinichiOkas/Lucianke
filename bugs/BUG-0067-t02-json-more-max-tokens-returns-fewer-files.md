@@ -62,6 +62,7 @@
   - `tests/unit/test_mcp_budget.py`: 要約の 2 件を新しい規則に合わせた（400 文字の上限は取り分が要約より大きい予算で確かめる。長い要約のために 0 件にせず切る）。
   - `tests/contract_fixtures/test_fx_read_T00_T08.py`: T-02 の事後条件 1・2・5 を、カーソルで全ページを辿って全ファイルで確かめる（2 ファイルが 1 ページに入るかは json の量で決まるので、1 ページに入ることを前提にしない）。
   - `tests/contract/test_T10_edit_body.py`: 縮んだ diff が診断を押し出さない。
+  - `tests/e2e/test_vertical_slice_stdio.py`: 既定の予算（2000）で `urn.py` が縮退してページを閉じ、`pipeline.py` が次ページに回るので、stdio でカーソルを辿って 2 ファイルを確かめる（各ページの文法・ヘッダも確かめる）。
 
 ### 確認（2026-10-31）
 
@@ -80,4 +81,8 @@
 - 直す前は 2000 → 1 件、3000〜6500 → 2 件、7000〜8500 → 1 件、8800 以上 → 2 件（減る）。直した後は 1 件 → 2 件で減らない。各ファイルの版も `_urls.py` が 50 省略 → `doc:` 省略 → 丸ごと、`_api.py` が 無し → 丸ごとと縮まない。
 - compact は同じ 2 ファイルで直す前後とも 2000・3000 が 1 件、4000 以上が 2 件（この組では変わらない）。
 - パイプラインを通した細かい走査（T-02、F-PY の 5 ファイル `_urls`・`_api`・`_config`・`_exceptions`・`_status_codes`、`max_tokens` 300〜16000 を 13 刻み）: json・compact とも 1,208 予算で、件数の減少・ファイルの骨格行数の減少 0 件、`used_tokens_est <= max_tokens`。桁の境目（960〜1040、9960〜10040 を 1 刻み）でも 0 件。
+- テスト（作業ツリー = `origin/main`〈`8536a5f`〉+ この直し）:
+  - `uv run ruff check src tests` → All checks passed
+  - `tests/unit/test_mcp_budget*.py`（4 本）・`test_syntax_skeleton.py`・`tests/contract/test_T02_*.py`・`tests/contract_fixtures/test_fx_read_T00_T08.py`・`tests/contract/test_T10_edit_body.py`・`tests/e2e/test_vertical_slice_stdio.py` → **243 passed, 3 skipped**（skip は F-TS の exact 水準 3 件。TypeScript の LSP が無い。BUG-0057）
+  - 全体（e2e の直しの前。他の役の全体テストと並行で負荷が高い）: `uv run pytest -q -p no:cacheprovider -rfs` → 3 failed, 3792 passed, 29 skipped（1257 秒）。1 件は e2e の縦切り（この仕様変更の結果。直した）。残り 2 件（T-04 の実 LSP が `structural`、T-13 の偽サーバーの didChange が 0 件）は単独では通り、パッカーに関係しない → 票 BUG-0076 に追記（同じ T-04 の 1 件。負荷の高い全体テストでだけ落ちる）。
 - 残る注意（観測のみ）: パイプラインの前置き（`mcp/fit.py`）は `max_tokens` の桁数を含むので、10 の累乗をまたぐと前置きが 1〜2 トークン増え、レコードに使える予算が 1 減りうる。パッカーの単調性は前置きを固定したときの保証。上の境目の実測では違反は無かった。

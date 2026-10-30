@@ -45,14 +45,24 @@ async def test_stdio_vertical_slice() -> None:
         assert "ping" not in tools  # 開発用ツールは通常の tools/list に出ない
         assert tools["get_file_skeleton"].input_schema["additionalProperties"] is False
 
-        skel = await c.call_tool(
-            "get_file_skeleton", {"paths": ["src/lucianke/core/urn.py", "src/lucianke/mcp/pipeline.py"]}
-        )
-        text = skel.content[0].text
-        print("\n" + "\n".join(text.splitlines()[:15]))
-        assert not skel.is_error and g.validate(text) == []
-        assert text.startswith("# get_file_skeleton ok conf=structural")
-        assert re.search(r" ws=\S+ ", text.splitlines()[0]) and " ws=- " not in text.splitlines()[0]  # 解決後の ID（BUG-0004）
+        # 既定の予算（2000）では 1 ファイル目が縮退してそのページの最後になり、2 ファイル目は次ページ（仕様書 §5.6-5、BUG-0067）。
+        # エージェントと同じくカーソルを辿って全ページを集める
+        skel_args: dict[str, object] = {"paths": ["src/lucianke/core/urn.py", "src/lucianke/mcp/pipeline.py"]}
+        pages: list[str] = []
+        for _ in range(3):
+            skel = await c.call_tool("get_file_skeleton", skel_args)
+            page = skel.content[0].text
+            assert not skel.is_error and g.validate(page) == []
+            assert page.startswith("# get_file_skeleton ok conf=structural")
+            assert re.search(r" ws=\S+ ", page.splitlines()[0]) and " ws=- " not in page.splitlines()[0]  # 解決後の ID（BUG-0004）
+            pages.append(page)
+            more = re.search(r"^# more: cursor=(\S+)", page, re.M)
+            if more is None:
+                break
+            skel_args = {**skel_args, "cursor": more.group(1)}
+        text = "".join(pages)
+        print("\n" + "\n".join(pages[0].splitlines()[:15]))
+        assert "=== src/lucianke/core/urn.py (" in pages[0]
         assert "=== src/lucianke/core/urn.py (" in text and "=== src/lucianke/mcp/pipeline.py (" in text
         assert "[Function] pub parse(text: str) -> Urn" in text
         assert "[Class] pub Pipeline @L" in text
