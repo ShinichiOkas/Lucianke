@@ -134,6 +134,7 @@ def _scan(
     total_estimate: int | None = None,
     record_text: Callable[[Record], str] | None = None,
     trailer_text: Callable[[str | None, str | None, int], str] | None = None,
+    form: str = "compact",
     context: object = None,
 ) -> list[Page]:
     """予算を ``budgets`` の順に上げて詰め、隣どうしで情報が減らないことと、各ページの不変条件を確かめる。"""
@@ -145,7 +146,7 @@ def _scan(
     for b in budgets:
         page = packer.pack(
             out, max_tokens=b, offset=offset, reserved_tokens=reserved, cursor_factory=factory,
-            record_text=record_text, trailer_text=trailer_text,
+            record_text=record_text, trailer_text=trailer_text, form=form,
         )  # fmt: skip
         if page.records:
             assert page.used_tokens_est <= b, (context, b, page.used_tokens_est)
@@ -253,3 +254,76 @@ def test_a_long_summary_is_cut_to_its_share_and_never_pushes_records_out() -> No
     assert cut > 0
     short = Packer().pack(make_out(recs), max_tokens=500, reserved_tokens=30, cursor_factory=cursor_factory())
     assert short.summary is not None and not short.summary.endswith("…")  # ふつうの要約はふつうの予算で丸ごと入る
+
+
+# --- T-02 の骨格レコード（BUG-0078） ------------------------------------------------------------------
+
+
+def _skeleton_records() -> list[Record]:
+    """T-02 の骨格レコード 2 件（クラス 3 つ・doc・非公開・入れ子の関数・デコレータ。2 件目は小さい）。"""
+    import hashlib
+
+    from lucianke.syntax.parsers import parse_source
+    from lucianke.syntax.skeleton import build_file_record
+    from lucianke.syntax.support import SUPPORT
+    from lucianke.syntax.symbols import extract, load_query_source
+    from lucianke.syntax.types import SkeletonOptions
+
+    def method(c: int, m: int) -> str:
+        doc = f'        """Method {m} of class {c}."""\n' if m % 2 == 0 else ""
+        name = f"_helper_{m}" if m % 5 == 4 else f"method_{m}"
+        return f"    @property\n    def {name}(self, a: int, b: str = 'x') -> int:\n{doc}        return a\n\n"
+
+    big = "".join(
+        f'class Klass{c}:\n    """Class {c}."""\n\n' + "".join(method(c, m) for m in range(4 + 3 * c)) for c in range(3)
+    )
+    big += 'def outer(x: int) -> int:\n    """Outer."""\n    def inner(y: int) -> int:\n        return y\n    return inner(x)\n'
+    small = 'def tiny(a: int) -> int:\n    """Tiny."""\n    return a\n'
+    records = []
+    for i, (rel, text) in enumerate((("pkg/big.py", big), ("pkg/small.py", small))):
+        source = text.encode("utf-8")
+        parsed, _ = parse_source(source, "python", hashlib.sha256(source).hexdigest())
+        symbols = extract(
+            parsed, language_id="python", language=SUPPORT["python"].grammar(),
+            query_source=load_query_source("python"), workspace_id="ws", rel=rel,  # type: ignore[arg-type]
+        )  # fmt: skip
+        records.append(build_file_record(parsed, symbols, rel=rel, opts=SkeletonOptions(), priority=i))
+    return records
+
+
+def _symbol_names(rec: Record) -> set[str]:
+    out: set[str] = set()
+    stack = list(rec.data["symbols"])
+    while stack:
+        s = stack.pop()
+        out.add(s["qualified_name"])
+        stack.extend(s["children"])
+    return out
+
+
+def test_t02_skeleton_pages_are_monotone_and_fill_the_budget() -> None:
+    """T-02 の骨格（BUG-0078）: 予算を上げても各ファイルの中身（シンボル・doc: 行）は減らず、縮退したファイルでページを
+    閉じるときは予算をほぼ使い切る（1 段は doc: 行 1 件かメンバー 1 件ぶん）。compact と json（``shrink_json``）の両方。
+    以前は入れ子を一度に落とす段しか無く、F-PY の ``_urls.py`` は予算 6000 の json で 618 トークンしか使わなかった。"""
+    from lucianke.mcp.render import json_out
+
+    records = _skeleton_records()
+    for form, kw, step in (
+        ("compact", {}, 40),
+        ("json", {"record_text": json_out.record_text, "trailer_text": json_out.trailer_text}, 260),
+    ):
+        measure = kw.get("record_text") or (lambda r: "\n".join(r.lines) + "\n")
+        lo = 120 if form == "compact" else 400
+        hi = sum(EST.count(measure(r)) for r in records) + 60
+        budgets = range(lo, hi, 7)
+        pages = _scan(records, budgets=budgets, reserved=30, form=form, context=form, **kw)  # type: ignore[arg-type]
+        filled = 0
+        for b, a, page in zip(budgets[1:], pages, pages[1:], strict=False):
+            for x, y in zip(a.records, page.records, strict=False):
+                assert _symbol_names(y) >= _symbol_names(x), (form, b, x.key)
+                assert {ln for ln in y.lines if "doc: " in ln} >= {ln for ln in x.lines if "doc: " in ln}, (form, b)
+            last = page.records[-1] if page.records else None
+            if last is not None and last.lines != records[len(page.records) - 1].lines:  # 縮退版でページを閉じた
+                assert page.max_tokens - page.used_tokens_est < step, (form, b, page.used_tokens_est)
+                filled += 1
+        assert filled > 20, form

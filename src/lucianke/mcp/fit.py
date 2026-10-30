@@ -50,7 +50,7 @@ _MAX_USED_ROUNDS: Final = 5  # ``used_tokens_est`` の桁数が変わるとき�
 #: dot / mermaid は records=0 なので実質不使用だが、共通ループで呼ばれるため空 dict を登録する（BUG-0053）。
 _PACKER_KWARGS: Final[Mapping[str, Mapping[str, Any]]] = {
     "compact": {},
-    "json": {"record_text": json_out.record_text, "trailer_text": json_out.trailer_text},
+    "json": {"record_text": json_out.record_text, "trailer_text": json_out.trailer_text, "form": "json"},
     "dot": {},
     "mermaid": {},
 }

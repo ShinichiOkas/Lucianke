@@ -150,9 +150,83 @@ async def test_shrink_drops_doc_first_and_stays_grammatical(pipeline: Pipeline) 
     used = re.search(r" ~(\d+)/\d+tok", full.text.splitlines()[0])
     assert used is not None
     small = await call(pipeline, paths=[PAY_PY], max_tokens=int(used[1]) - 1)  # 全部入りがちょうど入らない予算
-    assert "  doc: " not in small.text  # doc: から先に落ちる
+    # doc: から先に、1 件ずつ・入れ子から落ちる（BUG-0078。以前はファイル全体の doc: を一度に落とした）
+    assert "    doc: " not in small.text and small.text.count("  doc: ") < full.text.count("  doc: ")
+    assert re.search(r"^- truncated: 0 members omitted \(\d+ doc lines omitted\); ", small.text, re.M)
+    assert "_validate_limit" in small.text  # メンバーはまだ落ちない
     assert "urn omitted" not in small.text  # 出していない urn を「落とした」と書かない
     assert g.validate(small.text) == []
+
+
+def _symbol_names(item: dict[str, Any]) -> set[str]:
+    return {s["qualified_name"] for s in _flatten(item["symbols"])}
+
+
+@pytest.mark.parametrize(("fmt", "budgets", "step"), [("compact", range(150, 1100, 11), 60), ("json", range(500, 5200, 41), 320)])
+async def test_larger_budget_shows_no_less_and_a_shrunk_file_fills_the_page(
+    pipeline: Pipeline, fmt: str, budgets: range, step: int
+) -> None:
+    """BUG-0078（T-02 の単調性と予算の使い方）: ``max_tokens`` を上げても各ファイルの中身（シンボル・``doc:`` 行）は減らず、
+    縮退したファイルでページを閉じるときは予算をほぼ使い切る（縮退の 1 段は doc: 行 1 件かメンバー 1 件ぶん）。
+    以前は入れ子を一度に落とす段しか無く、F-PY の ``_urls.py`` は json の予算 6000 で 618 トークンしか使わなかった。"""
+    paths = [PAY_PY, PAY_TS, "src/shop/models/receipt.py"]
+    seen: dict[str, tuple[set[str], int]] = {}
+    filled = 0
+    for max_tokens in budgets:
+        r = await call(pipeline, fmt, paths=paths, max_tokens=max_tokens)
+        assert not r.is_error
+        if fmt == "compact":
+            text = r.text
+            assert g.validate(text) == []
+            used = int(re.search(r" ~(\d+)/\d+tok", text.splitlines()[0])[1])  # type: ignore[index]
+            blocks = re.split(r"^(?==== )", text, flags=re.M)[1:]
+            shown = {b.split()[1]: ({ln.strip() for ln in b.splitlines() if ln.lstrip().startswith("[")}, b.count("doc: ")) for b in blocks}
+            closing = blocks[-1] if blocks else ""
+            shrunk_last = "\n- truncated: " in closing
+            # compact は行で見る（シンボル行の数と doc: 行の数が減らない）
+            for path, (lines, docs) in shown.items():
+                if path in seen:
+                    assert len(lines) >= len(seen[path][0]) and docs >= seen[path][1], (max_tokens, path)
+                seen[path] = (lines, docs)
+        else:
+            used = r.structured["budget"]["used_tokens_est"]
+            items = r.structured["data"]["items"]
+            shrunk_last = bool(items) and items[-1]["truncated_note"] is not None
+            for item in items:
+                names = _symbol_names(item)
+                docs = sum(1 for s in _flatten(item["symbols"]) if s["doc_summary"])
+                if item["path"] in seen:
+                    assert names >= seen[item["path"]][0] and docs >= seen[item["path"]][1], (max_tokens, item["path"])
+                seen[item["path"]] = (names, docs)
+        assert used <= max_tokens
+        if shrunk_last:
+            assert max_tokens - used < step, (fmt, max_tokens, used)
+            filled += 1
+    assert filled >= 10
+
+
+@pytest.mark.parametrize("fmt", ["compact", "json"])
+async def test_truncation_note_says_what_was_omitted_and_how_to_get_it_whole(pipeline: Pipeline, fmt: str) -> None:
+    """縮退したファイルは、落としたメンバー数・入れ物ごとの件数と、そのファイルだけを丸ごと取り直す ``max_tokens`` を伝え、
+    その値で呼び直すと丸ごと返る（落とした分はカーソルでは辿れない。BUG-0078）。"""
+    r = await call(pipeline, fmt, paths=[PAY_PY], max_tokens=200 if fmt == "compact" else 1000)
+    if fmt == "json":
+        item = r.structured["data"]["items"][0]
+        assert item["truncated_members"] > 0
+        assert sum(c["omitted"] for c in item["truncated_by_container"]) == item["truncated_members"]
+        note = item["truncated_note"]
+    else:
+        note = next(ln for ln in r.text.splitlines() if ln.startswith("- truncated: "))[2:]
+    m = re.search(r"truncated: (\d+) members omitted .*: (.+); whole file: max_tokens>=(\d+) with this path alone$", note)
+    assert m is not None, note
+    assert sum(int(part.rsplit(" ", 1)[1]) for part in m[2].split(", ")) == int(m[1])
+    again = await call(pipeline, fmt, paths=[PAY_PY], max_tokens=int(m[3]))
+    if fmt == "json":
+        whole = again.structured["data"]["items"][0]
+        assert whole["truncated_members"] == 0 and whole["truncated_note"] is None
+        assert whole["truncated_by_container"] == []
+    else:
+        assert "- truncated: " not in again.text and "  doc: " in again.text
 
 
 async def test_compact_shows_only_urns_not_derivable_but_json_keeps_every_urn(pipeline: Pipeline) -> None:

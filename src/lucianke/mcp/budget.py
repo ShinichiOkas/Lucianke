@@ -229,7 +229,9 @@ class Packer:
         cursor_factory: Callable[[int], str] | None = None,
         record_text: RecordText | None = None,
         trailer_text: TrailerText | None = None,
+        form: str = "compact",
     ) -> Page:
+        """``form`` は応答の形式（``"json"`` なら縮退に ``Record.shrink_json`` を先に使う。``record_text`` は呼び手が合わせる）。"""
         est = self.estimator.count
         # 形式ごとの本文の見積もり（既定は compact の行。json は ``Record.data`` の JSON。BUG-0017）
         rt = record_text or _record_text
@@ -316,7 +318,7 @@ class Packer:
                 ask = room - tail - 1
                 if ask < 1:
                     return None
-                small = self._shrink(rec, ask, rt)
+                small = self._shrink(rec, ask, rt, form)
                 if small is None:
                     return None
                 size = est(rt(small))
@@ -400,14 +402,24 @@ class Packer:
             warnings=warnings,
         )
 
-    def _shrink(self, rec: Record, ask: int, record_text: RecordText) -> Record | None:
+    def _shrink(self, rec: Record, ask: int, record_text: RecordText, form: str = "compact") -> Record | None:
         """``rec.shrink(ask)``（``ask`` は縮退版が収まるべき行の本文のトークン数）。
+
+        json（``form == "json"``）で ``rec.shrink_json`` があれば、先にそれで ``ask + 1`` に収まる版を求め、実際に数えて
+        収まればそれを返す（版ごとに JSON を作って数える二分探索を省く。BUG-0078）。``None``（最も小さい版も収まらない）なら
+        ``None``。返った版が実際には収まらなければ（見積もりの外れ）下の探索に戻る。
 
         ``Record.shrink`` は compact の行の大きさで収める約束である。compact（既定）はそのまま 1 回呼ぶ。別の形式で数えるときは
         （json は ``Record.data`` の JSON）、返った縮退版をその形式で数えて ``ask + 1`` に収まればそのまま返す。収まらなければ、
         json の大きさは compact の行に比例しない（記号・メタ・エスケープの固定分がある）ので、``ask`` を二分探索して収まる最大の
         縮退版を探す（縮退版の大きさは ``ask`` に対して単調。最大 ``SHRINK_RETRIES`` 回呼ぶ）。収まるものが無ければ ``None``。
         """
+        if form == "json" and rec.shrink_json is not None:
+            fast = rec.shrink_json(ask + 1)
+            if fast is None:
+                return None  # 最も小さい版も json では収まらない（``Record.shrink_json`` の約束）
+            if self.estimator.count(record_text(fast)) <= ask + 1:
+                return fast
         small = rec.shrink(ask) if rec.shrink is not None else None
         if record_text is _record_text or small is None:
             return small  # compact は 1 回。compact の行でも収まらないなら、より小さい ``ask`` でも収まらない（単調）

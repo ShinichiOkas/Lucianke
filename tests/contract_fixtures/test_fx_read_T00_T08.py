@@ -224,6 +224,48 @@ async def test_t02_postcondition_1_2_5_skeleton_matches_the_source(rig: Rig) -> 
             assert squash(m.group(1)) in squash("".join(rig.read(p) for p in t.skeleton))
 
 
+#: 入れ子のメンバーが多いファイル（T-02 の縮退の段を見る。BUG-0078）
+SHRINK_TARGET = {"F-PY": "httpx/_urls.py", "F-TS": "source/core/Ky.ts"}
+
+
+@pytest.mark.parametrize("fmt", ["json", "compact"])
+async def test_t02_a_shrunk_file_fills_the_budget_and_the_hint_gets_it_whole(rig: Rig, fmt: str) -> None:
+    """BUG-0078 — 丸ごと入らないファイルは、渡した予算をほぼ使い切る縮退版で返り（予算を上げても中身は減らない）、注の
+    ``max_tokens`` で呼び直すと丸ごと返る。以前は F-PY の ``_urls.py`` が json の予算 6000 で最上位だけ（618 トークン）だった。"""
+    path = SHRINK_TARGET[rig.key]
+    whole = await rig.call("get_file_skeleton", fmt=fmt, paths=[path], max_tokens=50000)
+    need = int(re.search(r" ~(\d+)/", whole.text)[1]) if fmt == "compact" else whole.structured["budget"]["used_tokens_est"]  # type: ignore[index]
+    seen: list[str] = []
+    shrunk = 0
+    for frac in (0.3, 0.45, 0.6, 0.75, 0.9):
+        budget = int(need * frac)
+        r = await rig.call("get_file_skeleton", fmt=fmt, paths=[path], max_tokens=budget)
+        assert not r.is_error, r.text[:400]
+        if fmt == "json":
+            used = r.structured["budget"]["used_tokens_est"]
+            (item,) = r.structured["data"]["items"]
+            shown = [s["qualified_name"] for s in flatten(item["symbols"])]
+            note = item["truncated_note"]
+        else:
+            used = int(re.search(r" ~(\d+)/", r.text)[1])  # type: ignore[index]
+            shown = [ln.strip() for ln in r.text.splitlines() if re.match(r"^\s*\[", ln)]
+            note = next((ln[2:] for ln in r.text.splitlines() if ln.startswith("- truncated: ")), None)
+        assert used <= budget
+        assert len(shown) >= len(seen)  # 予算を上げても見えるシンボルは減らない
+        seen = shown
+        assert note is not None, (fmt, budget)  # 丸ごとは入らない
+        shrunk += 1
+        assert used >= 0.85 * budget, (fmt, budget, used)  # 以前は json の 6000 で 618（約 1 割）
+        m = re.search(r"whole file: max_tokens>=(\d+) with this path alone", note)
+        assert m is not None, note
+    assert shrunk == 5
+    again = await rig.call("get_file_skeleton", fmt=fmt, paths=[path], max_tokens=int(m[1]))
+    if fmt == "json":
+        assert again.structured["data"]["items"][0]["truncated_note"] is None
+    else:
+        assert "- truncated: " not in again.text
+
+
 async def test_t02_postcondition_4_twenty_one_paths_are_rejected(rig: Rig) -> None:
     """PC:T-02#4 — paths が 21 件のとき E_INVALID_ARGUMENT で、items を持たない。"""
     t = TARGETS[rig.key]

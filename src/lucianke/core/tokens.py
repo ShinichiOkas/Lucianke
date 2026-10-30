@@ -101,10 +101,31 @@ class TokenEstimator:
                 _memo.popitem(last=False)
         return value
 
+    #: ``units`` の分母（``count(text) == ceil(units(text) / UNIT_DEN)``）
+    UNIT_DEN: Final = _DEN
+    #: 行をつなぐ改行 1 文字の ``units``。どの項の連も改行をまたがないので、行の列の ``units`` は足し算で求まる:
+    #: ``units("\n".join(lines)) == sum(map(units, lines)) + NEWLINE_UNITS * (len(lines) - 1)``（BUG-0078 の縮退の見積もり）
+    NEWLINE_UNITS: Final = _W_NL
+    #: ASCII 記号の連 1 つの ``units``。詰めた JSON（``separators=(",", ":")``）の配列 ``"k":[A,B],"m"`` の大きさは
+    #: ``units('"k":[],"m"') + sum(units(X) - SYMBOL_RUN_UNITS for X in (A, B))``（要素が記号で始まり記号で終わるので、
+    #: 前後の記号の連とつながる）。骨格の json の大きさの見積もりに使う（BUG-0078）
+    SYMBOL_RUN_UNITS: Final = _W_SYMBOL
+
+    @staticmethod
+    def units(text: str) -> int:
+        """切り上げる前の値（``UNIT_DEN`` 倍の整数）。行ごとに数えて足し、最後に 1 回だけ切り上げるために使う。"""
+        if not text:
+            return 0
+        return TokenEstimator._units(text)
+
     @staticmethod
     def _count(text: str) -> int:
         if not text:
             return 0
+        return -(-TokenEstimator._units(text) // _DEN)
+
+    @staticmethod
+    def _units(text: str) -> int:
         units = 0
         if _RE_BLOB.search(text):
             units += _W_BLOB * sum(map(len, _RE_BLOB.findall(text)))
@@ -117,4 +138,4 @@ class TokenEstimator:
         if not text.isascii():  # ASCII だけなら ``wide`` は 0。走査を省く
             units += _W_WIDE * sum(map(len, _RE_WIDE.findall(text)))
         units += _W_OTHER * sum(map(len, _RE_OTHER.findall(text)))  # ASCII の制御文字（\t \r \n 以外）も含む
-        return -(-units // _DEN)
+        return units

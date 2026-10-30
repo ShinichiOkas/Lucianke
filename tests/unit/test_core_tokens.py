@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import random
 from fractions import Fraction
 
 from lucianke.core import tokens
@@ -71,3 +73,35 @@ def test_reexported_from_budget_and_skeleton() -> None:
     sample = "def f(x):\n    return x + 1  # 戻り値\n"
     assert skeleton.default_estimate(sample) == EST.count(sample)
     assert budget.Packer().estimator.count(sample) == EST.count(sample)
+
+
+def test_units_add_up_over_lines_and_json_arrays() -> None:
+    """``units`` は切り上げ前の値で、行の列は行ごとの和と改行の分、詰めた JSON の配列は要素ごとの和から記号の連 1 つずつを
+    引いた値になる（骨格の縮退段の見積もりがこれに頼る。BUG-0078）。"""
+    rng = random.Random(78)
+    alphabet = "abcXYZ019 _-:,()[]{}\"'=+/@#  \tあ漢αβ"
+    for _ in range(200):
+        lines = [
+            "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 50))) + ("A" * rng.choice([0, 0, 45]))
+            for _ in range(rng.randint(1, 8))
+        ]
+        text = "\n".join(lines)
+        units = sum(map(TokenEstimator.units, lines)) + TokenEstimator.NEWLINE_UNITS * (len(lines) - 1)
+        assert TokenEstimator.units(text) == units
+        assert EST.count(text) == -(-units // TokenEstimator.UNIT_DEN)
+
+    def dumps(value: object) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    for _ in range(100):
+        items = [
+            {
+                "name": "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 20))),
+                "n": rng.randint(0, 999),
+            }
+            for _ in range(rng.randint(0, 6))
+        ]
+        whole = TokenEstimator.units(dumps({"a": 1, "items": items, "z": "end"}))
+        empty = TokenEstimator.units(dumps({"a": 1, "items": [], "z": "end"}))
+        parts = sum(TokenEstimator.units(dumps(i)) - TokenEstimator.SYMBOL_RUN_UNITS for i in items)
+        assert whole == empty + parts

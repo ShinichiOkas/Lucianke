@@ -1447,7 +1447,7 @@ json の `data`:
 7. Tier 4（未知言語）: ctags 互換の規則で取れたエントリ（`syntax/heuristic.py` の `block_outline`）を `[Function]` / `[Class]` / `[Section]` などの入れ子にし、終了行はインデントまたは括弧の対応から推定する。取れれば `heuristic`、何も取れなければ見出しだけの空の骨格で `lexical_fallback` とし、どちらも先頭に `! DEGRADED` 行を置く（MUST。パイプラインがレコードの水準から付ける。§5.4.2）。T-02 の呼び出しでは `ctags` を起動しない（子プロセスと PATH の探索を持ち込まない。索引側の `Indexer` は使う）。`block_outline` の定義らしい行は、`def|function|fn|sub|proc|procedure|class|module` で始まる行、COBOL の段落名、字下げ 0 の `name = …` / `rule NAME = …` で、終了行は括弧の対応・字下げの戻り・`end` から推定する（実装で確定 2026-10-29、de291be）。
    - **Markdown・reStructuredText**（Tier 3）: 見出しの入れ子を `[Section]`（`structural`）にする。節の終わりは次の同位以上の見出しの前（末尾の空行は含めない）。Markdown は ATX（`#`）と Setext（`===` `---`）の見出しを拾い（フェンス付きコードブロックと先頭の YAML front matter の中は見出しにしない）、reStructuredText は下線のみ・上下線つきの見出しを出現順に深さへ割り当てる。
    - 種類の振り分けの順は、データ形式（JSON・JSONL・YAML・TOML・XML・`.ipynb`）→ コード（Python・TypeScript・JavaScript。構文木）→ Markdown・rst → それ以外（Tier 4）。
-8. 予算に収まらないとき、ファイル内では `doc:` → `urn:`（導けない URN の行。§6.1 規約 2）→ 非公開メンバー → 入れ子メンバー（最上位は残す）の順に落とし、落とした件数を `- truncated: N members omitted` に書く（属性行を落としたときは `(doc, urn omitted)` のように添える。`urn:` 行がもともと無ければ `urn` は挙げない）。縮退したファイルブロックはそのページの最後の 1 件とし、残りのファイルは次ページに回す（§5.6-5。縮退版でも収まらなければそのファイルから次ページ）。1 レコードは 1 ファイルブロック。
+8. 予算に収まらないとき、ファイル内では `doc:` 行 → `urn:` 行（導けない URN の行。§6.1 規約 2）→ 非公開メンバー → 入れ子の公開メンバー（最上位は残す）の順に、**1 件ずつ** 落とし、収まる最も浅い段を返す（BUG-0078、2026-10-31）。`doc:` 行と `urn:` 行は深い順・同じ深さでは文書の後ろから、非公開メンバーは文書の後ろから、入れ子の公開メンバーは「浅い順 → 文書順」（クラスごとに上から）に残し、その逆順に落とす（親を落とすと子も落ちる）。段の鎖は予算に依らないので、予算を上げても見える行・シンボルは減らない（§5.6-5）。落としたものは `- truncated: N members omitted (<属性>): <入れ物> <件数>, …; whole file: max_tokens>=<M> with this path alone` に書く。`<属性>` は `doc`・`urn`（全部落とした）か `K doc lines`・`K urn lines`（一部）で、`urn:` 行がもともと無ければ `urn` は挙げない。`<入れ物>` は落としたメンバーの親の修飾名（最上位は `(top level)`）で、文書順に 8 件まで（残りは `(others)` にまとめる）。`<M>` はそのファイルだけを丸ごと返す `max_tokens` の目安（丸ごとの大きさ + 前置きの分 200 を 100 単位に切り上げ。形式ごとに数える）。落とした分はカーソルでは辿れない（カーソルは次のファイルへ進む）ので、呼び直しの手を添える。縮退したファイルブロックはそのページの最後の 1 件とし、残りのファイルは次ページに回す（§5.6-5。縮退版でも収まらなければそのファイルから次ページ）。1 レコードは 1 ファイルブロック。理由: 主な利用者の AI は渡した予算を使い切った応答で往復を減らしたい。以前は段が「`urn:` を落とす」の次が「入れ子を全部落とす」だけで、F-PY の `_urls.py` は json の予算 6,000 で最上位だけ（618 トークン、利用率 1 割）と続きのカーソルを返した（今は 53 シンボル中 48 を返し、利用率 99%）。
 9. ファイルブロックのヘッダに `sha=` としてファイル内容の SHA-256 の先頭 12 桁を付ける（MUST）。エージェントはこれを編集ツールの `expected_file_sha256` に渡せる（§10.4）。json では `items[].file_sha256` に 64 桁の完全形を入れる。
 
 **出力**（compact。Python の例は §6.1.1。ここでは他形式の形を示す）:
@@ -1497,6 +1497,8 @@ json の `data`:
 | `items[].imports[]` | string[] | 1 名前 1 要素（`"os"`、`"Callable from collections.abc"`）。compact の `imports:` 行はモジュールごとにまとめた形（§6.1 規約 10） |
 | `items[].symbols[]` | object[] | SymbolRecord に `children[]`, `fold_lines`, `decorators[]`, `raises[]`, `attrs[]`（Tag）, `inferred_type`（Key）, `count`（×N） を加えたもの |
 | `items[].truncated_members` | integer | 予算で落としたメンバー数 |
+| `items[].truncated_by_container[]` | object[] | `{container, omitted}`。落としたメンバーの入れ物（親の修飾名、最上位は `"(top level)"`）ごとの件数（子孫も数える）。文書順に 8 件まで、残りは `"(others)"`。丸ごとなら `[]`（規約 8。BUG-0078） |
+| `items[].truncated_note` | string \| null | compact の `- truncated:` 行と同じ文（`max_tokens>=` の目安は json の大きさで数え、json はどのシンボルも `urn` を持つので `urn` は挙げない）。丸ごとなら `null` |
 | `items[].confidence_level` | string | 項目ごとの精度 |
 
 **エラー**:

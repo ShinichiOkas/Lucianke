@@ -29,12 +29,15 @@ class Record:
         confidence: このレコードの精度水準。
         group: 要約の単位（例: ファイルパス）。
         tokens: パッカーが推定して埋める。
-        shrink: 任意。残り予算（トークン）で収まる縮退版（T-02 の ``doc:`` → ``urn:`` → 非公開 → 入れ子の順の省略）を返す。
+        shrink: 任意。残り予算（トークン）で収まる縮退版（T-02 の ``doc:`` → ``urn:`` → 非公開 → 入れ子の順に 1 件ずつの省略）を返す。
             収められなければ ``None``。パッカーは「入らないレコード」にこれがあれば一度だけ呼ぶ。
         resume: 縮退版が **1 レコードの途中で切れている** ときの、続きの位置（ツールが決める 1 以上の整数。T-05 は続きの
             先頭行番号）。縮退してもレコード全体が入る（T-02 の省略など）なら ``None``。これがあるレコードは、パッカーが
             ``next_cursor`` を「同じレコードの ``resume`` から」にして返す（``join_offset``）。続きを呼ぶと、ツールは
             ``split_offset(ctx.cursor_offset)`` で取り出した ``resume`` から同じレコードを作り直す（仕様書 §11 T-05 規約 7）。
+        shrink_json: 任意。``shrink`` と同じ縮退の鎖で、json で描いたときの大きさ（``data`` を詰めた JSON と区切りの ``,``。
+            ``mcp/render/json_out.record_text``）が ``ask`` トークン以下の最も浅い版。パッカーは json で数えるときこれを先に試し、
+            実際に数えて収まればそのまま使う（``shrink`` の ``ask`` を二分探索して版ごとに JSON を作って数えなくて済む。BUG-0078）。
     """
 
     kind: str
@@ -47,6 +50,7 @@ class Record:
     tokens: int | None = None
     shrink: Callable[[int], Record | None] | None = None
     resume: int | None = None
+    shrink_json: Callable[[int], Record | None] | None = None
 
     def with_tokens(self, tokens: int) -> Record:
         return dataclasses.replace(self, tokens=tokens)

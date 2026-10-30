@@ -424,49 +424,179 @@ def test_signature_and_doc_text_come_from_source(rel: str, lang: str) -> None:
 # --- 縮退 ------------------------------------------------------------------------------------------
 
 
-def test_shrink_drops_in_order_and_notes_truncation() -> None:
+def _chain(rec: Record) -> list[tuple[int, Record]]:
+    """縮退の鎖: 予算を丸ごとの大きさから 1 ずつ下げて、版が変わるところの ``(予算, 版)``（浅い段から深い段へ）。
+
+    丸ごとの大きさちょうどの予算から始める（注の分で、最初の段が丸ごとと同じ大きさになることがある）。"""
+    assert rec.shrink is not None
+    out: list[tuple[int, Record]] = []
+    for budget in range(default_estimate(text_of(rec)), 0, -1):
+        small = rec.shrink(budget)
+        if small is None:
+            break
+        if not out or small.lines != out[-1][1].lines:
+            out.append((budget, small))
+    return out
+
+
+def _docs(rec: Record) -> list[str]:
+    return [ln for ln in rec.lines if ln.lstrip().startswith("doc: ")]
+
+
+def _names(rec: Record) -> list[str]:
+    return [s["qualified_name"] for s in flatten(rec.data["symbols"])]
+
+
+def test_shrink_drops_one_by_one_in_order_and_notes_truncation() -> None:
+    """処理規約 8（BUG-0078）: doc: 行を 1 件ずつ（深い順・後ろから）→ 非公開メンバー → 入れ子の公開メンバーを 1 件ずつ
+    （後ろのクラスの後ろから）落とし、最上位は残す。どの段も予算に収まり、注に落とした件数・入れ物ごとの件数・丸ごと取り直す
+    目安を書く。以前は 6,324 → 441 のように入れ子を一度に落とし、予算の 1 割しか使わなかった。"""
     rec = py()
-    full_tokens = default_estimate(text_of(rec))
-    sizes = []
-    for budget in (full_tokens - 1, 400, 250, 150):
-        small = rec.shrink(budget) if rec.shrink else None
-        assert small is not None, budget
+    chain = _chain(rec)
+    for budget, small in chain:
         assert default_estimate(text_of(small)) <= budget
-        assert small.shrink is None  # 縮退は一度だけ
-        assert any(line.startswith("- truncated: ") and " members omitted" in line for line in small.lines)
+        assert small.shrink is None and small.shrink_json is None  # 縮退は一度だけ
         assert small.data["skeleton_line_count"] == len(small.lines) - 1
         assert f"skeleton: {len(small.lines) - 1} lines" in small.lines[0]
-        sizes.append(len(small.lines))
-    assert sizes == sorted(sizes, reverse=True) and sizes[0] < len(rec.lines) + 1 and sizes[-1] < sizes[0]
-
-    no_doc = rec.shrink(full_tokens - 1)
-    assert no_doc is not None
-    assert "doc:" not in text_of(no_doc) and "_validate_limit" in text_of(no_doc)  # 最初に落ちるのは doc:
-    # payment.py の URN はすべて導けて urn: 行が無いので、注は doc だけを挙げる（urn の段は本文が同じなので飛ばす。BUG-0069）
-    assert "- truncated: 0 members omitted (doc omitted)" in no_doc.lines
-    no_private = rec.shrink(default_estimate(text_of(no_doc)) - 1)
-    assert no_private is not None and "_validate_limit" not in text_of(no_private)
-
-    tiny = rec.shrink(150)
-    assert tiny is not None
-    assert "_validate_limit" not in text_of(tiny)  # 非公開メンバーが落ちる
+        assert small.lines[-1].startswith("- truncated: ") and " members omitted" in small.lines[-1]
+        assert small.data["truncated_note"] == small.lines[-1][2:].replace(
+            small.lines[-1].rsplit("max_tokens>=", 1)[1].split()[0],
+            small.data["truncated_note"].rsplit("max_tokens>=", 1)[1].split()[0],
+        )  # json の注は同じ文で、目安だけ json の大きさから
+    # doc: 行は 1 件ずつ、入れ子（process_charge・apply_discount）から後ろ向きに、最上位は最後に落ちる
+    docs = [len(_docs(small)) for _, small in chain]
+    assert docs[:6] == [4, 3, 2, 1, 0, 0]
+    assert not any(ln.startswith("    doc: ") for ln in _docs(chain[1][1]))  # 入れ子の 2 件が先に落ちる
+    assert "- truncated: 0 members omitted (2 doc lines omitted)" in chain[1][1].lines[-1]
+    assert "(doc omitted)" in chain[4][1].lines[-1]
+    # 次に非公開メンバー、その次に入れ子の公開メンバーを 1 件ずつ（後ろのクラスの後ろから）
+    gone = [
+        sorted(set(_names(a)) - set(_names(b))) for (_, a), (_, b) in zip(chain[4:], chain[5:], strict=False)
+    ]
+    assert gone == [
+        ["PaymentProcessor._validate_limit"],
+        ["PaymentProcessor.apply_discount"],
+        ["PaymentProcessor.process_charge"],
+        ["PaymentProcessor.__init__"],
+        ["PaymentRequest.currency"],
+        ["PaymentRequest.amount"],
+        ["PaymentRequest.order_id"],
+    ]
+    tiny = chain[-1][1]
     for top in ("transactional(fn) @L13-15", "PaymentRequest @L18-24", "PaymentProcessor @L31-64"):
         assert any(line.startswith("[") and top in line for line in tiny.lines)  # 最上位は残る
     assert not any(line.startswith("  [") for line in tiny.lines)  # 入れ子メンバーは落ちる
-    m = re.search(r"truncated: (\d+) members omitted", text_of(tiny))
-    assert m is not None
-    assert int(m.group(1)) == tiny.data["truncated_members"] == 7  # Field 3 + メソッド 4
+    assert tiny.data["truncated_members"] == 7  # Field 3 + メソッド 4
+    assert tiny.data["truncated_by_container"] == [
+        {"container": "PaymentRequest", "omitted": 3},
+        {"container": "PaymentProcessor", "omitted": 4},
+    ]
+    whole = default_estimate(text_of(rec) + "\n")
+    m = re.fullmatch(
+        r"- truncated: 7 members omitted \(doc omitted\): PaymentRequest 3, PaymentProcessor 4; "
+        r"whole file: max_tokens>=(\d+) with this path alone",
+        tiny.lines[-1],
+    )
+    assert m is not None, tiny.lines[-1]
+    assert int(m[1]) >= whole + 100 and int(m[1]) % 100 == 0  # 丸ごと + 前置きの分
+    assert rec.data["truncated_by_container"] == [] and rec.data["truncated_note"] is None  # 丸ごとは空
 
 
 def test_shrink_drops_non_derivable_urns_after_doc() -> None:
     """導けない ``urn:`` 行（オーバーロード）がある TS では、doc → urn の順に落ち、注に両方を挙げる。"""
     rec = ts()
     assert "urn: " in text_of(rec) and "doc: " in text_of(rec)
-    no_doc = rec.shrink(default_estimate(text_of(rec)) - 1)
-    assert no_doc is not None and "doc:" not in text_of(no_doc) and "urn: " in text_of(no_doc)
-    no_urn = rec.shrink(default_estimate(text_of(no_doc)) - 1)
-    assert no_urn is not None and "urn:" not in text_of(no_urn)
-    assert any(ln.endswith("(doc, urn omitted)") for ln in no_urn.lines)
+    chain = [small for _, small in _chain(rec)]
+    first_without_urn = next(i for i, small in enumerate(chain) if "urn: " not in text_of(small))
+    assert first_without_urn > 0
+    assert all(
+        "doc:" not in text_of(small) for small in chain[first_without_urn - 1 :]
+    )  # doc が先に全部落ちる
+    assert "urn: " in text_of(chain[first_without_urn - 1])
+    no_urn = chain[first_without_urn]
+    assert no_urn.lines[-1].startswith("- truncated: 0 members omitted (doc, urn omitted); ")
+    # json は urn: 行を持たない（どのシンボルも urn を持つ）ので、json の注は urn を挙げない
+    assert no_urn.data["truncated_note"].startswith("truncated: 0 members omitted (doc omitted); ")
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: py(),
+        lambda: py(include_private=False),
+        lambda: py(include_doc_summary=False, include_urns="none"),
+        lambda: ts(),
+        lambda: ts(include_urns="all"),
+    ],
+)
+def test_shrink_is_monotone_in_the_budget(make: Any) -> None:
+    """``Record.shrink`` は予算について単調（BUG-0067・BUG-0078）: 予算を 1 ずつ上げても、見える行・シンボル・doc は
+    減らず、版も小さくならない。json の ``shrink_json`` も同じ（実際の json の大きさで予算に収まる）。"""
+    from lucianke.mcp.render import json_out
+
+    rec = make()
+    full = default_estimate(text_of(rec))
+    previous: Record | None = None
+    for budget in range(1, full + 1):
+        small = rec.shrink(budget)
+        if small is None:
+            assert previous is None
+            continue
+        assert default_estimate(text_of(small)) <= budget
+        if previous is not None:
+            assert set(_names(small)) >= set(_names(previous)), budget
+            assert set(_docs(small)) >= set(_docs(previous)), budget
+            assert default_estimate(text_of(small)) >= default_estimate(text_of(previous)), budget
+        previous = small
+    whole_json = default_estimate(json_out.record_text(rec))
+    previous = None
+    for budget in range(1, whole_json + 1, 3):
+        small = rec.shrink_json(budget) if rec.shrink_json else None
+        if small is None:
+            assert previous is None
+            continue
+        assert default_estimate(json_out.record_text(small)) <= budget
+        if previous is not None:
+            assert set(_names(small)) >= set(_names(previous)), budget
+        previous = small
+
+
+def test_shrink_json_picks_the_deepest_version_that_fits_exactly() -> None:
+    """``shrink_json`` の見積もり（JSON の部品の和）は、実際に JSON を作って数えた値と一致する: 各段の実際の json の大きさ
+    ちょうどの予算で、その段か、より浅い（json では大きくない）段が返る。見積もりが小さすぎれば予算を超える段が返り
+    （``test_shrink_is_monotone_in_the_budget`` が全予算で検める）、大きすぎればより深い段が返る（パッカーの二分探索の代わり。
+    BUG-0078）。"""
+    from lucianke.mcp.render import json_out
+
+    for rec in (py(), ts(), py(include_urns="all")):
+        assert rec.shrink_json is not None
+        sizes: list[int] = []
+        for _, small in _chain(rec):
+            size = default_estimate(json_out.record_text(small))
+            sizes.append(size)
+            got = rec.shrink_json(size)  # 見積もりが大きすぎれば、より深い段が返る
+            assert got is not None and default_estimate(json_out.record_text(got)) <= size
+            assert set(_names(got)) >= set(_names(small)) and len(got.lines) >= len(small.lines)
+        assert len(sizes) > 3
+
+
+def test_truncated_containers_are_capped_and_top_level_is_named() -> None:
+    """落としたメンバーの入れ物は文書順に 8 件まで（残りは ``(others)``）、最上位で落とした非公開は ``(top level)``。"""
+    classes = "".join(f"class C{i}:\n    def m(self) -> None:\n        pass\n\n" for i in range(12))
+    source = (classes + "def _helper() -> int:\n    return 1\n").encode("utf-8")
+    parsed, symbols = parse(source, "python", "many.py")
+    rec = build_file_record(parsed, symbols, rel="many.py", opts=SkeletonOptions())
+    tiny = _chain(rec)[-1][1]
+    assert tiny.data["truncated_members"] == 13
+    by = tiny.data["truncated_by_container"]
+    assert [b["container"] for b in by] == [f"C{i}" for i in range(7)] + ["(others)"]
+    assert (
+        sum(b["omitted"] for b in by) == 13 and by[-1]["omitted"] == 6
+    )  # C7〜C11 の 5 件 + 最上位の _helper
+    assert ": C0 1, C1 1, C2 1, C3 1, C4 1, C5 1, C6 1, (others) 6; " in tiny.lines[-1]
+    first = _chain(rec)[0][1]  # 最初に落ちるのは文書の最後の非公開（最上位の _helper）
+    assert "_helper" not in _names(first) and all(f"C{i}" in _names(first) for i in range(12))
+    assert first.data["truncated_by_container"][-1] == {"container": "(top level)", "omitted": 1}
 
 
 def test_shrink_returns_none_when_nothing_fits() -> None:
