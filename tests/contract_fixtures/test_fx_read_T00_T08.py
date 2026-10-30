@@ -442,7 +442,7 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
     }
     # LSP があれば最初の答えを exact で得て（BUG-0080）、すぐ真値も取る。以降の問い合わせは PaaD の exact 行から答えるので、
     # 事後条件 2〜6 も LSP の期限（負荷）で経路が揺れない。最初から延ばした期限で聞く: basedpyright は references の要求が
-    # 1 度取り消されると、同じプロセスの references がすべて失敗する（票 BUG-0083）。製品の期限 3 秒で切れたら exact も真値も取れない。
+    # 1 度取り消されると、同じプロセスの references がすべて失敗する（票 BUG-0085）。製品の期限 3 秒で切れたら exact も真値も取れない。
     want: set[tuple[str, int, int]] = set()
     if rig.lsp_ready:
         r = await ask_exact(
