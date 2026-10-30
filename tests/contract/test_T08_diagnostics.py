@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -952,6 +953,11 @@ async def test_real_ruff_ready_with_types_lsp_unavailable(indexed: tuple[Path, P
         await registry.terminate_all(500, close=True)
 
 
+
+# ``LspPool`` の ``ready_fallback_s`` の既定（BUG-0050 の退行はこの秒数まで ruff の診断を返せない）
+_DEFAULT_READY_FALLBACK_S = inspect.signature(LspPool.__init__).parameters["ready_fallback_s"].default
+
+
 @pytest.mark.skipif(not _HAVE_RUFF, reason="ruff is not installed in this environment")
 async def test_real_ruff_answers_within_one_second_of_start_with_types_lsp_down(
     indexed: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
@@ -960,7 +966,10 @@ async def test_real_ruff_answers_within_one_second_of_start_with_types_lsp_down(
 
     ruff は ``$/progress`` を出さず、診断も文書を開くまで出さない。``ready`` の合図が「最初の ``publishDiagnostics`` か
     ``ready_fallback_s``」だった間は、``ready`` でないハンドルに文書を開かせない T-08 が約 15 秒（既定の
-    ``ready_fallback_s``。ここでも既定のまま）ruff の診断を返せなかった。``initialize`` の応答を合図にして、それが無くなった。"""
+    ``ready_fallback_s``。ここでも既定のまま）ruff の診断を返せなかった。``initialize`` の応答を合図にして、それが無くなった。
+
+    合否は「既定の ``ready_fallback_s``（15 秒）の半分より十分前に返る」で見る（BUG-0089）。実時間 1 秒の上限は負荷の高い
+    全体テストで 1.1 秒になって落ちた（揺れる）。退行（約 15 秒）とは 7.5 秒の境で確実に分かれる。1 秒の目標は計測（bench）で見る。"""
     root, _ = indexed
     for var in ("LUCIANKE_LSP_BASEDPYRIGHT_CMD", "LUCIANKE_LSP_PYRIGHT_CMD"):
         monkeypatch.setenv(var, str(root / "no-such-language-server"))  # 型の LSP は init_failed
@@ -972,7 +981,8 @@ async def test_real_ruff_answers_within_one_second_of_start_with_types_lsp_down(
         await call(pipe, paths=[LINTY], min_severity="hint")  # 起動の契機（この呼び出し自体は降格でよい）
         got: list[dict[str, Any]] = []
         r: Any = None
-        while time.perf_counter() - t0 < 1.0:
+        limit_s = _DEFAULT_READY_FALLBACK_S / 2  # 退行（ready_fallback_s まで待つ）なら必ず超える。負荷では揺れない
+        while time.perf_counter() - t0 < limit_s:
             r = await call(pipe, paths=[LINTY], min_severity="hint")
             got = diags_of(r)
             if any(d["source"] == "ruff" for d in got):
@@ -980,7 +990,7 @@ async def test_real_ruff_answers_within_one_second_of_start_with_types_lsp_down(
             await asyncio.sleep(0.05)
         elapsed = time.perf_counter() - t0
         assert any(d["source"] == "ruff" and d["code"] == "F401" for d in got), (elapsed, got)
-        assert elapsed < 1.0, elapsed
+        assert elapsed < limit_s, elapsed
         servers = {(s["language"], s["role"]): s["status"] for s in r.structured["data"]["lsp_sources"]}
         assert servers == {("python", "types"): "unavailable", ("python", "lint"): "ready"}
     finally:
