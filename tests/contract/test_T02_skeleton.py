@@ -145,10 +145,31 @@ async def test_postcondition_5_budget_is_respected(pipeline: Pipeline, max_token
 
 async def test_shrink_drops_doc_first_and_stays_grammatical(pipeline: Pipeline) -> None:
     full = await call(pipeline, paths=[PAY_PY])
-    small = await call(pipeline, paths=[PAY_PY], max_tokens=400)
-    assert "  doc: " in full.text and "  urn: " in full.text
+    # payment.py の URN はすべて lk://<ws>/<path>#<修飾名> で導けるので urn: 行は無い（§6.1 規約 2。BUG-0069）
+    assert "  doc: " in full.text and "urn: " not in full.text
+    used = re.search(r" ~(\d+)/\d+tok", full.text.splitlines()[0])
+    assert used is not None
+    small = await call(pipeline, paths=[PAY_PY], max_tokens=int(used[1]) - 1)  # 全部入りがちょうど入らない予算
     assert "  doc: " not in small.text  # doc: から先に落ちる
+    assert "urn omitted" not in small.text  # 出していない urn を「落とした」と書かない
     assert g.validate(small.text) == []
+
+
+async def test_compact_shows_only_urns_not_derivable_but_json_keeps_every_urn(pipeline: Pipeline) -> None:
+    """compact の urn: 行は導けない URN（TS のオーバーロードの /arity・~sighash）だけ。json の SymbolRecord は全部 urn を持つ
+    （§6.2 の形は変えない。BUG-0069）。"""
+    r = await call(pipeline, paths=[PAY_TS])
+    shown = [ln.strip().removeprefix("urn: ") for ln in r.text.splitlines() if ln.strip().startswith("urn: ")]
+    assert shown and all("#PaymentClient.charge/" in u for u in shown), r.text
+    assert g.validate(r.text) == []
+    j = await call(pipeline, "json", paths=[PAY_TS])
+
+    def walk(syms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [x for s in syms for x in (s, *walk(s["children"]))]
+
+    every = walk(j.structured["data"]["items"][0]["symbols"])
+    assert every and all(s["urn"].startswith("lk://") for s in every)
+    assert set(shown) < {s["urn"] for s in every}
 
 
 async def test_partial_failure_keeps_ok_and_marks_item(pipeline: Pipeline) -> None:

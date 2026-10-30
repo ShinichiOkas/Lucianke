@@ -121,17 +121,17 @@ def test_python_process_charge_block() -> None:
     assert any(a.startswith("doc: 注文に対する決済") for a in attrs)
     assert "decorators: @transactional" in attrs
     assert "raises: ValueError, PaymentDeclined" in attrs  # 本体の raise の文書順
-    assert any(
-        a.startswith("urn: lk://app/src/shop/services/payment.py#PaymentProcessor.process_charge")
-        for a in attrs
-    )
+    # URN は lk://app/<ブロックのパス>#PaymentProcessor.process_charge で導けるので urn: 行は出さない（§6.1 規約 2。BUG-0069）
+    assert not any(a.startswith("urn:") for a in attrs)
 
 
 def test_python_nesting_and_imports() -> None:
     lines = text_of(py()).splitlines()
-    assert lines[1].startswith("imports: [")
-    assert "Decimal from decimal" in lines[1]
-    assert "LimitTable from shop.services.limits" in lines[1]
+    # import はモジュールごとにまとめ、モジュール名を名前ごとに繰り返さない（§6.1 規約 10。BUG-0069）
+    assert lines[1] == (
+        "imports: [os; dataclasses: dataclass; decimal: Decimal; shop.models.receipt: Receipt; "
+        "shop.services.limits: LimitExceeded, LimitTable]"
+    )
     assert "annotations" not in lines[1]  # from __future__ は載せない
     assert "[Class] pub PaymentProcessor @L31-64" in lines
     # クラスの直下のメソッドは 1 段インデントで短い名前、最上位は修飾名
@@ -248,12 +248,36 @@ def test_include_private_false_drops_private() -> None:
     assert "_validate_limit" not in names
 
 
-def test_urn_modes() -> None:
-    none, public, every = (text_of(py(include_urns=m)) for m in ("none", "public", "all"))
-    assert "urn:" not in none
-    assert "urn: lk://app/src/shop/services/payment.py#PaymentProcessor.process_charge" in public
-    assert "#PaymentProcessor._validate_limit" not in public
-    assert "urn: lk://app/src/shop/services/payment.py#PaymentProcessor._validate_limit" in every
+def test_urn_lines_only_for_urns_not_derivable_from_the_block() -> None:
+    """``urn:`` 行は ``lk://<ws>/<ブロックのパス>#<入れ子をたどった修飾名>`` で導けない URN だけ（§6.1 規約 2。BUG-0069）。"""
+    for mode in ("none", "public", "all"):
+        assert "urn:" not in text_of(py(include_urns=mode))  # payment.py の URN はすべて導ける
+    # 同名の再定義（arity・sighash 付き）は導けないので、include_urns の範囲で出す
+    source = (
+        b"def f(a):\n    return 1\n\n"
+        b"def f(a, b):\n    return 2\n\n"
+        b"class C:\n    def m(self):\n        def inner():\n            pass\n"
+    )
+    parsed, symbols = parse(source, "python", "m.py")
+    lines = build_file_record(parsed, symbols, rel="m.py", opts=SkeletonOptions()).lines
+    shown = [ln.strip() for ln in lines if ln.strip().startswith("urn:")]
+    assert shown == ["urn: lk://app/m.py#f/1", "urn: lk://app/m.py#f/2"]
+    # 入れ子は C → m → inner とたどった修飾名で導ける（C.m.inner）ので出さない
+    assert {str(s.urn) for s in symbols} >= {"lk://app/m.py#C.m", "lk://app/m.py#C.m.inner"}
+    assert "    [Function] pub inner() @L9-10 { ...1 lines omitted }" in lines
+    none = build_file_record(parsed, symbols, rel="m.py", opts=SkeletonOptions(include_urns="none")).lines
+    assert not any("urn:" in ln for ln in none)
+
+
+def test_urn_modes_choose_which_non_derivable_urns_are_shown() -> None:
+    source = b"def _f(a):\n    return 1\n\ndef _f(a, b):\n    return 2\n"
+    parsed, symbols = parse(source, "python", "m.py")
+
+    def text(mode: str) -> str:
+        return text_of(build_file_record(parsed, symbols, rel="m.py", opts=SkeletonOptions(include_urns=mode)))  # type: ignore[arg-type]
+
+    assert "urn:" not in text("public")  # 非公開
+    assert "urn: lk://app/m.py#_f/1" in text("all") and "urn: lk://app/m.py#_f/2" in text("all")
 
 
 def test_doc_and_imports_switches() -> None:
@@ -311,6 +335,27 @@ def test_typescript_imports_and_private_toplevel() -> None:
     shown = build_file_record(parsed, symbols, rel="m.ts", opts=SkeletonOptions(include_private=False))
     assert "helper" not in text_of(shown)  # 非 export の最上位は非公開
     assert "pub(a: number): number" in text_of(shown)
+
+
+def test_compact_import_line_groups_by_module() -> None:
+    """compact の ``imports:`` はモジュールごと（``m: a, b``、``import m`` は ``m``）。別名は残す（§6.1 規約 10。BUG-0069）。"""
+    py_src = (
+        b"import a.b as c, d\nfrom . import y\nfrom .m import (p as q, r)\nfrom x import *\n"
+        b"from .m import s\nimport d\nif TYPE_CHECKING:\n    from t import T\n"
+    )
+    parsed, symbols = parse(py_src, "python", "m.py")
+    rec = build_file_record(parsed, symbols, rel="m.py", opts=SkeletonOptions())
+    # 同じモジュールの from 文は 1 つにまとめ（.m）、同じ import の重複（d）は 1 回
+    assert rec.lines[1] == "imports: [a.b as c; d; .: y; .m: p as q, r, s; x: *; t: T]"
+    assert rec.data["imports"][:3] == ["a.b as c", "d", "y from ."]  # json の形は変えない
+    ts_src = (
+        b'import X, { A, B as C } from "mod";\nimport * as ns from "./ns";\nimport "side";\n'
+        b'import { D } from "mod";\n'
+    )
+    parsed, symbols = parse(ts_src, "typescript", "m.ts")
+    rec = build_file_record(parsed, symbols, rel="m.ts", opts=SkeletonOptions())
+    assert rec.lines[1] == "imports: [mod: X, A, B as C, D; ./ns: * as ns; side]"
+    assert compact_grammar.validate("\n".join(rec.lines), require_header=False) == []
 
 
 def test_python_imports_summary() -> None:
@@ -396,9 +441,11 @@ def test_shrink_drops_in_order_and_notes_truncation() -> None:
 
     no_doc = rec.shrink(full_tokens - 1)
     assert no_doc is not None
-    assert "doc:" not in text_of(no_doc) and "urn:" in text_of(no_doc)  # 最初に落ちるのは doc:
-    no_urn = rec.shrink(default_estimate(text_of(no_doc)) - 1)
-    assert no_urn is not None and "urn:" not in text_of(no_urn) and "_validate_limit" in text_of(no_urn)
+    assert "doc:" not in text_of(no_doc) and "_validate_limit" in text_of(no_doc)  # 最初に落ちるのは doc:
+    # payment.py の URN はすべて導けて urn: 行が無いので、注は doc だけを挙げる（urn の段は本文が同じなので飛ばす。BUG-0069）
+    assert "- truncated: 0 members omitted (doc omitted)" in no_doc.lines
+    no_private = rec.shrink(default_estimate(text_of(no_doc)) - 1)
+    assert no_private is not None and "_validate_limit" not in text_of(no_private)
 
     tiny = rec.shrink(150)
     assert tiny is not None
@@ -409,6 +456,17 @@ def test_shrink_drops_in_order_and_notes_truncation() -> None:
     m = re.search(r"truncated: (\d+) members omitted", text_of(tiny))
     assert m is not None
     assert int(m.group(1)) == tiny.data["truncated_members"] == 7  # Field 3 + メソッド 4
+
+
+def test_shrink_drops_non_derivable_urns_after_doc() -> None:
+    """導けない ``urn:`` 行（オーバーロード）がある TS では、doc → urn の順に落ち、注に両方を挙げる。"""
+    rec = ts()
+    assert "urn: " in text_of(rec) and "doc: " in text_of(rec)
+    no_doc = rec.shrink(default_estimate(text_of(rec)) - 1)
+    assert no_doc is not None and "doc:" not in text_of(no_doc) and "urn: " in text_of(no_doc)
+    no_urn = rec.shrink(default_estimate(text_of(no_doc)) - 1)
+    assert no_urn is not None and "urn:" not in text_of(no_urn)
+    assert any(ln.endswith("(doc, urn omitted)") for ln in no_urn.lines)
 
 
 def test_shrink_returns_none_when_nothing_fits() -> None:

@@ -10,6 +10,7 @@ EXPECTED: dict[str, object] = {
     "BATCH_MAX_ITEMS": 20,
     "CANDIDATES_MAX": 10,
     "SNIPPET_MAX_CHARS": 200,
+    "SEARCH_SIGNATURE_MAX_CHARS": 160,  # BUG-0069: compact の T-03 のヒットのシグネチャ
     "WATCH_STEP_MS": 10,  # S-06: step=10 が必須（既定の 50 では単発の p95 が 100 ms 前後）
     "WATCH_DEBOUNCE_MS": 1000,  # S-06: パスが増え続ける間にグループ化する最大時間
     "WATCH_BURST_HINT": 100,

@@ -13,7 +13,9 @@
   0 以下を渡すと ``ValueError``（内部の 0 始まりが漏れたことを早く見つけるため）。
 * テキスト欄の改行は空白 1 つに畳む（1 行に収める）。
 * 規約 6: ``snippet`` ・``doc`` ・``when`` は、行全体が 200 文字を超えるとき、その欄の末尾を切って ``…`` で終え、
-  行全体を 200 文字以内に収める。``sig`` とコードブロックには適用しない。
+  行全体を 200 文字以内に収める。``sig`` とコードブロックには適用しない（T-03 の検索ヒットのシグネチャだけは
+  ``cap_signature`` で 160 文字に切る。BUG-0069）。
+* 規約 2: ``urn:`` 行は、URN が表示したパスと修飾名から導けないときだけ出す（``urn_lines``。BUG-0069）。
 * 語彙（``kind`` ・``modifier`` ・``attr-key`` ・``use`` ・``sev`` ・``level``）は仕様書 §6.1 の EBNF に限る。違えば ``ValueError``。
 """
 
@@ -23,8 +25,10 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from lucianke.core.limits import SEARCH_SIGNATURE_MAX_CHARS
 from lucianke.core.model import Confidence, Kind
 from lucianke.core.records import ResolutionMeta
+from lucianke.core.urn import Urn, derivable
 
 __all__ = [
     "ATTR_KEYS",
@@ -37,6 +41,7 @@ __all__ = [
     "banner",
     "banner_lines",
     "candidate_line",
+    "cap_signature",
     "code_block",
     "diag_line",
     "error_header_line",
@@ -54,6 +59,7 @@ __all__ = [
     "trailer_more",
     "trailer_summary",
     "tree_line",
+    "urn_lines",
 ]
 
 LINE_LIMIT = 200  # 規約 6
@@ -227,9 +233,13 @@ def file_block_header(
     return f"=== {one_line(path)} ({', '.join(inner)}) ==="
 
 
-def import_line(items: Iterable[str]) -> str:
-    """``import-line``: ``imports: [a, b, c]``。"""
-    return f"imports: [{', '.join(one_line(i) for i in items)}]"
+def import_line(groups: Iterable[str]) -> str:
+    """``import-line``: ``imports: [<group>; <group>; ...]``（仕様書 §6.1 規約 10。BUG-0069）。
+
+    ``groups`` はモジュールごとにまとめた項目: ``module``（``import module``）か ``module: a, b as c``
+    （``from module import a, b as c``。JS / TS の ``import ... from "module"`` も同じ）。区切りは ``"; "``。
+    """
+    return f"imports: [{'; '.join(one_line(g) for g in groups)}]"
 
 
 def symbol_line(
@@ -287,6 +297,54 @@ def attr_line(key: str, value: object, *, indent: int) -> str:
     if key in ("doc", "when"):
         text = _fit(prefix, text)
     return prefix + text
+
+
+def urn_lines(
+    urn: Urn | str, *, path: str, qualified: str | None, indent: int, workspace_id: str | None = None
+) -> list[str]:
+    """``urn:`` 属性行（0 行か 1 行）。URN が ``lk://<ws>/<path>#<qualified>`` で導けるなら出さない（§6.1 規約 2）。
+
+    ``path`` と ``qualified`` は **その記号の行が示すもの**（ファイルブロックではブロックのパスと入れ子をたどった修飾名、
+    横断の一覧では ``path#qualified``、``[Module] <path>`` は ``qualified=None``）。``workspace_id`` は ``core.urn.derivable`` と同じ。
+    """
+    if derivable(urn, path, qualified, workspace_id=workspace_id):
+        return []
+    return [attr_line("urn", str(urn), indent=indent)]
+
+
+def _close_paren(sig: str) -> int:
+    """``sig[0] == "("`` の対応する ``)`` の位置。無ければ -1。"""
+    depth = 0
+    for i, ch in enumerate(sig):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i if ch == ")" else -1
+    return -1
+
+
+def cap_signature(sig: str | None, limit: int = SEARCH_SIGNATURE_MAX_CHARS) -> str | None:
+    """シグネチャを ``limit`` 文字以内に切る（compact の検索ヒット用。仕様書 §11 T-03。BUG-0069）。
+
+    ``(params) -> ret`` の形なら引数部の末尾を ``…`` にして ``)`` で閉じ、戻り値は残す（長ければ戻り値も ``…`` で切る）。
+    ``sig-inline`` の形（``(`` で始まり ``)`` で閉じる）を保つ。それ以外の形は末尾を ``…`` にする。
+    """
+    if sig is None:
+        return None
+    text = one_line(sig)
+    if len(text) <= limit:
+        return text
+    close = _close_paren(text) if text.startswith("(") else -1
+    if close < 0:
+        return text[: max(limit - 1, 0)].rstrip() + "…"
+    params, rest = text[1:close], text[close + 1 :]
+    rest_max = max(limit // 4, 8)
+    if len(rest) > rest_max:
+        rest = rest[: rest_max - 1].rstrip() + "…"
+    keep = max(limit - len(rest) - 3, 0)  # "(" + "…" + ")"
+    return f"({params[:keep].rstrip(' ,')}…){rest}"
 
 
 def ref_line(

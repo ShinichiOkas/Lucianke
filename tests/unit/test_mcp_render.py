@@ -76,7 +76,8 @@ def test_file_block_header_and_imports():
     assert c.file_block_header("a.py", lines=1) == "=== a.py (1 lines) ==="
     with pytest.raises(ValueError):
         c.file_block_header("a.py", lines=1, sha12="xyz")
-    assert c.import_line(["Decimal from decimal", "OrderRepository"]) == "imports: [Decimal from decimal, OrderRepository]"
+    # モジュールごとの項目を "; " で区切る（仕様書 §6.1 規約 10。BUG-0069）
+    assert c.import_line(["decimal: Decimal", "os"]) == "imports: [decimal: Decimal; os]"
     assert c.import_line([]) == "imports: []"
     _check(nb, c.import_line(["a", "b"]), c.file_block_header("a.py", lines=1))
 

@@ -23,6 +23,7 @@ from lucianke.core.compact_lines import (
     banner,
     banner_lines,
     candidate_line,
+    cap_signature,
     code_block,
     diag_line,
     error_header_line,
@@ -39,6 +40,7 @@ from lucianke.core.compact_lines import (
     trailer_more,
     trailer_summary,
     tree_line,
+    urn_lines,
 )
 from lucianke.mcp.budget import trailer_lines
 from lucianke.mcp.envelope import collect_warnings
@@ -55,6 +57,7 @@ __all__ = [
     "banner",
     "banner_lines",
     "candidate_line",
+    "cap_signature",
     "code_block",
     "diag_line",
     "error_header_line",
@@ -72,6 +75,7 @@ __all__ = [
     "trailer_more",
     "trailer_summary",
     "tree_line",
+    "urn_lines",
 ]
 
 

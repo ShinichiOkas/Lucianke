@@ -3,7 +3,10 @@
 ``structural`` 版: PaaD の ``symbols``（Tree-sitter 由来。ctags 由来の ``heuristic`` も同じ表に入る）を
 ``index.queries`` で引くだけで、LSP は使わない（``exact`` と ``structural`` は同じ結果を返す。仕様書 T-03「精度と降格」）。
 
-* 一致の順位は 完全一致 > 前方一致 > 部分一致、同順位は コードのシンボル > データファイルの Key / Tag、``pagerank`` 降順（``FileInfo`` に載ったら使う。無ければ 0）、パスの辞書順。
+* 一致の順位は 完全一致 > 前方一致 > 名前の部分一致 > シグネチャ・Doc だけの一致（名前に当たらない ``fuzzy`` の FTS 一致。BUG-0069）、
+  同順位は コードのシンボル > データファイルの Key / Tag、``pagerank`` 降順（``FileInfo`` に載ったら使う。無ければ 0）、パスの辞書順。
+* compact のヒットの行は ``path#qualified(sig)``。URN はそこから導けるので ``urn:`` 行は導けないとき（``lex:`` など）だけ。
+  シグネチャは ``SEARCH_SIGNATURE_MAX_CHARS``（160）文字で ``…)`` に切る（json の ``signature`` は全文。BUG-0069）。
   データファイルの Key / Tag（Tier 3）は名前検索の対象だが、同じ一致の質ならコードのシンボルを先に出す
   （``symbol_kinds`` を渡さない既定では全種別が混ざるので、設定ファイルのキーがコードの定義を押しのけない。Key / Tag だけが欲しいときは ``symbol_kinds`` で指定する）。
   FTS5 の ``bm25`` 順は使わず、広めに取った候補を Python で並べ直す。
@@ -60,7 +63,9 @@ CANDIDATE_CAP = 2000
 """索引から取る候補の上限。ここから絞り込み・並べ直しをして ``limit`` 件にする。"""
 
 _GLOB_CHARS = frozenset("*?[")
-_SCORE_BASE = {0: 1.0, 1: 0.75, 2: 0.5}
+_SCORE_BASE = {0: 1.0, 1: 0.75, 2: 0.5, 3: 0.25}
+_WORD_RE = re.compile(r"[^\W_]+")
+"""名前の語（FTS5 の unicode61 と同じく英数字の連なり。``process_charge`` は ``process`` と ``charge``）。"""
 _DATA_KINDS = frozenset({Kind.KEY, Kind.TAG})
 """データファイル（Tier 3: JSON / YAML / TOML / XML）のシンボルの種別。同じ一致の質ならコードのシンボルより後ろに並べる。"""
 
@@ -202,7 +207,7 @@ def _parse_sig_filter(text: str | None) -> _SigFilter | None:
 @dataclass(frozen=True, slots=True)
 class _Hit:
     sym: SymbolRecord
-    tier: int  # 0 完全一致 / 1 前方一致 / 2 部分一致
+    tier: int  # 0 完全一致 / 1 前方一致 / 2 名前の部分一致 / 3 シグネチャ・Doc だけの一致
     score: float
     pagerank: float
     file: FileInfo | None
@@ -222,10 +227,20 @@ def _match_tier(sym: SymbolRecord, query: str, rx: re.Pattern[str] | None) -> in
     if sym.name == query or sym.qualified_name == query:
         return 0
     q = query.casefold()
+    name, qualified = sym.name.casefold(), sym.qualified_name.casefold()
     # 前方一致は名前で見る。限定名で探しているとき（query に "." がある）だけ限定名の前方も前方一致にする
-    if sym.name.casefold().startswith(q) or ("." in q and sym.qualified_name.casefold().startswith(q)):
+    if name.startswith(q) or ("." in q and qualified.startswith(q)):
         return 1
-    return 2
+    return 2 if _names_match(name, qualified, q) else 3
+
+
+def _names_match(name: str, qualified: str, q: str) -> bool:
+    """名前か限定名に当たる（部分文字列、または query の各語が名前の語の前方一致）。当たらなければシグネチャ・Doc だけの一致。"""
+    if q in name or q in qualified:
+        return True
+    words = _WORD_RE.findall(qualified)
+    tokens = _WORD_RE.findall(q)
+    return bool(tokens) and all(any(w.startswith(t) for w in words) for t in tokens)
 
 
 def _score(tier: int, sym: SymbolRecord, query: str) -> float:
@@ -403,9 +418,11 @@ def _record(svc: ToolServices, hit: _Hit, priority: int) -> Record:
     s = hit.sym
     start, end = s.range.line_span_external()
     rel = str(s.path)
+    sig = L.cap_signature(s.signature)  # compact だけ 160 文字に切る（json の signature は全文）
+    # 導ける URN（lk://<ws>/<path>#<qualified>）は出さない（仕様書 §6.1 規約 2。BUG-0069）
     lines = [
-        L.symbol_line(s.kind, f"{rel}#{s.qualified_name}", sig=s.signature, start_line=start, end_line=end),
-        L.attr_line("urn", str(s.urn), indent=0),
+        L.symbol_line(s.kind, f"{rel}#{s.qualified_name}", sig=sig, start_line=start, end_line=end),
+        *L.urn_lines(s.urn, path=rel, qualified=s.qualified_name, indent=0),
     ]
     if (
         s.confidence < Confidence.STRUCTURAL

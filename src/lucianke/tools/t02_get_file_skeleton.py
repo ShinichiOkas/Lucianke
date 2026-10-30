@@ -35,7 +35,8 @@ class GetFileSkeletonArgs(CommonArgs):
     include_private: bool = Field(default=True)
     include_doc_summary: bool = Field(default=True)
     include_urns: Literal["public", "all", "none"] = Field(
-        default="public", description="Symbols that get a urn: line."
+        default="public",
+        description="Symbols that may get a urn: line (only when not lk://ws/path#qualified).",
     )
     include_imports: bool = Field(default=True)
     max_depth: int = Field(default=4, ge=1, le=10, description="Data files only.")

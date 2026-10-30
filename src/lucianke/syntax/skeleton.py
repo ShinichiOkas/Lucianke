@@ -2,8 +2,9 @@
 
 ``build_file_record`` は 1 ファイル = 1 レコード（``kind="file-block"``、``group=rel``）を作る。
 
-* ``lines``: ``=== path (N lines, skeleton: M lines, sha=…) ===`` → ``imports: […]`` → 入れ子の ``symbol-block``
-  （``doc:`` ・``urn:`` ・``decorators:`` ・``raises:`` の属性行つき）。本体は ``{ ...N lines omitted }`` に畳む。
+* ``lines``: ``=== path (N lines, skeleton: M lines, sha=…) ===`` → ``imports: […]``（モジュールごと: ``m: a, b; n``）→
+  入れ子の ``symbol-block``（``doc:`` ・``urn:`` ・``decorators:`` ・``raises:`` の属性行つき）。本体は ``{ ...N lines omitted }``
+  に畳む。``urn:`` 行は ``lk://<ws>/<path>#<行が示す修飾名>`` で導けない URN だけ（仕様書 §6.1 規約 2。BUG-0069）。
 * ``data``: T-02 の json の ``items[]`` の 1 項目（``symbols[]`` は SymbolRecord の json に ``children`` ・``fold_lines`` ・
   ``decorators`` ・``raises`` を足したもの）。
 * ``shrink``: 予算に入らないときの縮退版（処理規約 8: ``doc:`` → ``urn:`` → 非公開メンバー → 入れ子メンバー〈最上位は残す〉
@@ -34,6 +35,7 @@ from lucianke.core.compact_lines import (
     note,
     one_line,
     symbol_line,
+    urn_lines,
 )
 from lucianke.core.model import Confidence, Kind, SymbolRecord
 from lucianke.core.records import Record
@@ -48,6 +50,7 @@ __all__ = [
     "default_estimate",
     "extract_imports",
     "file_block_header",
+    "group_imports",
     "import_line",
     "note",
     "symbol_line",
@@ -93,8 +96,12 @@ _PY_CONTAINERS = frozenset(
 )
 
 
-def _py_imports(parsed: ParsedFile) -> list[str]:
-    items: list[str] = []
+type _Import = tuple[str, str | None]
+"""import 1 件: ``(module, name)``。``import module`` は ``name=None``、``from module import a as b`` は ``name="a as b"``。"""
+
+
+def _py_imports(parsed: ParsedFile) -> list[_Import]:
+    items: list[_Import] = []
 
     def name_of(node: Any) -> str:
         if node.type == "aliased_import":
@@ -107,14 +114,14 @@ def _py_imports(parsed: ParsedFile) -> list[str]:
     def visit(parent: Any) -> None:
         for c in parent.named_children:
             if c.type == "import_statement":
-                items.extend(name_of(n) for n in c.children_by_field_name("name"))
+                items.extend((name_of(n), None) for n in c.children_by_field_name("name"))
             elif c.type == "import_from_statement":
                 module = c.child_by_field_name("module_name")
                 where = _text(parsed, module) if module is not None else "?"
                 names = [name_of(n) for n in c.children_by_field_name("name")]
                 if any(ch.type == "wildcard_import" for ch in c.children):
                     names.append("*")
-                items.extend(f"{n} from {where}" for n in names)
+                items.extend((where, n) for n in names)
             elif c.type in _PY_CONTAINERS:
                 visit(c)
 
@@ -122,8 +129,8 @@ def _py_imports(parsed: ParsedFile) -> list[str]:
     return items
 
 
-def _js_imports(parsed: ParsedFile) -> list[str]:
-    items: list[str] = []
+def _js_imports(parsed: ParsedFile) -> list[_Import]:
+    items: list[_Import] = []
     for c in parsed.tree.root_node.named_children:
         if c.type != "import_statement":
             continue
@@ -133,15 +140,15 @@ def _js_imports(parsed: ParsedFile) -> list[str]:
         where = _text(parsed, source).strip("\"'`")
         clause = next((ch for ch in c.named_children if ch.type == "import_clause"), None)
         if clause is None:
-            items.append(where)  # import "side-effect";
+            items.append((where, None))  # import "side-effect";
             continue
         for part in clause.named_children:
             if part.type == "identifier":  # 既定 import
-                items.append(f"{_text(parsed, part)} from {where}")
+                items.append((where, _text(parsed, part)))
             elif part.type == "namespace_import":
                 ident = next((n for n in part.named_children if n.type == "identifier"), None)
                 local = _text(parsed, ident) if ident is not None else "?"
-                items.append(f"* as {local} from {where}")
+                items.append((where, f"* as {local}"))
             elif part.type == "named_imports":
                 for spec in part.named_children:
                     if spec.type != "import_specifier":
@@ -153,13 +160,12 @@ def _js_imports(parsed: ParsedFile) -> list[str]:
                     text = _text(parsed, base)
                     if alias is not None:
                         text += f" as {_text(parsed, alias)}"
-                    items.append(f"{text} from {where}")
+                    items.append((where, text))
     return items
 
 
-def extract_imports(parsed: ParsedFile) -> list[str]:
-    """``import`` の要約: ``import x`` → ``x``、``from m import a, b`` → ``a from m``, ``b from m``、
-    ``import X, { A as B } from "m"`` → ``X from m``, ``A as B from m``。重複は除く。対象外の言語は空。"""
+def _imports_of(parsed: ParsedFile) -> list[_Import]:
+    """文書順・重複なしの ``(module, name)``。対象外の言語は空。"""
     if parsed.language_id == "python":
         raw = _py_imports(parsed)
     elif parsed.language_id in ("typescript", "tsx", "javascript", "jsx"):
@@ -167,6 +173,34 @@ def extract_imports(parsed: ParsedFile) -> list[str]:
     else:
         return []
     return list(dict.fromkeys(raw))
+
+
+def _flat(items: Sequence[_Import]) -> list[str]:
+    """json の ``items[].imports[]``（仕様書 §11 T-02。形は変えない）: ``module`` か ``name from module``。"""
+    return list(dict.fromkeys(m if n is None else f"{n} from {m}" for m, n in items))
+
+
+def group_imports(items: Sequence[_Import]) -> list[str]:
+    """compact の ``import-line`` の項目（仕様書 §6.1 規約 10。BUG-0069）: モジュールごとにまとめる。
+
+    ``import m`` → ``m``、``from m import a, b as c``（同じモジュールの文が複数あっても 1 つに）→ ``m: a, b as c``。
+    並びはそのモジュールが最初に現れた順。モジュール名を名前ごとに繰り返さない（トークンを使わない）。
+    """
+    groups: dict[tuple[str, bool], list[str]] = {}
+    for module, name in items:
+        names = groups.setdefault((module, name is not None), [])
+        if name is not None and name not in names:
+            names.append(name)
+    return [f"{m}: {', '.join(names)}" if named else m for (m, named), names in groups.items()]
+
+
+def extract_imports(parsed: ParsedFile) -> list[str]:
+    """``import`` の要約（json の形）: ``import x`` → ``x``、``from m import a, b`` → ``a from m``, ``b from m``、
+    ``import X, { A as B } from "m"`` → ``X from m``, ``A as B from m``。重複は除く。対象外の言語は空。
+
+    compact の ``imports:`` 行はモジュールごとにまとめた ``group_imports`` の形（``m: a, b``）。
+    """
+    return _flat(_imports_of(parsed))
 
 
 @dataclass(slots=True)
@@ -366,9 +400,15 @@ def _emit(
     d: _Detail,
     out: list[str],
     *,
+    rel: str,
+    parent_name: str | None = None,
     want_json: bool = True,
 ) -> tuple[list[dict[str, Any]], list[_Entry], int]:
-    """``(json の symbols, 出した直下の Entry, 出した総数)``。``want_json=False`` なら json は作らない（縮退段の見積もり用）。"""
+    """``(json の symbols, 出した直下の Entry, 出した総数)``。``want_json=False`` なら json は作らない（縮退段の見積もり用）。
+
+    ``parent_name`` は親の行が示す修飾名（入れ子の行は ``name`` だけを出すので、``親.name`` が行から読める修飾名）。
+    ``urn:`` 行は URN がそれと ``rel`` から導けないときだけ出す（仕様書 §6.1 規約 2。BUG-0069）。
+    """
     jsons: list[dict[str, Any]] = []
     emitted: list[_Entry] = []
     total = 0
@@ -376,13 +416,14 @@ def _emit(
         if not d.private and e.private:
             continue
         sym = e.sym
+        shown = sym.qualified_name if depth == 0 or parent_name is None else f"{parent_name}.{sym.name}"
         slot = len(out)
         out.append("")  # 見出し行は子を出した後（畳む行数が決まってから）で埋める
         doc = sym.doc_summary if d.doc and opts.include_doc_summary else None
         if doc:
             out.append(attr_line("doc", doc, indent=depth))
         if d.urn and _urn_wanted(opts, e):
-            out.append(attr_line("urn", str(sym.urn), indent=depth))
+            out.extend(urn_lines(sym.urn, path=rel, qualified=shown, indent=depth))
         if e.info.decorators:
             out.append(attr_line("decorators", ", ".join(e.info.decorators), indent=depth))
         if e.info.raises:
@@ -392,7 +433,7 @@ def _emit(
         child_total = 0
         if d.nested:
             child_json, child_entries, child_total = _emit(
-                e.children, depth + 1, opts, d, out, want_json=want_json
+                e.children, depth + 1, opts, d, out, rel=rel, parent_name=shown, want_json=want_json
             )
         fold = 0
         if sym.kind in _CALLABLE_KINDS:
@@ -485,7 +526,9 @@ def _build_file_record(
 ) -> Record:
     est = estimate or default_estimate
     entries = _build_tree(parsed, symbols, include_private=opts.include_private)
-    imports = extract_imports(parsed) if opts.include_imports else []
+    pairs = _imports_of(parsed) if opts.include_imports else []
+    imports = _flat(pairs)  # json の形（items[].imports[]）
+    import_groups = group_imports(pairs)  # compact の imports: 行（モジュールごと）
     spec = SUPPORT.get(parsed.language_id)
     tier = int(getattr(spec, "tier", 1))
     line_count = parsed.line_index.content_line_count
@@ -501,14 +544,18 @@ def _build_file_record(
         ``want_json=False`` は縮退段の見積もり用（行だけ作る。``data`` は空）。
         """
         body: list[str] = []
-        if imports:
-            body.append(import_line(imports))
-        jsons, _, emitted = _emit(entries, 0, opts, d, body, want_json=want_json)
+        if import_groups:
+            body.append(import_line(import_groups))
+        jsons, _, emitted = _emit(entries, 0, opts, d, body, rel=rel, want_json=want_json)
         core = tuple(body)
         omitted = total_members - emitted
         if d != full:
+            # ``urn`` は、全部入りの骨格に ``urn:`` 行（導けない URN）があったときだけ「落とした」と書く（BUG-0069）
+            had_urn = any(ln.lstrip().startswith("urn: ") for ln in full_core)
             dropped = [
-                n for n, was, now in (("doc", full.doc, d.doc), ("urn", full.urn, d.urn)) if was and not now
+                n
+                for n, was, now in (("doc", full.doc, d.doc), ("urn", full.urn and had_urn, d.urn))
+                if was and not now
             ]
             suffix = f" ({', '.join(dropped)} omitted)" if dropped else ""
             body.append(note(f"truncated: {omitted} members omitted{suffix}"))

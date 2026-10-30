@@ -562,7 +562,7 @@ kv-line      = key , ":" , [ " " , text ] , NL ;   (* ツール固有の見出�
 file-block   = "=== " , path , " (" , int , " lines" , [ ", " , int , " cells" ] ,
                [ ", skeleton: " , int , " lines" ] , [ ", sha=" , 12*12 HEXDIG ] , ")" , " ===" , NL ,
                { import-line | symbol-block | note } ;
-import-line  = "imports: [" , text , "]" , NL ;
+import-line  = "imports: [" , text , "]" , NL ;   (* text はモジュールごとの項目を "; " で区切る。規約 10 *)
 
 symbol-block = indent , "[" , kind , "] " , [ modifiers , " " ] , name , [ sig-inline ] ,
                " @L" , range , [ " " , fold ] , NL ,
@@ -606,32 +606,42 @@ level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
 規約:
 
 1. `symbol-block` の `name` は、ファイルブロック内ではファイル内修飾名（`Class.method`）、ワークスペース横断の一覧では `path#qualified` とする。
-2. `urn:` 属性行は、エージェントが続けて URN で呼び直す可能性が高いツール（`search_workspace_symbols`, `resolve_symbols`, `get_file_skeleton` の公開シンボル）では付ける（SHOULD）。それ以外では省いてトークンを節約する。
+2. **`urn:` 属性行は、URN がその記号の行から導けないときだけ付ける**（導ける URN の行は MUST NOT。応答のトークンは呼ぶ側の文脈を使うため。BUG-0069、2026-10-31）。導き方は文字列の連結だけで、`lk://<ws>/<path>#<qualified>`（`<ws>` はヘッダの `ws=`）:
+   - ワークスペース横断の一覧（`search_workspace_symbols`、`resolve_symbols`。規約 1 の `path#qualified`）: `lk://<ws>/` + 記号名。`[Module] <path>` は `lk://<ws>/<path>`（セレクタなし）。
+   - ファイルブロック内（`get_file_skeleton`）: `<path>` はファイルブロックの見出しのパス、`<qualified>` は入れ子をたどった名前を `.` でつないだもの（最上位の行は修飾名そのもの。`[Class] PaymentProcessor` の下の `[Method] process_charge` は `PaymentProcessor.process_charge`）。
+   - 導けないもの（`urn:` 行で示す）: arity・sighash の付いた URN（オーバーロード・同名の再定義の区別。`#parse/2`、`#charge/2~2797d533`）、`lex:` ・`ctags:` などのセレクタ、パスや名前にパーセントエンコードの要る文字を含むもの、ヘッダの `ws=` と違うワークスペースのもの。
+   - `urn:` 行を付ける候補の範囲は `get_file_skeleton` の `include_urns`（既定 `public`）で選ぶ。json の SymbolRecord（§6.2）は常に `urn` を持つ。
+   - 記号は、導いた URN でも、TargetRef の `path` + `symbol_name`（行が示す修飾名。§5.3）でも指せる（`urn` / `path` + `symbol_name` / `path` + `line` の 3 形式を受けるのは T-04・T-05・T-06・T-07・T-09・T-10・T-11・T-14・T-16・T-17）。導けない URN は、`path` + `symbol_name` が曖昧になる記号（オーバーロード）なので、`urn:` 行の値か `path` + `line` で指す。
 3. `doc:` は Doc コメントの 1 行目要約のみ。全文は `resolve_symbols` の JSON で返す。
 4. `conf=` は、応答内で `_resolution_meta.confidence_level` と異なる水準の要素にだけ付ける（混在時の個別表示）。
 5. `code-block` 内の `@L<n>: ` 接頭辞は `with_line_numbers: true`（既定）のとき付ける。コード本文はエスケープせずそのまま出す。コード内に ``` が含まれる場合はフェンスを ```` に延長する。
-6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。
+6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。ただし `search_workspace_symbols` のヒットの `sig-inline` は 160 文字（`SEARCH_SIGNATURE_MAX_CHARS`）を超えたら引数部の末尾を `…` にして `)` で閉じ、戻り値は残す（`(self, out: ToolOutput, *, max_tokens: int, …) -> Page`。長い戻り値も `…` で切る）。json の `signature` は全文（BUG-0069）。
 7. `kind` の `File` は、シンボルに分解せずファイル全体を 1 要素として扱う場合（T-18 の Tier 3 / Tier 4 のファイルの変更要素。`modified_symbols[].kind`）に使う。`symbols` テーブルには格納しない。
 8. ツール固有の見出し行（`kv-line`: `target:`、`applied:`、`resolved:` など）はインデント 0 に置く。インデントされた `key: text` は `attr-line` で、キーは `attr-key` の語彙に限る。
 9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない（範囲 `@Ls-e` は、集約した最初の要素の開始行から最後の要素の終了行まで）。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` と `{ ...N nodes omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
+10. `import-line` はモジュールごとにまとめ、モジュール名を名前ごとに繰り返さない（BUG-0069、2026-10-31）。項目の区切りは `; `、項目は `module`（`import module`。`import a.b as c` は `a.b as c`）か `module: name, name as alias`（`from module import ...`。同じモジュールの文が複数あっても 1 項目にまとめる。`from . import y` は `.: y`、`from x import *` は `x: *`）。JS / TS は `import X, { A as B } from "m"` → `m: X, A as B`、`import * as ns from "m"` → `m: * as ns`、`import "m"` → `m`。並びはモジュールが最初に現れた順。別名（`as`）は省かない。例: `imports: [base64; collections.abc: Callable, Mapping, Sequence; lucianke.core.records: Record, ToolOutput]`。json の `items[].imports[]`（T-02）は従来どおり 1 名前 1 要素（`"Callable from collections.abc"`）。
 
 ### 6.1.1 代表例
 
 ```
-# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~310/2000tok
-=== src/services/payment.py (245 lines, skeleton: 21 lines, sha=3f9c1a2b4c5d) ===
-imports: [Decimal from decimal, OrderRepository, PaymentGateway]
+# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~290/2000tok
+=== src/services/payment.py (245 lines, skeleton: 13 lines, sha=3f9c1a2b4c5d) ===
+imports: [decimal: Decimal; services.repo: OrderRepository; services.gateway: PaymentGateway]
 [Class] PaymentRequest @L12-18
   doc: 決済要求。amount > 0 が必須
-  urn: lk://app/src/services/payment.py#PaymentRequest
-[Class] PaymentProcessor @L25-240
-  urn: lk://app/src/services/payment.py#PaymentProcessor
+[Class] PaymentProcessor @L25-170
   [Constructor] __init__(self, repo: OrderRepository, gateway: PaymentGateway) @L28-32 { ...4 lines omitted }
   [Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L40-115 { ...75 lines omitted }
     doc: 注文に対する決済を実行し領収書を発行する
     raises: PaymentDeclined, LimitExceeded
   [Method] priv _validate_limit(self, amount: Decimal) -> bool @L117-140 { ...23 lines omitted }
+[Function] pub parse(data: bytes) -> PaymentRequest @L180-190 { ...9 lines omitted }
+  urn: lk://app/src/services/payment.py#parse/1
+[Function] pub parse(data: bytes, strict: bool) -> PaymentRequest @L192-210 { ...17 lines omitted }
+  urn: lk://app/src/services/payment.py#parse/2
 ```
+
+`PaymentProcessor.process_charge` の URN は `lk://app/src/services/payment.py#PaymentProcessor.process_charge` と行から導けるので `urn:` 行を付けない。同名の `parse` の 2 つは arity で区別した URN で、行から導けないので付ける（規約 2）。
 
 ```
 # find_references_and_implementations ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~420/2000tok
@@ -1421,8 +1431,8 @@ json の `data`:
 | `paths` | string[] | はい | なし | 1〜20 件。0 件または 21 件以上は `E_INVALID_ARGUMENT` |
 | `include_private` | boolean | いいえ | `true` | 非公開メンバー（`_` 始まり、`private`、非 `export`）を含める |
 | `include_doc_summary` | boolean | いいえ | `true` | Doc コメント 1 行目を `doc:` で付ける |
-| `include_urns` | enum | いいえ | `"public"` | `"public"` \| `"all"` \| `"none"`。`urn:` 行を付ける範囲 |
-| `include_imports` | boolean | いいえ | `true` | `imports:` 行を付ける |
+| `include_urns` | enum | いいえ | `"public"` | `"public"` \| `"all"` \| `"none"`。`urn:` 行を付けてよい範囲。付けるのはその範囲のうち、URN が行から導けないもの（§6.1 規約 2）だけ |
+| `include_imports` | boolean | いいえ | `true` | `imports:` 行を付ける（モジュールごと。§6.1 規約 10） |
 | `max_depth` | integer | いいえ | `4` | データファイル（Tier 3）の階層表示の深さ。1〜10 |
 
 **処理規約**:
@@ -1436,7 +1446,7 @@ json の `data`:
 7. Tier 4（未知言語）: ctags 互換の規則で取れたエントリ（`syntax/heuristic.py` の `block_outline`）を `[Function]` / `[Class]` / `[Section]` などの入れ子にし、終了行はインデントまたは括弧の対応から推定する。取れれば `heuristic`、何も取れなければ見出しだけの空の骨格で `lexical_fallback` とし、どちらも先頭に `! DEGRADED` 行を置く（MUST。パイプラインがレコードの水準から付ける。§5.4.2）。T-02 の呼び出しでは `ctags` を起動しない（子プロセスと PATH の探索を持ち込まない。索引側の `Indexer` は使う）。`block_outline` の定義らしい行は、`def|function|fn|sub|proc|procedure|class|module` で始まる行、COBOL の段落名、字下げ 0 の `name = …` / `rule NAME = …` で、終了行は括弧の対応・字下げの戻り・`end` から推定する（実装で確定 2026-10-29、de291be）。
    - **Markdown・reStructuredText**（Tier 3）: 見出しの入れ子を `[Section]`（`structural`）にする。節の終わりは次の同位以上の見出しの前（末尾の空行は含めない）。Markdown は ATX（`#`）と Setext（`===` `---`）の見出しを拾い（フェンス付きコードブロックと先頭の YAML front matter の中は見出しにしない）、reStructuredText は下線のみ・上下線つきの見出しを出現順に深さへ割り当てる。
    - 種類の振り分けの順は、データ形式（JSON・JSONL・YAML・TOML・XML・`.ipynb`）→ コード（Python・TypeScript・JavaScript。構文木）→ Markdown・rst → それ以外（Tier 4）。
-8. 予算に収まらないとき、ファイル内では `doc:` → `urn:` → 非公開メンバー → 入れ子メンバー（最上位は残す）の順に落とし、落とした件数を `- truncated: N members omitted` に書く。それでも収まらなければ残りのファイルを次ページに回す。1 レコードは 1 ファイルブロック。
+8. 予算に収まらないとき、ファイル内では `doc:` → `urn:`（導けない URN の行。§6.1 規約 2）→ 非公開メンバー → 入れ子メンバー（最上位は残す）の順に落とし、落とした件数を `- truncated: N members omitted` に書く（属性行を落としたときは `(doc, urn omitted)` のように添える。`urn:` 行がもともと無ければ `urn` は挙げない）。それでも収まらなければ残りのファイルを次ページに回す。1 レコードは 1 ファイルブロック。
 9. ファイルブロックのヘッダに `sha=` としてファイル内容の SHA-256 の先頭 12 桁を付ける（MUST）。エージェントはこれを編集ツールの `expected_file_sha256` に渡せる（§10.4）。json では `items[].file_sha256` に 64 桁の完全形を入れる。
 
 **出力**（compact。Python の例は §6.1.1。ここでは他形式の形を示す）:
@@ -1483,7 +1493,7 @@ json の `data`:
 | `items[].path`, `language`, `tier` | string, string, integer | |
 | `items[].line_count`, `skeleton_line_count` | integer | 元の行数と骨格の行数（Notebook はセル数も `cell_count` に） |
 | `items[].file_sha256` | string | ファイル内容の SHA-256（64 桁）。compact ではヘッダの `sha=` に先頭 12 桁 |
-| `items[].imports[]` | string[] | |
+| `items[].imports[]` | string[] | 1 名前 1 要素（`"os"`、`"Callable from collections.abc"`）。compact の `imports:` 行はモジュールごとにまとめた形（§6.1 規約 10） |
 | `items[].symbols[]` | object[] | SymbolRecord に `children[]`, `fold_lines`, `decorators[]`, `raises[]`, `attrs[]`（Tag）, `inferred_type`（Key）, `count`（×N） を加えたもの |
 | `items[].truncated_members` | integer | 予算で落としたメンバー数 |
 | `items[].confidence_level` | string | 項目ごとの精度 |
@@ -1529,22 +1539,20 @@ json の `data`:
 **処理規約**:
 
 1. `symbols` テーブルを引く。`fuzzy` と `prefix` は FTS5 相当の索引、`exact` は `name`（最後の部分）の等価比較だけで、`Class.method` のような限定名では当てず、`regex` は索引を使わない走査で 200 ms を上限とし、超えたら部分結果付きの `E_TIMEOUT`。
-2. 順位は、完全一致 > 前方一致 > 部分一致の順、同順位内は**コードのシンボル（`Key` / `Tag` 以外）をデータファイル（JSON / YAML / TOML / XML。Tier 3）の `Key` / `Tag` より先**、次に**そのシンボルのファイルの `pagerank`**（`files.pagerank_score`。`FileInfo.pagerank`。未計算・グラフ未準備は 0）降順、さらにパスの辞書順とする（73ee3fb・8139279。実装で確定 2026-10-29）。`symbol_kinds` を渡さない既定では全種別が混ざるので、設定ファイルのキーがコードの定義を押しのけないための規則。`Key` / `Tag` だけが欲しいときは `symbol_kinds` で指定する（既定の `symbol_kinds` は全種別のまま）。
+2. 順位は、完全一致 > 前方一致 > 名前の部分一致（`name` か `qualified_name` が query を含む、または query の各語が名前の語の前方一致）> **シグネチャ・Doc の文字列だけの一致**（`fuzzy` の FTS が `signature` / `doc_summary` だけで当てたもの。`Packer` に対する `Pipeline.__init__(…, packer: Packer | None = None, …)` など。BUG-0069、2026-10-31）の順、同順位内は**コードのシンボル（`Key` / `Tag` 以外）をデータファイル（JSON / YAML / TOML / XML。Tier 3）の `Key` / `Tag` より先**、次に**そのシンボルのファイルの `pagerank`**（`files.pagerank_score`。`FileInfo.pagerank`。未計算・グラフ未準備は 0）降順、さらにパスの辞書順とする（73ee3fb・8139279。実装で確定 2026-10-29）。`symbol_kinds` を渡さない既定では全種別が混ざるので、設定ファイルのキーがコードの定義を押しのけないための規則。`Key` / `Tag` だけが欲しいときは `symbol_kinds` で指定する（既定の `symbol_kinds` は全種別のまま）。
 3. `type_signature_filter` は `->` で分けて、左側を `signature` の引数部、右側を `return_type` に対して部分文字列一致で適用する。
 4. 0 件かつ `fallback_grep: true` のとき、Tier 4 ファイルに対して `\bquery\b` と定義パターン（`query\s*[:=(]`）で内部 grep を実行し、`lex:` セレクタの URN で返す。このとき `is_degraded: true`、先頭に `! DEGRADED` 行（MUST）。
 5. 1 レコードは 1 シンボル。`limit` 件を超える一致は `page.total_estimate` に総数を入れ、`next_cursor` を発行する。
+6. compact のヒットの行は `path#qualified(sig)`。URN はそこから導けるので `urn:` 行は導けないとき（`lex:` の URN、オーバーロードの arity・sighash など）だけ付ける（§6.1 規約 2）。`sig` は 160 文字で切る（§6.1 規約 6。json の `signature` は全文）（BUG-0069、2026-10-31）。
 
 **出力**（compact）:
 
 ```
-# search_workspace_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~300/1500tok
-- query: "process_charge" match=fuzzy hits=3
+# search_workspace_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~150/1500tok
+query: "process_charge" match=fuzzy hits=3
 [Method] src/services/payment.py#PaymentProcessor.process_charge(self, req: PaymentRequest) -> Receipt @L40-115
-  urn: lk://app/src/services/payment.py#PaymentProcessor.process_charge
 [Function] src/legacy/charge.py#process_charge_v1(order_id: str) -> dict @L10-55
-  urn: lk://app/src/legacy/charge.py#process_charge_v1
 [Function] tests/test_payment.py#test_process_charge_ok() @L40-60
-  urn: lk://app/tests/test_payment.py#test_process_charge_ok
 ```
 
 json の `data`:
@@ -1600,20 +1608,18 @@ json の `data`:
 3. `structural`: Tree-sitter の宣言と import 文のモジュールパス→ファイル対応（ワークスペース内に限る）で定義を引く。型の展開は行わず、宣言どおりの文字列を返す。
 4. Python 周辺ブリッジ（FR-LANG-3）: `.py` に定義が無く `.pyi` スタブ、Cython の `.pxd`/`.pyx`、同一ワークスペースの PyO3 属性付き Rust 関数、`*_pb2.py` の生成元 `.proto` に対応する宣言があるときは、それを `definition` とし `declared_in` に種別（`stub` \| `cython` \| `pyo3` \| `proto`）を書く。
 5. `heuristic` / `lexical_fallback`: ctags エントリまたは定義パターンの grep 一致行を `definition` とし、`signature` は一致行のテキストを返す。
-6. 1 レコードは 1 対象。
+6. 1 レコードは 1 対象。compact の見出しは `path#qualified`（モジュールは `[Module] <path>`）で、URN はそこから導けるので `urn:` 行は導けないとき（arity・sighash 付きなど）だけ付ける（§6.1 規約 2。BUG-0069、2026-10-31）。
 
 **出力**（compact）:
 
 ```
-# resolve_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~350/2000tok
+# resolve_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~300/2000tok
 [Method] src/services/payment.py#PaymentProcessor.process_charge @L40-115
-  urn: lk://app/src/services/payment.py#PaymentProcessor.process_charge
   sig: (self, req: PaymentRequest) -> Receipt
   type: PaymentRequest=lk://app/src/services/payment.py#PaymentRequest Receipt=lk://app/src/models/receipt.py#Receipt
   doc: 注文に対する決済を実行し領収書を発行する (doc_lines=6)
   decorators: @transactional
 [Function] src/legacy/charge.py#process_charge_v1 @L10-55
-  urn: lk://app/src/legacy/charge.py#process_charge_v1
   sig: (order_id: str) -> dict
 ```
 
@@ -2538,7 +2544,6 @@ compact の例:
 # extract_code_contracts ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~380/2000tok
 === src/pricing.py (88 lines) ===
 [Function] apply_discount(price: Decimal, rate: int) -> Decimal @L12-30
-  urn: lk://app/src/pricing.py#apply_discount
 - PRE [TYPE] rate: int
 - PRE [GUARD] rate >= 0 and rate <= 100  @L14
 - PRE [DOCSTRING] price > 0

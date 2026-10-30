@@ -11,21 +11,23 @@ import pytest
 
 HEADER = "# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~310/2000tok\n"
 
-# 仕様書 §6.1.1 の 3 例（そのまま）
+# 仕様書 §6.1.1 の 3 例（そのまま）。骨格の例は BUG-0069 で、導ける urn: 行を除き、imports をモジュールごとにした形
 EXAMPLE_SKELETON = """\
-# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~310/2000tok
-=== src/services/payment.py (245 lines, skeleton: 21 lines, sha=3f9c1a2b4c5d) ===
-imports: [Decimal from decimal, OrderRepository, PaymentGateway]
+# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~290/2000tok
+=== src/services/payment.py (245 lines, skeleton: 13 lines, sha=3f9c1a2b4c5d) ===
+imports: [decimal: Decimal; services.repo: OrderRepository; services.gateway: PaymentGateway]
 [Class] PaymentRequest @L12-18
   doc: 決済要求。amount > 0 が必須
-  urn: lk://app/src/services/payment.py#PaymentRequest
-[Class] PaymentProcessor @L25-240
-  urn: lk://app/src/services/payment.py#PaymentProcessor
+[Class] PaymentProcessor @L25-170
   [Constructor] __init__(self, repo: OrderRepository, gateway: PaymentGateway) @L28-32 { ...4 lines omitted }
   [Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L40-115 { ...75 lines omitted }
     doc: 注文に対する決済を実行し領収書を発行する
     raises: PaymentDeclined, LimitExceeded
   [Method] priv _validate_limit(self, amount: Decimal) -> bool @L117-140 { ...23 lines omitted }
+[Function] pub parse(data: bytes) -> PaymentRequest @L180-190 { ...9 lines omitted }
+  urn: lk://app/src/services/payment.py#parse/1
+[Function] pub parse(data: bytes, strict: bool) -> PaymentRequest @L192-210 { ...17 lines omitted }
+  urn: lk://app/src/services/payment.py#parse/2
 """
 
 EXAMPLE_REFERENCES = """\
@@ -174,3 +176,43 @@ def test_rejects_missing_final_newline_and_empty():
 
 def test_body_only_mode_does_not_require_header():
     assert g.validate("[Class] C @L1-5\n  urn: lk://a", require_header=False) == []
+
+
+# --- 規約 2（BUG-0069）: 記号の行から導ける urn: 行は出さない ------------------------------------------------
+
+_SEARCH_HEADER = "# search_workspace_symbols ok conf=structural lsp=n/a rev=WORKING_TREE ws=app ~90/1500tok\n"
+
+
+def test_rejects_derivable_urn_in_a_file_block_including_nested_members():
+    _assert_rejects(
+        EXAMPLE_SKELETON.replace(
+            "[Class] PaymentRequest @L12-18\n", "[Class] PaymentRequest @L12-18\n  urn: lk://app/src/services/payment.py#PaymentRequest\n"
+        ),
+        "導ける urn: 行",
+    )
+    nested = EXAMPLE_SKELETON.replace(
+        "    raises: PaymentDeclined, LimitExceeded\n",
+        "    raises: PaymentDeclined, LimitExceeded\n    urn: lk://app/src/services/payment.py#PaymentProcessor.process_charge\n",
+    )
+    _assert_rejects(nested, "PaymentProcessor.process_charge は記号の行から導ける")
+
+
+def test_rejects_derivable_urn_in_a_cross_workspace_listing_and_for_a_module():
+    _assert_rejects(_SEARCH_HEADER + "[Method] src/a.py#C.m(self) -> int @L3-9\n  urn: lk://app/src/a.py#C.m\n", "導ける urn: 行")
+    _assert_rejects(_SEARCH_HEADER + "[Module] src/a.py @L1-40\n  urn: lk://app/src/a.py\n", "導ける urn: 行")
+    # ヘッダの無い本文だけの検査でも、URN 自身のワークスペースで導けるものは落とす
+    problems = g.validate("[Function] src/a.py#f() @L1-2\n  urn: lk://other/src/a.py#f", require_header=False)
+    assert any("導ける urn: 行" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "urn",
+    [
+        "lk://app/src/a.py#C.m/2",  # arity
+        "lk://app/src/a.py#C.m~0a1b2c3d",  # sighash
+        "lk://app/src/a.py#lex:m@L3",  # lex: セレクタ
+        "lk://other/src/a.py#C.m",  # ヘッダの ws= と違うワークスペース
+    ],
+)
+def test_accepts_urn_lines_that_are_not_derivable(urn):
+    assert g.validate(_SEARCH_HEADER + f"[Method] src/a.py#C.m(self) -> int @L3-9\n  urn: {urn}\n") == []

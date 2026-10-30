@@ -21,6 +21,7 @@ BUDGET_FLOOR_FOR_PAGING: Final = 200  # 内部用（ページング検証の床�
 BATCH_MAX_ITEMS: Final = 20  # §11 T-02 / T-04 / T-05: paths[] / targets[] は 1〜20 件
 CANDIDATES_MAX: Final = 10  # §5.3 / §5.8: E_TARGET_AMBIGUOUS の candidates[] の最大件数
 SNIPPET_MAX_CHARS: Final = 200  # §6.1 規約 6 / §12.6 / §13.5: snippet・doc・when の最大文字数（超過は「…」）
+SEARCH_SIGNATURE_MAX_CHARS: Final = 160  # §6.1 規約 6 / §11 T-03: compact の検索ヒットのシグネチャの最大文字数（超過は「…)」。BUG-0069）
 
 # --- ファイル監視と増分同期（仕様書 §12.4） ---------------------------------------------
 WATCH_STEP_MS: Final = 10  # §12.4-2 / S-06: awatch の step。単発の遅延はほぼ 2×step（50 では p95 ≈ 100 ms）

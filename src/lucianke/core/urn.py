@@ -350,6 +350,28 @@ def relax(urn: Urn) -> Urn:
     return urn
 
 
+def derivable(
+    urn: Urn | str, path: str, qualified: str | None = None, *, workspace_id: str | None = None
+) -> bool:
+    """``urn`` が、表示したパスと修飾名から文字列の連結だけで導けるか（仕様書 §6.1 規約 2。BUG-0069）。
+
+    導き方は ``lk://<workspace_id>/<path>#<qualified>``（``qualified`` が ``None`` なら ``lk://<workspace_id>/<path>``）。
+    パーセントエンコード・arity・sighash・``lex:`` などのセレクタで形が変わるものは導けない（compact は ``urn:`` 行で示す）。
+    ``workspace_id`` を省くと ``urn`` 自身のワークスペース ID を使う（ヘッダの ``ws=`` と同じワークスペースのツールの出力用）。
+    """
+    text = str(urn)
+    if workspace_id is None:
+        if isinstance(urn, Urn):
+            workspace_id = urn.workspace_id
+        else:
+            try:
+                workspace_id = parse(text).workspace_id
+            except ValueError:
+                return False
+    expected = f"{SCHEME}{workspace_id}/{path}" + (f"#{qualified}" if qualified is not None else "")
+    return text == expected
+
+
 # --- シグネチャのハッシュとワークスペース ID ---------------------------------------------
 
 _WS_RE = re.compile(r"\s+")

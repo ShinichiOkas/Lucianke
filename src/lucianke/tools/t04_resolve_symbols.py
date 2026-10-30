@@ -571,7 +571,8 @@ async def _symbol_record(
 
     lines = [
         L.symbol_line(sym.kind, f"{path}#{sym.qualified_name}", start_line=first, end_line=last),
-        L.attr_line("urn", str(sym.urn), indent=0),
+        # 導ける URN（lk://<ws>/<path>#<qualified>）は出さない（仕様書 §6.1 規約 2。BUG-0069）
+        *L.urn_lines(sym.urn, path=path, qualified=sym.qualified_name, indent=0, workspace_id=env.ws_id),
     ]
     if sym.signature:
         lines.append(L.attr_line("sig", sym.signature, indent=0))
@@ -622,7 +623,10 @@ def _module_record(
         "resolved_via": list(target.via),
         "confidence_level": Confidence.STRUCTURAL.value,
     }
-    lines = (L.symbol_line(Kind.MODULE, path, start_line=1, end_line=last), L.attr_line("urn", urn, indent=0))
+    lines = (
+        L.symbol_line(Kind.MODULE, path, start_line=1, end_line=last),
+        *L.urn_lines(urn, path=path, qualified=None, indent=0, workspace_id=env.ws_id),
+    )
     record = Record(
         kind="symbol", key=urn, priority=priority, lines=lines, data=item,
         confidence=Confidence.STRUCTURAL, group=path,

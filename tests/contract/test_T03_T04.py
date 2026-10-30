@@ -156,7 +156,73 @@ async def test_t03_compact_shape(pipeline: Pipeline) -> None:
     assert lines[head].startswith(
         f"[Method] {PAY_PY}#PaymentProcessor.process_charge(self, req: PaymentRequest) -> Receipt @L"
     )
-    assert lines[head + 1] == f"  urn: lk://{WS}/{PAY_PY}#PaymentProcessor.process_charge"
+    # URN は lk://<ws>/<path>#<qualified> で行から導けるので urn: 行は出さない（仕様書 §6.1 規約 2。BUG-0069）
+    assert not any(ln.strip().startswith("urn: ") for ln in lines), r.text
+
+
+async def test_t03_signature_only_matches_rank_after_name_matches(pipeline: Pipeline) -> None:
+    """名前・限定名に当たるヒットが先、シグネチャ・Doc の文字列だけに当たるヒットは後（BUG-0069）。"""
+    r = await search(pipeline, query="PaymentRequest", limit=200)
+    syms = r.structured["data"]["symbols"]
+    q = "paymentrequest"
+    by_name = [q in s["name"].casefold() or q in s["qualified_name"].casefold() for s in syms]
+    assert True in by_name and False in by_name, names(r)  # process_charge(self, req: PaymentRequest) はシグネチャだけの一致
+    first = by_name.index(False)
+    assert not any(by_name[first:]), names(r)
+    assert "PaymentProcessor.process_charge" in names(r)[first:]
+    assert max(s["score"] for s in syms[first:]) < min(s["score"] for s in syms[:first])
+
+
+def test_t03_compact_caps_long_signatures_but_json_keeps_them() -> None:
+    """compact のヒットのシグネチャは 160 文字で ``…)`` に切る（戻り値は残す）。json の signature は全文（BUG-0069）。"""
+    from types import SimpleNamespace
+
+    from lucianke.core.limits import SEARCH_SIGNATURE_MAX_CHARS
+    from lucianke.core.model import Kind, Range, SymbolRecord
+    from lucianke.core.urn import CodeSel, Urn
+
+    sig = "(self, " + ", ".join(f"p{i}: Callable[[int], str] | None = None" for i in range(15)) + ") -> None"
+    sym = SymbolRecord(
+        urn=Urn(WS, "src/m.py", CodeSel("Pipeline.__init__")), path=RelPath("src/m.py"), name="__init__",
+        qualified_name="Pipeline.__init__", kind=Kind.CONSTRUCTOR, range=Range.from_line_span_external(3, 9),
+        signature=sig, confidence=Confidence.STRUCTURAL,
+    )  # fmt: skip
+    rec = t03._record(SimpleNamespace(lines=compact), t03._Hit(sym, 3, 0.1, 0.0, None), 0)  # type: ignore[arg-type]
+    assert len(rec.lines) == 1  # 導ける URN なので urn: 行は無い
+    shown = rec.lines[0].removeprefix("[Constructor] src/m.py#Pipeline.__init__").split(" @L")[0]
+    assert len(shown) <= SEARCH_SIGNATURE_MAX_CHARS < len(sig)
+    assert shown.startswith("(self, p0: Callable[[int], str] | None = None") and shown.endswith("…) -> None")
+    assert g.validate("\n".join(rec.lines), require_header=False) == []
+    assert rec.data["signature"] == sig
+
+
+async def test_compact_symbols_are_addressable_from_what_is_shown(pipeline: Pipeline) -> None:
+    """compact に出た記号は、行から導いた URN（``lk://<ws>/<path>#<qualified>``）でも ``path`` + ``symbol_name`` でも、
+    ``urn:`` 行があればその URN でも、T-04・T-05 で同じ記号に届く（仕様書 §6.1 規約 2・§5.3。BUG-0069）。"""
+    r = await search(pipeline, "compact", query="charge", limit=50)
+    assert not r.is_error and g.validate(r.text) == [], r.text
+    lines = r.text.splitlines()
+    ws = re.search(r" ws=(\S+) ", lines[0])
+    assert ws is not None
+    shown: list[tuple[str, str, str | None]] = []  # (path, qualified, urn: 行の値)
+    for i, ln in enumerate(lines):
+        m = re.match(r"^\[\w+\] (\S+?)#([^(\s@]+)", ln)
+        if m is None:
+            continue
+        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        shown.append((m[1], m[2], nxt.removeprefix("urn: ") if nxt.startswith("urn: ") else None))
+    assert any(u is None for _p, _q, u in shown), r.text
+    assert any(u is not None for _p, _q, u in shown), r.text  # TS のオーバーロード（charge/1・charge/2~…）は導けない
+    for path, qualified, urn_line in shown:
+        urn = urn_line or f"lk://{ws[1]}/{path}#{qualified}"
+        j = await resolve(pipeline, targets=[{"urn": urn}])
+        assert not j.is_error and items(j)[0]["ok"], (urn, j.text)
+        assert items(j)[0]["symbol"]["urn"] == urn
+        b = await pipeline.call_tool("get_symbol_bodies", {"format": "json", "targets": [{"urn": urn}]})
+        assert not b.is_error and b.structured["data"]["items"][0]["ok"], (urn, b.text)
+        if urn_line is None:  # 導ける記号は path + symbol_name（修飾名）でも一意に届く
+            j2 = await resolve(pipeline, targets=[{"path": path, "symbol_name": qualified}])
+            assert not j2.is_error and items(j2)[0]["symbol"]["urn"] == urn, (path, qualified, j2.text)
 
 
 async def test_t03_exact_postcondition_1(pipeline: Pipeline) -> None:
@@ -521,7 +587,7 @@ async def test_t04_compact_shape(pipeline: Pipeline) -> None:
             break
         block.append(ln.strip())
     attrs = {a.split(":", 1)[0]: a.split(": ", 1)[1] for a in block}
-    assert attrs["urn"] == METHOD_URN
+    assert "urn" not in attrs  # METHOD_URN は見出しの path#qualified から導ける（§6.1 規約 2。BUG-0069）
     assert attrs["sig"] == "(self, req: PaymentRequest) -> Receipt"
     assert attrs["type"].startswith(f"PaymentRequest=lk://{WS}/{PAY_PY}#PaymentRequest Receipt=lk://{WS}/")
     assert re.fullmatch(r"注文に対する決済を実行し領収書を発行する。 \(doc_lines=\d+\)", attrs["doc"])

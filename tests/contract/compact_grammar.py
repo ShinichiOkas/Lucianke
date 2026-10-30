@@ -14,6 +14,13 @@ EBNF と §5.4 の記述・例のあいだで食い違う点は、次のよう�
 * トレーラは ``# summary:`` → ``# more:`` の順で末尾にだけ置ける。それ以外の ``# `` 行は違反。
 * §11 の例のうち EBNF に合わないもの（``@L`` の無い ``[Node] ×23``、範囲の後ろの ``(25 lines)``、
   インデント付きの ``  resolved:``）は **適合としない**。EBNF に従う。
+
+文法の外の規約で検査するもの（行の形だけでは落とせないトークンの浪費）:
+
+* 規約 2（BUG-0069）: ``urn:`` 行の値が、属性を持つ記号の行から導ける URN と同じなら違反。導き方は
+  ``lk://<ws>/<path>#<qualified>``。``ws`` はヘッダの ``ws=``（ヘッダが無ければ URN 自身のワークスペース）、
+  ``path#qualified`` は横断の一覧（T-03・T-04）の記号名そのもの、ファイルブロック内はブロックの ``path`` と、入れ子を
+  たどった名前を ``.`` でつないだもの。``[Module] <path>`` は ``lk://<ws>/<path>``。
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ KINDS = frozenset(
 ATTR_KEYS = frozenset(
     "sig doc urn type body when conf scip decorators raises refs rank sha declared_in change".split()
 )
+MODIFIERS = frozenset("pub priv prot static async abstract export".split())
 USES = frozenset("r w rw call type import impl".split())
 SEVERITIES = frozenset("EWIH")
 LEVELS = frozenset({"exact", "structural", "heuristic", "lexical_fallback"})
@@ -114,6 +122,7 @@ def validate(text: str, *, require_header: bool = True) -> list[str]:
     fence_start = 0
     table_cols: int | None = None  # 直前の行が表のとき、その列数
     trailer: str | None = None  # 最後に見たトレーラ行の種類（"summary" | "more"）
+    urns = _UrnContext(lines[0] if lines else "")  # 規約 2: 導ける urn: 行の検出
 
     for no, line in enumerate(lines, start=1):
 
@@ -177,6 +186,7 @@ def validate(text: str, *, require_header: bool = True) -> list[str]:
             continue
         table_cols = None
 
+        urns.observe(line, indent_len, add)
         if indent_len == 0:
             fence_len = _check_top_level(line, add)
             if fence_len:
@@ -187,6 +197,64 @@ def validate(text: str, *, require_header: bool = True) -> list[str]:
     if fence is not None:
         problems.append(f"line {fence_start}: コードフェンスが閉じていない")
     return problems
+
+
+_RE_URN_WS = re.compile(r"^lk://([^/]+)/")
+
+
+class _UrnContext:
+    """規約 2（BUG-0069）: ``urn:`` 行が、属性を持つ記号の行から導ける URN なら違反にする。"""
+
+    def __init__(self, first_line: str) -> None:
+        m = RE_HEADER.match(first_line)
+        kvs = dict(p.split("=", 1) for p in m["kvs"].split()) if m else {}
+        ws = kvs.get("ws")
+        self.ws = ws if ws and ws != "-" else None
+        self.file: str | None = None  # 今いるファイルブロックのパス
+        self.stack: list[tuple[int, str, str]] = []  # (インデント段, kind, 行が示す名前)
+
+    def observe(self, line: str, indent_len: int, add) -> None:
+        level = indent_len // 2
+        if indent_len == 0 and line.startswith("=== "):
+            m = RE_FILE.match(line)
+            self.file = m["path"] if m else None
+            self.stack.clear()
+            return
+        if line.lstrip().startswith("["):
+            m = RE_SYMBOL.match(line)
+            if m is None:
+                return
+            while self.stack and self.stack[-1][0] >= level:
+                self.stack.pop()
+            words = m["rest"].split(" ")
+            while len(words) > 1 and words[0] in MODIFIERS:
+                words.pop(0)
+            self.stack.append((level, m["kind"], " ".join(words).split("(", 1)[0]))
+            return
+        if level < 1 or not line.lstrip().startswith("urn: "):
+            return
+        owner = [s for s in self.stack if s[0] == level - 1]
+        if not owner or self.stack[-1] is not owner[-1]:
+            return  # 属性を持つ記号の行の直後でない（文法側の検査に任せる）
+        urn = line.strip().removeprefix("urn: ")
+        ws = self.ws
+        if ws is None:
+            wm = _RE_URN_WS.match(urn)
+            if wm is None:
+                return
+            ws = wm[1]
+        kind, name = owner[-1][1], owner[-1][2]
+        if "#" in name:  # 横断の一覧: path#qualified
+            derived = f"lk://{ws}/{name}"
+        elif self.file is not None:  # ファイルブロック: パス + 入れ子をたどった修飾名
+            qualified = ".".join(s[2] for s in self.stack if s[0] <= level - 1)
+            derived = f"lk://{ws}/{self.file}#{qualified}"
+        elif kind == "Module":  # [Module] <path>
+            derived = f"lk://{ws}/{name}"
+        else:
+            return
+        if urn == derived:
+            add(f"導ける urn: 行（{derived} は記号の行から導ける。仕様書 §6.1 規約 2）")
 
 
 def _check_top_level(line: str, add) -> int:
