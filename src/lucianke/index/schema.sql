@@ -1,4 +1,4 @@
--- schema_version: 5
+-- schema_version: 6
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -246,6 +246,25 @@ CREATE TABLE _name_calls (
 CREATE INDEX _name_calls_name   ON _name_calls(name);
 CREATE INDEX _name_calls_source ON _name_calls(source_urn);
 CREATE INDEX _name_calls_file   ON _name_calls(file_id);
+
+-- 受け手のクラスに無いメンバーへの参照（`self.helper()`・`s: Sub` の `s.helper()` で helper が基底クラスにある。BUG-0075。index/inherited.py）。
+-- 関係を整える段が relations から移し、受け手のクラスの C3 線形化（INHERITS 行）で最初に見つかったメンバーを先にした relations の行を作る。
+-- 基底のメンバー・基底の並びが変わったら、そのクラスのファイルを整えるときに結び直す（resolved_urn は前に結んだ先）。
+CREATE TABLE _member_refs (
+  file_id          INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,  -- 参照箇所のファイル（relations.source_file_id）
+  source_urn       TEXT NOT NULL,
+  class_urn        TEXT NOT NULL,             -- 受け手のクラス（`Sub`）
+  name             TEXT NOT NULL,             -- メンバー名（`helper`）
+  relation_kind    TEXT NOT NULL,             -- CALLS / REFERENCES
+  use_kind         TEXT,
+  call_site_line   INTEGER NOT NULL,          -- 1 始まり（relations と同じ）
+  call_site_col    INTEGER NOT NULL,
+  guard_condition  TEXT,
+  confidence_level TEXT NOT NULL,
+  resolved_urn     TEXT                       -- いま relations に作ってある行の先（結べなければ NULL）
+);
+CREATE INDEX _member_refs_class ON _member_refs(class_urn);
+CREATE INDEX _member_refs_file  ON _member_refs(file_id);
 
 -- ===== symbols_fts を symbols に追従させるトリガ（外部コンテンツ FTS5） =====
 CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN

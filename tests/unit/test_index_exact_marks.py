@@ -26,6 +26,7 @@ def test_migrates_v3_to_v4_by_adding_the_table_and_keeping_the_data(conn: sqlite
     ensure_schema(conn)
     conn.execute("DROP TABLE _exact_marks")
     conn.execute("DROP TABLE _name_calls")
+    conn.execute("DROP TABLE _member_refs")
     conn.execute("UPDATE _meta SET schema_version = 3")
     assert ensure_schema(conn) is SchemaAction.MIGRATED
     assert current_schema_version() >= 4  # v4 で _exact_marks、その先の移行も続けて当たる

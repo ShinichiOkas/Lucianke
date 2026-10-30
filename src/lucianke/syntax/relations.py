@@ -15,6 +15,9 @@
   1. 属性アクセス（``recv.name``）: レシーバの型（``self`` / ``this`` の囲みクラス、注釈つきパラメータ・変数、``x = Foo(...)`` /
      ``new Foo()`` で束ねた変数、``self.attr`` の型）が分かれば、そのクラスのメンバーを探す（同じファイルの定義、または
      ``resolve_name(型名)`` の URN + ``.name``）。レシーバがモジュール（``resolve_name`` が ``#`` なしの URN を返す名前）なら ``<URN>#name``。
+     同じファイルのクラスに無ければ、同じファイルの基底クラスを C3 の順（``core/mro.py``）にたどる。基底が別ファイル（または
+     この場で解決できない名前・``mod.Base`` の形）なら ``<このクラス>.name`` を返し、索引の整え（``index/inherited.py``）が
+     ``INHERITS`` 行をファイルをまたいでたどって基底のメンバーに結ぶ（BUG-0075）。
   2. 同じファイルの定義の修飾名の末尾一致（一意のときだけ）。
   3. ``resolve_name(name)``（呼び手が import 表から作る。解決できない import は呼び手が ``lk://_ext/<pkg>#<name>`` にして返す）。
   4. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
@@ -51,6 +54,7 @@ from typing import Any
 from tree_sitter import Language, Node, Query, QueryCursor
 
 from lucianke.core.model import Confidence, Kind, Position, RelPath, SymbolRecord
+from lucianke.core.mro import TRANSPARENT_EXTERNAL_BASES, c3_linearize
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
 from lucianke.syntax.builtin_names import JS_GLOBALS, PYTHON_BUILTINS
 from lucianke.syntax.guards import guard_for
@@ -605,7 +609,7 @@ class _Extractor:
         if recv is not None:
             ref = self._type_ref(recv, node, chain)
             if ref is not None:
-                hit = self._member_of(ref, name, depth=0)
+                hit = self._member_of(ref, name)
                 if hit is not None or ref[0] == "local":
                     return hit, True  # 同じファイルのクラスと分かっているのに無いメンバーは、別のクラスの同名で埋めない
             elif self._is_self_attribute(recv):
@@ -631,22 +635,60 @@ class _Extractor:
         obj = recv.child_by_field_name("object")
         return obj is not None and (obj.type == "this" or self._text(obj) in _RECEIVER_SELF)
 
-    def _member_of(self, ref: tuple[str, str], name: str, *, depth: int) -> str | None:
+    def _member_of(self, ref: tuple[str, str], name: str) -> str | None:
+        """型 ``ref`` のメンバー ``name`` の URN。
+
+        * ``("urn", 型)``（別ファイル・外部の型）: ``<型>.name``。実在するか、基底クラスから継承したものかは索引の整え
+          （``index/inherited.py``）が決める（BUG-0075）。
+        * ``("local", 修飾名)``（同じファイルのクラス）: クラス自身 → 同じファイルの基底クラスを C3 の順（``core/mro.py``）に探す。
+          たどる途中に別ファイルの基底・この場で解決できない基底があれば、``<このクラス>.name`` を返して整えに任せる（索引の
+          ``INHERITS`` 行をファイルをまたいでたどる）。中身の分からない外部の基底（``object``・``ABC`` などの素通りするもの以外）に
+          先に当たったら ``None``（その基底が同名を定義しているかもしれないので、後ろの基底の同名に結ばない）。
+        """
         kind, value = ref
         if kind != "local":
             return _append_member(value, name)
         hit = self.by_qualified.get(f"{value}.{name}")
         if hit is not None:
             return str(hit.urn)
-        if depth >= _MAX_BASE_DEPTH:
+        order = c3_linearize(("local", value), self._local_bases)
+        if order is None:
             return None
-        for base in self.class_bases.get(value, ()):  # 同じファイルの基底クラスをたどる
-            base_ref = self._name_ref(base, [])
-            if base_ref is not None and base_ref[0] == "local":
-                found = self._member_of(base_ref, name, depth=depth + 1)
-                if found is not None:
-                    return found
+        if any(k == "other" for k, _ in order):
+            return self._requested_member(value, name)
+        for k, v in order[1:]:
+            if k == "ext":
+                if v in TRANSPARENT_EXTERNAL_BASES:
+                    continue
+                return None
+            hit = self.by_qualified.get(f"{v}.{name}")
+            if hit is not None:
+                return str(hit.urn)
         return None
+
+    def _local_bases(self, entry: tuple[str, str]) -> list[tuple[str, str]]:
+        """``_member_of`` の C3 に渡す直接の基底: ``("local", 修飾名)`` / ``("ext", 外部 URN)`` / ``("other", 綴り)``（別ファイルの
+        クラス・この場で解決できない名前・``mod.Base`` の形。整えに任せる印）。外部と ``other`` は葉（基底を持たない）として扱う。"""
+        kind, value = entry
+        if kind != "local":
+            return []
+        out: list[tuple[str, str]] = []
+        for base in self.class_bases.get(value, ()):
+            ref = None if "." in base else self._name_ref(base, [])
+            if ref is not None and ref[0] == "local":
+                out.append(("local", ref[1]))
+            elif ref is not None and ref[1].startswith(_EXTERNAL_PREFIX):
+                out.append(("ext", ref[1]))
+            else:
+                out.append(("other", base))
+        return out
+
+    def _requested_member(self, class_qualified: str, name: str) -> str | None:
+        """同じファイルのクラスのメンバーとして求めた URN（``<ファイル>#<クラス>.name``。シンボルが無ければ整えが基底をたどる）。"""
+        try:
+            return str(Urn(self.workspace_id, str(self.rel), CodeSel(f"{class_qualified}.{name}")))
+        except ValueError:
+            return None
 
     def _type_ref(self, recv: Node, node: Node, chain: list[SymbolRecord]) -> tuple[str, str] | None:
         """レシーバ式の型を ``("local", 修飾名)`` か ``("urn", URN)`` で。分からなければ ``None``。"""
@@ -879,28 +921,39 @@ class _Extractor:
             self.class_bases.setdefault(sym.qualified_name, bases)
 
     def _py_base_names(self, cls: Node) -> list[str]:
+        """基底クラスの綴り（書いた順）。``mod.Base`` は点つきのまま（``_local_bases`` が整えに任せる印にする）。"""
         out: list[str] = []
         sup = cls.child_by_field_name("superclasses")
         for c in sup.named_children if sup is not None else ():
-            if c.type == "identifier":
+            if c.type in ("identifier", "attribute"):
                 out.append(self._text(c))
-            elif c.type == "attribute":
-                attr = c.child_by_field_name("attribute")
-                if attr is not None:
-                    out.append(self._text(attr))
             elif c.type == "subscript":
                 value = c.child_by_field_name("value")
-                if value is not None and value.type == "identifier":
+                if value is not None and value.type in ("identifier", "attribute"):
                     out.append(self._text(value))
         return out
 
     def _js_base_names(self, cls: Node) -> list[str]:
+        """``extends`` の基底クラス（TS の ``implements`` は入れない。実装を持たないので継承したメンバーの探し先にならない）。"""
         out: list[str] = []
         for heritage in (c for c in cls.children if c.type == "class_heritage"):
             for clause in heritage.named_children:
+                if clause.type == "implements_clause":
+                    continue
                 value = clause.child_by_field_name("value") if clause.type == "extends_clause" else clause
-                if value is not None and value.type == "identifier":
+                if value is not None and value.type in ("identifier", "member_expression"):
                     out.append(self._text(value))
+        return out
+
+    def _ts_interface_base_names(self, node: Node) -> list[str]:
+        """TS の ``interface I extends A, ns.B<T>`` の基底（書いた順）。"""
+        out: list[str] = []
+        for clause in (c for c in node.named_children if c.type == "extends_type_clause"):
+            for t in clause.named_children:
+                if t.type == "generic_type":
+                    t = t.child_by_field_name("name") or t
+                if t.type in ("type_identifier", "nested_type_identifier"):
+                    out.append(self._text(t))
         return out
 
     def _py_params(self, params: Node, fn: Node) -> None:
@@ -1023,6 +1076,10 @@ class _Extractor:
                         self._bind(name, fn)
                     self._record_bases(name, self._js_base_names(node))
                 child_scope = child_cls = node
+            elif t == "interface_declaration":
+                name = node.child_by_field_name("name")
+                if name is not None:
+                    self._record_bases(name, self._ts_interface_base_names(node))
             elif t == "variable_declarator":
                 name = node.child_by_field_name("name")
                 if name is not None:
@@ -1096,7 +1153,6 @@ class _Extractor:
 
 
 _NOT_MEMBER_TARGETS = frozenset({Kind.VARIABLE})
-_MAX_BASE_DEPTH = 5
 
 
 def _neg_pos(p: Position) -> tuple[int, int]:

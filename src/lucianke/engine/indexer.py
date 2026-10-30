@@ -56,7 +56,7 @@ from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
 from lucianke.engine import reresolve
 from lucianke.engine.rank_scheduler import RANK_DEBOUNCE_S, RankScheduler
-from lucianke.index import queries, rank
+from lucianke.index import inherited, queries, rank
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
     FileFacts,
@@ -1147,9 +1147,12 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
     * ``symbols`` に無いシンボルを指す目標（``#`` を含む URN）の行を消す。import 表から作った URN は定義元の存在を
       確かめていないため。外部シンボル（``lk://_ext/``）は ``ingest_file`` が ``symbols`` に行を作るので残る。
     * ``target_file_id`` を目標のシンボルの持ち主で埋める（目標のファイルが後から取り込まれた場合に備える）。
+    * 消す前に、受け手のクラスに無いメンバー（``self.helper()`` の ``Sub.helper``）を指す行を ``_member_refs`` に退避し、最後に
+      基底クラスを C3 の順にたどって結ぶ。整えるファイルのクラスの派生クラスを受け手にする退避行も結び直す（BUG-0075。``index/inherited.py``）。
     """
     for file_id in file_ids:
         _redirect_overloads(conn, file_id)
+        inherited.park_member_refs(conn, file_id)  # type: ignore[arg-type]
         conn.execute(  # type: ignore[attr-defined]
             "DELETE FROM relations WHERE source_file_id = ? AND instr(target_urn, '#') > 0"
             " AND target_urn NOT IN (SELECT urn FROM symbols)",
@@ -1160,6 +1163,7 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
             " WHERE source_file_id = ? AND target_file_id IS NULL",
             (file_id,),
         )
+    inherited.resolve_member_refs(conn, file_ids)  # type: ignore[arg-type]
 
 
 def _redirect_overloads(conn: object, file_id: int) -> None:

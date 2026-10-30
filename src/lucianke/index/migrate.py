@@ -99,11 +99,33 @@ def _migrate_4_to_5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_5_to_6(conn: sqlite3.Connection) -> None:
+    """v6: 受け手のクラスに無い（基底クラスから継承した）メンバーへの参照の内部表 ``_member_refs``（BUG-0075。``index/inherited.py``）。
+
+    その参照は v5 までの取り込みで捨てられていて、取り込み直さないと戻らない。v5 と同じく関係を抽出する言語（Python / TS / JS）の
+    ファイルの ``sha256`` を空にして、次の差分走査で取り込み直させる。
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _member_refs ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " source_urn TEXT NOT NULL, class_urn TEXT NOT NULL, name TEXT NOT NULL,"
+        " relation_kind TEXT NOT NULL, use_kind TEXT,"
+        " call_site_line INTEGER NOT NULL, call_site_col INTEGER NOT NULL, guard_condition TEXT,"
+        " confidence_level TEXT NOT NULL, resolved_urn TEXT)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _member_refs_class ON _member_refs(class_urn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _member_refs_file ON _member_refs(file_id)")
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('python', 'typescript', 'tsx', 'javascript', 'jsx')"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
     3: _migrate_3_to_4,
     4: _migrate_4_to_5,
+    5: _migrate_5_to_6,
 }
 
 

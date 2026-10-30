@@ -719,6 +719,8 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
             [(file_id, stem) for stem in facts.import_stems],
         )
 
+    # 継承したメンバーへの参照の退避行（BUG-0075。index/inherited.py）は relations と一緒に作り直す（整えで退避し直す）
+    conn.execute("DELETE FROM _member_refs WHERE file_id = ?", (file_id,))
     conn.execute("DELETE FROM _name_calls WHERE file_id = ?", (file_id,))
     if facts.name_calls:
         conn.executemany(

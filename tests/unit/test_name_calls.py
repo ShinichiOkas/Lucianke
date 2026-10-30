@@ -198,9 +198,10 @@ def test_migration_4_to_5_adds_the_table_and_reingests_code_files(conn: sqlite3.
     _tx(conn, lambda c: ingest_file(c, _facts("web/b.ts", [], language="typescript")))
     _tx(conn, lambda c: ingest_file(c, _facts("README.md", [], language="markdown")))
     conn.execute("DROP TABLE _name_calls")
+    conn.execute("DROP TABLE _member_refs")
     conn.execute("UPDATE _meta SET schema_version = 4")
     assert ensure_schema(conn) is SchemaAction.MIGRATED
-    assert current_schema_version() == 5
+    assert current_schema_version() >= 5  # v5 で _name_calls、その先の移行も続けて当たる
     assert conn.execute("SELECT count(*) FROM _name_calls").fetchone()[0] == 0
     shas = dict(conn.execute("SELECT path, sha256 FROM files").fetchall())
     assert shas == {"app/a.py": "", "web/b.ts": "", "README.md": "a" * 64}

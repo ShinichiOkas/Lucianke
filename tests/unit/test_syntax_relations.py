@@ -368,6 +368,87 @@ def test_inherits_through_a_local_base_class():
     assert base.target_urn == f"lk://{WS}/m.py#Base" and base.source_urn == f"lk://{WS}/m.py#Child"
 
 
+# --- 継承したメンバー（BUG-0075） ----------------------------------------------------------------
+
+SUB_PY = (
+    b"from pkg.base import Base\n\n\nclass Sub(Base):\n    def run(self):\n        return self.helper()\n\n"
+    b"    def again(self):\n        return self.run()\n\n    @classmethod\n    def build(cls):\n        return cls.make()\n\n\n"
+    b"def use(s: Sub):\n    return s.helper()\n\n\ndef fresh():\n    return Sub().helper()\n"
+)
+
+
+def test_member_inherited_from_a_base_in_another_file_is_left_to_the_settle_step():
+    """基底クラスが別ファイル: ``<このクラス>.name`` を返す（索引の整えが ``INHERITS`` 行をたどって基底のメンバーに結ぶ）。
+
+    ``self`` / ``cls`` / ``s: Sub`` / ``Sub()`` のどれも同じ。受け手の型は分かっているので ``name_only`` にはしない。自分のメンバーは自分のもの。
+    """
+    rels = _relations("python", SUB_PY, "pkg/sub.py", {"Base": f"lk://{WS}/pkg/base.py#Base"}.get)
+    requested = f"lk://{WS}/pkg/sub.py#Sub.helper"
+    assert [(r.source_urn.rpartition("#")[2], r.target_urn) for r in _where(rels, kind="CALLS", name="helper")] == [
+        ("Sub.run", requested),
+        ("use", requested),
+        ("fresh", requested),
+    ]
+    assert _one(rels, kind="CALLS", name="make").target_urn == f"lk://{WS}/pkg/sub.py#Sub.make"
+    assert _one(rels, kind="CALLS", name="run").target_urn == f"lk://{WS}/pkg/sub.py#Sub.run"
+    assert not [r for r in rels if r.name_only]
+
+
+def test_receiver_of_an_imported_class_points_at_that_class_member():
+    src = b"from pkg.sub import Sub\n\n\ndef go(s: Sub):\n    return s.helper()\n"
+    rels = _relations("python", src, "pkg/use.py", {"Sub": f"lk://{WS}/pkg/sub.py#Sub"}.get)
+    assert _one(rels, kind="CALLS", name="helper").target_urn == f"lk://{WS}/pkg/sub.py#Sub.helper"
+
+
+def test_same_file_bases_follow_the_c3_order():
+    """菱形（``D(B, C)``・``B(A)``・``C(A)``）: C3 は D, B, C, A なので ``C`` の上書きが ``A`` に勝つ（深さ優先なら ``A.m``）。"""
+    src = (
+        b"class A:\n    def m(self): ...\n\nclass B(A):\n    pass\n\nclass C(A):\n    def m(self): ...\n\n"
+        b"class D(B, C):\n    def run(self):\n        return self.m()\n"
+    )
+    rels = _relations("python", src, "d.py")
+    assert _one(rels, kind="CALLS", name="m").target_urn == f"lk://{WS}/d.py#C.m"
+
+
+def test_opaque_external_base_before_the_member_stops_the_lookup():
+    """``Worker(Thread, Base)``: 先の ``Thread`` が ``helper`` を持つかもしれないので結ばない。``Plain(Base, Thread)`` は ``Base.helper``。
+    ``ABC`` はユーザーのメソッドを持たないので素通りする（``Shape(ABC, Base)`` は ``Base.helper``）。"""
+    src = (
+        b"from threading import Thread\nfrom abc import ABC\n\n\nclass Base:\n    def helper(self): ...\n\n\n"
+        b"class Worker(Thread, Base):\n    def go(self):\n        return self.helper()\n\n\n"
+        b"class Plain(Base, Thread):\n    def go(self):\n        return self.helper()\n\n\n"
+        b"class Shape(ABC, Base):\n    def go(self):\n        return self.helper()\n"
+    )
+    table = {"Thread": "lk://_ext/threading#Thread", "ABC": "lk://_ext/abc#ABC"}
+    rels = _relations("python", src, "w.py", table.get)
+    worker = _one(rels, kind="CALLS", name="helper", source="#Worker.go")
+    assert worker.target_urn is None and not worker.name_only
+    assert _one(rels, kind="CALLS", name="helper", source="#Plain.go").target_urn == f"lk://{WS}/w.py#Base.helper"
+    assert _one(rels, kind="CALLS", name="helper", source="#Shape.go").target_urn == f"lk://{WS}/w.py#Base.helper"
+
+
+def test_dotted_base_is_left_to_the_settle_step():
+    """``class Sub(base.Base)``: 綴りから同じファイルのクラスと分からないので ``<このクラス>.name``（整えが INHERITS 行をたどる）。"""
+    src = b"from pkg import base\n\n\nclass Sub(base.Base):\n    def run(self):\n        return self.helper()\n"
+    rels = _relations("python", src, "pkg/sub.py", {"base": f"lk://{WS}/pkg/base.py"}.get)
+    assert _one(rels, kind="CALLS", name="helper").target_urn == f"lk://{WS}/pkg/sub.py#Sub.helper"
+    assert _one(rels, kind="INHERITS").target_urn == f"lk://{WS}/pkg/base.py#Base"
+
+
+def test_typescript_members_inherited_from_another_file():
+    """``class Sub extends Base`` の ``this.helper()`` と、``interface Loud extends Pingable`` の ``l.ping()``（基底は別ファイル）。"""
+    src = (
+        b'import { Base, Pingable } from "./base";\n\nexport class Sub extends Base {\n  run(): number {\n'
+        b"    return this.helper();\n  }\n}\n\nexport interface Loud extends Pingable {\n  shout(): void;\n}\n\n"
+        b"export function use(l: Loud): void {\n  l.ping();\n  l.shout();\n}\n"
+    )
+    table = {"Base": f"lk://{WS}/web/base.ts#Base", "Pingable": f"lk://{WS}/web/base.ts#Pingable"}
+    rels = _relations("typescript", src, "web/sub.ts", table.get)
+    assert _one(rels, kind="CALLS", name="helper").target_urn == f"lk://{WS}/web/sub.ts#Sub.helper"
+    assert _one(rels, kind="CALLS", name="ping").target_urn == f"lk://{WS}/web/sub.ts#Loud.ping"
+    assert _one(rels, kind="CALLS", name="shout").target_urn == f"lk://{WS}/web/sub.ts#Loud.shout"
+
+
 def test_typescript_extends_implements_and_types():
     src = (
         b"import { Base, Port as P } from './base';\n"
