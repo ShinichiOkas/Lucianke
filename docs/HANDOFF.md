@@ -3,7 +3,7 @@
 この文書は、セッションが中断した（トークンクォータ等）ときに、**別の PC・別のエージェントが続きを拾うため**の現在地。
 作業が進んだらこの文書を更新してコミットする（履歴は git に残る）。
 
-最終更新: 2026-10-31 / 対象: `main`（この文書を含むコミット） / 直前のコミット: `87d9451`。このコミットで BUG-0063（`max_tokens` の固定下限 200 の廃止）・BUG-0064（前置きだけで予算超過のとき必要な `max_tokens` を名指し）を解消
+最終更新: 2026-10-31（夜〜朝。師匠は就寝中で「おまかせ」） / 対象: `main` / このセッションで BUG-0062〜0089 を処理し、exe 配布を入れた（§2・§6）
 
 ---
 
@@ -11,7 +11,7 @@
 
 ```powershell
 git pull
-uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 に 3783 passed / 32 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
+uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の統合で 3925 passed / 29 skipped。1 件の揺れは BUG-0089 で直した）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
@@ -28,44 +28,42 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `3783 passed, 32 skipped, 0 failed`（2026-10-31・645 秒・BUG-0065 の直しのあと）。skip は環境由来（TS の LSP なし・POSIX のみ など）と較正の 3 件（BUG-0068）。新 .venv でも `uv run pytest -q` だけで届く（BUG-0062 で langs を dev 組に・フィクスチャを自動取得） |
-| 索引 DB のスキーマ | v4（`_exact_marks`、`index/exact_marks.py`、ADR-16） |
+| 全体テスト | 統合（`9f4ffa3`、直す役 4 つが同時に pytest を流す高負荷・37 分）で `1 failed, 3925 passed, 29 skipped`。落ちた 1 件は実時間 1 秒の試験の揺れで、BUG-0089（`84d1b16`）で直した。skip 29 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml） |
+| 索引 DB のスキーマ | **v7**（v5 `_name_calls` = BUG-0071、v6 `_member_refs` = BUG-0075、v7 `_member_refs.via_super` = BUG-0081）。古い索引は移行で Python/TS/JS を再取り込みする |
+| 配布 | exe（PyInstaller onedir）。`.uild.ps1`（§6） |
 
-## 2. このコミットで入ったもの
+## 2. 2026-10-31 に入ったもの（要約。詳細は各票の「原因・直し方・確認」）
 
-テーマは「`max_tokens` の下限を固定値から呼び出しごとの実測値へ」（師匠の判断 2026-10-30）。
+師匠の宣言（2026-10-31）: **Lucianke の主な利用者は呼ぶ側の AI。仕様の判断は AI にとっての有用さで AI が決めてよい**（ペア固有 Skill `the-tools-primary-user-decides-its-spec`）。以下はこの基準で決めて、仕様書も同じコミットで直した。
 
-### (a) 固定下限 200 の廃止（BUG-0063）
-
-前置き（ヘッダ・accuracy_warning・`head_kv`・json の封筒）だけで 200 を超える応答があり、仕様 §5.2（最小 200）と §5.7（`used_tokens_est <= max_tokens`）が衝突していた。
-
-- `core/limits.py`: `MIN_MAX_TOKENS` を廃止。`REGISTRY_MIN_DEFAULT_MAX_TOKENS = 1`（`ToolSpec.default_max_tokens` の登録時の床。作者のミス検出用で公開下限ではない）と、テスト用の `BUDGET_FLOOR_FOR_PAGING = 200`
-- `tools/_base.py`: `max_tokens: int | None = Field(default=None, gt=0)`。非正だけ `E_INVALID_ARGUMENT`
-- `mcp/pipeline.py`: 200 未満を弾く検査を削除。`mcp/registry.py`: `tools/list` のスキーマは `exclusiveMinimum: 0`
-- 仕様書 §5.2 の表・§5.6-4、設計書の検査一覧を更新
-
-### (b) 前置きだけで超過したときに必要な `max_tokens` を名指しする（BUG-0064）
-
-レコードが元から 0 件で前置きが予算を超えると、`warnings` が空で「いくつに上げればよいか」が伝わらなかった。
-
-- `mcp/budget.py` の `Packer.pack`（`start >= n` の経路）: `reserved_tokens > max_tokens` なら
-  `the response preamble alone needs ~N tokens, over max_tokens=M; raise max_tokens to ~N or more ...` を `warnings` に入れる
-  （`_fit` の `m == 0` の警告と同じ形）。dot・mermaid もこの経路を通る
-- 実測（`tests/fixtures/poly`、`bench/_budget_probe2.py`）: T-07 json は max_tokens=200 で警告 `~365`、365 で呼び直すと used=365・警告なし。T-06 json は `~384` → 384 で used=384・警告なし
-
-### (c) その他
-
-- `mcp/render/graph.py`: ruff の 2 件（`Final` の import 漏れ・未使用変数）を修正。`ruff check src tests` clean
-- `tests/contract/test_unsupported_tools.py`: スキーマの `minimum == 200` を `exclusiveMinimum == 0` に
-- `bench/_budget_probe2.py`: T-06 の引数を `target` に直し（`urn` は存在しない引数で E_INVALID_ARGUMENT だった）、名指しした値で呼び直して収まることを確かめる検査を追加
-- 前セッションの一時スクリプト `tools/_restore_default_max_tokens.py` は、HEAD と同じ値に戻すだけ（実質は CRLF 化だけ）だったので捨てた
+- 予算・出力
+  - BUG-0063/0064（`b1ce8ac`）: `max_tokens` の固定下限 200 を廃止。前置きだけで超えるときは必要な `max_tokens` を warnings で名指し
+  - BUG-0067（`afc06fc`）: パッカーを予算に対して単調に（`max_tokens` を上げて件数・内容が減らない。縮退したレコードでページを閉じる。仕様 §5.6-5）
+  - BUG-0078（`9f4ffa3`）: T-02 の縮退を 1 件ずつの段に（F-PY の json・6000 で 618 → 5,967 トークン。省いた量と丸ごとに要る `max_tokens` を書く）
+  - BUG-0069（`a747105`）: compact で導ける `urn:` 行を出さない（`lk://<ws>/<path>#<修飾名>`）・imports をモジュールごとに・検索は名前の一致を先に・シグネチャ 160 文字（骨格 −37%、検索 −49%）
+  - BUG-0065（`e021064`）・BUG-0066（`379d70c`）: json の記号は仕様 §6.2 の形（null・空のキーも出す）。json は形の安定、節約は compact
+- 参照・呼び出し階層（構文木の層）
+  - BUG-0071（`d5e8614`）: 型の分からない受け手の呼び出しを黙って落とさない。名前のメソッドが 1 つなら `conf=heuristic`、複数・組み込み名なら件数と位置を warnings と `data.unattributed_calls` に
+  - BUG-0077（`c7f2b7e`）: 名前の一致の候補を呼び出し箇所に近い段（同じファイル → 呼び出しを含む fixture → 全体）から選ぶ（誤帰属 511 件を除去）
+  - BUG-0075（`8a72e31`）: 基底クラスが別ファイルでも継承メソッドの呼び出し（`self.helper()`・`s: Sub`）を解決（C3 の MRO、`core/mro.py`、`index/inherited.py`）
+  - BUG-0079/0081（`8c10a2a`）: 属性の連鎖（`a.b.m()`）を `type(a)` に結び付けない。`super().m()` を MRO の次のクラスへ
+  - BUG-0082（`f5cf85b`）: Python の絶対 import を pytest が `sys.path` に載せる根（テストの隣・conftest・`pythonpath`）と fixture の根でも解決
+  - BUG-0070（`94689c7`）: 初回索引の途中でも、未索引のファイルの対象をその場で索引して答える（not found にしない）。索引中の応答に進みの警告
+- 試験・検証の穴
+  - BUG-0062（`9d96cd2`）: 新 .venv でも `uv run pytest -q` だけで全体に届く（langs を dev 組、フィクスチャ自動取得・失敗は赤）
+  - BUG-0068（`b034d64`）: 較正の標本を `tests/fixtures/tokens/` に凍結（skip をなくし、古くなったら赤）
+  - BUG-0074（`4ca4684`）・BUG-0076（`0fee57d`）・BUG-0083（`bf74fb5`）・BUG-0089（`84d1b16`）: 負荷で揺れていた試験を決定的に（スレッドの漏れの見張り `tests/conftest.py`、条件待ち、watcher の `expect` の製品の直し）
+  - BUG-0072/0073（`8536a5f`）: 依存方向の見張り・CI と同じ引数なしの `ruff check`
+- その他: `.mcp.json` の `--directory` を「.」に（別 PC の絶対パスで MCP がつながらなかった。`cf4497c`）、exe 配布（§6）
 
 ## 3. 次にやること（優先順）
 
-1. ~~**BUG-0065**（T-02 skeleton 系の 7 件が落ちる。`KeyError: 'children'` など）~~ — **解消済み**（T-02 の json の記号で null・空のキーを省かない形に戻した。仕様 §6.2。json で省くかは師匠の判断〈推奨: 省かない〉。続きの票は BUG-0066〈T-06・T-07 も省いている〉・BUG-0067〈max_tokens を上げると返るファイル数が減る〉）
-2. ~~**BUG-0062**（新 .venv で langs extra・フィクスチャを手で入れないと全体テストに届かない）~~ — **解消済み**（langs を dev 組に・契約テストのフィクスチャを自動取得し、取れなければ赤。§0 は `uv run pytest -q` だけ）
-3. **BUG-0058**（レイテンシ）— 師匠判断（2026-10-30）で優先度を下げた。再開は「毎回別シンボル＋exact 経路強制」で計時ログを拾うところから（票の末尾）
-4. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する（2026-10-31 時点で BUG-0041〜0065 はすべて対応コミットあり（BUG-0066〜0068 は票のみ）。BUG-0058 は実測の記録のみ）
+1. 作業中だった票（このセッションの終わりに直す役が走っていたもの。push 済みかは `git log --oneline --grep=BUG-00xx` で見る）:
+   BUG-0080（F-PY の exact の事後条件が降格時に誤った理由で skip）・BUG-0086（F-PY T-06 事後条件 3 の揺れ）・BUG-0085（型の分からない素の名前の受け手を同じファイルの唯一の同名メソッドに確定で結ぶ誤り）・BUG-0087（索引の更新に失敗しても watcher に expect を登録して索引が古いまま）・BUG-0088（並行起動で `test_edit_transaction.py` が一斉にエラー）
+2. **BUG-0084** — データファイル（JSON など）の骨格の縮退が深さ単位で粗い（ky `package.json` で予算の 66%）。影響は小さいので後回しにした
+3. **BUG-0058**（レイテンシ）— 師匠判断（2026-10-30）で優先度を下げた。exact 経路の初回が 10 秒の予算を超えて structural に落ちることがある（BUG-0074・0080 の票にも実測）
+4. リリースのワークフロー（`.github/workflows/release.yml`）は未実行。CI（GitHub Actions）の結果もこの PC から確かめていない（`gh` が無い）
+5. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する
 
 ## 4. 触るときの注意
 
