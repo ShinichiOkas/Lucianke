@@ -432,6 +432,22 @@ async def test_expectation_expires_after_its_ttl(tmp_path: Path, monkeypatch: py
     assert sink.of("changed") == ["a.py"]
 
 
+async def test_forget_removes_the_expectation(tmp_path: Path) -> None:
+    """決定的版（BUG-0087）: ``forget`` した後は、内容が期待どおりでもイベントは届く（無いパスの ``forget`` は何もしない）。"""
+    ws = make_ws(tmp_path)
+    put(ws.root, "a.py", b"v1")
+    sink = FakeSink({"a.py"})
+    w = Watcher(ws, sink)
+    w.expect(RelPath("a.py"), sha(b"v1"))
+    w.forget(RelPath("a.py"))
+    w.forget(RelPath("never_expected.py"))
+    q: asyncio.Queue[watcher_mod._Item] = asyncio.Queue()
+    q.put_nowait({"a.py"})
+    q.put_nowait(None)
+    await asyncio.wait_for(w._consume(q, asyncio.Event()), WAIT_S)
+    assert sink.of("changed") == ["a.py"]
+
+
 async def test_expectation_with_different_content_is_not_dropped(tmp_path: Path) -> None:
     """期待と内容が違う（別のプロセスが先に書き換えた）なら捨てない。"""
     ws = make_ws(tmp_path)

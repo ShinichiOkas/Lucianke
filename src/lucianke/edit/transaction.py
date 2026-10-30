@@ -18,7 +18,9 @@
   成功応答に警告を書く（仕様書 §10.5。エラーにはしない）。
 
 依存はすべてコンストラクタ引数で注入する（テストで偽物に差し替える）。``indexer`` / ``watcher`` / ``documents`` の呼び出しは
-同期でも非同期でもよい。再索引（``Reindexed``）の失敗は応答を止めず ``warnings`` に残す。
+同期でも非同期でもよい。再索引（``Reindexed``）の失敗は応答を止めず ``warnings`` に残す。監視にこだまを捨てさせる
+（``watcher.expect``）のは索引への取り込みが済んだファイルだけで、取り込めなかったファイルは ``watcher.forget`` して監視の
+通常の道（こだまのイベント → ``sink.changed``）で取り込み直させる（BUG-0087。古い索引のまま残さない）。
 """
 
 from __future__ import annotations
@@ -131,6 +133,8 @@ class WatcherLike(Protocol):
     def drain(self) -> Awaitable[None] | None: ...
 
     def expect(self, rel: RelPath, sha256_after: str) -> None: ...
+
+    def forget(self, rel: RelPath) -> None: ...
 
 
 class DocumentsLike(Protocol):
@@ -343,7 +347,9 @@ class EditTransaction:
         writer_index: ``IndexWriter``（``anext_edit_id``）。
         journal_dir: ジャーナルの置き場（``<cache_root>/<ws_hash>/journal``）。
         indexer: 書き込んだファイルを取り込む（``index_file(rel)``）。``None`` なら取り込まない。
-        watcher: 前提検証の前に ``drain()``、書き込み後に ``expect(rel, sha)``。``None`` なら何もしない。
+        watcher: 前提検証の前に ``drain()``。書き込み後、``indexer`` がそのファイルを取り込めたら ``expect(rel, sha)``
+            （こだまを捨てる）、取り込めなかった（失敗・``indexer`` なし）なら ``forget(rel)``（こだまを監視の通常の道で
+            取り込ませる。BUG-0087）。``None`` なら何もしない。
         documents: LSP への ``didOpen`` / ``didChange``。``None`` なら LSP 不在として扱う。
         diagnostics_hub: LSP の診断の受け皿。``None`` なら LSP 不在（Tree-sitter の構文エラー差分だけを返す）。
         reader_pool: ``ReaderPool``。診断スナップショットと直接の参照元の読み取りに使う。``None`` なら空。
@@ -799,9 +805,11 @@ class EditTransaction:
                     self._trees.evict(self._ws.workspace_id, path)
                 except Exception as exc:
                     _log.warning("tree cache eviction failed for %s: %s", path, exc)
+            indexed = False
             if self._indexer is not None:
                 try:
                     await _maybe_await(self._indexer.index_file(path))
+                    indexed = True
                 except Exception as exc:
                     _log.warning("reindex failed for %s: %s", path, exc, exc_info=True)
                     warnings.append(f"reindex failed for {path}: {type(exc).__name__}")
@@ -815,9 +823,15 @@ class EditTransaction:
                     warnings.append(f"LSP didChange failed for {path}: {type(exc).__name__}")
             if self._watcher is not None:
                 try:
-                    self._watcher.expect(path, after_sha[path])
+                    if indexed:
+                        # 索引が書いた内容を取り込み終えたときだけ、こだま（自分の書き込みのイベント）を捨てさせる
+                        self._watcher.expect(path, after_sha[path])
+                    else:
+                        # 取り込めなかった（失敗・索引なし）: こだまを捨てさせず、監視の通常の道で取り込み直させる。
+                        # 前の編集の期待が残っていれば消す（同じ内容に戻す編集のこだまを、古い期待が捨てないように。BUG-0087）
+                        self._watcher.forget(path)
                 except Exception as exc:
-                    _log.warning("watcher.expect failed for %s: %s", path, exc)
+                    _log.warning("watcher.expect/forget failed for %s: %s", path, exc)
         return sent
 
     async def _locate_after(

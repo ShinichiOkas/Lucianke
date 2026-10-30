@@ -9,13 +9,23 @@
 * 関数より広いスコープ（module / class / package / session）のフィクスチャが作ったスレッドは、そのフィクスチャが片づいた時点
   （``pytest_fixture_post_finalizer``）で見て、そのとき teardown 中の試験のエラーにする（フィクスチャの名前を書く）。
 * 止まりかけのスレッドは ``EXIT_GRACE_S`` まで終わるのを待つ（条件待ち。``join``）。それでも生きていれば「残した」とみなす。
+
+赤い報告の全文の記録（BUG-0088）: 試験の赤い報告（セットアップ・本体・後始末のどれでも）の全文を、出力を捨てても残るように
+``<一時ディレクトリ>/lucianke-test-errors/<時刻>-<pid>.log`` に追記し、最後の要約の行の**後**に、件数・最初の 1 件の理由・
+ファイルのパスを 1 行で出す（``| tail -3`` でも見える。要約の行は端末の幅で切られ、パイプでは 80 桁なので、長い試験名の
+``ERROR`` 行からは理由が消える）。ファイルの頭には ``tmp_path`` の根（basetemp）と作業ディレクトリを書く（共有のパスが
+原因かを、次に起きたときに見分けるため）。
 """
 
 from __future__ import annotations
 
+import os
+import sys
+import tempfile
 import threading
 import time
 from collections.abc import Generator, Iterable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -137,3 +147,81 @@ def pytest_runtest_teardown(
     if msgs:
         pytest.fail(LEAK_HINT + "; ".join(msgs), pytrace=False)
     return result
+
+
+# --- 赤い報告の全文の記録（BUG-0088） -------------------------------------------------------------
+
+RED_LOG_DIR = Path(tempfile.gettempdir()) / "lucianke-test-errors"
+RED_LOG_KEEP = 50  # 残すファイルの数（作るたびに古いものから消す）
+
+
+class _RedReports:
+    """赤い報告の全文をファイルに残す（最初の 1 件で作る）。"""
+
+    def __init__(self) -> None:
+        self.config: pytest.Config | None = None
+        self.path: Path | None = None
+        self.count = 0
+        self.first = ""
+        self.write_error = ""
+
+    def _header(self) -> str:
+        factory = getattr(self.config, "_tmp_path_factory", None)
+        return (
+            f"pid={os.getpid()} first_red_at={time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"argv={sys.argv}\ncwd={os.getcwd()}\n"
+            f"rootpath={getattr(self.config, 'rootpath', None)}\n"
+            f"basetemp={getattr(factory, '_basetemp', None)} "
+            f"tempdir={tempfile.gettempdir()} PYTEST_DEBUG_TEMPROOT={os.environ.get('PYTEST_DEBUG_TEMPROOT')}\n\n"
+        )
+
+    def record(self, report: pytest.TestReport) -> None:
+        crash = getattr(report.longrepr, "reprcrash", None)
+        reason = crash.message if crash is not None else report.longreprtext.strip()
+        reason = (reason.splitlines() or [""])[0]
+        self.count += 1
+        if not self.first:
+            self.first = f"{report.nodeid} [{report.when}]: {reason}"
+        try:
+            if self.path is None:
+                RED_LOG_DIR.mkdir(parents=True, exist_ok=True)
+                for stale in sorted(RED_LOG_DIR.glob("*.log"))[: -RED_LOG_KEEP + 1]:
+                    stale.unlink(missing_ok=True)
+                self.path = RED_LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log"
+                self.path.write_text(self._header(), encoding="utf-8", newline="\n")
+            with self.path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(f"=== {report.nodeid} [{report.when}] {report.outcome}\n{report.longreprtext}\n\n")
+        except OSError as exc:  # 記録できなくても試験は止めない（最後の行で知らせる）
+            self.write_error = self.write_error or f"{type(exc).__name__}: {exc}"
+
+    def summary(self) -> str | None:
+        if not self.count:
+            return None
+        where = self.path if self.path is not None else RED_LOG_DIR
+        if self.write_error:
+            return f"{self.count} red report(s); could not write them to {where} ({self.write_error}) (first: {self.first})"
+        return f"{self.count} red report(s) written in full to {where} (first: {self.first})"
+
+
+_red = _RedReports()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    _red.config = config
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    if report.failed:
+        _red.record(report)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    line = _red.summary()
+    if line is None:
+        return
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(line)
+    else:
+        sys.stderr.write(line + "\n")

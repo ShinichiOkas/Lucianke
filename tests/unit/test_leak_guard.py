@@ -113,6 +113,10 @@ def run(tmp_path: Path) -> dict[str, list[str]]:
     (tmp_path / "test_leaky.py").write_bytes(LEAKY.encode("utf-8"))
     (tmp_path / "test_scoped.py").write_bytes(SCOPED.encode("utf-8"))
     (tmp_path / "test_scoped_leak.py").write_bytes(SCOPED_LEAK.encode("utf-8"))
+    temp = (
+        tmp_path / "temp"
+    )  # 入れ子の pytest の一時ディレクトリ（赤い報告の記録〈BUG-0088〉で本物の記録を汚さない）
+    temp.mkdir()
     proc = subprocess.run(  # noqa: S603  固定の引数列
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-rA", "-q", str(tmp_path)],
         cwd=tmp_path,
@@ -120,7 +124,9 @@ def run(tmp_path: Path) -> dict[str, list[str]]:
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=dict(os.environ, PYTHONUTF8="1", COLUMNS="2000"),  # 要約の行を切らせない
+        env=dict(
+            os.environ, PYTHONUTF8="1", COLUMNS="2000", TMPDIR=str(temp), TEMP=str(temp), TMP=str(temp)
+        ),  # 要約の行を切らせない
         timeout=300,
         check=False,
     )

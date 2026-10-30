@@ -11,6 +11,7 @@ import hashlib
 import os
 import shutil
 import threading
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,7 +19,9 @@ from typing import Any
 
 import pytest
 
+import lucianke.workspace.watcher as watcher_mod
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.limits import WATCH_EXPECT_TTL_S
 from lucianke.core.model import Confidence, Position, Range, RelPath, TargetRef
 from lucianke.edit.builders import replace_body_builder
 from lucianke.edit.lock import WorkspaceLocks
@@ -32,6 +35,7 @@ from lucianke.lsp.diagnostics import DiagnosticsHub
 from lucianke.syntax.parsers import parse_source
 from lucianke.workspace.paths import to_file_uri
 from lucianke.workspace.types import Workspace
+from lucianke.workspace.watcher import Watcher
 
 POLY = Path(__file__).resolve().parents[1] / "fixtures" / "poly"
 PAYMENT = RelPath("src/shop/services/payment.py")
@@ -67,6 +71,7 @@ class FakeIndexer:
 class FakeWatcher:
     drained: int = 0
     expected: list[tuple[str, str]] = field(default_factory=list)
+    forgotten: list[str] = field(default_factory=list)
     on_drain: Any = None
 
     async def drain(self) -> None:
@@ -76,6 +81,9 @@ class FakeWatcher:
 
     def expect(self, rel: RelPath, sha256_after: str) -> None:
         self.expected.append((str(rel), sha256_after))
+
+    def forget(self, rel: RelPath) -> None:
+        self.forgotten.append(str(rel))
 
 
 @dataclass
@@ -245,6 +253,7 @@ async def test_ep1_replace_body_runs_the_eight_stages_and_writes(rig: Rig):
     # 再索引・監視・LSP なしの経路
     assert rig.indexer.calls == [str(PAYMENT)]
     assert rig.watcher.expected == [(str(PAYMENT), sha(after))]
+    assert rig.watcher.forgotten == []
     assert leftovers(rig.root) == []
 
 
@@ -568,6 +577,172 @@ async def test_ep9_rename_failure_on_the_second_file_restores_every_file(
     assert {p: read(rig, p) for p in before} == before  # 全ファイルが書き込み前に戻っている
     assert leftovers(rig.root) == []
     assert rig.indexer.calls == [] and rig.watcher.expected == []
+
+
+# --- 再索引と監視のこだま（BUG-0087） -----------------------------------------------------------------
+# 本物の ``Watcher`` に、索引へ取り込む sink（``tools/_runtime.IndexerSink`` と同じく ``changed`` → ``index_file``）を付け、
+# こだま（自分の書き込みのイベント）の窓を ``_consume`` に直接流す（``awatch`` を使わないので窓の割れ方も時刻も決まっている）。
+
+
+@dataclass
+class FlakyIndexer:
+    """最初の ``fail`` 回の ``index_file`` は例外。``calls`` は取り込めた呼び出し、``attempts`` はすべての呼び出し。"""
+
+    fail: int = 0
+    calls: list[str] = field(default_factory=list)
+    attempts: list[str] = field(default_factory=list)
+
+    async def index_file(self, rel: RelPath) -> None:
+        self.attempts.append(str(rel))
+        if len(self.attempts) <= self.fail:
+            raise RuntimeError(f"injected reindex failure for {rel}")
+        self.calls.append(str(rel))
+
+
+@dataclass
+class IndexingSink:
+    indexer: FlakyIndexer
+
+    async def changed(self, rel: RelPath) -> None:
+        await self.indexer.index_file(rel)
+
+    async def removed(self, rel: RelPath) -> None:
+        raise AssertionError(f"unexpected removal: {rel}")
+
+    async def rescan(self) -> None:
+        raise AssertionError("unexpected rescan")
+
+    def known_paths_under(self, prefix: str) -> list[RelPath]:
+        return []
+
+
+class Clock:
+    """監視モジュールの ``time`` の差し替え。``monotonic`` は手で進める（期待の失効を決定的に試す）。"""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    @staticmethod
+    def perf_counter() -> float:
+        return time.perf_counter()
+
+
+@dataclass
+class EchoRig:
+    tx: EditTransaction
+    indexer: FlakyIndexer
+    watcher: Watcher
+    clock: Clock
+    root: Path
+
+    async def echo(self, *windows: set[str]) -> None:
+        """監視に窓を順に流して処理し切る。"""
+        q: asyncio.Queue[watcher_mod._Item] = asyncio.Queue()
+        for window in windows:
+            q.put_nowait(window)
+        q.put_nowait(None)
+        await asyncio.wait_for(self.watcher._consume(q, asyncio.Event()), 60)
+
+
+def make_echo_rig(
+    ws: Workspace,
+    index_writer: IndexWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail: int = 0,
+) -> EchoRig:
+    clock = Clock()
+    monkeypatch.setattr(watcher_mod, "time", clock)
+    indexer = FlakyIndexer(fail=fail)
+    watcher = Watcher(ws, IndexingSink(indexer))
+    tx = EditTransaction(
+        ws,
+        locks=WorkspaceLocks(),
+        writer_index=index_writer,
+        journal_dir=tmp_path / "cache" / "journal",
+        indexer=indexer,
+        watcher=watcher,
+    )
+    return EchoRig(tx, indexer, watcher, clock, ws.root)
+
+
+async def run_validate(tx: EditTransaction, **kw: Any):
+    return await tx.run(
+        replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=0, **kw
+    )
+
+
+async def test_reindex_failure_does_not_drop_the_echo_so_the_watcher_reindexes(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rig = make_echo_rig(ws, index_writer, tmp_path, monkeypatch, fail=1)
+    result = await run_validate(rig.tx)
+    assert result.applied is True
+    assert f"reindex failed for {PAYMENT}: RuntimeError" in result.warnings
+    assert rig.indexer.attempts == [str(PAYMENT)] and rig.indexer.calls == []  # 編集の中では取り込めていない
+    await rig.echo({str(PAYMENT)})  # 自分の書き込みのこだま
+    assert rig.indexer.calls == [str(PAYMENT)]  # 監視の通常の道で取り込み直した（捨てていない）
+
+
+async def test_reindex_failure_also_clears_a_stale_expectation_for_the_same_content(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """前の編集の期待が残っていて、書いた内容と ``sha256`` が一致しても（同じ内容に戻す編集）、こだまは捨てられない。"""
+    rig = make_echo_rig(ws, index_writer, tmp_path, monkeypatch, fail=1)
+    dry = await run_validate(rig.tx, dry_run=True)
+    rig.watcher.expect(PAYMENT, dry.files_changed[0].sha256_after)  # 失効していない古い期待（同じ内容）
+    result = await run_validate(rig.tx)
+    assert (
+        result.applied is True and result.files_changed[0].sha256_after == dry.files_changed[0].sha256_after
+    )
+    assert rig.indexer.calls == []
+    await rig.echo({str(PAYMENT)})
+    assert rig.indexer.calls == [str(PAYMENT)]
+
+
+async def test_reindexed_edit_drops_its_echo_even_when_split_into_windows(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rig = make_echo_rig(ws, index_writer, tmp_path, monkeypatch)
+    result = await run_validate(rig.tx)
+    assert result.applied is True and not any("reindex failed" in w for w in result.warnings)
+    assert rig.indexer.calls == [str(PAYMENT)]
+    await rig.echo({str(PAYMENT)}, {str(PAYMENT)})  # os.replace の deleted と added が別々の窓に割れて届いた
+    assert rig.indexer.calls == [str(PAYMENT)]  # 二重取り込みしない
+
+
+async def test_after_the_ttl_an_external_write_of_the_same_content_is_ingested(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rig = make_echo_rig(ws, index_writer, tmp_path, monkeypatch)
+    await run_validate(rig.tx)
+    after = (rig.root / PAYMENT).read_bytes()
+    await rig.echo({str(PAYMENT)})
+    assert rig.indexer.calls == [str(PAYMENT)]
+    rig.clock.now += WATCH_EXPECT_TTL_S + 0.001
+    (rig.root / PAYMENT).write_bytes(after)  # 外部のプロセスが同じ内容を書いた（保存し直し）
+    await rig.echo({str(PAYMENT)})
+    assert rig.indexer.calls == [str(PAYMENT), str(PAYMENT)]  # 失効した期待は捨てない
+
+
+async def test_without_an_indexer_the_echo_is_left_to_the_watcher(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    watcher = FakeWatcher()
+    tx = EditTransaction(
+        ws,
+        locks=WorkspaceLocks(),
+        writer_index=index_writer,
+        journal_dir=tmp_path / "cache" / "journal",
+        watcher=watcher,
+    )
+    result = await run_validate(tx)
+    assert result.applied is True
+    assert watcher.expected == [] and watcher.forgotten == [str(PAYMENT)]
 
 
 # --- ロック ---------------------------------------------------------------------------------------

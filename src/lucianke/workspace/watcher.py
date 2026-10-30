@@ -194,6 +194,14 @@ class Watcher:
             del self._expected[k]
         self._expected[rel] = (sha256_after, now + WATCH_EXPECT_TTL_S)
 
+    def forget(self, rel: RelPath) -> None:
+        """``rel`` の期待を消す（無ければ何もしない）。以降のこのパスのイベントは、内容によらず sink に届く。
+
+        編集トランザクションが、書き込んだファイルを索引に取り込めなかったときに呼ぶ（BUG-0087）。こだまを捨てずに
+        ``sink.changed`` で取り込み直させ、前の編集の期待（同じ内容に戻す編集なら ``sha256`` が一致する）が残っていても捨てさせない。
+        """
+        self._expected.pop(rel, None)
+
     # --- 監視ループ ---------------------------------------------------------------------
 
     @staticmethod
