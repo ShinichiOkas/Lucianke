@@ -54,3 +54,6 @@
 - `tests/unit/test_core_compact_lines.py`: `urn_lines`（導けるもの・導けないもの 5 種）、`cap_signature`、`import_line`。`tests/unit/test_mcp_render.py` の `import_line`。
 - `tests/contract/test_T02_skeleton.py`: 全部入りに `urn:` 行が無いこと、縮退の注に `urn` を挙げないこと、TS のオーバーロードの `urn:` 行だけが出て json は全記号が `urn` を持つこと。
 - `tests/contract/test_T03_T04.py`: compact に `urn:` 行が無いこと（T-03・T-04）、シグネチャだけの一致が名前の一致の後ろで score も低いこと、compact のシグネチャを 160 文字で切り json は全文、見たもので指せること（上の 4）。
+- `bench/e2e/run_session.py`（e2e の台本）: 骨格の `urn:` 行を読んでいたので、行から URN を導く形に（`urn:` 行があればそれを使う）。
+
+実行の結果: `uv run ruff check src tests bench` は clean。全体テスト（`uv run pytest -q -p no:cacheprovider`、8536a5f の上）は 3809 passed・29 skipped・1 failed（`tests/e2e/test_m1_6_session.py::test_m1_6_scripted_session_completes`。上の e2e の台本が `urn:` 行を読んでいたため。直して 2 passed）。`tests/contract_fixtures` は 39 passed・5 skipped。origin/main（BUG-0070・BUG-0071 の後）へ載せ直した後は対象のテスト（compact・骨格・検索・解決・文法・T-06/T-07 の name_calls・e2e の M1-6）を流して push した（全体テストは親が main でまとめて流す）。
