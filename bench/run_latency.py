@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import bisect
 import contextlib
 import random
 import re
@@ -31,6 +32,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,16 +114,9 @@ def extract_symbols(root: Path, rel: str) -> list[Sym]:
             offsets.append(offsets[-1] + len(ln))
         for m in _TS_DECL.finditer(text):
             kind = "function" if m["kw"] == "function" else "class"
-            # バイナリサーチで行番号を求める
-            pos = m.start()
-            lo, hi = 0, len(offsets) - 1
-            while lo < hi - 1:
-                mid = (lo + hi) // 2
-                if offsets[mid] <= pos:
-                    lo = mid
-                else:
-                    hi = mid
-            out.append(Sym(rel, m["name"], m["name"], kind, lo + 1))
+            # offsets[i] は i 行目の先頭バイト位置。offsets[line] <= pos < offsets[line+1] の line を求める
+            line = bisect.bisect_right(offsets, m.start()) - 1
+            out.append(Sym(rel, m["name"], m["name"], kind, line + 1))
     return out
 
 
@@ -141,6 +136,10 @@ def build_pool(root: Path) -> Pool:
     symbols: list[Sym] = []
     for rel in files:
         symbols.extend(extract_symbols(root, rel))
+    # 同一 (path, name) に複数ある対象（TS の関数オーバーロード宣言など）は symbol_name で一意に解決できず
+    # E_TARGET_AMBIGUOUS になる（BUG-0060）。計測対象は被測定物から独立に一意化しておく（母集団から落とす）
+    seen: Counter[tuple[str, str]] = Counter((s.path, s.name) for s in symbols)
+    symbols = [s for s in symbols if seen[(s.path, s.name)] == 1]
     return Pool(files=files, symbols=symbols)
 
 
