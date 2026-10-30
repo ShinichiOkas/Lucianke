@@ -332,7 +332,7 @@ def test_migration_5_to_6_adds_the_table_and_reingests_code_files(tmp_path: Path
         conn.execute("DROP TABLE _member_refs")
         conn.execute("UPDATE _meta SET schema_version = 5")
         assert ensure_schema(conn) is SchemaAction.MIGRATED
-        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() == 6
+        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 6
         assert conn.execute("SELECT count(*) FROM _member_refs").fetchone()[0] == 0
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
             "a.py": "",

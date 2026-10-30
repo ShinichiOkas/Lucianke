@@ -20,6 +20,9 @@
   途中で止め、残りを ``# summary:`` に要約して ``next_cursor`` で続きを返す。
 * ``Class`` / ``Struct`` を渡したときはコンストラクタ（``__init__`` / ``constructor``）の呼び出しを起点にする。
 * ``dot`` / ``mermaid``: ``data_static["graph"]``。エッジは呼び出し元 → 呼び出し先（ラベル ``CALLS``、``attrs.guard`` に条件）。
+* 結ばなかった ``super()``・継承メンバーの呼び出し（BUG-0081、``_blocked_refs``）: ``structural`` の木の根の incoming に、根に届くかも
+  しれない（受け手のクラスの線形化で中身の分からない外部の基底などが根のクラスより先にある）呼び出しの件数・理由・先頭の位置を
+  ``warnings`` と ``data.unattributed_calls``（``reason: external_base | unknown_base``）に書く。
 * 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071 / BUG-0077、``_name_calls``）: ``structural`` の
   木では、呼び出し箇所ごとに近い段（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース。テストダブルは同じファイルから
   だけ）の同名のメソッドが 1 つだけ（組み込み型と同名でない）なら結ぶ。incoming はノードが ``Method`` なら、そのノードに結べる
@@ -50,6 +53,7 @@ from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME
 from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
+from lucianke.tools import _blocked_refs as br
 from lucianke.tools import _lsp_exact as lx
 from lucianke.tools import _name_calls as nc
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
@@ -413,6 +417,8 @@ def _work(
                 tree.roots[direction] = []
         if exact is None:
             _name_notes(syms, tree)
+            if "incoming" in directions:
+                _blocked_notes(conn, ws.workspace_id, sym, tree, args.include_tests)
         elif "incoming" in directions and sym.kind is Kind.METHOD:
             _exact_name_note(names, sym, tree, args.include_tests)
         return tree, source
@@ -433,6 +439,15 @@ def _name_notes(syms: _Symbols, tree: _Tree) -> None:
             f" not attributed: {group.verdict.reason()}; e.g. {nc.sample_text(rows)} (data.unattributed_calls)"
         )
         tree.unattributed.append({"direction": direction, **group.to_json(enclosing_name_of)})
+
+
+def _blocked_notes(conn: sqlite3.Connection, ws_id: str, sym: SymbolRecord, tree: _Tree, include_tests: bool) -> None:
+    """structural の木の根の incoming: 結ばなかった ``super()``・継承メンバーの呼び出しのうち、根に届くかもしれないもの（BUG-0081）。"""
+    notes = br.blocked_notes(
+        conn, ws_id, sym, enclosing_name_of, include_tests=include_tests, use_kinds=("call",)
+    )
+    tree.warnings += [f"incoming: {w}" for w in notes.warnings]
+    tree.unattributed += [{"direction": "incoming", **u} for u in notes.unattributed]
 
 
 def _exact_name_note(names: nc.NameIndex, sym: SymbolRecord, tree: _Tree, include_tests: bool) -> None:

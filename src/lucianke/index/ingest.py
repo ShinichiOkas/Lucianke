@@ -34,6 +34,7 @@ __all__ = [
     "IngestStats",
     "NameCallFact",
     "RelationFact",
+    "SuperRefFact",
     "SymbolExtra",
     "SyntaxErrorFact",
     "TREE_SITTER_SOURCE",
@@ -137,6 +138,25 @@ class NameCallFact:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SuperRefFact:
+    """内部表 ``_member_refs`` の ``via_super = 1`` の 1 行分: ``super().name``（``super(C, self).name``・TS / JS の ``super.name``）の
+    参照・呼び出し（BUG-0081）。``class_urn`` は ``C``（探し始めるのは ``C`` の C3 線形化の次のクラスから）。位置は 0 始まり。
+
+    先は関係を整える段（``index/inherited.resolve_member_refs``）が決めて ``relations`` に行を作る。
+    """
+
+    source_urn: Urn | str
+    class_urn: str
+    name: str
+    relation_kind: str
+    use_kind: str | None
+    call_site_line: int
+    call_site_col: int
+    guard_condition: str | None = None
+    confidence: Confidence = Confidence.STRUCTURAL
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DiagnosticFact:
     """``diagnostics`` の 1 行分（LSP の ``publishDiagnostics`` 用）。位置は 0 始まり。
 
@@ -180,6 +200,8 @@ class FileFacts:
     """import の解決で調べたパスの語幹（``engine/reresolve.py``）。後からファイルが作られた・消えたとき、これを import している側を引く。"""
     name_calls: Sequence[NameCallFact] = field(default_factory=tuple)
     """受け手の型が分からない属性呼び出し（``_name_calls``。BUG-0071）。``ingest_file`` がファイルごとに全置換する。"""
+    super_refs: Sequence[SuperRefFact] = field(default_factory=tuple)
+    """``super()`` 経由の参照（``_member_refs`` の ``via_super = 1``。BUG-0081）。``ingest_file`` がファイルごとに全置換する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,6 +743,27 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
 
     # 継承したメンバーへの参照の退避行（BUG-0075。index/inherited.py）は relations と一緒に作り直す（整えで退避し直す）
     conn.execute("DELETE FROM _member_refs WHERE file_id = ?", (file_id,))
+    if facts.super_refs:  # super() 経由の参照（BUG-0081）: 先は整えで基底の C3 線形化から決める
+        conn.executemany(
+            "INSERT INTO _member_refs (file_id, source_urn, class_urn, name, relation_kind, use_kind,"
+            " call_site_line, call_site_col, guard_condition, confidence_level, via_super)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+            [
+                (
+                    file_id,
+                    _urn_str(r.source_urn),
+                    r.class_urn,
+                    r.name,
+                    r.relation_kind,
+                    r.use_kind,
+                    r.call_site_line + 1,
+                    r.call_site_col + 1,
+                    r.guard_condition,
+                    r.confidence.value,
+                )
+                for r in facts.super_refs
+            ],
+        )
     conn.execute("DELETE FROM _name_calls WHERE file_id = ?", (file_id,))
     if facts.name_calls:
         conn.executemany(

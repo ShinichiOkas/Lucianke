@@ -18,7 +18,13 @@
      同じファイルのクラスに無ければ、同じファイルの基底クラスを C3 の順（``core/mro.py``）にたどる。基底が別ファイル（または
      この場で解決できない名前・``mod.Base`` の形）なら ``<このクラス>.name`` を返し、索引の整え（``index/inherited.py``）が
      ``INHERITS`` 行をファイルをまたいでたどって基底のメンバーに結ぶ（BUG-0075）。
-  2. 同じファイルの定義の修飾名の末尾一致（一意のときだけ）。
+     ``a.b.name`` の受け手は ``a.b`` で、その型は ``a`` が同じファイルのクラスのときの属性 ``b`` の型（注釈・``self.b: T = ...``・
+     dataclass のフィールド・``self.b = T()``・戻り値の注釈つきの property / getter。同じファイルの基底も C3 の順）だけから決める（BUG-0079）。
+     ``super().name``・``super(C, self).name``・TS / JS の ``super.name`` は ``super_of``（``C`` の URN）にし、先は整えが ``C`` の
+     線形化の次のクラスから決める（BUG-0081）。
+  2. 同じファイルの定義の修飾名の末尾一致（一意のときだけ）。受け手が名前（``x.name`` の ``x``）のときだけ。受け手が式
+     （``a.b``・``f()``・``x[0]`` など）で型が分からなければ、2・3 を使わず ``name_only`` にする（``url._uri_reference.copy_with()`` を
+     同じファイルの唯一の ``URL.copy_with`` に結ばない。BUG-0079）。
   3. ``resolve_name(name)``（呼び手が import 表から作る。解決できない import は呼び手が ``lk://_ext/<pkg>#<name>`` にして返す）。
   4. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
      （Python の ``builtins``、TS / JS の標準グローバル。``syntax/builtin_names.py``）なら ``lk://_ext/<builtins_package>#<name>``。
@@ -149,6 +155,8 @@ class RelationCandidate:
 
     ``target_urn`` が ``None`` のときは解決できなかった（``target_name`` は参照された名前そのまま）。
     ``name_only`` は、``target_urn`` が ``None`` の属性呼び出しのうち、受け手の型が分からないもの（名前でしか結べない。BUG-0071）。
+    ``super_of`` は ``super().name``（``super(C, self).name``・TS / JS の ``super.name``）の ``C`` のクラスの URN。先は ``C`` の C3 線形化で
+    ``C`` の次から最初にその名前を持つクラスのメンバーで、索引の整え（``index/inherited.py``）が決める（``target_urn`` は ``None``。BUG-0081）。
     """
 
     source_urn: str
@@ -161,6 +169,7 @@ class RelationCandidate:
     guard_condition: str | None = None
     confidence: Confidence = field(default=Confidence.STRUCTURAL)
     name_only: bool = False
+    super_of: str | None = None
 
 
 def load_refs_source(language_id: str) -> str:
@@ -291,6 +300,7 @@ class _Extractor:
         self.symbols = sorted(symbols, key=lambda s: (s.range.start, _neg_pos(s.range.end)))
         self.scan = _Scan()
         self.class_bases: dict[str, list[str]] = {}  # クラスの修飾名 → 基底クラス名（同じファイルでの解決用）
+        self.class_ids: dict[str, int] = {}  # クラスの修飾名 → クラスノードの id（``scan.attr_types`` を引く。BUG-0079）
 
     # --- 名前解決の窓口 ---
 
@@ -432,13 +442,23 @@ class _Extractor:
 
         is_member = self._is_member_name(node)
         receiver_known = False
+        relation_kind, use_kind = _KIND_OF[ref.category]
+        super_of: str | None = None
         if is_member:
-            target, receiver_known = self._resolve_member(ref.recv, name, node, chain)
+            is_super, super_of = (
+                self._super_receiver(ref.recv, node, chain) if ref.recv is not None else (False, None)
+            )
+            if is_super:
+                # ``super()`` の受け手は囲みのクラスの基底（構文から分かる）。名前では結ばない（BUG-0081）
+                target, receiver_known = None, True
+                if relation_kind not in ("CALLS", "REFERENCES"):
+                    super_of = None
+            else:
+                target, receiver_known = self._resolve_member(ref.recv, name, node, chain)
         else:
             is_local, target = self._resolve_bare(name, node, chain)
             if is_local:
                 return None
-        relation_kind, use_kind = _KIND_OF[ref.category]
         guard = None
         if relation_kind == "CALLS":
             call_node = self._call_node(node)
@@ -454,6 +474,7 @@ class _Extractor:
             use_kind=use_kind,
             guard_condition=guard,
             name_only=is_member and target is None and not receiver_known and relation_kind == "CALLS",
+            super_of=super_of,
         )
 
     def _import_candidate(
@@ -612,8 +633,11 @@ class _Extractor:
                 hit = self._member_of(ref, name)
                 if hit is not None or ref[0] == "local":
                     return hit, True  # 同じファイルのクラスと分かっているのに無いメンバーは、別のクラスの同名で埋めない
-            elif self._is_self_attribute(recv):
-                return None, False  # ``self.x.name``: x の型が分からないとき、同名の他の定義に当てると組み込み型のメソッドを誤認する
+            if recv.type not in ("identifier", "this"):
+                # 受け手が式（``a.b``・``self.x``・``f()``・``x[0]`` など）で型が構文から分からない: 同じファイルの同名
+                # （``url._uri_reference.copy_with()`` を囲みのクラスの ``URL.copy_with`` に）や import した同名に当てない。
+                # 名前で結ぶか曖昧と書くかは問い合わせのとき（BUG-0071）に任せる（BUG-0079）
+                return None, False
         suffix = f".{name}"
         container = chain[-1] if chain else None
         own = recv is not None and (recv.type == "this" or self._text(recv) in _RECEIVER_SELF)
@@ -629,11 +653,70 @@ class _Extractor:
         got = self.resolve(name)
         return (None if got is not None and got.startswith(_EXTERNAL_PREFIX) else got), False
 
-    def _is_self_attribute(self, recv: Node) -> bool:
-        if recv.type not in _ATTRIBUTE_NODES:
-            return False
-        obj = recv.child_by_field_name("object")
-        return obj is not None and (obj.type == "this" or self._text(obj) in _RECEIVER_SELF)
+    def _super_receiver(
+        self, recv: Node, node: Node, chain: list[SymbolRecord]
+    ) -> tuple[bool, str | None]:
+        """``(super の受け手か, 探し始めるクラスの URN)``（BUG-0081）。
+
+        Python の ``super()``（囲みのクラス）と ``super(C, self)``（``C``）、TS / JS の ``super``（囲みのクラスのメソッド・フィールド
+        初期化子の中。オブジェクトリテラルのメソッドの ``super`` はそのオブジェクトのプロトタイプなので受け手にしない）。
+        ``super`` を自分で束ねた名前（引数・代入・import・同じファイルの定義）は組み込みの ``super`` ではない。クラスが分からない
+        （``super(type(self), self)``・外部のクラス・クラスの外）ときは ``(True, None)``（結ばない。名前でも結ばない）。
+        """
+        if self.family == _PYTHON:
+            if recv.type != "call":
+                return False, None
+            fn = recv.child_by_field_name("function")
+            if fn is None or fn.type != "identifier" or self._text(fn) != "super":
+                return False, None
+            if self._binding("super", fn)[0] != "none" or "super" in self.by_qualified or self.resolve("super"):
+                return False, None
+            args = recv.child_by_field_name("arguments")
+            named = [a for a in args.named_children if a.type != "comment"] if args is not None else []
+            if not named:
+                cls = self._class_node(node)
+                ref = self._class_ref(cls) if cls is not None else None
+            elif len(named) == 2 and named[0].type == "identifier":
+                ref = self._name_ref(self._text(named[0]), chain, node)
+            else:
+                return True, None
+        else:
+            if recv.type != "super":
+                return False, None
+            cls = self._js_super_class(node)
+            ref = self._class_ref(cls) if cls is not None else None
+        return True, self._class_urn(ref)
+
+    def _js_super_class(self, node: Node) -> Node | None:
+        """TS / JS の ``super`` が指す基底を持つクラス（アロー関数は外側の ``super`` を使う）。"""
+        anc = node.parent
+        while anc is not None:
+            if anc.type in self.classes:
+                return anc
+            if anc.type == "method_definition":
+                body = anc.parent
+                return body.parent if body is not None and body.type == "class_body" else None
+            if anc.type in self.functions and anc.type != "arrow_function":
+                return None  # function 式・宣言の中の super は構文エラー
+            anc = anc.parent
+        return None
+
+    def _class_urn(self, ref: tuple[str, str] | None) -> str | None:
+        """``("local", 修飾名)`` / ``("urn", URN)`` → ワークスペースのクラスの URN（外部・セレクタの無い URN は ``None``）。"""
+        if ref is None:
+            return None
+        kind, value = ref
+        if kind == "local":
+            return self._local_urn(value)
+        if value.startswith(_EXTERNAL_PREFIX) or "#" not in value:
+            return None
+        return value
+
+    def _local_urn(self, qualified: str) -> str | None:
+        try:
+            return str(Urn(self.workspace_id, str(self.rel), CodeSel(qualified)))
+        except ValueError:
+            return None
 
     def _member_of(self, ref: tuple[str, str], name: str) -> str | None:
         """型 ``ref`` のメンバー ``name`` の URN。
@@ -683,6 +766,23 @@ class _Extractor:
                 out.append(("other", base))
         return out
 
+    def _attr_type(self, class_qualified: str, attr: str) -> str | None:
+        """同じファイルのクラス ``class_qualified`` の属性 ``attr`` の型名（注釈・property の戻り値・構築の呼び出し）。
+
+        クラス自身 → 同じファイルの基底を C3 の順に見る。別ファイルの基底・この場で解決できない基底・中身の分からない外部の基底
+        （素通りするもの以外）に先に当たったら ``None``（その基底が同名の属性を別の型で持つかもしれない）。
+        """
+        order = c3_linearize(("local", class_qualified), self._local_bases) or [("local", class_qualified)]
+        for kind, value in order:
+            if kind == "local":
+                cid = self.class_ids.get(value)
+                tname = self.scan.attr_types.get(cid, {}).get(attr) if cid is not None else None
+                if tname is not None:
+                    return tname
+            elif not (kind == "ext" and value in TRANSPARENT_EXTERNAL_BASES):
+                return None
+        return None
+
     def _requested_member(self, class_qualified: str, name: str) -> str | None:
         """同じファイルのクラスのメンバーとして求めた URN（``<ファイル>#<クラス>.name``。シンボルが無ければ整えが基底をたどる）。"""
         try:
@@ -709,21 +809,24 @@ class _Extractor:
                 text, chain, node
             )  # クラス名・モジュール名そのもの（``Foo.create()``、``mod.f()``）
         if t in _ATTRIBUTE_NODES:
+            # ``a.b`` の型は ``b`` の型（``a`` の型ではない。BUG-0079）。構文から分かるときだけ決める
             obj = recv.child_by_field_name("object")
             prop = recv.child_by_field_name("attribute" if t == "attribute" else "property")
-            if obj is not None and prop is not None and (obj.type == "this" or self._text(obj) in _RECEIVER_SELF):
-                cls = self._class_node(node)
-                if cls is not None:
-                    tname = self.scan.attr_types.get(cls.id, {}).get(self._text(prop))
-                    if tname is not None:
-                        return self._name_ref(tname, chain, node)
-            elif obj is not None and prop is not None and obj.type in ("identifier", *_ATTRIBUTE_NODES):
+            if obj is None or prop is None or obj.type not in ("identifier", "this", *_ATTRIBUTE_NODES):
+                return None
+            inner = self._type_ref(obj, node, chain)
+            if inner is None:
+                return None
+            if inner[0] == "local":
+                # 同じファイルのクラス（``self`` の囲みのクラスを含む）の注釈つきの属性・``self.b: T = ...``・dataclass の
+                # フィールド・戻り値の注釈つきの property（``self.b = T()`` もここに入る）。同じファイルの基底も C3 の順に見る
+                tname = self._attr_type(inner[1], self._text(prop))
+                return self._name_ref(tname, chain, node) if tname is not None else None
+            if inner[1].startswith(_EXTERNAL_PREFIX):
                 # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）
-                inner = self._type_ref(obj, node, chain)
-                if inner is not None and inner[0] == "urn" and inner[1].startswith(_EXTERNAL_PREFIX):
-                    joined = _append_member(inner[1], self._text(prop))
-                    return ("urn", joined) if joined is not None else None
-            return None
+                joined = _append_member(inner[1], self._text(prop))
+                return ("urn", joined) if joined is not None else None
+            return None  # 別ファイルのクラス・モジュールの属性の型はこの場では分からない
         if t in ("call", "new_expression"):
             fn = recv.child_by_field_name("constructor" if t == "new_expression" else "function")
             if fn is not None and fn.type == "identifier":
@@ -859,6 +962,11 @@ class _Extractor:
                 name = node.child_by_field_name("name")
                 if name is not None:
                     self._bind(name, fn)
+                    if cls is not None and scope.id == cls.id and self._py_is_property(node):
+                        # 戻り値の注釈つきの property は属性として型を持つ（``a.b.m()`` の ``a.b``。BUG-0079）
+                        self._set_attr_type(
+                            cls, self._text(name), self._py_ann_name(node.child_by_field_name("return_type"))
+                        )
                 params = node.child_by_field_name("parameters")
                 child_fn = child_scope = node
                 if params is not None:
@@ -873,6 +981,7 @@ class _Extractor:
                 if name is not None:
                     self._bind(name, fn)
                     self._record_bases(name, self._py_base_names(node))
+                    self._record_class(name, node)
                 child_scope = child_cls = node
             elif t == "assignment":
                 self._py_assignment(node, fn, scope, cls)
@@ -913,6 +1022,24 @@ class _Extractor:
             if name in self.scan.globals.get(scope.id, ()):
                 continue  # ``global X`` + ``import X``: モジュールの名前を束ねる
             table[name] = key
+
+    def _record_class(self, name_node: Node, cls: Node) -> None:
+        position = self.pos(name_node)
+        sym = self.by_selection.get((position.line, position.col))
+        if sym is not None:
+            self.class_ids[sym.qualified_name] = cls.id  # 同じ修飾名はあとの定義が勝つ（``by_qualified`` と同じ）
+
+    def _py_is_property(self, fn: Node) -> bool:
+        """``@property`` / ``@functools.cached_property`` / ``@cached_property`` で飾った関数か。"""
+        parent = fn.parent
+        if parent is None or parent.type != "decorated_definition":
+            return False
+        for dec in (c for c in parent.named_children if c.type == "decorator"):
+            expr = dec.named_children[0] if dec.named_children else None
+            if expr is not None and expr.type in ("identifier", "attribute"):
+                if self._text(expr).rsplit(".", 1)[-1] in ("property", "cached_property"):
+                    return True
+        return False
 
     def _record_bases(self, name_node: Node, bases: list[str]) -> None:
         position = self.pos(name_node)
@@ -1062,6 +1189,13 @@ class _Extractor:
                     name = node.child_by_field_name("name")
                     if name is not None:
                         self._bind(name, fn)
+                elif t == "method_definition" and cls is not None and any(c.type == "get" for c in node.children):
+                    # 戻り値の注釈つきの getter は属性として型を持つ（``a.b.m()`` の ``a.b``。BUG-0079）
+                    name = node.child_by_field_name("name")
+                    if name is not None:
+                        self._set_attr_type(
+                            cls, self._text(name), self._js_ann_name(node.child_by_field_name("return_type"))
+                        )
                 child_fn = child_scope = node
                 params = node.child_by_field_name("parameters")
                 if params is not None:
@@ -1075,6 +1209,7 @@ class _Extractor:
                     if name.type == "identifier":
                         self._bind(name, fn)
                     self._record_bases(name, self._js_base_names(node))
+                    self._record_class(name, node)
                 child_scope = child_cls = node
             elif t == "interface_declaration":
                 name = node.child_by_field_name("name")

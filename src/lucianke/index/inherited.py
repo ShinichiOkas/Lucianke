@@ -17,6 +17,13 @@
   （import している側の取り込み直しは ``engine/reresolve.py``。直接の派生クラスのファイルは基底を import しているので一緒に整う）。
   前に結んだ先は ``_member_refs.resolved_urn`` に覚え、変わったら ``relations`` の行を差し替える。
 
+* **super()**（BUG-0081）: ``super().save()``（``super(C, self).save()``・TS / JS の ``super.save()``）は取り込み（``ingest_file``）が
+  ``via_super = 1`` の行として直接入れる（``class_urn`` は ``C``）。結ぶときは ``C`` の線形化の **次のクラスから** 探す（``C`` 自身の
+  上書きには結ばない）。外部・クラスでない基底に先に当たったときの扱いは上と同じ。
+* **結べない理由**（``blocked_member_refs``）: 先に当たって止めた基底（中身の分からない外部の基底・クラスでない基底）の後ろに
+  対象のクラスがあれば、その参照は対象に届くかもしれない。T-06 / T-07 が「結ばなかった」と理由つきで書く（名前の一致の
+  「型不明・曖昧」には回さない）。
+
 ``_member_refs`` はファイルの取り込み（``ingest_file``）で全置換され、ファイルの削除で CASCADE で消える。
 """
 
@@ -25,13 +32,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Final
 
 from lucianke.core.model import Kind
 from lucianke.core.mro import TRANSPARENT_EXTERNAL_BASES, c3_linearize
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, parse
 
-__all__ = ["CLASS_KINDS", "park_member_refs", "resolve_member_refs"]
+__all__ = ["CLASS_KINDS", "BlockedRef", "blocked_member_refs", "park_member_refs", "resolve_member_refs"]
 
 CLASS_KINDS: Final = frozenset(
     {Kind.CLASS.value, Kind.INTERFACE.value, Kind.STRUCT.value, Kind.TRAIT.value, Kind.ENUM.value}
@@ -98,6 +106,15 @@ def park_member_refs(conn: sqlite3.Connection, file_id: int) -> int:
     return len(parked)
 
 
+@dataclass(frozen=True, slots=True)
+class _Lookup:
+    """C3 の順に探した結果。``blocker`` は先に当たって探すのをやめた基底（中身の分からない外部の基底・クラスでない基底）。"""
+
+    found: str | None
+    blocker: str | None
+    order: tuple[str, ...]
+
+
 class _Resolver:
     """C3 の順にメンバーを探す（1 回の整えの中で、基底・メンバー・線形化を覚えておく）。"""
 
@@ -106,7 +123,7 @@ class _Resolver:
         self._bases: dict[str, list[str]] = {}
         self._kinds: dict[str, str | None] = {}
         self._orders: dict[str, list[str] | None] = {}
-        self._found: dict[tuple[str, str], str | None] = {}
+        self._found: dict[tuple[str, str, bool], _Lookup] = {}
 
     def _kind(self, urn: str) -> str | None:
         if urn not in self._kinds:
@@ -146,29 +163,39 @@ class _Resolver:
         ).fetchone()
         return None if row is None else str(row[0])
 
-    def resolve(self, cls: str, name: str) -> str | None:
-        key = (cls, name)
+    def resolve(self, cls: str, name: str, *, after: bool = False) -> str | None:
+        """``cls`` の線形化で最初に ``name`` を持つクラスのメンバー。``after`` なら ``cls`` 自身は探さない（``super()``）。"""
+        return self.lookup(cls, name, after=after).found
+
+    def lookup(self, cls: str, name: str, *, after: bool = False) -> _Lookup:
+        key = (cls, name, after)
         if key not in self._found:
-            self._found[key] = self._resolve(cls, name)
+            self._found[key] = self._lookup(cls, name, after)
         return self._found[key]
 
-    def _resolve(self, cls: str, name: str) -> str | None:
+    def order(self, cls: str) -> list[str] | None:
         if cls not in self._orders:
             self._orders[cls] = c3_linearize(cls, self.bases)
-        order = self._orders[cls]
+        return self._orders[cls]
+
+    def has_member(self, cls: str, name: str) -> bool:
+        return not cls.startswith(_EXTERNAL_PREFIX) and self._member(cls, name) is not None
+
+    def _lookup(self, cls: str, name: str, after: bool) -> _Lookup:
+        order = self.order(cls)
         if order is None:
-            return None  # 循環・矛盾した並び
-        for c in order:
+            return _Lookup(None, None, ())  # 循環・矛盾した並び
+        for c in order[1:] if after else order:
             if c.startswith(_EXTERNAL_PREFIX):
                 if c in TRANSPARENT_EXTERNAL_BASES:
                     continue
-                return None  # 中身の分からない外部の基底: 同名を定義しているかもしれない
+                return _Lookup(None, c, tuple(order))  # 中身の分からない外部の基底: 同名を定義しているかもしれない
             if self._kind(c) not in CLASS_KINDS:
-                return None  # クラスでない基底（別名など）: 実体が分からない
+                return _Lookup(None, c, tuple(order))  # クラスでない基底（別名など）: 実体が分からない
             hit = self._member(c, name)
             if hit is not None:
-                return hit
-        return None
+                return _Lookup(hit, None, tuple(order))
+        return _Lookup(None, None, tuple(order))
 
 
 def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> int:
@@ -183,14 +210,14 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
         "  sub(urn) AS (SELECT urn FROM seed UNION"
         "   SELECT r.source_urn FROM relations r JOIN sub ON r.target_urn = sub.urn WHERE r.relation_kind = 'INHERITS')"
         " SELECT rowid, file_id, source_urn, class_urn, name, relation_kind, use_kind, call_site_line, call_site_col,"
-        "  guard_condition, confidence_level, resolved_urn FROM _member_refs"
+        "  guard_condition, confidence_level, resolved_urn, via_super FROM _member_refs"
         " WHERE file_id IN (SELECT value FROM json_each(:ids)) OR class_urn IN (SELECT urn FROM sub)",
         {"ids": ids},
     ).fetchall()
     resolver = _Resolver(conn)
     changed = 0
-    for rowid, file_id, source, cls, name, kind, use_kind, line, col, guard, confidence, old in rows:
-        new = resolver.resolve(str(cls), str(name))
+    for rowid, file_id, source, cls, name, kind, use_kind, line, col, guard, confidence, old, via_super in rows:
+        new = resolver.resolve(str(cls), str(name), after=bool(via_super))
         site = (file_id, source, kind, line, col)
         touched = False
         if old is not None and old != new:
@@ -217,3 +244,69 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
             conn.execute("UPDATE _member_refs SET resolved_urn = ? WHERE rowid = ?", (new, rowid))
         changed += touched
     return changed
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedRef:
+    """結べなかった ``_member_refs`` の行のうち、対象のクラスに届くかもしれないもの（``blocked_member_refs``）。位置は 1 始まり。"""
+
+    source_urn: str
+    class_urn: str  # 受け手のクラス（super() なら super を書いたクラス）
+    blocker: str  # 線形化で対象のクラスより先に当たって探すのをやめた基底
+    reason: str  # ``external_base``（中身の分からない外部の基底）| ``unknown_base``（クラスでない基底）
+    via_super: bool
+    relation_kind: str
+    use_kind: str | None
+    path: str
+    line: int
+    col: int
+    is_test: bool
+
+
+def blocked_member_refs(conn: sqlite3.Connection, workspace_id: str, target_urn: str) -> list[BlockedRef]:
+    """対象のメンバー ``target_urn``（``path#Cls.name``）に届くかもしれないのに結ばなかった参照（BUG-0081）。
+
+    ``_member_refs`` の結べなかった行（``resolved_urn IS NULL``）のうち、名前が同じで、受け手のクラスの線形化で ``Cls`` が
+    探すのをやめた基底（外部・クラスでない）の後ろにあり、その間に同名を持つワークスペースのクラスが無いもの。並びは（パス、行、列）。
+    """
+    split = _split_member(target_urn)
+    if split is None:
+        return []
+    owner, name = split
+    try:
+        rows = conn.execute(
+            "SELECT mr.source_urn, mr.class_urn, mr.via_super, mr.relation_kind, mr.use_kind, mr.call_site_line,"
+            " mr.call_site_col, f.path, f.is_test FROM _member_refs mr JOIN files f ON f.file_id = mr.file_id"
+            " WHERE f.workspace_id = ? AND mr.name = ? AND mr.resolved_urn IS NULL"
+            " ORDER BY f.path, mr.call_site_line, mr.call_site_col",
+            (workspace_id, name),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:  # v7 より前の DB（移行前に読んだ）。無いものとして答える
+        if "no such" in str(exc):
+            return []
+        raise
+    resolver = _Resolver(conn)
+    out: list[BlockedRef] = []
+    for source, cls, via_super, kind, use_kind, line, col, path, is_test in rows:
+        lk = resolver.lookup(str(cls), name, after=bool(via_super))
+        if lk.blocker is None or owner not in lk.order:
+            continue
+        start, end = lk.order.index(lk.blocker) + 1, lk.order.index(owner)
+        if end < start or any(resolver.has_member(c, name) for c in lk.order[start:end]):
+            continue
+        out.append(
+            BlockedRef(
+                source_urn=str(source),
+                class_urn=str(cls),
+                blocker=lk.blocker,
+                reason="external_base" if lk.blocker.startswith(_EXTERNAL_PREFIX) else "unknown_base",
+                via_super=bool(via_super),
+                relation_kind=str(kind),
+                use_kind=None if use_kind is None else str(use_kind),
+                path=str(path),
+                line=int(line),
+                col=int(col),
+                is_test=bool(is_test),
+            )
+        )
+    return out

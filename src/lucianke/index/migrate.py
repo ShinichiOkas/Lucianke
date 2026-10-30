@@ -120,12 +120,26 @@ def _migrate_5_to_6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_6_to_7(conn: sqlite3.Connection) -> None:
+    """v7: ``_member_refs.via_super``（``super().save()`` を基底のメソッドに結ぶ。BUG-0081）。
+
+    v6 までの取り込みは、``super()`` 経由の呼び出しを名前だけの呼び出し（``_name_calls``）にし、属性を辿った受け手の呼び出し
+    （``url._uri_reference.copy_with()``）を同じファイルの同名のメソッドに結んでいた（BUG-0079）。どちらも取り込み直さないと直らないので、
+    v5・v6 と同じく関係を抽出する言語（Python / TS / JS）のファイルの ``sha256`` を空にして、次の差分走査で取り込み直させる。
+    """
+    conn.execute("ALTER TABLE _member_refs ADD COLUMN via_super INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('python', 'typescript', 'tsx', 'javascript', 'jsx')"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
     3: _migrate_3_to_4,
     4: _migrate_4_to_5,
     5: _migrate_5_to_6,
+    6: _migrate_6_to_7,
 }
 
 

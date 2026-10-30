@@ -655,6 +655,27 @@ async def test_t07_postcondition_1_2_3_4_5_6_call_hierarchy(rig: Rig) -> None:
         assert n["urn"].startswith("lk://_ext/") and not n.get("children")
 
 
+async def test_t07_structural_edges_follow_the_attribute_receiver(rig: Rig) -> None:
+    """BUG-0079: httpx ``URL.__init__`` の ``url._uri_reference.copy_with(**kwargs)`` の受け手は ``url._uri_reference``（``ParseResult``）。
+    構造層の ``relations`` に ``URL.__init__ -> URL.copy_with`` の辺を作らない（LSP〈basedpyright〉も作らない辺）。"""
+    if rig.key != "F-PY":
+        pytest.skip(reason="not applicable: the BUG-0079 call site is in F-PY (httpx/_urls.py), not in F-TS")
+    rel = "httpx/_urls.py"
+    line = next(
+        i + 1 for i, text in enumerate(rig.read(rel).split("\n")) if "url._uri_reference.copy_with(" in text
+    )
+    r = await rig.ok(
+        "query_project_db",
+        query=(
+            "SELECT r.source_urn, r.target_urn FROM relations r JOIN files f ON f.file_id = r.source_file_id"
+            f" WHERE f.path = '{rel}' AND r.call_site_line = {line} AND r.relation_kind = 'CALLS'"
+            " AND r.confidence_level = 'structural'"
+        ),
+    )
+    targets = {row["target_urn"] for row in r["data"]["rows"]}
+    assert not any(t.endswith("#URL.copy_with") for t in targets), targets
+
+
 # --- T-08 -----------------------------------------------------------------------------------------
 
 

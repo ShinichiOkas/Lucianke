@@ -449,6 +449,118 @@ def test_typescript_members_inherited_from_another_file():
     assert _one(rels, kind="CALLS", name="shout").target_urn == f"lk://{WS}/web/sub.ts#Loud.shout"
 
 
+# --- 属性を辿った受け手（BUG-0079） ---------------------------------------------------------------
+
+CHAIN_PY = (
+    b"class Parsed:\n    def copy_with(self): ...\n\n\n"
+    b"class Url:\n    parsed: Parsed\n\n    def __init__(self, url: Url, other):\n"
+    b"        self.raw = url.raw.copy_with()\n"  # 8: raw の型は分からない
+    b"        self.parsed = url.parsed.copy_with()\n"  # 9: parsed: Parsed
+    b"        self.mine: Parsed = Parsed()\n"
+    b"        self.mine.copy_with()\n"  # 11: self.mine: Parsed
+    b"        self.view.copy_with()\n"  # 12: @property -> Parsed
+    b"        url.raw.missing()\n"  # 13: raw の型は分からない
+    b"        make().copy_with()\n"  # 14: 呼び出しの戻り値
+    b"        url.items[0].copy_with()\n"  # 15: 添字
+    b"        self.raw.copy_with()\n"  # 16: self.raw の型は分からない
+    b"\n    @property\n    def view(self) -> Parsed:\n        return self.parsed\n\n"
+    b"    def copy_with(self): ...\n"
+)
+
+
+def test_attribute_chain_with_unknown_type_is_not_bound_to_the_receivers_class():
+    """``url.raw.copy_with()`` の受け手は ``url.raw``（型が分からない）。``type(url)`` の ``Url.copy_with``（同じファイルの唯一の
+    ``.copy_with`` でもある）にも、同じファイルの同名にも結ばず、名前だけの呼び出しにする。呼び出しの戻り値・添字の受け手も同じ。"""
+    rels = _relations("python", CHAIN_PY, "chain.py")
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="copy_with")}
+    for line in (8, 14, 15, 16):
+        assert by_line[line].target_urn is None and by_line[line].name_only, (line, by_line[line])
+    missing = _one(rels, kind="CALLS", name="missing")
+    assert missing.target_urn is None and missing.name_only
+
+
+def test_attribute_chain_with_a_structurally_known_type_binds_to_that_type():
+    """注釈つきのクラス属性（dataclass のフィールドと同じ）・``self.x: T = ...``・戻り値の注釈つきの property は、その型のメンバー。"""
+    rels = _relations("python", CHAIN_PY, "chain.py")
+    by_line = {r.call_site_line: r.target_urn for r in _where(rels, kind="CALLS", name="copy_with")}
+    parsed = f"lk://{WS}/chain.py#Parsed.copy_with"
+    assert (by_line[9], by_line[11], by_line[12]) == (parsed, parsed, parsed)  # url.parsed / self.mine / self.view
+
+
+def test_attribute_type_is_inherited_from_a_same_file_base():
+    src = (
+        b"class Parsed:\n    def copy_with(self): ...\n\n\nclass Base:\n    ref: Parsed\n\n\n"
+        b"class Sub(Base):\n    def go(self, s: Sub):\n        self.ref.copy_with()\n        s.ref.copy_with()\n"
+    )
+    rels = _relations("python", src, "inh.py")
+    assert [r.target_urn for r in _where(rels, kind="CALLS", name="copy_with")] == [
+        f"lk://{WS}/inh.py#Parsed.copy_with"
+    ] * 2
+
+
+def test_typescript_attribute_chains():
+    """``this.x.m()``・``u.x.m()``: フィールドの型・パラメータプロパティ・getter の戻り値の型で決め、分からなければ名前だけ。"""
+    src = (
+        b"class Parsed {\n  copyWith(): Parsed { return this; }\n}\n\n"
+        b"class Url {\n  ref: Parsed;\n  private untyped;\n  constructor(private inner: Parsed) {}\n"
+        b"  get view(): Parsed { return this.ref; }\n  copyWith(): Url { return this; }\n"
+        b"  go(u: Url) {\n"
+        b"    this.ref.copyWith();\n"  # 11
+        b"    this.inner.copyWith();\n"  # 12
+        b"    this.view.copyWith();\n"  # 13
+        b"    u.ref.copyWith();\n"  # 14
+        b"    this.untyped.copyWith();\n"  # 15
+        b"    u.untyped.copyWith();\n"  # 16
+        b"  }\n}\n"
+    )
+    rels = _relations("typescript", src, "url.ts")
+    by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="copyWith")}
+    parsed = f"lk://{WS}/url.ts#Parsed.copyWith"
+    assert [by_line[i].target_urn for i in (11, 12, 13, 14)] == [parsed] * 4
+    for line in (15, 16):
+        assert by_line[line].target_urn is None and by_line[line].name_only
+
+
+# --- super()（BUG-0081） -------------------------------------------------------------------------
+
+
+def test_python_super_points_the_settle_step_at_the_enclosing_class():
+    """``super().m()`` は ``super_of`` に囲みのクラス、``super(C, self).m()`` は ``C``。先は決めず（整えが ``C`` の次から探す）、
+    名前だけの呼び出しにもしない。自分で束ねた ``super`` とクラスの外の ``super()`` は対象にしない。"""
+    src = (
+        b"from pkg.base import Base\n\n\nclass Sub(Base):\n"
+        b"    def save(self):\n        return super().save()\n\n"  # 5
+        b"    def load(self):\n        return super(Sub, self).load()\n\n"  # 8
+        b"    def size(self):\n        return super().size\n\n"  # 11
+        b"    def odd(self):\n        return super(type(self), self).odd()\n\n\n"  # 14
+        b"def outside():\n    return super().save()\n\n\n"  # 18
+        b"def shadow(super):\n    return super().save()\n"  # 22
+    )
+    rels = _relations("python", src, "pkg/sub.py", {"Base": f"lk://{WS}/pkg/base.py#Base"}.get)
+    sub = f"lk://{WS}/pkg/sub.py#Sub"
+    got = {(r.call_site_line, r.target_name): (r.relation_kind, r.target_urn, r.super_of, r.name_only) for r in rels}
+    assert got[(5, "save")] == ("CALLS", None, sub, False)
+    assert got[(8, "load")] == ("CALLS", None, sub, False)
+    assert got[(11, "size")] == ("REFERENCES", None, sub, False)
+    assert got[(14, "odd")] == ("CALLS", None, None, False)  # クラスが分からない: 結ばない・名前でも結ばない
+    assert got[(18, "save")] == ("CALLS", None, None, False)
+    assert got[(22, "save")][2] is None and got[(22, "save")][3]  # 引数の super は組み込みではない
+
+
+def test_typescript_super_member_access():
+    src = (
+        b'import { Base } from "./base";\n\nclass Sub extends Base {\n  save(): number {\n'
+        b"    const f = () => super.save();\n"  # 4: アロー関数は外側の super
+        b"    const o = { save() { return super.save(); } };\n"  # 5: オブジェクトリテラルのメソッド
+        b"    return super.save();\n"  # 6
+        b"  }\n}\n"
+    )
+    rels = _relations("typescript", src, "web/sub.ts", {"Base": f"lk://{WS}/web/base.ts#Base"}.get)
+    got = {r.call_site_line: (r.target_urn, r.super_of, r.name_only) for r in _where(rels, kind="CALLS", name="save")}
+    sub = f"lk://{WS}/web/sub.ts#Sub"
+    assert got == {4: (None, sub, False), 5: (None, None, False), 6: (None, sub, False)}
+
+
 def test_typescript_extends_implements_and_types():
     src = (
         b"import { Base, Port as P } from './base';\n"

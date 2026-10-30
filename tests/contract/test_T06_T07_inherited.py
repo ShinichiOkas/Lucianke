@@ -126,7 +126,11 @@ async def test_t06_lists_calls_through_subclass_receivers_as_structural(pipeline
     assert worker not in {
         (p, line) for p, line, _ in got
     }  # Worker(threading.Thread, Base): 先の外部の基底が持つかもしれない
-    assert data["totals"].get("by_name") is None and "unattributed_calls" not in data
+    assert data["totals"].get("by_name") is None
+    # 結ばなかった Worker.go は、名前の一致の「曖昧」ではなく、先の外部の基底を理由に書く（BUG-0081）
+    assert [(u["reason"], [(s["path"], s["line"]) for s in u["sites"]]) for u in data["unattributed_calls"]] == [
+        ("external_base", [worker])
+    ]
     assert r.structured["_resolution_meta"]["confidence_level"] == "structural"
 
 

@@ -21,6 +21,9 @@ LSP が ``ready`` でない・時間切れ・失敗なら ``structural``（今�
   ``conf=heuristic`` ・json の ``match: "name"`` で足す。同じ段に同名が複数・組み込み型と同名なら足さず、件数と先頭の位置を
   ``warnings`` と ``data.unattributed_calls`` に書く。``exact`` の答えには足さない（結べるのに LSP の答えに無い位置の件数と先頭を
   ``warnings`` に書く）。
+* 結ばなかった ``super()``・継承メンバーの参照（BUG-0081、``_blocked_refs``）: 受け手のクラスの線形化で中身の分からない外部の基底などに
+  先に当たって結ばなかった参照のうち、対象のクラスがその基底の後ろにあるものを、``structural`` の答えで件数・理由・先頭の位置として
+  ``warnings`` と ``data.unattributed_calls``（``reason: external_base | unknown_base``）に書く。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
 ``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
@@ -53,6 +56,7 @@ from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
 from lucianke.lsp import features
 from lucianke.syntax.heuristic import lexical_scan
+from lucianke.tools import _blocked_refs as br
 from lucianke.tools import _lsp_exact as lx
 from lucianke.tools import _name_calls as nc
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
@@ -447,6 +451,24 @@ def _name_refs(
         found.unattributed.append(u.to_json(enclosing_name_of))
 
 
+def _blocked_refs(
+    conn: sqlite3.Connection, ws: Workspace, sym: SymbolRecord, args: FindReferencesArgs, found: _Found
+) -> None:
+    """結ばなかった ``super()``・継承メンバーの参照のうち、対象に届くかもしれないものを理由つきで書く（BUG-0081。処理規約 9）。"""
+    notes = br.blocked_notes(
+        conn,
+        ws.workspace_id,
+        sym,
+        enclosing_name_of,
+        include_tests=args.include_tests,
+        use_kinds=args.use_kinds or None,
+        in_scope=_scope_set(conn, ws.workspace_id, args),
+        known={(r.path, r.line, r.col) for r in found.refs},
+    )
+    found.warnings += notes.warnings
+    found.unattributed += notes.unattributed
+
+
 def _lexical_refs(
     conn: sqlite3.Connection,
     ws: Workspace,
@@ -550,6 +572,8 @@ def _work(
         if args.query_type in ("references", "all"):
             found.refs = _collect_refs(conn, ws, sym, args, files, source, exact_rows)
             _name_refs(conn, ws, sym, args, source, found, exact=exact_rows is not None)
+            if exact_rows is None:
+                _blocked_refs(conn, ws, sym, args, found)
             if args.include_lexical_in_other_files:
                 known = {(r.path, r.line, r.col) for r in found.refs}
                 found.refs += _lexical_refs(conn, ws, sym, args, known, found)
