@@ -646,12 +646,13 @@ class CallEdgeSource:
         route: LspRoute,
         token: str,
         roots: Iterable[str],
-        budget_s: float = EXACT_BUDGET_S,
+        budget_s: float | None = None,
     ) -> None:
         self.loop, self.services, self.ws, self.db_path, self.conn = loop, services, ws, db_path, conn
         self.route, self.token = route, token
         self.roots = set(roots)
-        self.deadline = time.monotonic() + budget_s
+        # 省略時は作るときの ``EXACT_BUDGET_S``（定義時に固定しない。契約テストが真値を取る間だけ延ばせるように。BUG-0080）
+        self.deadline = time.monotonic() + (EXACT_BUDGET_S if budget_s is None else budget_s)
         self.sites = SiteIndex(services, ws)
         self.staged: list[RelationFact] = []
         self.staged_rows: dict[tuple[str, str], list[queries.ReferenceRow]] = {}

@@ -7,7 +7,10 @@
 LSP の水準: F-PY は basedpyright + ruff が ready なので ``exact`` で確かめる。F-TS は、この環境に TypeScript の LSP
 （typescript-language-server / vtsls）が無ければ構文層（Tree-sitter）の降格応答になる。``exact`` 水準だけが条件の事後条件は
 ``rig.lsp_ready`` で分岐し、LSP が無いときは降格応答の約束（``lsp_status`` が ready でない・構造層の応答・書き込みが無い）を確かめる。
-skip はしない（``bench/exit_criteria.toml`` の ``skips = "fail"``）。
+exact の事後条件の答えは ``_rig.ask_exact`` で得る（負荷で LSP の予算を使い切って降格したら、期限を延ばして聞き直す。得られなければ
+fail）。skip するのは、型解決の LSP がこの環境に入っていない（F-TS で TypeScript の LSP が無い）ときの exact の事後条件だけで、理由は
+そのとおりに書く（``_rig.require_exact_lsp``。exact の事後条件は試験の最後に置き、skip が他の事後条件を外さないようにする）。
+``bench/exit_criteria.toml`` は ``skips = "report"``（BUG-0057・BUG-0080）。
 
 事後条件の印は ``bench/postcondition_map.py`` の書き方（関数名の ``postcondition_N``、docstring の ``PC:T-xx#n``）に従う。
 """
@@ -23,7 +26,7 @@ from typing import Any
 import pytest
 import tree_sitter_python
 import tree_sitter_typescript
-from _rig import Rig, warm_up
+from _rig import Rig, ask_exact, patient_lsp, require_exact_lsp, warm_up
 from _targets import TARGETS, assert_present, target_dict
 from tree_sitter import Language, Parser
 
@@ -321,10 +324,14 @@ async def test_t04_postcondition_1_2_3_4_resolve(rig: Rig) -> None:
     t = TARGETS[rig.key]
     assert_present(rig.root, t)
     await warm_up(rig, [t.sym_path, t.callee_path])
-    r = await rig.ok(
-        "resolve_symbols",
-        targets=[target_dict(t.sym_path, t.sym), target_dict(t.callee_path, t.callee)],
-        resolve_type_definitions=True,
+    args: dict[str, Any] = {
+        "targets": [target_dict(t.sym_path, t.sym), target_dict(t.callee_path, t.callee)],
+        "resolve_type_definitions": True,
+    }
+    r = (
+        await ask_exact(rig, "resolve_symbols", what=T04_EXACT, exact=_any_exact_item, **args)
+        if rig.lsp_ready
+        else await rig.ok("resolve_symbols", **args)
     )
     items = r["data"]["items"]
     assert len(items) == 2 and all(i["ok"] for i in items), items
@@ -354,20 +361,26 @@ async def test_t04_postcondition_1_2_3_4_resolve(rig: Rig) -> None:
         assert exact, "the LSP is ready but no item is exact"
     else:
         assert not exact
-        pytest.skip(
-            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-04#4 signature_expanded vs LSP hover)"
-        )
+        require_exact_lsp(rig, T04_EXACT)
     handle = rig.pool.get(rig.language, rig.ws)
     for i in exact:
         sel = i["symbol"]["selection_range"]
-        hover = await features.hover(
-            handle, RelPath(i["symbol"]["path"]), Position(sel["line"] - 1, sel["start_col"] - 1)
-        )
+        with patient_lsp():  # 真値（BUG-0080）
+            hover = await features.hover(
+                handle, RelPath(i["symbol"]["path"]), Position(sel["line"] - 1, sel["start_col"] - 1)
+            )
         assert (
             hover is not None
             and squash(hover) == squash(i["signature_expanded"])
             or squash(i["signature_expanded"]) in squash(hover or "")
         )
+
+
+T04_EXACT = "T-04#4 signature_expanded vs LSP hover"
+
+
+def _any_exact_item(r: dict[str, Any]) -> bool:
+    return any(i["confidence_level"] == "exact" for i in r["data"]["items"])
 
 
 async def _ambiguous_name(rig: Rig) -> tuple[str, str]:
@@ -421,13 +434,23 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
     t = TARGETS[rig.key]
     await warm_up(rig, [t.sym_path])
     tgt = target_dict(t.sym_path, t.sym)
-    r = await rig.ok(
-        "find_references_and_implementations",
-        target=tgt,
-        query_type="references",
-        include_tests=True,
-        max_tokens=6000,
-    )
+    first: dict[str, Any] = {
+        "target": tgt,
+        "query_type": "references",
+        "include_tests": True,
+        "max_tokens": 6000,
+    }
+    # LSP があれば最初の答えを exact で得て（BUG-0080）、すぐ真値も取る。以降の問い合わせは PaaD の exact 行から答えるので、
+    # 事後条件 2〜6 も LSP の期限（負荷）で経路が揺れない。最初から延ばした期限で聞く: basedpyright は references の要求が
+    # 1 度取り消されると、同じプロセスの references がすべて失敗する（票 BUG-0083）。製品の期限 3 秒で切れたら exact も真値も取れない。
+    want: set[tuple[str, int, int]] = set()
+    if rig.lsp_ready:
+        r = await ask_exact(
+            rig, "find_references_and_implementations", what=T06_EXACT, product_first=False, **first
+        )
+        want = await _lsp_references(rig, t.sym_path, r["data"]["target"]["selection_range"])
+    else:
+        r = await rig.ok("find_references_and_implementations", **first)
     refs = r["references"] if "references" in r else r["data"]["references"]
     assert refs
     assert r["budget"]["used_tokens_est"] <= 6000  # 事後条件 6
@@ -460,24 +483,6 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
         if not cursor:
             break
     assert len(seen) == len(set(seen)) and len(seen) >= len(refs) - 1, (len(seen), len(refs))
-    # 事後条件 1: exact 水準のとき、LSP の参照検索結果と一致する
-    if rig.lsp_ready and meta_level(r) == "exact":
-        handle = rig.pool.get(rig.language, rig.ws)
-        sel = r["data"]["target"]["selection_range"]
-        lsp = await features.references(
-            handle,
-            RelPath(t.sym_path),
-            Position(sel["line"] - 1, sel["start_col"] - 1),
-            include_declaration=False,
-        )
-        want = {(x.rel, x.range.start.line + 1, x.range.start.col + 1) for x in lsp}
-        got = {(x["path"], x["line"], x["col"]) for x in refs if x["confidence_level"] == "exact"}
-        assert got == want or got <= want, (sorted(want - got)[:5], sorted(got - want)[:5])
-    else:
-        assert not rig.lsp_ready or meta_level(r) != "exact"
-        pytest.skip(
-            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-06#1 references vs LSP)"
-        )
     # 事後条件 5: 解決できない import は外部シンボル lk://_ext/<pkg>#<name> として索引に現れ、それを target にした references は import の箇所を返す
     ext_q = "SELECT urn FROM symbols WHERE urn LIKE 'lk://\\_ext/%' ESCAPE '\\' ORDER BY urn LIMIT 1"
     ext = (await rig.ok("query_project_db", query=ext_q))["data"]["rows"]
@@ -490,6 +495,31 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
     )
     assert er["data"]["target"]["urn"] == ext[0]["urn"]
     assert er["data"]["references"] and any(x["use"] == "import" for x in er["data"]["references"])
+    # 事後条件 1: exact 水準のとき、LSP の参照検索結果と一致する（exact の事後条件だけを最後に置く: skip はこれだけを外す）
+    if not rig.lsp_ready:
+        assert meta_level(r) != "exact"
+        require_exact_lsp(rig, T06_EXACT)
+    got = {(x["path"], x["line"], x["col"]) for x in refs if x["confidence_level"] == "exact"}
+    assert got and want, (
+        "the answer is exact but has no exact reference, or the LSP found none",
+        len(got),
+        len(want),
+    )
+    assert got == want or got <= want, (sorted(want - got)[:5], sorted(got - want)[:5])
+
+
+T06_EXACT = "T-06#1 references vs LSP"
+
+
+async def _lsp_references(rig: Rig, rel: str, sel: dict[str, Any]) -> set[tuple[str, int, int]]:
+    """真値: LSP に直に聞いた参照（宣言を除く）。延ばした期限で聞く（BUG-0080）。"""
+    handle = rig.pool.get(rig.language, rig.ws)
+    assert handle is not None, "the types LSP is not ready"
+    with patient_lsp():
+        lsp = await features.references(
+            handle, RelPath(rel), Position(sel["line"] - 1, sel["start_col"] - 1), include_declaration=False
+        )
+    return {(str(x.rel), x.range.start.line + 1, x.range.start.col + 1) for x in lsp}
 
 
 def meta_level(r: dict[str, Any]) -> str:
@@ -623,24 +653,6 @@ async def test_t07_postcondition_1_2_3_4_5_6_call_hierarchy(rig: Rig) -> None:
         window = guard_window(rig, e["call_site_path"], e["call_site_line"])
         for part in guard_sources(e["guard"]):
             assert squash(part) in window, (e["guard"], e["call_site_path"], e["call_site_line"], part)
-    # 事後条件 2: exact 水準のとき depth = 1 の incoming ノード集合は LSP の incoming calls と等しい
-    d1 = await rig.ok(
-        "query_call_hierarchy", target=tgt, direction="incoming", depth=1, max_children=500, max_tokens=8000
-    )
-    if rig.lsp_ready and meta_level(d1) == "exact":
-        handle = rig.pool.get(rig.language, rig.ws)
-        sel = d1["data"]["root"]["selection_range"]
-        items = await features.prepare_call_hierarchy(
-            handle, RelPath(t.callee_path), Position(sel["line"] - 1, sel["start_col"] - 1)
-        )
-        assert items
-        lsp = {(str(e.item.rel), e.item.name) for e in await features.incoming_calls(handle, items[0])}
-        got = {(n["path"], n["name"].split(".")[-1]) for n in d1["data"]["nodes"] if n["depth"] == 1}
-        assert got == lsp, (sorted(got - lsp), sorted(lsp - got))
-    else:
-        pytest.skip(
-            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-07#2 call hierarchy depth-1 vs LSP)"
-        )
     # 事後条件 5: 解決できない import の呼び先は is_external の葉
     out = await rig.ok(
         "query_call_hierarchy",
@@ -653,6 +665,28 @@ async def test_t07_postcondition_1_2_3_4_5_6_call_hierarchy(rig: Rig) -> None:
     ext_nodes = [n for n in (out["data"].get("nodes") or []) if n.get("is_external")]
     for n in ext_nodes:
         assert n["urn"].startswith("lk://_ext/") and not n.get("children")
+    # 事後条件 2: exact 水準のとき depth = 1 の incoming ノード集合は LSP の incoming calls と等しい
+    # （exact の事後条件だけを最後に置く: skip はこれだけを外す。答えは ask_exact で exact を得る。BUG-0080）
+    d1_args: dict[str, Any] = {
+        "target": tgt, "direction": "incoming", "depth": 1, "max_children": 500, "max_tokens": 8000,
+    }  # fmt: skip
+    if not rig.lsp_ready:
+        assert meta_level(await rig.ok("query_call_hierarchy", **d1_args)) != "exact"
+        require_exact_lsp(rig, T07_EXACT)
+    d1 = await ask_exact(rig, "query_call_hierarchy", what=T07_EXACT, **d1_args)
+    handle = rig.pool.get(rig.language, rig.ws)
+    sel = d1["data"]["root"]["selection_range"]
+    with patient_lsp():  # 真値（BUG-0080）
+        items = await features.prepare_call_hierarchy(
+            handle, RelPath(t.callee_path), Position(sel["line"] - 1, sel["start_col"] - 1)
+        )
+        assert items
+        lsp = {(str(e.item.rel), e.item.name) for e in await features.incoming_calls(handle, items[0])}
+    got = {(n["path"], n["name"].split(".")[-1]) for n in d1["data"]["nodes"] if n["depth"] == 1}
+    assert got == lsp, (sorted(got - lsp), sorted(lsp - got))
+
+
+T07_EXACT = "T-07#2 call hierarchy depth-1 vs LSP"
 
 
 async def test_t07_structural_edges_follow_the_attribute_receiver(rig: Rig) -> None:

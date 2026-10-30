@@ -8,6 +8,9 @@
   無ければ構文層（Tree-sitter）の降格応答で事後条件を確かめる（``Rig.lsp_ready``）。
 * 取得されていなければ ``FixtureMissing``。``conftest.py`` の ``fetched_fixtures`` が取得しにいき、失敗なら赤にする（BUG-0062）。
   ``LUCIANKE_NO_FIXTURE_FETCH=1`` のときだけ、これを理由（NOT CHECKED）に skip する。
+* exact 水準の事後条件（BUG-0080）: ``require_exact_lsp`` が前提を確かめる。skip するのは型解決の LSP がこの環境に **入っていない**
+  ときだけ（理由は事実どおり）。入っているのに ready でなければ fail。``ask_exact`` は exact の答えを得るまで聞き直し、得られなければ
+  fail にする（負荷で 1 問い合わせの LSP の予算を使い切って ``structural`` に降格しても、検査を黙って外さない）。
 """
 
 from __future__ import annotations
@@ -18,22 +21,27 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
 from _t11_harness import snapshot  # tests/contract の共通部品（conftest が sys.path に足す）
 
-from lucianke.core.model import RelPath
+from lucianke.core.model import LspStatus, RelPath
 from lucianke.core.procs import ProcessRegistry
+from lucianke.lsp import features
 from lucianke.lsp.pool import LspPool
 from lucianke.lsp.servers import LspServerDef, find_command, servers_for
 from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.mcp.render import compact
 from lucianke.syntax.parsers import TreeCache
-from lucianke.tools import register_tools
+from lucianke.tools import _lsp_exact, register_tools
 from lucianke.tools._runtime import RuntimeHub, WiredServices
 from lucianke.workspace.types import Workspace
 
@@ -48,6 +56,21 @@ READY_WAIT_MS = 120_000
 FIRST_ANALYSIS_TIMEOUT_MS = 120_000
 
 COPY_IGNORE = shutil.ignore_patterns(".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache")
+
+# exact の事後条件の答え・真値を取る間だけ使う期限（BUG-0080）。製品の既定（``LSP_TIMEOUT_*``・``EXACT_BUDGET_S``）は変えない。
+PATIENT_REQUEST_MS = 120_000
+PATIENT_BUDGET_S = 180.0
+PATIENT_TARGETS: tuple[tuple[Any, str, float], ...] = (
+    (features, "LSP_TIMEOUT_DEFINITION_MS", PATIENT_REQUEST_MS),
+    (features, "LSP_TIMEOUT_REFERENCES_MS", PATIENT_REQUEST_MS),
+    (features, "LSP_TIMEOUT_HOVER_MS", PATIENT_REQUEST_MS),
+    (features, "LSP_TIMEOUT_CALL_HIERARCHY_MS", PATIENT_REQUEST_MS),
+    (_lsp_exact, "EXACT_BUDGET_S", PATIENT_BUDGET_S),
+)
+EXACT_RETRIES = 3
+"""製品の期限で降格したあと、延ばした期限で聞き直す回数の上限（LSP が 0 件と答えた ``indexing`` の降格も聞き直しで抜ける）。"""
+
+LANGUAGE_LABEL = {"python": "Python", "typescript": "TypeScript"}
 
 
 class FixtureMissing(Exception):
@@ -131,6 +154,9 @@ class Rig:
     types_ready: bool = False
     lint_ready: bool = False
     servers: list[str] = field(default_factory=list)
+    types_server: str | None = None
+    """この環境で起動コマンドが見つかった型解決の LSP の名前。``None`` は入っていない（探した名前は ``types_candidates``）。"""
+    types_candidates: list[str] = field(default_factory=list)
 
     @property
     def lsp_ready(self) -> bool:
@@ -188,6 +214,8 @@ async def open_rig(key: str, tmp_path: Path) -> Rig:
         rig = Rig(
             key, language, root, ws, hub, pool, Pipeline(registry, services=services), procs,
             servers=[s.name for s in servers],
+            types_server=next((s.name for s in servers if s.role == "types"), None),
+            types_candidates=[d.name for d in servers_for(language, "types")],
         )  # fmt: skip
         for defn in servers:
             ok = False
@@ -234,3 +262,103 @@ async def warm_up(rig: Rig, rels: list[str]) -> None:
             await handle.diagnostics.wait_for(
                 RelPath(rel), min_version=1, sent_at=sent_at, timeout_ms=FIRST_ANALYSIS_TIMEOUT_MS
             )
+
+
+# --- exact 水準の事後条件（BUG-0080） ------------------------------------------------------------------
+
+
+def require_exact_lsp(rig: Rig, what: str) -> None:
+    """exact 水準の事後条件 ``what`` を確かめる前提（型解決の LSP が ready）。満たさなければ skip か fail で、戻らない。
+
+    skip するのは、その言語の型解決の LSP がこの環境に **入っていない** ときだけ（この環境の F-TS: TypeScript の LSP が無い）。
+    理由はそのとおりに書く。入っているのに ready にならなかったのは fail（skip にすると、検査していないのに
+    「passed + skipped」に見え、しかも理由が事実と違う）。
+    """
+    if rig.lsp_ready:
+        return
+    label = LANGUAGE_LABEL.get(rig.language, rig.language)
+    if rig.types_server is None:
+        pytest.skip(
+            reason=f"no {label} LSP installed ({' / '.join(rig.types_candidates) or 'no server defined'} not found): "
+            f"{rig.key} exact postconditions unverified ({what})"
+        )
+    pytest.fail(
+        f"{rig.key}: the {label} LSP {rig.types_server} is installed but did not become ready within "
+        f"{READY_WAIT_MS} ms, so the exact postconditions cannot be checked ({what})",
+        pytrace=False,
+    )
+
+
+@contextmanager
+def patient_lsp() -> Iterator[None]:
+    """この間だけ、LSP の要求の期限と T-07 の 1 問い合わせの予算を延ばす（``PATIENT_TARGETS``。製品の既定は変えない）。
+
+    exact の答えの中身は期限に依らない（LSP の答えそのもの）。期限で変わるのは「exact で答えきれたか」だけなので、
+    exact の事後条件を確かめるための問い合わせと、試験が LSP に直に聞く真値にだけ使う。真値を製品の期限で聞くと、
+    負荷で切れたときに試験が落ちるうえ、その時間切れが ``LspHandle`` の連続時間切れ（3 回で ``unavailable``）に数えられる。
+    試験は 1 つのイベントループで順に問い合わせるので、モジュールの値を差し替えて戻すだけでよい。
+    """
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in PATIENT_TARGETS]
+    for mod, name, value in PATIENT_TARGETS:
+        setattr(mod, name, value)
+    try:
+        yield
+    finally:
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+
+
+def is_exact(r: dict[str, Any]) -> bool:
+    return r["_resolution_meta"]["confidence_level"] == "exact"
+
+
+async def ask_exact(
+    rig: Rig,
+    tool: str,
+    *,
+    what: str,
+    exact: Callable[[dict[str, Any]], bool] = is_exact,
+    product_first: bool = True,
+    **args: Any,
+) -> dict[str, Any]:
+    """exact 水準の事後条件 ``what`` を確かめるための答えを得る（BUG-0080）。戻り値は ``exact(r)`` が真の ``structured``。
+
+    1. 前提を確かめる（``require_exact_lsp``: LSP が入っていなければ事実どおりの理由で skip、入っていて ready でなければ fail）。
+    2. 製品の期限のまま聞く（``product_first``）。exact ならそれを返す。
+    3. 降格したら（負荷の高いときや取得直後の 1 回目は、1 問い合わせの LSP の予算 ``EXACT_BUDGET_S``・要求の期限を使い切る）、
+       LSP が ready のままか確かめてから、期限を延ばして（``patient_lsp``）聞き直す（最大 ``EXACT_RETRIES`` 回）。
+    4. それでも exact でなければ **fail**（skip しない）。各回の水準・エンジン・``lsp_status``・警告・所要を書く。
+
+    ``product_first=False`` は最初から延ばした期限で聞く。製品の期限で要求が取り消されると、同じ LSP のプロセスでその後の
+    同じ種類の要求が失敗し続ける組み合わせ（basedpyright の references。票 BUG-0083）に使う。
+    """
+    require_exact_lsp(rig, what)
+    tries: list[str] = []
+    for attempt in range(1 + EXACT_RETRIES):
+        st = rig.pool.status(rig.language, rig.ws, "types")
+        if st.status is not LspStatus.READY:
+            pytest.fail(
+                f"{what}: the {rig.types_server} LSP is {st.status.value} (reason: {st.reason}), so {tool} cannot "
+                f"answer exact. Tries: {'; '.join(tries) or 'none'}",
+                pytrace=False,
+            )
+        product = attempt == 0 and product_first
+        started = time.monotonic()
+        if product:
+            r = await rig.ok(tool, **args)
+        else:
+            with patient_lsp():
+                r = await rig.ok(tool, **args)
+        if exact(r):
+            return r
+        m = r["_resolution_meta"]
+        tries.append(
+            f"#{attempt + 1} ({'product' if product else 'patient'} budgets, {time.monotonic() - started:.1f}s): "
+            f"confidence={m['confidence_level']} engine={m['engine_used']} lsp_status={m['lsp_status']} "
+            f"warning={m.get('accuracy_warning')!r}"
+        )
+    pytest.fail(
+        f"{what}: the {rig.types_server} LSP is ready but {tool} did not answer exact after {len(tries)} tries: "
+        f"{'; '.join(tries)}",
+        pytrace=False,
+    )

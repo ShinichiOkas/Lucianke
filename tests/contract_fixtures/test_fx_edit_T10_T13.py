@@ -2,7 +2,8 @@
 
 ワークスペースは ``bench/.cache`` に取得済みの F-PY・F-TS を ``tmp_path`` に複製したもの。編集は複製に対してだけ行い、原本
 （``bench/.cache/``）は書き換えない。試験ごとに新しい複製を作る（戻す手間と、前の編集の持ち越しを避ける）。
-結線・LSP の水準・skip の扱いは ``test_fx_read_T00_T08.py`` と同じ（LSP が無い F-TS は降格応答の約束を確かめる。skip はしない）。
+結線・LSP の水準・skip の扱いは ``test_fx_read_T00_T08.py`` と同じ（LSP が無い F-TS は降格応答の約束を確かめてから、exact の
+事後条件だけを ``_rig.require_exact_lsp`` の事実どおりの理由で skip する。LSP が入っているのに ready でなければ fail）。
 """
 
 from __future__ import annotations
@@ -10,10 +11,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import pytest
 import tree_sitter_python
 import tree_sitter_typescript
-from _rig import Rig, warm_up
+from _rig import Rig, patient_lsp, require_exact_lsp, warm_up
 from _t11_harness import sha
 from _targets import TARGETS, assert_present, target_dict
 from test_T10_edit_body import apply_unified_diff  # tests/contract の共通部品（conftest が sys.path に足す）
@@ -200,9 +200,7 @@ async def test_t11_postcondition_1_2_3_rename(rig: Rig) -> None:
                 p: s for p, s in before.items() if p not in changed
             }
             assert r.structured["_resolution_meta"]["is_degraded"] is True
-        pytest.skip(
-            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-11#2 urn_map, T-11#3 edits_count)"
-        )
+        require_exact_lsp(rig, "T-11#2 urn_map, T-11#3 edits_count")
     uses = await _lsp_reference_count(rig, t.rename_path, t.rename_sym)
     urns_before = await symbol_urns(rig, sorted({t.rename_path, *_files_with(rig, t.rename_sym)}))
     r = await rig.ok("rename_symbol", target=target, new_name=t.rename_to, diagnostics_wait_ms=0)
@@ -240,9 +238,10 @@ async def _lsp_reference_count(rig: Rig, path: str, sym: str) -> int:
     handle = rig.pool.get(rig.language, rig.ws)
     res = await rig.ok("resolve_symbols", targets=[target_dict(path, sym)])
     sel = res["data"]["items"][0]["symbol"]["selection_range"]
-    refs = await features.references(
-        handle, RelPath(path), Position(sel["line"] - 1, sel["start_col"] - 1), include_declaration=False
-    )
+    with patient_lsp():  # 真値（BUG-0080: 製品の期限で切れると試験が落ち、LSP の連続時間切れにも数えられる）
+        refs = await features.references(
+            handle, RelPath(path), Position(sel["line"] - 1, sel["start_col"] - 1), include_declaration=False
+        )
     return len(refs)
 
 
@@ -307,9 +306,7 @@ async def test_t13_postcondition_1_2_3_4_code_action(rig: Rig) -> None:
         r = await rig.call("apply_code_action", path=path, line=1, action_kind_or_id="quickfix")
         assert r.is_error or r.structured["data"]["applied"] is False
         assert rig.snapshot() == before
-        pytest.skip(
-            reason="no TypeScript LSP: F-TS exact postconditions unverified (T-13#1 applied, T-13#2 diff, T-13#3 diagnostic resolved)"
-        )
+        require_exact_lsp(rig, "T-13#1 applied, T-13#2 diff, T-13#3 diagnostic resolved")
     f401 = [(d, i) for d, i in fixes if d["code"] == "F401"] or fixes
     assert f401, diag["data"]["diagnostics"]
     await apply_and_check(rig, path, *f401[0])
