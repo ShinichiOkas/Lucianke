@@ -19,8 +19,9 @@
    （数字は 1 文字ずつ数える）ので、数え直した値で描き直して、値が動かなくなるまで繰り返す（桁数が変わらなければ 1 回で収まる）。
    数えるときの ``timing_ms`` は最大の桁数に固定する（実際の全文以上の上限。同じ入力なら呼び出しごとに同じ値になる）。
 
-dot / mermaid は従来どおり（レコードを compact の行で数えるだけで、前置きは数えない）。グラフは ``data_static`` を丸ごと
-描くので、この方式では予算を守れない。別の票で扱う。
+dot / mermaid は BUG-0053 で追加（FITTED_FORMATS）。``Packer.pack`` を通す（records=0 なので実質 no-op）が、probe で
+前置きを数える。``page.max_tokens`` をレンダラ（``graph._render``）に伝え、レンダラがグラフのノード / エッジ数を二分探索で
+削減して全文を ``max_tokens`` 以下に収める。
 """
 
 from __future__ import annotations
@@ -39,16 +40,19 @@ from lucianke.mcp.types import CallInfo, Page, Rendered, RenderInput
 
 __all__ = ["FITTED_FORMATS", "Fitted", "pack_and_render"]
 
-#: 前置きを数えて全文で収める形式。dot / mermaid は対象外（モジュールの docstring）。
-FITTED_FORMATS: Final = ("compact", "json")
+#: 前置きを数えて全文で収める形式。compact・json はレコードを詰める。dot・mermaid はグラフを切り詰める（BUG-0053）。
+FITTED_FORMATS: Final = ("compact", "json", "dot", "mermaid")
 _PROBE_TIMING_MS: Final = 99_999  # 前置きの見積もりに使う ``timing_ms``（json の桁数を最大幅にする）
 _MAX_PACK_ROUNDS: Final = 8  # 前置きの見積もりが足りなかったときの詰め直しの上限
 _MAX_USED_ROUNDS: Final = 5  # ``used_tokens_est`` の桁数が変わるときの描き直しの上限
 
 #: 形式ごとに、パッカーが応答の本文を見積もるときの関数。compact は ``Packer`` の既定（``Record.lines`` ・トレーラの 2 行）。
+#: dot / mermaid は records=0 なので実質不使用だが、共通ループで呼ばれるため空 dict を登録する（BUG-0053）。
 _PACKER_KWARGS: Final[Mapping[str, Mapping[str, Any]]] = {
     "compact": {},
     "json": {"record_text": json_out.record_text, "trailer_text": json_out.trailer_text},
+    "dot": {},
+    "mermaid": {},
 }
 
 

@@ -38,6 +38,7 @@ from urllib.parse import unquote
 
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Confidence
+from lucianke.core.tokens import TokenEstimator
 from lucianke.mcp.envelope import collect_warnings
 from lucianke.mcp.render.compact import (
     banner,
@@ -373,8 +374,30 @@ def _tail_lines(inp: RenderInput, graph: _Graph | None) -> list[str]:
     return lines
 
 
+_MAX_GRAPH_TRIM_ROUNDS: Final = 12  # max binary-search rounds when trimming graph to budget
+
+
+def _trim(graph: _Graph, max_nodes: int, max_edges: int) -> _Graph:
+    """Return a new _Graph with node/edge counts limited to ``max_nodes`` / ``max_edges``."""
+    nodes = graph.nodes[:max_nodes]
+    kept_ids = {n.id for n in nodes}
+    edges = [e for e in graph.edges if e.source in kept_ids and e.target in kept_ids]
+    edges = edges[:max_edges]
+    trimmed = _Graph(
+        nodes=nodes,
+        edges=edges,
+        dropped_nodes=len(graph.nodes) - len(nodes) + graph.dropped_nodes,
+        dropped_edges=len(graph.edges) - len(edges) + graph.dropped_edges,
+    )
+    return trimmed
+
+
 def _render(inp: RenderInput, prefix: str, body: Callable[[RenderInput, _Graph], list[str]]) -> Rendered:
-    """共通の枠: 失敗ならコメントだけの失敗応答、成功なら先頭コメント + 本文 + 末尾コメント。"""
+    """共通の枠: 失敗ならコメントだけの失敗応答、成功なら先頭コメント + 本文 + 末尾コメント。
+
+    ``inp.page.max_tokens`` が 0 より大きいとき (FITTED_FORMATS 経由)、全文が予算に収まるまで
+    グラフを二分探索でノード / エッジ数を削減する（BUG-0053）。
+    """
     error = inp.error
     graph: _Graph | None = None
     if error is None:
@@ -386,6 +409,31 @@ def _render(inp: RenderInput, prefix: str, body: Callable[[RenderInput, _Graph],
         lines = [f"{prefix}{line}" for line in _head_lines(inp, error)]
         return Rendered(text="\n".join(lines) + "\n", is_error=True)
     assert graph is not None
+    max_tokens = inp.page.max_tokens if inp.page is not None else 0
+    if max_tokens > 0:
+        # BUG-0053: trim graph until full text fits within max_tokens (binary search on node count)
+        count = TokenEstimator().count
+        head_tok = count("\n".join(f"{prefix}{line}" for line in _head_lines(inp, None)) + "\n")
+        body_lines = body(inp, graph)
+        tail_lines_g = [f"{prefix}{line}" for line in _tail_lines(inp, graph)]
+        total_tok = count("\n".join([*[f"{prefix}{line}" for line in _head_lines(inp, None)], *body_lines, *tail_lines_g]) + "\n")
+        if total_tok > max_tokens:
+            # head already exceeds budget or graph body is too large: binary-search node count
+            budget = max_tokens - head_tok
+            lo, hi = 0, len(graph.nodes)
+            best_n = 0
+            for _ in range(_MAX_GRAPH_TRIM_ROUNDS):
+                if lo > hi:
+                    break
+                mid = (lo + hi) // 2
+                trial = _trim(graph, mid, MAX_EDGES)
+                cost = count("\n".join(body(inp, trial) + [f"{prefix}{line}" for line in _tail_lines(inp, trial)]) + "\n")
+                if head_tok + cost <= max_tokens:
+                    best_n = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            graph = _trim(graph, best_n, MAX_EDGES)
     lines = [f"{prefix}{line}" for line in _head_lines(inp, None)]
     lines += body(inp, graph)
     lines += [f"{prefix}{line}" for line in _tail_lines(inp, graph)]

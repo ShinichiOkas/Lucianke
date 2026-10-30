@@ -502,8 +502,10 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
             )
 
     edges = _edges(root_urn, all_nodes, args.include_guard_conditions)
+    # BUG-0054: drop null/empty fields from root symbol to keep fixed part of json envelope small
+    _root_json = {k: v for k, v in tree.root.to_json().items() if v is not None and v != []}
     data: dict[str, Any] = {
-        "root": tree.root.to_json(),
+        "root": _root_json,
         "direction": args.direction,
         "depth": args.depth,
         "edges": edges,
