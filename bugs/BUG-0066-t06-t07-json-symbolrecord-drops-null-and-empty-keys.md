@@ -30,5 +30,6 @@
   - `uv run ruff check src tests` → All checks passed
   - `uv run pytest -q tests/contract/test_T06_T07.py -k keep_null` → 直す前 1 failed、直した後 1 passed
   - `uv run pytest -q tests/unit/test_mcp_*.py tests/contract_fixtures/test_fx_read_T00_T08.py tests/contract/test_T06_T07*.py tests/contract/test_T06_ts_outside_tsconfig.py tests/contract/test_T07_builtins_hidden.py tests/contract/test_T07_ts_outside_tsconfig.py` → 374 passed・9 skipped（skip は TypeScript の LSP が無い 8 件と F-TS〈ky〉の未取得 1 件。環境由来）
+  - 全体: `uv run pytest -q -p no:cacheprovider -rfs` → 3786 passed・32 skipped・**1 failed**（867 秒）。落ちたのは `tests/unit/test_import_graph.py::test_dependency_directions`（`cli/selftest.py` が `bootstrap_io` を import。`4ba7c0a` で入ったファイルで、この直しとは関係しない）。票 BUG-0072 に書いた。
   - `PYTHONUTF8=1 uv run pytest bench/_budget_probe2.py -s -q` → 2 passed。json の `max_tokens=200` は 0 件と `raise max_tokens to ~N`、N で呼び直すと収まる。N は T-07 365 → **370**、T-06 384 → **389**（キーが戻った分だけ増えた）。dot・mermaid の値は変わらない。
 - 戻ったもの（BUG-0054 の症状）: json の前置きが SymbolRecord 1 件あたり数トークン増える（上の N で T-07・T-06 とも +5）。§5.6-4・§5.7 どおりの応答。トークンを節約する既定の形式は compact。
