@@ -28,7 +28,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `7 failed, 3774 passed, 32 skipped`（2026-10-31・989 秒）。落ちる 7 件は T-02 skeleton の json の形（BUG-0065・対応中）。新 .venv でも `uv run pytest -q` だけで届く（BUG-0062 で langs を dev 組に・フィクスチャを自動取得） |
+| 全体テスト | `3783 passed, 32 skipped, 0 failed`（2026-10-31・645 秒・BUG-0065 の直しのあと）。skip は環境由来（TS の LSP なし・POSIX のみ など）と較正の 3 件（BUG-0068）。新 .venv でも `uv run pytest -q` だけで届く（BUG-0062 で langs を dev 組に・フィクスチャを自動取得） |
 | 索引 DB のスキーマ | v4（`_exact_marks`、`index/exact_marks.py`、ADR-16） |
 
 ## 2. このコミットで入ったもの
@@ -62,10 +62,10 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 
 ## 3. 次にやること（優先順）
 
-1. **BUG-0065**（T-02 skeleton 系の 7 件が落ちる。`KeyError: 'children'` など）— 並行で直す役が対応中。直るまで全体テストの基準は「この 7 件以外 green」
+1. ~~**BUG-0065**（T-02 skeleton 系の 7 件が落ちる。`KeyError: 'children'` など）~~ — **解消済み**（T-02 の json の記号で null・空のキーを省かない形に戻した。仕様 §6.2。json で省くかは師匠の判断〈推奨: 省かない〉。続きの票は BUG-0066〈T-06・T-07 も省いている〉・BUG-0067〈max_tokens を上げると返るファイル数が減る〉）
 2. ~~**BUG-0062**（新 .venv で langs extra・フィクスチャを手で入れないと全体テストに届かない）~~ — **解消済み**（langs を dev 組に・契約テストのフィクスチャを自動取得し、取れなければ赤。§0 は `uv run pytest -q` だけ）
 3. **BUG-0058**（レイテンシ）— 師匠判断（2026-10-30）で優先度を下げた。再開は「毎回別シンボル＋exact 経路強制」で計時ログを拾うところから（票の末尾）
-4. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する（2026-10-31 時点で BUG-0041〜0064 はすべて対応コミットあり（BUG-0065 は対応中）。BUG-0058 は実測の記録のみ）
+4. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する（2026-10-31 時点で BUG-0041〜0065 はすべて対応コミットあり（BUG-0066〜0068 は票のみ）。BUG-0058 は実測の記録のみ）
 
 ## 4. 触るときの注意
 

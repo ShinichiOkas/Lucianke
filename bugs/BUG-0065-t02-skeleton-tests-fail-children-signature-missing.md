@@ -51,7 +51,8 @@ uv run pytest -q "tests/contract_fixtures/test_fx_read_T00_T08.py::test_t02_post
   - `uv run ruff check src tests` → All checks passed
   - `uv run pytest -q tests/unit/test_syntax_skeleton.py` → 25 passed（直す前は 6 failed）
   - `uv run pytest -q tests/contract_fixtures/test_fx_read_T00_T08.py tests/e2e/test_vertical_slice_stdio.py tests/e2e/test_m1_6_session.py` → 26 passed・3 skipped（skip は F-TS の exact 水準 3 件〈TypeScript の LSP が無い。BUG-0057〉で T-02 ではない。T-02 の事後条件 1・2・5 は F-PY・F-TS とも passed）
+  - 全体（`origin/main` = `9d96cd2` に載せ直したあと・`uv sync` 済み）: `uv run pytest -q -p no:cacheprovider -rfs` → **3783 passed, 32 skipped, 0 failed**（645 秒）。skip は環境由来（TypeScript の LSP なし・POSIX のみ・symlink 権限など）と較正の 3 件（BUG-0068）
   - `tests/unit/test_mcp_*.py`・`tests/contract/test_T02_skeleton.py`・`tests/contract/test_T02_data_files.py`・`tests/contract/test_perf_reuse.py`・`tests/contract/test_compact_grammar.py`・`tests/contract/test_revision_reads.py`・`tests/contract/test_T10_delete.py`・骨格と adapter の単体 → 597 passed
 - 戻ったもの（BUG-0055 の症状）: json の量は省く前に戻る。`src/lucianke/core/urn.py` の実測: json `max_tokens=50000` で 10,203 トークン（compact 3,449）、`max_tokens=3000` で縮退して 2,531（`truncated_members` 54）、既定の 2,000 では 0 件と `warnings`「no record fits in max_tokens=2000 … raise max_tokens to ~10203 or more」。§5.6-4・§5.7 どおりの応答。
 - 師匠の判断が要ること（推奨つき）: json で null・空のキーを省いてトークンを減らしたいなら、仕様書 §6.2 の改訂（全ツール一律）として決めて、T-02・T-06・T-07 とテストを一緒に直す。推奨は「省かない（今の仕様のまま）」。json は形の安定を求める受け手のための形式で、トークンを節約する既定の形式は compact。
-- 別の票: T-06・T-07 の json も BUG-0054（`0db3922`）で SymbolRecord の null・空のキーを省いている（BUG-0066）。T-02 の json で `max_tokens` を上げると返るファイル数が減る（BUG-0067。F-PY の契約テストが 6,000 で通るのはこの詰め方の結果でもある）。
+- 別の票: T-06・T-07 の json も BUG-0054（`0db3922`）で SymbolRecord の null・空のキーを省いている（BUG-0066）。T-02 の json で `max_tokens` を上げると返るファイル数が減る（BUG-0067。F-PY の契約テストが 6,000 で通るのはこの詰め方の結果でもある）。較正テストの 3 件の skip（BUG-0068）。
