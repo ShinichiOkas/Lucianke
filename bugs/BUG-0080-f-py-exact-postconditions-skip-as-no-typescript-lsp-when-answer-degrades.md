@@ -39,9 +39,9 @@
   T-04#4 は逆に、負荷で T-04 が降格すると「the LSP is ready but no item is exact」で落ちる（揺れる fail）。
 - **製品の側で見たこと（票に書いた。直していない）。**
   - 冷えた LSP での F-PY の T-07 depth 3 は、負荷をかけなくても 1 回目が予算 10 秒（または要求の期限 5 秒）に届き、5 回中 4 回
-    降格した（BUG-0088）。
+    降格した（BUG-0091）。
   - basedpyright は references の要求が 1 度取り消される（製品の期限 3 秒で切れる）と、同じプロセスの references がすべて
-    `this._token.cancel is not a function` で失敗し、T-06 はセッションの間ずっと `structural` になる（BUG-0087）。
+    `this._token.cancel is not a function` で失敗し、T-06 はセッションの間ずっと `structural` になる（BUG-0090）。
     T-06 の真値を製品の期限で聞く書き方だと、試験もこれで落ちる。
 
 ### 直し方
@@ -59,7 +59,7 @@
     その時間切れが LSP の連続時間切れ〈3 回で unavailable〉に数えられる）。
 - `tests/contract_fixtures/test_fx_read_T00_T08.py`:
   - T-04 の resolve_symbols、T-07 の depth 1 の答えを `ask_exact` で得る。
-  - T-06 は最初の答えを `ask_exact(..., product_first=False)`（最初から延ばした期限）で得て、すぐ真値を取る（BUG-0087 のため、製品の
+  - T-06 は最初の答えを `ask_exact(..., product_first=False)`（最初から延ばした期限）で得て、すぐ真値を取る（BUG-0090 のため、製品の
     期限で references が 1 度取り消されると、以降は exact も真値も得られない）。以降の T-06 の問い合わせは PaaD の exact 行から答える
     （`lsp-cache`）ので、事後条件 2〜6 も経路が揺れない。T-07 の depth 3（事後条件 1・3・4・6）は今までどおり製品の期限で聞く
     （どちらの経路で答えても同じ検査。BUG-0074）。
@@ -68,7 +68,7 @@
 - `tests/contract_fixtures/test_fx_edit_T10_T13.py`: T-11・T-13 の skip を `require_exact_lsp` にした。T-11 の真値（参照数）を `patient_lsp` で聞く。
 - `src/lucianke/tools/_lsp_exact.py`: `CallEdgeSource` の `budget_s` の既定を、定義時ではなく作るときの `EXACT_BUDGET_S` にした
   （`budget_s: float = EXACT_BUDGET_S` は定義時に値が固定され、試験から延ばせなかった）。既定値 10 秒と挙動は変えていない。
-  製品の予算は変えていない（変える根拠になる数字は BUG-0088 に書いた。どう直すかは直す役が決める）。
+  製品の予算は変えていない（変える根拠になる数字は BUG-0091 に書いた。どう直すかは直す役が決める）。
 
 ### 確認
 
@@ -88,7 +88,13 @@
 
 ### 見つけた別の不具合（票）
 
-- BUG-0087: basedpyright の references の要求が 1 度取り消されると、同じプロセスの references がすべて失敗し、T-06 がセッションの間
+- BUG-0090: basedpyright の references の要求が 1 度取り消されると、同じプロセスの references がすべて失敗し、T-06 がセッションの間
   `structural` になる（警告は「LSP が利用できない」、`lsp_status` は `ready`）。
-- BUG-0088: 冷えた LSP での F-PY の T-07 depth 3 が、負荷なしでも 1 回目に予算 10 秒（または要求の期限 5 秒）に届いて降格する。
+- BUG-0091: 冷えた LSP での F-PY の T-07 depth 3 が、負荷なしでも 1 回目に予算 10 秒（または要求の期限 5 秒）に届いて降格する。
   降格の警告は使い切った予算ではなく「5000 ms」と書く。
+
+### 確認（追記: 載せ直した後）
+
+- `8c10a2a` に載せ直し、BUG-0086 の直しも足して `tests/contract_fixtures` 全体を単独 1 本・2 本同時 1 組（計 3 本）: F-PY の exact の
+  事後条件（T-04#4・T-06#1・T-07#2・T-11・T-13）は 3 本とも通った。skip は 3 本とも F-TS の 5 件（TypeScript の LSP が無い）と、F-TS には
+  当てはまらない BUG-0079 の試験 1 件だけ。別の 1 件（T-20、DB ファイルの SHA-256 が試験の間に変わる）が 3 本中 2 本で落ちた → 票 BUG-0092。

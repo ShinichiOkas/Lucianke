@@ -331,7 +331,7 @@ async def ask_exact(
     4. それでも exact でなければ **fail**（skip しない）。各回の水準・エンジン・``lsp_status``・警告・所要を書く。
 
     ``product_first=False`` は最初から延ばした期限で聞く。製品の期限で要求が取り消されると、同じ LSP のプロセスでその後の
-    同じ種類の要求が失敗し続ける組み合わせ（basedpyright の references。票 BUG-0087）に使う。
+    同じ種類の要求が失敗し続ける組み合わせ（basedpyright の references。票 BUG-0090）に使う。
     """
     require_exact_lsp(rig, what)
     tries: list[str] = []
@@ -351,7 +351,7 @@ async def ask_exact(
             with patient_lsp():
                 r = await rig.ok(tool, **args)
         if exact(r):
-            if tries:  # 製品の期限では降格した（検査はした。降格したことは隠さない: 票 BUG-0088）
+            if tries:  # 製品の期限では降格した（検査はした。降格したことは隠さない: 票 BUG-0091）
                 warnings.warn(
                     f"{rig.key} {what}: exact only after a patient re-ask; {'; '.join(tries)}", stacklevel=2
                 )
