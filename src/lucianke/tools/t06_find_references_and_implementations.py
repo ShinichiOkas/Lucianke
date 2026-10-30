@@ -684,12 +684,10 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
         if exact_rows is not None and args.query_type in ("implementations", "type_hierarchy", "all")
         else []
     )
-    def _compact(sym: SymbolRecord) -> dict[str, Any]:
-        """BUG-0054: drop null/empty fields from SymbolRecord json to keep fixed part of json envelope small."""
-        return {k: v for k, v in sym.to_json().items() if v is not None and v != []}
+    # target・implementations[] は仕様書 §6.2 の SymbolRecord そのまま（null・空のキーも出す。BUG-0066）。
     data: dict[str, Any] = {
-        "target": _compact(found.target),
-        "implementations": [_compact(s) for s in found.implementations],
+        "target": found.target.to_json(),
+        "implementations": [s.to_json() for s in found.implementations],
         "implementations_total": found.implementations_total,
         "type_hierarchy": (
             {

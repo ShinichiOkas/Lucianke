@@ -1071,3 +1071,87 @@ async def test_real_t06_use_after_a_function_local_require_is_a_reference(tmp_pa
         await indexer.aclose()
         readers.close()
         writer.close()
+
+
+# --- json の SymbolRecord の形（BUG-0066） -----------------------------------------------------------
+
+# 仕様書 §6.2 の SymbolRecord の例にあるキー。null・空でも出す（省いてよいという規約は仕様書に無い）。
+# ``declared_in`` は例に無く、``"source"`` のとき出さない（``SymbolRecord.to_json``）。
+SPEC_SYMBOL_KEYS = {
+    "urn",
+    "scip_symbol",
+    "path",
+    "name",
+    "qualified_name",
+    "kind",
+    "modifiers",
+    "range",
+    "selection_range",
+    "signature",
+    "return_type",
+    "doc_summary",
+    "confidence_level",
+}
+
+
+def assert_spec_symbol(sym: dict[str, Any]) -> None:
+    keys = set(sym)
+    assert SPEC_SYMBOL_KEYS <= keys <= SPEC_SYMBOL_KEYS | {"declared_in"}, sorted(keys ^ SPEC_SYMBOL_KEYS)
+
+
+async def test_t06_t07_json_symbol_records_keep_null_and_empty_keys(tmp_path: Path) -> None:
+    """BUG-0066: T-06 の ``data.target``・``data.implementations[]`` と T-07 の ``data.root`` は §6.2 の SymbolRecord の
+    キーをすべて持つ（値が null・空でも省かない）。BUG-0054 で省いていた形に戻らないことを確かめる。
+    """
+    root = tmp_path / "impls"
+    (root / "app").mkdir(parents=True)
+    (root / "app/__init__.py").write_text("", encoding="utf-8")
+    (root / "app/base.py").write_text("class Base:\n    def run(self):\n        return 0\n", encoding="utf-8")
+    (root / "app/impl.py").write_text(
+        "from app.base import Base\n\n\nclass Impl(Base):\n    def run(self):\n        return 1\n\n\n"
+        "def main():\n    return Impl().run()\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "db" / "paad.sqlite"
+    writer = IndexWriter(db)
+    readers = ReaderPool(db, size=2)
+    indexer = Indexer(Workspace(workspace_id="impls", root=root.resolve()), writer, readers, TreeCache())
+    try:
+        report = await indexer.scan()
+        assert not report.errors, report.errors
+        registry = ToolRegistry()
+        registry.register(t06.TOOL_SPEC)
+        registry.register(t07.TOOL_SPEC)
+        base = build_services(lambda: [str(root)])
+
+        @dataclass(slots=True)
+        class Services(ToolServices):
+            db_path: Path | None = None
+
+        pipe = Pipeline(
+            registry, services=Services(roots=base.roots, trees=base.trees, lines=base.lines, db_path=db)
+        )
+
+        run = await refs(pipe, {"urn": str(Urn("impls", "app/base.py", CodeSel("Base.run")))}, query_type="all")
+        assert not run.is_error, run.text
+        data = run.structured["data"]
+        assert_spec_symbol(data["target"])
+        assert data["target"]["scip_symbol"] is None  # structural の索引では null。null でもキーは出す
+        assert [s["qualified_name"] for s in data["implementations"]] == ["Impl.run"], run.text
+        for s in data["implementations"]:
+            assert_spec_symbol(s)
+
+        cls = await refs(pipe, {"urn": str(Urn("impls", "app/base.py", CodeSel("Base")))})
+        assert not cls.is_error, cls.text
+        target = cls.structured["data"]["target"]
+        assert_spec_symbol(target)
+        assert target["return_type"] is None and target["doc_summary"] is None  # null のキーも省かない
+
+        main = await calls(pipe, {"urn": str(Urn("impls", "app/impl.py", CodeSel("main")))}, "outgoing", depth=1)
+        assert not main.is_error, main.text
+        assert_spec_symbol(main.structured["data"]["root"])
+        assert main.structured["data"]["root"]["scip_symbol"] is None
+    finally:
+        await indexer.aclose()
+        readers.close()
+        writer.close()
