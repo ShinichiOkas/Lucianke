@@ -25,10 +25,11 @@ def conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
 def test_migrates_v3_to_v4_by_adding_the_table_and_keeping_the_data(conn: sqlite3.Connection) -> None:
     ensure_schema(conn)
     conn.execute("DROP TABLE _exact_marks")
+    conn.execute("DROP TABLE _name_calls")
     conn.execute("UPDATE _meta SET schema_version = 3")
     assert ensure_schema(conn) is SchemaAction.MIGRATED
-    assert current_schema_version() == 4
-    assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == 4
+    assert current_schema_version() >= 4  # v4 で _exact_marks、その先の移行も続けて当たる
+    assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version()
     assert conn.execute("SELECT count(*) FROM _exact_marks").fetchone()[0] == 0
 
 

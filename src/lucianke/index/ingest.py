@@ -32,6 +32,7 @@ __all__ = [
     "DiagnosticFact",
     "FileFacts",
     "IngestStats",
+    "NameCallFact",
     "RelationFact",
     "SymbolExtra",
     "SyntaxErrorFact",
@@ -125,6 +126,17 @@ class RelationFact:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class NameCallFact:
+    """内部表 ``_name_calls`` の 1 行分: 受け手の型が分からない属性呼び出し ``x.name(...)``（BUG-0071）。位置は 0 始まり。"""
+
+    source_urn: Urn | str
+    name: str
+    call_site_line: int
+    call_site_col: int
+    guard_condition: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DiagnosticFact:
     """``diagnostics`` の 1 行分（LSP の ``publishDiagnostics`` 用）。位置は 0 始まり。
 
@@ -166,6 +178,8 @@ class FileFacts:
     symbol_extras: Mapping[str, SymbolExtra] = field(default_factory=dict)
     import_stems: Sequence[str] = field(default_factory=tuple)
     """import の解決で調べたパスの語幹（``engine/reresolve.py``）。後からファイルが作られた・消えたとき、これを import している側を引く。"""
+    name_calls: Sequence[NameCallFact] = field(default_factory=tuple)
+    """受け手の型が分からない属性呼び出し（``_name_calls``。BUG-0071）。``ingest_file`` がファイルごとに全置換する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +717,24 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
         conn.executemany(
             "INSERT OR IGNORE INTO _import_probes (file_id, stem) VALUES (?, ?)",
             [(file_id, stem) for stem in facts.import_stems],
+        )
+
+    conn.execute("DELETE FROM _name_calls WHERE file_id = ?", (file_id,))
+    if facts.name_calls:
+        conn.executemany(
+            "INSERT INTO _name_calls (file_id, source_urn, name, call_site_line, call_site_col, guard_condition)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    file_id,
+                    _urn_str(c.source_urn),
+                    c.name,
+                    c.call_site_line + 1,
+                    c.call_site_col + 1,
+                    c.guard_condition,
+                )
+                for c in facts.name_calls
+            ],
         )
 
     return IngestStats(

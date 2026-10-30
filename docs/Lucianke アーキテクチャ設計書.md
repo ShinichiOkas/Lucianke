@@ -528,7 +528,7 @@ class LuciankeError(Exception):
 - WAL のチェックポイントは `IndexWriter` が暇なときと終了時に行う。
 - **作り直し**（`reindex`、移行できない古い `schema_version`）は DB ファイルを削除せず、書き込み接続の中で全オブジェクトを `DROP` して流し直す（§7.6.5。Windows では読み取り接続が開いている DB ファイルを消せない。実装で確定 2026-10-29）。
 - `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（`WriteJob.bumps_version=True`）。`diagnostics` だけの更新、LSP の結果を `relations` へ `exact` で書き戻す更新（`upsert_exact_relations`。§7.5.6）、PageRank の再計算（§7.6.2）は進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
-- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + 定義ファイルの `sha256`。§7.5.6）、`_symbol_rank`（シンボル単位の PageRank と fan_in。schema v2。`index/rank.py`）、`_import_probes`（import の解決で調べたパスの語幹。schema v3。`engine/reresolve.py`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。公開 DDL（仕様書 §9.2）に列や表を足さないための表で、`schema.sql` に写しを置く。
+- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + 定義ファイルの `sha256`。§7.5.6）、`_symbol_rank`（シンボル単位の PageRank と fan_in。schema v2。`index/rank.py`）、`_import_probes`（import の解決で調べたパスの語幹。schema v3。`engine/reresolve.py`）、`_exact_marks`（LSP の exact の集合が完全だった目印。schema v4。ADR-16）、`_name_calls`（受け手の型が分からない属性呼び出し `x.name(...)` の位置と名前。schema v5。索引器が書き、T-06 / T-07 が `tools/_name_calls.py` で名前の一意性から結ぶ。v4 からの移行は表を足し、Python / TS / JS のファイルの `sha256` を空にして次の差分走査で取り込み直させる。BUG-0071）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。公開 DDL（仕様書 §9.2）に列や表を足さないための表で、`schema.sql` に写しを置く。
 
 ## 6.3 ロックと順序
 

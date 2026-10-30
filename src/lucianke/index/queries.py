@@ -35,6 +35,7 @@ from lucianke.core.urn import Urn, parse
 
 __all__ = [
     "DiagnosticRow",
+    "NameCallRow",
     "ReferenceRow",
     "count_references_to",
     "data_version",
@@ -43,6 +44,9 @@ __all__ = [
     "files_by_paths",
     "files_fingerprint",
     "files_in_scope",
+    "methods_named",
+    "name_calls_from",
+    "name_calls_named",
     "references_from",
     "references_to",
     "search_symbols_fts",
@@ -578,6 +582,94 @@ def count_references_to(
     where, params = _reference_where(target_urn, kinds, use_kinds, include_tests)
     sql = "SELECT count(*) FROM relations r LEFT JOIN files f ON f.file_id = r.source_file_id" + where
     return int(conn.execute(sql, params).fetchone()[0])
+
+
+# --- 受け手の型が分からない属性呼び出し（内部表 _name_calls。BUG-0071） ---------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class NameCallRow:
+    """``_name_calls`` の 1 行（``x.name(...)`` で ``x`` の型が分からない呼び出し）。``site`` は内部表現（0 始まり）。"""
+
+    source_urn: str
+    name: str
+    path: RelPath
+    language: str
+    site: Position
+    guard_condition: str | None
+    is_test: bool
+
+
+_NAME_CALL_SELECT: Final = (
+    "SELECT nc.source_urn, nc.name, f.path, f.language, nc.call_site_line, nc.call_site_col, nc.guard_condition,"
+    " f.is_test FROM _name_calls nc JOIN files f ON f.file_id = nc.file_id"
+)
+
+
+def _in_clause(column: str, values: Iterable[str], prefix: str, params: dict[str, object]) -> str:
+    names = []
+    for i, v in enumerate(sorted(set(values))):
+        params[f"{prefix}{i}"] = v
+        names.append(f":{prefix}{i}")
+    return f" AND {column} IN ({', '.join(names)})" if names else " AND 0"
+
+
+def _name_call_rows(conn: sqlite3.Connection, sql: str, params: dict[str, object]) -> list[NameCallRow]:
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:  # v5 より前の DB（移行前に読んだ）。無いものとして答える
+        if "no such table" in str(exc):
+            return []
+        raise
+    return [
+        NameCallRow(
+            source_urn=src,
+            name=name,
+            path=RelPath(path),
+            language=lang,
+            site=Position(int(line) - 1, max(int(col) - 1, 0)),
+            guard_condition=guard,
+            is_test=bool(is_test),
+        )
+        for src, name, path, lang, line, col, guard, is_test in rows
+    ]
+
+
+def name_calls_named(
+    conn: sqlite3.Connection,
+    workspace_id: str,
+    name: str,
+    languages: Iterable[str],
+    *,
+    include_tests: bool = True,
+) -> list[NameCallRow]:
+    """ワークスペースの ``languages`` のファイルにある、``name`` という名前の型不明の属性呼び出し。並びは（パス、行、列）。"""
+    params: dict[str, object] = {"ws": workspace_id, "name": name}
+    where = " WHERE f.workspace_id = :ws AND nc.name = :name" + _in_clause("f.language", languages, "lg", params)
+    if not include_tests:
+        where += " AND f.is_test = 0"
+    sql = _NAME_CALL_SELECT + where + " ORDER BY f.path, nc.call_site_line, nc.call_site_col"
+    return _name_call_rows(conn, sql, params)
+
+
+def name_calls_from(conn: sqlite3.Connection, source_urn: Urn | str) -> list[NameCallRow]:
+    """``source_urn`` の中にある型不明の属性呼び出し（T-07 の outgoing 用）。並びは（行、列）。"""
+    sql = _NAME_CALL_SELECT + " WHERE nc.source_urn = :src ORDER BY nc.call_site_line, nc.call_site_col"
+    return _name_call_rows(conn, sql, {"src": str(source_urn)})
+
+
+def methods_named(
+    conn: sqlite3.Connection, workspace_id: str, name: str, languages: Iterable[str]
+) -> list[tuple[SymbolRecord, bool]]:
+    """ワークスペースの ``languages`` のファイルで ``name`` という名前の ``Method``。``(シンボル, テストファイルか)``、（パス、行）順。"""
+    params: dict[str, object] = {"ws": workspace_id, "name": name, "kind": Kind.METHOD.value}
+    sql = (
+        f"SELECT {_SYMBOL_COLUMNS}, COALESCE(f.is_test, 0) FROM symbols s JOIN files f ON f.file_id = s.file_id"
+        " WHERE f.workspace_id = :ws AND s.name = :name AND s.kind = :kind"
+        + _in_clause("f.language", languages, "lg", params)
+        + " ORDER BY f.path, s.start_line, s.urn"
+    )
+    return [(_symbol(r[:-1]), bool(r[-1])) for r in conn.execute(sql, params).fetchall()]
 
 
 # --- 診断 -------------------------------------------------------------------------------

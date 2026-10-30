@@ -12,7 +12,14 @@
 
 from __future__ import annotations
 
-__all__ = ["BUILTINS_PACKAGE", "GLOBALS_PACKAGE", "JS_GLOBALS", "PYTHON_BUILTINS"]
+__all__ = [
+    "BUILTINS_PACKAGE",
+    "GLOBALS_PACKAGE",
+    "JS_BUILTIN_METHODS",
+    "JS_GLOBALS",
+    "PYTHON_BUILTINS",
+    "PYTHON_BUILTIN_METHODS",
+]
 
 BUILTINS_PACKAGE = "builtins"
 GLOBALS_PACKAGE = "globals"
@@ -57,3 +64,38 @@ _JS_NAMES = """
 
 PYTHON_BUILTINS: frozenset[str] = frozenset(_PYTHON_NAMES.split())
 JS_GLOBALS: frozenset[str] = frozenset(_JS_NAMES.split())
+
+# 組み込み型のメソッド名（BUG-0071）。受け手の型が分からない ``x.name(...)`` は、この名前なら組み込み型（``list.append``・
+# ``dict.get``・``Array.push`` など）の呼び出しでもありうるので、ワークスペースに同名のメソッドが 1 つしか無くても名前では結ばない
+# （``tools/_name_calls.py``）。Python は str / bytes / bytearray / list / tuple / dict / set / frozenset / int / float / complex /
+# memoryview / io の基底クラスの公開メソッド（Python 3.13 の ``dir()`` から採取。属性は除く）。TS / JS は Array / String / Map / Set /
+# Promise / Object.prototype / Number / RegExp / Function / Date の主なメソッド。
+_PYTHON_METHOD_NAMES = """
+    add append as_integer_ratio bit_count bit_length capitalize casefold cast center clear close
+    conjugate copy count decode detach difference difference_update discard encode endswith
+    expandtabs extend fileno find flush format format_map from_bytes fromhex fromkeys get hex index
+    insert intersection intersection_update is_integer isalnum isalpha isascii isatty isdecimal
+    isdigit isdisjoint isidentifier islower isnumeric isprintable isspace issubset issuperset
+    istitle isupper items join keys ljust lower lstrip maketrans partition pop popitem read
+    read1 readable readall readinto readinto1 readline readlines release remove removeprefix
+    removesuffix replace reverse rfind rindex rjust rpartition rsplit rstrip seek seekable
+    setdefault sort split splitlines startswith strip swapcase symmetric_difference
+    symmetric_difference_update tell title to_bytes tobytes tolist toreadonly translate truncate
+    union update upper values writable write writelines zfill
+"""
+
+_JS_METHOD_NAMES = """
+    add apply at bind call catch charAt charCodeAt clear codePointAt concat copyWithin delete
+    difference endsWith entries every exec fill filter finally find findIndex findLast
+    findLastIndex flat flatMap forEach get getTime has hasOwnProperty includes indexOf
+    intersection isDisjointFrom isPrototypeOf isSubsetOf isSupersetOf isWellFormed join keys
+    lastIndexOf localeCompare map match matchAll normalize padEnd padStart pop
+    propertyIsEnumerable push reduce reduceRight repeat replace replaceAll reverse search set
+    shift slice some sort splice split startsWith substr substring symmetricDifference test then
+    toExponential toFixed toISOString toJSON toLocaleLowerCase toLocaleString toLocaleUpperCase
+    toLowerCase toPrecision toReversed toSorted toSpliced toString toUpperCase toWellFormed trim
+    trimEnd trimStart union unshift valueOf values with
+"""
+
+PYTHON_BUILTIN_METHODS: frozenset[str] = frozenset(_PYTHON_METHOD_NAMES.split())
+JS_BUILTIN_METHODS: frozenset[str] = frozenset(_JS_METHOD_NAMES.split())

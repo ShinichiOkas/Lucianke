@@ -19,7 +19,11 @@
   3. ``resolve_name(name)``（呼び手が import 表から作る。解決できない import は呼び手が ``lk://_ext/<pkg>#<name>`` にして返す）。
   4. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
      （Python の ``builtins``、TS / JS の標準グローバル。``syntax/builtin_names.py``）なら ``lk://_ext/<builtins_package>#<name>``。
-  5. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側が捨てる）。
+  5. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側は ``relations`` に入れない）。ただし **受け手の型が分からない
+     属性呼び出し**（``x.name(...)`` で ``x`` の型が構文から読めない。注釈が ``Any`` のもの、``self.x`` の型が不明なもの、呼び出しの
+     戻り値などを含む）は ``name_only=True`` にする。取り込み側は内部表 ``_name_calls`` に位置と名前を残し、T-06 / T-07 が問い合わせの
+     ときに名前で対象に結ぶ（BUG-0071。``tools/_name_calls.py``）。受け手の型が分かっていてメンバーが無い（同じファイルのクラスに
+     その名前が無い）ものは ``name_only`` にしない（別のクラスの同名に結ばない）。
 
   外部 URN は属性アクセスの連鎖にも伸びる（``import os`` の ``os.path.join(...)`` → ``lk://_ext/os#path.join``、
   ``from decimal import Decimal`` の ``Decimal(x).quantize()`` → ``lk://_ext/decimal#Decimal.quantize``）。レシーバの型が分からない
@@ -108,6 +112,8 @@ _ANNOTATION_SKIP = frozenset(
         "Literal",
         "None",
         "Self",
+        # ``x: Any`` は型が分からないのと同じ（``lk://_ext/typing#Any.name`` という実在しない外部メソッドに結ばない。BUG-0071）
+        "Any",
     }
 )
 
@@ -138,6 +144,7 @@ class RelationCandidate:
     """``index.ingest.RelationFact`` と同じ形の候補。URN は正準形の文字列、位置は 0 始まり。
 
     ``target_urn`` が ``None`` のときは解決できなかった（``target_name`` は参照された名前そのまま）。
+    ``name_only`` は、``target_urn`` が ``None`` の属性呼び出しのうち、受け手の型が分からないもの（名前でしか結べない。BUG-0071）。
     """
 
     source_urn: str
@@ -149,6 +156,7 @@ class RelationCandidate:
     use_kind: str
     guard_condition: str | None = None
     confidence: Confidence = field(default=Confidence.STRUCTURAL)
+    name_only: bool = False
 
 
 def load_refs_source(language_id: str) -> str:
@@ -419,8 +427,9 @@ class _Extractor:
         source = str(container.urn) if container is not None else self.file_urn
 
         is_member = self._is_member_name(node)
+        receiver_known = False
         if is_member:
-            target = self._resolve_member(ref.recv, name, node, chain)
+            target, receiver_known = self._resolve_member(ref.recv, name, node, chain)
         else:
             is_local, target = self._resolve_bare(name, node, chain)
             if is_local:
@@ -440,6 +449,7 @@ class _Extractor:
             call_site_col=position.col,
             use_kind=use_kind,
             guard_condition=guard,
+            name_only=is_member and target is None and not receiver_known and relation_kind == "CALLS",
         )
 
     def _import_candidate(
@@ -590,15 +600,16 @@ class _Extractor:
 
     def _resolve_member(
         self, recv: Node | None, name: str, node: Node, chain: list[SymbolRecord]
-    ) -> str | None:
+    ) -> tuple[str | None, bool]:
+        """``(URN, 受け手の型が分かったか)``。URN が ``None`` で型も分からないものが ``name_only`` の候補（BUG-0071）。"""
         if recv is not None:
             ref = self._type_ref(recv, node, chain)
             if ref is not None:
                 hit = self._member_of(ref, name, depth=0)
                 if hit is not None or ref[0] == "local":
-                    return hit  # 同じファイルのクラスと分かっているのに無いメンバーは、別のクラスの同名で埋めない
+                    return hit, True  # 同じファイルのクラスと分かっているのに無いメンバーは、別のクラスの同名で埋めない
             elif self._is_self_attribute(recv):
-                return None  # ``self.x.name``: x の型が分からないとき、同名の他の定義に当てると組み込み型のメソッドを誤認する
+                return None, False  # ``self.x.name``: x の型が分からないとき、同名の他の定義に当てると組み込み型のメソッドを誤認する
         suffix = f".{name}"
         container = chain[-1] if chain else None
         own = recv is not None and (recv.type == "this" or self._text(recv) in _RECEIVER_SELF)
@@ -610,9 +621,9 @@ class _Extractor:
             and (own or container is None or s.urn != container.urn)
         ]
         if len(matches) == 1:
-            return str(matches[0].urn)
+            return str(matches[0].urn), False
         got = self.resolve(name)
-        return None if got is not None and got.startswith(_EXTERNAL_PREFIX) else got
+        return (None if got is not None and got.startswith(_EXTERNAL_PREFIX) else got), False
 
     def _is_self_attribute(self, recv: Node) -> bool:
         if recv.type not in _ATTRIBUTE_NODES:

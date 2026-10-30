@@ -789,7 +789,7 @@ lex-sel      = "lex:" , ident , "@L" , DIGIT , { DIGIT } ;                      
 |---|---|---|---|
 | `exact` | 型推論とスコープ解決を経た、コンパイラと同じ答え。同名別シンボルを区別し、クロスファイルの参照を漏らさない（動的ディスパッチと `eval` 相当は除く） | 実行時にしか決まらない呼び出し | LSP（+ Tree-sitter） |
 | `structural` | 構文木に基づく答え。シンボルの境界・種別・同一ファイル内のスコープは正確。クロスファイルの名前解決はインポート文の追跡による推定 | 型、オーバーロードの区別、再エクスポートの追跡 | Tree-sitter、専用パーサ |
-| `heuristic` | 定義らしき位置（関数・セクションの開始行）の推定と、インデント・括弧によるブロック終端の推定 | 境界の正確さ、スコープ | ctags、ブロック推定 |
+| `heuristic` | 定義らしき位置（関数・セクションの開始行）の推定と、インデント・括弧によるブロック終端の推定。T-06 / T-07 では、受け手の型が分からない呼び出し（`x.name(...)`）を、その名前のメソッドがワークスペースに 1 つしか無いことを根拠に対象へ結んだ参照・呼び出し（呼び出し箇所そのものは構文木で正確） | 境界の正確さ、スコープ、受け手の型（名前で結んだ行） | ctags、ブロック推定、名前の一意性（`_name_calls`） |
 | `lexical_fallback` | 単語境界つきの文字列一致。該当行と前後のスニペット | 同名の区別、コメントや文字列内の一致の除外 | 内部 grep |
 
 応答に複数水準が混在するとき、`_resolution_meta.confidence_level` は最も低い水準、`mixed: true`、内訳は `confidence_breakdown`（§5.5）。
@@ -1752,6 +1752,7 @@ json の `data`:
 4. `heuristic` / `lexical_fallback`: 対象名の単語境界 grep で集め、`use` は定義パターンから `w`、それ以外 `r` とする。
 5. 並びはパス辞書順、次に行番号。`implementations` と `type_hierarchy` は先頭にまとめて出し、ページネーションしない（50 件を超えたら件数と先頭 50 件）。`references` は 1 参照箇所を 1 レコードとしてページネーションする。
 6. `dot` / `mermaid` では参照元の囲み関数（`enclosing_urn`）→対象のエッジを `use` ラベル付きで出し、同じ囲み関数からの複数参照は 1 エッジに `×N` を付ける。
+7. **受け手の型が分からない呼び出し**（`x.name(...)` で `x` の型が構文から読めない: 注釈なし・`Any`・`self.x` の型が不明・呼び出しの戻り値など）は `relations` に先が決まらないので、索引器が位置と名前を内部表 `_name_calls` に残す。対象が `Method` のとき、同じ言語族（Python / TS・JS）のワークスペース内の同名の `Method`（テスト以外の定義が 1 つでもあればテストファイルの定義〔テストダブル〕は数えない）を数え、(a) **対象 1 つだけ**で、名前が組み込み型のメソッド名（`list.append`・`dict.get`・`Array.push` など。固定の一覧）でなければ、`structural` の答えにその位置を `use: call`・`confidence_level: heuristic`・`match: "name"` で足し（compact は行末に `conf=heuristic`、見出しの `references:` に `by name: N`）、`warnings[]` に件数と根拠（「`<対象>` is the only method named '<名前>'」）を書く。(b) 同名が **2 つ以上**、または組み込み型と同名ならどの候補にも足さず、件数・同名の定義・先頭の位置（warnings は 5 件、`data.unattributed_calls[].sites` は 20 件まで）を `warnings[]` と `data.unattributed_calls[]` に書く（全候補に足すと `run`・`get` のような名前で参照の一覧が推定で埋まるため）。受け手の型が分かっていてそのクラスに名前が無い呼び出し（`runner: Runner` の `runner.pack()`）は名前で結ばない。`use_kinds`・`scope_paths`・`include_tests` は名前で足す行にも効く。`exact`（LSP・PaaD の `exact` 行）の答えには足さない: (a) の条件で LSP の答えに無い位置があれば、件数と先頭を `warnings[]` と `data.unattributed_calls[]`（`reason: "not_in_exact_answer"`）に書くだけにする（`Any` の受け手は LSP も型を決められない）（実装で確定 2026-10-31、BUG-0071。理由: 呼ぶ側の AI にとって、本番の呼び出し元が黙って 0 件に見えるのは、印の付いた推定より悪い〔編集の影響を見落とす〕）。
 
 **出力**（compact）:
 
@@ -1774,8 +1775,9 @@ json の `data`:
 | `target` | SymbolRecord | |
 | `implementations[]` | SymbolRecord[] | |
 | `type_hierarchy` | object | `supertypes[]`, `subtypes[]`（SymbolRecord） |
-| `references[]` | object[] | `path`, `line`, `col`, `use`, `enclosing_urn`, `enclosing_name`, `snippet`, `is_test`, `confidence_level` |
-| `totals` | object | `files`, `sites`, `tests` |
+| `references[]` | object[] | `path`, `line`, `col`, `use`, `enclosing_urn`, `enclosing_name`, `snippet`, `is_test`, `confidence_level`。名前だけで結んだ行（処理規約 7）にだけ `match: "name"`（`confidence_level` は `heuristic`） |
+| `totals` | object | `files`, `sites`, `tests`。名前で足した行があれば `by_name` |
+| `unattributed_calls[]` | object[] | 処理規約 7 で結ばなかった型不明の呼び出し（あるときだけ）。`name`, `total`, `reason`（`ambiguous` \| `builtin_name` \| `not_in_exact_answer`）, `candidates[]`（`qualified_name`, `path`, `line`）, `candidates_total`, `builtin_name`, `sites[]`（`path`, `line`, `col`, `enclosing_name`, `is_test`。先頭 20 件） |
 
 **エラー**:
 
@@ -1784,7 +1786,7 @@ json の `data`:
 - `E_TIMEOUT`: 降格時の grep が 2,000 ms を超えた（部分結果を `details.partial` に）。
 - `E_WORKSPACE_NOT_CONFIGURED`, `E_REVISION_NOT_FOUND`, `E_CURSOR_EXPIRED`: §5.8 のとおり。
 
-**精度と降格**: `exact` はスコープと型を区別した参照、実装、型階層をすべて返す。`structural` は同名識別子の一致を返し、実装は推定、型階層は直接の基底・派生のみ。`heuristic` と `lexical_fallback` は参照のみで、実装と型階層は `(unavailable)` とする。`include_lexical_in_other_files: true` で加わった行は個別に `conf=lexical_fallback` を付け、応答は `mixed: true`。
+**精度と降格**: `exact` はスコープと型を区別した参照、実装、型階層をすべて返す。`structural` は同名識別子の一致を返し、実装は推定、型階層は直接の基底・派生のみ。`heuristic` と `lexical_fallback` は参照のみで、実装と型階層は `(unavailable)` とする。`include_lexical_in_other_files: true` で加わった行は個別に `conf=lexical_fallback` を付け、応答は `mixed: true`。処理規約 7 で名前だけで結んだ行は個別に `conf=heuristic` を付け、応答は `mixed: true`（`confidence_level` は最も低い `heuristic`）。`exact` の答えには名前で結んだ行を混ぜない。
 
 **事後条件**:
 
@@ -1825,6 +1827,7 @@ json の `data`:
 6. 動的ディスパッチ: `outgoing` で抽象メソッド・インターフェース経由の呼び出しは抽象側を表示し、実装の数を `-> impl ×N` の `note` で添える。展開はしない。
 7. `both` は incoming の木、outgoing の木の順に 2 本出す。
 8. 1 レコードは 1 `tree-line`。予算が尽きたら幅優先の途中で止め、残りを `# summary: depth 3: 42 more callers in 9 files` のように要約し、`next_cursor` で続きを返す。
+9. **受け手の型が分からない呼び出し**（T-06 処理規約 7 と同じ `_name_calls` と同じ判定）: `structural` の木では、incoming はノードが `Method` で同名のメソッドがそれだけなら、その名前の型不明の呼び出しを呼び出し元として足す（深さ 2 以降のノードにも適用する）。outgoing はノードの中の型不明の呼び出しのうち、名前のメソッドが 1 つだけのものをそのメソッドへの呼び出しとして足す。どちらも `confidence_level: heuristic`・`match: "name"`（compact は `tree-line` の `  conf=heuristic`）。ノードの水準は呼び出し箇所のうち最も高いもの（名前解決済みの箇所が 1 つでもあればその水準）で、`match` はすべての箇所が名前だけのときに付ける。結べない（同名が複数・組み込み型と同名）ものは向きごと・名前ごとに件数と先頭の位置を `warnings[]` と `data.unattributed_calls[]`（`direction` 付き）に書く（outgoing は組み込み型と同名のものを数えない。`append`・`get` などは組み込み型の呼び出しがほとんどのため）。`exact` の木には足さず、根の incoming で結べる（同名が根 1 つだけ）のに LSP の答えに無い位置の件数と先頭を `warnings[]` と `data.unattributed_calls[]`（`reason: "not_in_exact_answer"`）に書くだけにする（実装で確定 2026-10-31、BUG-0071。理由: 呼ぶ側の AI にとって、本番の呼び出し元が黙って 0 件に見えるのは、印の付いた推定より悪い〔編集の影響を見落とす〕）。
 
 **出力**（compact）:
 
@@ -1845,8 +1848,9 @@ json の `data`:
 |---|---|---|
 | `root` | SymbolRecord | |
 | `direction`, `depth` | string, integer | |
-| `nodes[]` | object[] | `urn`, `name`, `path`, `call_site_line`, `depth`, `parent_urn`, `when`, `is_test`, `is_external`, `cycle`, `children_truncated`, `confidence_level` |
-| `edges[]` | object[] | `source_urn`, `target_urn`, `call_site_line`, `guard`（dot / mermaid の元） |
+| `nodes[]` | object[] | `urn`, `name`, `path`, `call_site_line`, `depth`, `parent_urn`, `when`, `is_test`, `is_external`, `cycle`, `children_truncated`, `confidence_level`。すべての呼び出し箇所を名前だけで結んだノード（処理規約 9）にだけ `match: "name"`。`call_sites[]` の各要素も同じ条件で `match` |
+| `edges[]` | object[] | `source_urn`, `target_urn`, `call_site_line`, `guard`（dot / mermaid の元）。名前だけで結んだ辺にだけ `match: "name"` |
+| `unattributed_calls[]` | object[] | 処理規約 9 で結ばなかった型不明の呼び出し（あるときだけ）。T-06 の同名の欄と同じ形に `direction` を足したもの |
 
 **エラー**:
 
@@ -1856,7 +1860,7 @@ json の `data`:
 - `E_TIMEOUT`: 降格時の grep が 2,000 ms を超えた。
 - `E_WORKSPACE_NOT_CONFIGURED`, `E_REVISION_NOT_FOUND`, `E_CURSOR_EXPIRED`: §5.8 のとおり。
 
-**精度と降格**: `exact` は型解決済みの呼び出し関係を `depth` まで返す。`structural` は `relations` の名前解決済みエッジを使い、動的ディスパッチと同名メソッドの区別が落ちる旨を `accuracy_warning` に書く。`heuristic` / `lexical_fallback` は 1 段のみで `when:` を付けない。
+**精度と降格**: `exact` は型解決済みの呼び出し関係を `depth` まで返す。`structural` は `relations` の名前解決済みエッジを使い、動的ディスパッチと同名メソッドの区別が落ちる旨を `accuracy_warning` に書く。加えて処理規約 9 で名前だけで結んだノードは個別に `conf=heuristic` を付け、応答は `mixed: true`。`exact` の木には混ぜない。`heuristic` / `lexical_fallback` は 1 段のみで `when:` を付けない。
 
 **事後条件**:
 

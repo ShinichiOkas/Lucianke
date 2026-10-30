@@ -79,10 +79,31 @@ def _migrate_3_to_4(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_4_to_5(conn: sqlite3.Connection) -> None:
+    """v5: 受け手の型が分からない属性呼び出しの内部表 ``_name_calls``（BUG-0071。``tools/_name_calls.py``）。
+
+    値は取り込みのときにしか作れないので、関係を抽出する言語（Python / TS / JS）のファイルの ``sha256`` を空にして、次の差分走査で
+    取り込み直させる（ファイルの中身は変わらない。``relations`` もそのとき作り直される）。
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _name_calls ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " source_urn TEXT NOT NULL, name TEXT NOT NULL,"
+        " call_site_line INTEGER NOT NULL, call_site_col INTEGER NOT NULL, guard_condition TEXT)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _name_calls_name ON _name_calls(name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _name_calls_source ON _name_calls(source_urn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _name_calls_file ON _name_calls(file_id)")
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('python', 'typescript', 'tsx', 'javascript', 'jsx')"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
     3: _migrate_3_to_4,
+    4: _migrate_4_to_5,
 }
 
 

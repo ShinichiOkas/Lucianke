@@ -15,6 +15,10 @@ LSP が ``ready`` でない・時間切れ・失敗なら ``structural``（今�
   同じ囲みからの複数参照は ``mcp/render/graph.py`` が 1 本にまとめて ``×N`` を付ける。
 * ``include_lexical_in_other_files``: 対象が Tier 1〜2 でも、Tier 3〜4 のファイルを単語境界 grep して ``lex:`` の参照を足す
   （その行は ``conf=lexical_fallback``。応答は ``mixed``）。
+* 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071、``_name_calls``）: 対象が ``Method`` で、その名前の
+  メソッドがワークスペースに対象 1 つだけ（組み込み型と同名でない）なら、``structural`` の答えにその位置を ``use=call`` ・
+  ``conf=heuristic`` ・json の ``match: "name"`` で足す。同名が複数・組み込み型と同名なら足さず、件数と先頭の位置を ``warnings`` と
+  ``data.unattributed_calls`` に書く。``exact`` の答えには足さない（結べるのに LSP の答えに無い位置の件数と先頭を ``warnings`` に書く）。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
 ``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
@@ -48,6 +52,7 @@ from lucianke.index import queries
 from lucianke.lsp import features
 from lucianke.syntax.heuristic import lexical_scan
 from lucianke.tools import _lsp_exact as lx
+from lucianke.tools import _name_calls as nc
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._building import ensure_target_indexed
 from lucianke.tools._nav import (
@@ -132,6 +137,7 @@ class _Ref:
     is_test: bool
     confidence: Confidence = Confidence.STRUCTURAL
     lexical: bool = False
+    match: str | None = None  # 名前だけで結んだ参照は ``"name"``（BUG-0071）
 
 
 @dataclass(slots=True)
@@ -147,6 +153,8 @@ class _Found:
     subtypes: list[SymbolRecord] = field(default_factory=list)
     hierarchy_applicable: bool = False
     warnings: list[str] = field(default_factory=list)
+    by_name: int = 0  # 名前だけで結んで足した参照の数
+    unattributed: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_calls
 
 
 def _glob_list(scope_paths: list[str]) -> list[str]:
@@ -275,6 +283,12 @@ def _implementations(
 # --- 参照 ---------------------------------------------------------------------------------------
 
 
+def _scope_set(conn: sqlite3.Connection, ws_id: str, args: FindReferencesArgs) -> set[str] | None:
+    if not args.scope_paths:
+        return None
+    return {f.path for f in queries.files_in_scope(conn, ws_id, _glob_list(args.scope_paths))}
+
+
 def _collect_refs(
     conn: sqlite3.Connection,
     ws: Workspace,
@@ -285,10 +299,7 @@ def _collect_refs(
     exact_rows: Sequence[queries.ReferenceRow] | None = None,
 ) -> list[_Ref]:
     """``exact_rows`` があればそれだけを参照の元にする（LSP の答え、または PaaD の ``exact`` 行）。無ければ ``relations`` の全行。"""
-    ws_id = ws.workspace_id
-    in_scope: set[str] | None = None
-    if args.scope_paths:
-        in_scope = {f.path for f in queries.files_in_scope(conn, ws_id, _glob_list(args.scope_paths))}
+    in_scope = _scope_set(conn, ws.workspace_id, args)
     wanted = set(args.use_kinds) if args.use_kinds else None
     best: dict[tuple[str, int, int], _Ref] = {}
     if exact_rows is None:
@@ -352,6 +363,80 @@ def _collect_refs(
                     confidence=Confidence.EXACT if exact_rows is not None else sym.confidence,
                 )
     return [best[k] for k in sorted(best)]
+
+
+def _name_refs(
+    conn: sqlite3.Connection,
+    ws: Workspace,
+    sym: SymbolRecord,
+    args: FindReferencesArgs,
+    source: SourceLines,
+    found: _Found,
+    *,
+    exact: bool,
+) -> None:
+    """型の分からない受け手の呼び出し ``x.<name>(...)`` を名前で足す・要約する（BUG-0071。``_name_calls`` の docstring）。"""
+    if args.use_kinds and "call" not in args.use_kinds:
+        return
+    names = nc.NameIndex(conn, ws.workspace_id)
+    verdict = names.target_verdict(sym)
+    if verdict is None:
+        return
+    in_scope = _scope_set(conn, ws.workspace_id, args)
+    known = {(r.path, r.line, r.col) for r in found.refs}
+    rows = [
+        r
+        for r in names.sites_named(verdict, include_tests=args.include_tests)
+        if nc.site_key(r) not in known and (in_scope is None or str(r.path) in in_scope)
+    ]
+    if not rows:
+        return
+    name = verdict.name
+    if exact:
+        if not verdict.owned_by(sym):
+            return  # 同名が複数あるなら LSP の答えが正。足しも書きもしない
+        found.warnings.append(
+            f"{len(rows)} call site(s) of .{name}() whose receiver type is unknown to the syntax tree are not in this"
+            f" exact answer (the LSP could not type the receiver, e.g. Any); {verdict.only_text()}, so they may call"
+            f" it: {nc.sample_text(rows)} (data.unattributed_calls)"
+        )
+        u = nc.Unattributed(verdict)
+        u.add(rows)
+        found.unattributed.append(u.to_json(enclosing_name_of, "not_in_exact_answer"))
+        return
+    if verdict.owned_by(sym):
+        for r in rows:
+            key = nc.site_key(r)
+            ename = enclosing_name_of(r.source_urn)
+            found.refs.append(
+                _Ref(
+                    path=key[0],
+                    line=key[1],
+                    col=key[2],
+                    use="call",
+                    source_urn=r.source_urn,
+                    enclosing_urn=r.source_urn if ename is not None else None,
+                    enclosing_name=ename,
+                    snippet=source.text(key[0], r.site.line) if args.context_snippet else "",
+                    is_test=r.is_test,
+                    confidence=Confidence.HEURISTIC,
+                    match=nc.MATCH_NAME,
+                )
+            )
+        found.refs.sort(key=lambda x: (x.path, x.line, x.col))
+        found.by_name = len(rows)
+        found.warnings.append(
+            f"{len(rows)} call site(s) marked conf=heuristic are matched by name only: the receiver's type is unknown"
+            f" and {verdict.only_text()}"
+        )
+        return
+    found.warnings.append(
+        f"{len(rows)} call site(s) of .{name}() with a receiver of unknown type are not listed: {verdict.reason()};"
+        f" e.g. {nc.sample_text(rows)} (data.unattributed_calls)"
+    )
+    u = nc.Unattributed(verdict)
+    u.add(rows)
+    found.unattributed.append(u.to_json(enclosing_name_of))
 
 
 def _lexical_refs(
@@ -456,6 +541,7 @@ def _work(
         source = SourceLines(ws)
         if args.query_type in ("references", "all"):
             found.refs = _collect_refs(conn, ws, sym, args, files, source, exact_rows)
+            _name_refs(conn, ws, sym, args, source, found, exact=exact_rows is not None)
             if args.include_lexical_in_other_files:
                 known = {(r.path, r.line, r.col) for r in found.refs}
                 found.refs += _lexical_refs(conn, ws, sym, args, known, found)
@@ -490,7 +576,7 @@ def _sym_list(symbols: list[SymbolRecord], total: int) -> str:
 
 def _ref_record(L: Any, r: _Ref, priority: int, target_urn: str, show_snippet: bool) -> Record:
     snippet = r.snippet if show_snippet else ""
-    suffix = "  conf=lexical_fallback" if r.lexical else ""
+    suffix = "  conf=lexical_fallback" if r.lexical else ("  conf=heuristic" if r.match else "")
     if suffix and snippet:  # 末尾の印を足しても 200 文字に収める（規約 6）
         head = L.ref_line(r.path, r.line, r.col, use=r.use, enclosing=r.enclosing_name, snippet="x")[:-1]
         room = L.LINE_LIMIT - len(head) - len(suffix)
@@ -517,6 +603,7 @@ def _ref_record(L: Any, r: _Ref, priority: int, target_urn: str, show_snippet: b
             "confidence_level": r.confidence.value,
             "source_urn": r.source_urn,
             "target_urn": target_urn,
+            **({"match": r.match} if r.match else {}),
         },
         confidence=r.confidence,
         group=r.path,
@@ -533,7 +620,7 @@ def _graph(found: _Found, ws_id: str) -> dict[str, Any]:
         src = r.enclosing_urn or file_urn(ws_id, r.path)
         if src not in nodes:
             nodes[src] = {"id": src, "label": r.enclosing_name or r.path, "path": r.path}
-            if r.lexical:
+            if r.lexical or r.match:
                 nodes[src]["conf"] = r.confidence.value
         edges.append(
             {
@@ -541,7 +628,7 @@ def _graph(found: _Found, ws_id: str) -> dict[str, Any]:
                 "target": target_urn,
                 "label": r.use,
                 "count": 1,
-                "conf": r.confidence.value if r.lexical else None,
+                "conf": r.confidence.value if r.lexical or r.match else None,
             }
         )
     return {"nodes": list(nodes.values()), "edges": edges}
@@ -656,6 +743,8 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     files = {r.path for r in found.refs}
     tests = sum(1 for r in found.refs if r.is_test)
     totals = {"files": len(files), "sites": len(found.refs), "tests": tests}
+    if found.by_name:
+        totals["by_name"] = found.by_name
 
     head: list[tuple[str, str]] = [("target", f"[{found.target.kind.value}] {target_urn}")]
     if args.query_type in ("implementations", "all"):
@@ -679,7 +768,8 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
         else:
             head.append(("type_hierarchy", "(n/a)"))
     if args.query_type in ("references", "all"):
-        head.append(("references", f"{totals['files']} files, {totals['sites']} sites (tests: {tests})"))
+        by_name = f"; by name: {found.by_name}" if found.by_name else ""
+        head.append(("references", f"{totals['files']} files, {totals['sites']} sites (tests: {tests}{by_name})"))
 
     hierarchy_note = (
         [HIERARCHY_NOTE]
@@ -701,6 +791,8 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
         ),
         "totals": totals,
     }
+    if found.unattributed:
+        data["unattributed_calls"] = found.unattributed
     if args.format in ("dot", "mermaid"):
         data["graph"] = _graph(found, ws.workspace_id)
     return ToolOutput(

@@ -1,4 +1,4 @@
--- schema_version: 4
+-- schema_version: 5
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -232,6 +232,20 @@ CREATE TABLE _exact_marks (
   rows_fp      TEXT NOT NULL,            -- 対象の exact 行の指紋
   PRIMARY KEY (workspace_id, kind, urn)
 ) WITHOUT ROWID;
+
+-- 受け手の型が構文から分からない属性呼び出し（`x.name(...)`）の位置と名前（BUG-0071。engine/indexer.py が書き、tools/_name_calls.py が読む）。
+-- relations には先の URN が決まらないので入らない。T-06 / T-07 が問い合わせのときに名前で対象に結ぶ（同名のメソッドが 1 つだけなら heuristic で）。
+CREATE TABLE _name_calls (
+  file_id         INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  source_urn      TEXT NOT NULL,             -- 呼び出し箇所を含む最内の定義（モジュール直下ならファイルの URN）
+  name            TEXT NOT NULL,             -- 呼んだメンバーの名前
+  call_site_line  INTEGER NOT NULL,          -- 1 始まり（relations と同じ外部表現）
+  call_site_col   INTEGER NOT NULL,          -- 1 始まり
+  guard_condition TEXT
+);
+CREATE INDEX _name_calls_name   ON _name_calls(name);
+CREATE INDEX _name_calls_source ON _name_calls(source_urn);
+CREATE INDEX _name_calls_file   ON _name_calls(file_id);
 
 -- ===== symbols_fts を symbols に追従させるトリガ（外部コンテンツ FTS5） =====
 CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN

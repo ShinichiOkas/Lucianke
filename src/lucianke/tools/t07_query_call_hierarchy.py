@@ -20,6 +20,12 @@
   途中で止め、残りを ``# summary:`` に要約して ``next_cursor`` で続きを返す。
 * ``Class`` / ``Struct`` を渡したときはコンストラクタ（``__init__`` / ``constructor``）の呼び出しを起点にする。
 * ``dot`` / ``mermaid``: ``data_static["graph"]``。エッジは呼び出し元 → 呼び出し先（ラベル ``CALLS``、``attrs.guard`` に条件）。
+* 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071、``_name_calls``）: ``structural`` の木では、
+  incoming はノードが ``Method`` でその名前のメソッドがワークスペースに 1 つだけ（組み込み型と同名でない）なら、その名前の型不明の
+  呼び出しを呼び出し元として足す。outgoing はノードの中の型不明の呼び出しのうち、名前のメソッドが 1 つだけのものをそのメソッドへの
+  呼び出しとして足す。どちらも ``conf=heuristic``・json の ``match: "name"``。結べない（同名が複数・組み込み型と同名）ものは件数と
+  先頭の位置を ``warnings`` と ``data.unattributed_calls`` に書く（outgoing は組み込み型と同名のものを数えない）。``exact`` の木には
+  足さず、根の incoming で結べるのに LSP の答えに無い位置の件数と先頭を ``warnings`` に書くだけにする。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
 ``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
@@ -44,6 +50,7 @@ from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
 from lucianke.tools import _lsp_exact as lx
+from lucianke.tools import _name_calls as nc
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._building import ensure_target_indexed
 from lucianke.tools._nav import (
@@ -97,6 +104,7 @@ class _Site:
     line: int  # 1 始まり
     guard: str | None
     confidence: Confidence
+    match: str | None = None  # 名前だけで結んだ呼び出しは ``"name"``（BUG-0071）
 
 
 @dataclass(slots=True)
@@ -118,6 +126,16 @@ class _Node:
     def site(self) -> _Site:
         return self.sites[0]
 
+    @property
+    def confidence(self) -> Confidence:
+        """呼び出し箇所のうち最も高い水準（1 箇所でも名前解決済みなら、名前だけの箇所があってもその水準）。"""
+        return max(s.confidence for s in self.sites)
+
+    @property
+    def match(self) -> str | None:
+        """すべての呼び出し箇所が名前だけで結んだものなら ``"name"``。"""
+        return nc.MATCH_NAME if all(s.match for s in self.sites) else None
+
 
 @dataclass(slots=True)
 class _Tree:
@@ -130,18 +148,28 @@ class _Tree:
     )  # direction → 根の子のうち max_children で省いた数
     count: int = 0
     capped: bool = False
+    warnings: list[str] = field(default_factory=list)  # 名前で結んだ・結ばなかった呼び出しの説明（BUG-0071）
+    unattributed: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_calls
 
 
 class _Symbols:
     """シンボルと ``is_test`` の問い合わせ（URN・パスごとに 1 度）。"""
 
     def __init__(
-        self, conn: sqlite3.Connection, workspace_id: str, source: lx.CallEdgeSource | None = None
+        self,
+        conn: sqlite3.Connection,
+        workspace_id: str,
+        source: lx.CallEdgeSource | None = None,
+        names: nc.NameIndex | None = None,
     ) -> None:
         self.conn, self.ws = conn, workspace_id
         self.source = source  # exact 経路の辺の供給（無ければ relations の全行）
+        self.names = names  # structural の木で、型の分からない受け手の呼び出しを名前で足す（BUG-0071）
         self._sym: dict[str, SymbolRecord | None] = {}
         self._test: dict[str, bool] = {}
+        # 名前で足した呼び出し箇所（向き, パス, 行, 列）と、結ばなかったもの（向き, 名前, 言語族）→ 集まり
+        self.by_name: set[tuple[str, str, int, int]] = set()
+        self.unattributed: dict[tuple[str, str, str], nc.Unattributed] = {}
 
     def symbol(self, urn: str) -> SymbolRecord | None:
         if urn not in self._sym:
@@ -200,7 +228,62 @@ def _call_edges(
             grouped.setdefault(child, {}).setdefault(
                 key, _Site(path=key[0], line=key[1], guard=r.guard_condition, confidence=r.confidence)
             )
+    if syms.names is not None:
+        for urn in urns:
+            for child, key, site in _name_edges(syms, syms.names, urn, direction, include_tests):
+                if key not in grouped.get(child, {}):
+                    grouped.setdefault(child, {})[key] = site
+                    syms.by_name.add((direction, *key))
     return {c: sorted(s.values(), key=lambda x: (x.path, x.line)) for c, s in grouped.items()}
+
+
+def _name_site(r: queries.NameCallRow) -> tuple[tuple[str, int, int], _Site]:
+    key = nc.site_key(r)
+    return key, _Site(
+        path=key[0], line=key[1], guard=r.guard_condition, confidence=Confidence.HEURISTIC, match=nc.MATCH_NAME
+    )
+
+
+def _name_edges(
+    syms: _Symbols, names: nc.NameIndex, urn: str, direction: str, include_tests: bool
+) -> list[tuple[str, tuple[str, int, int], _Site]]:
+    """型の分からない受け手の呼び出しのうち、名前で ``urn`` と結べるもの ``(子の URN, 箇所のキー, 箇所)``（BUG-0071）。
+
+    結べないもの（同名が複数・組み込み型と同名）は ``syms.unattributed`` に集める（outgoing は組み込み型と同名のものを数えない）。
+    """
+    out: list[tuple[str, tuple[str, int, int], _Site]] = []
+    if direction == "incoming":
+        sym = syms.symbol(urn)
+        verdict = names.target_verdict(sym) if sym is not None else None
+        if sym is None or verdict is None:
+            return out
+        rows = names.sites_named(verdict, include_tests=include_tests)
+        if not rows:
+            return out
+        if not verdict.owned_by(sym):
+            syms.unattributed.setdefault(
+                (direction, verdict.name, verdict.family), nc.Unattributed(verdict)
+            ).add(rows)
+            return out
+        for r in rows:
+            key, site = _name_site(r)
+            out.append((r.source_urn, key, site))
+        return out
+    for r in names.calls_from(urn):
+        family = nc.family_of(r.language)
+        verdict = names.verdict(r.name, family) if family is not None else None
+        if verdict is None:
+            continue  # ワークスペースにその名前のメソッドが無い（外部・組み込みの呼び出し）
+        owner = verdict.owner
+        if owner is None:
+            if len(verdict.candidates) > 1 and not verdict.builtin:
+                syms.unattributed.setdefault(
+                    (direction, verdict.name, verdict.family), nc.Unattributed(verdict)
+                ).add([r])
+            continue
+        key, site = _name_site(r)
+        out.append((str(owner.urn), key, site))
+    return out
 
 
 def _make_node(
@@ -315,7 +398,8 @@ def _work(
                 token=queries.files_fingerprint(conn, ws.workspace_id),
                 roots=_roots_of(conn, ws.workspace_id, sym),
             )
-        syms = _Symbols(conn, ws.workspace_id, source)
+        names = nc.NameIndex(conn, ws.workspace_id)
+        syms = _Symbols(conn, ws.workspace_id, source, names=None if exact is not None else names)
         tree = _Tree(
             root=sym,
             language=info.language if info is not None else "n/a",
@@ -333,7 +417,46 @@ def _work(
                     tree.root_truncated[direction] = skipped
             else:
                 tree.roots[direction] = []
+        if exact is None:
+            _name_notes(syms, tree)
+        elif "incoming" in directions and sym.kind is Kind.METHOD:
+            _exact_name_note(names, sym, tree, args.include_tests)
         return tree, source
+
+
+def _name_notes(syms: _Symbols, tree: _Tree) -> None:
+    """structural の木の、名前で結んだ・結ばなかった呼び出しの説明（BUG-0071）。"""
+    if syms.by_name:
+        tree.warnings.append(
+            f"{len(syms.by_name)} call site(s) marked conf=heuristic are matched by method name only: the receiver's"
+            " type is unknown and the workspace has exactly one method of that name"
+        )
+    for (direction, _name, _family), group in sorted(syms.unattributed.items()):
+        rows = group.sorted_rows()
+        tree.warnings.append(
+            f"{direction}: {len(rows)} call site(s) of .{group.verdict.name}() with a receiver of unknown type were"
+            f" not attributed: {group.verdict.reason()}; e.g. {nc.sample_text(rows)} (data.unattributed_calls)"
+        )
+        tree.unattributed.append({"direction": direction, **group.to_json(enclosing_name_of)})
+
+
+def _exact_name_note(names: nc.NameIndex, sym: SymbolRecord, tree: _Tree, include_tests: bool) -> None:
+    """exact の木には足さない。根の incoming で、名前で結べるのに LSP の答えに無い呼び出しの件数と先頭を書く（BUG-0071）。"""
+    verdict = names.target_verdict(sym)
+    if verdict is None or not verdict.owned_by(sym):
+        return
+    known = {(s.path, s.line) for n in tree.roots.get("incoming", []) for s in n.sites}
+    rows = [r for r in names.sites_named(verdict, include_tests=include_tests) if nc.site_key(r)[:2] not in known]
+    if not rows:
+        return
+    tree.warnings.append(
+        f"incoming: {len(rows)} call site(s) of .{verdict.name}() whose receiver type is unknown to the syntax tree"
+        f" are not in this exact tree (the LSP could not type the receiver, e.g. Any); {verdict.only_text()}, so"
+        f" they may call it: {nc.sample_text(rows)} (data.unattributed_calls)"
+    )
+    group = nc.Unattributed(verdict)
+    group.add(rows)
+    tree.unattributed.append({"direction": "incoming", **group.to_json(enclosing_name_of, "not_in_exact_answer")})
 
 
 # --- 出力 ---------------------------------------------------------------------------------------
@@ -356,7 +479,13 @@ def _node_json(n: _Node, include_guard: bool) -> dict[str, Any]:
         "call_site_path": first.path,
         "call_site_line": first.line,
         "call_sites": [
-            {"path": s.path, "line": s.line, "when": s.guard if include_guard else None} for s in n.sites
+            {
+                "path": s.path,
+                "line": s.line,
+                "when": s.guard if include_guard else None,
+                **({"match": s.match} if s.match else {}),
+            }
+            for s in n.sites
         ],
         "direction": n.direction,
         "depth": n.depth,
@@ -366,7 +495,8 @@ def _node_json(n: _Node, include_guard: bool) -> dict[str, Any]:
         "is_external": n.external,
         "cycle": n.cycle,
         "children_truncated": n.children_truncated,
-        "confidence_level": first.confidence.value,
+        "confidence_level": n.confidence.value,
+        **({"match": n.match} if n.match else {}),
     }
 
 
@@ -389,6 +519,7 @@ def _edges(root_urn: str, all_nodes: Sequence[_Node], include_guard: bool) -> li
                     "call_site_line": s.line,
                     "call_site_path": s.path,
                     "guard": s.guard if include_guard else None,
+                    **({"match": s.match} if s.match else {}),
                 }
             )
     return out
@@ -486,6 +617,7 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
                     n.site.line,
                     indent=n.depth - 1,
                     when=when,
+                    conf=n.confidence if n.match else None,
                     cycle=n.cycle,
                 )
             ]
@@ -498,7 +630,7 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
                     priority=len(records),
                     lines=tuple(lines),
                     data=_node_json(n, args.include_guard_conditions),
-                    confidence=n.site.confidence,
+                    confidence=n.confidence,
                     group=n.site.path,
                 )
             )
@@ -510,6 +642,8 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
         "depth": args.depth,
         "edges": edges,
     }
+    if tree.unattributed:
+        data["unattributed_calls"] = tree.unattributed
     if args.format in ("dot", "mermaid"):
         data["graph"] = _graph(tree.root, all_nodes, edges)
     head = [("root", f"[{tree.root.kind.value}] {root_urn} direction={args.direction} depth={args.depth}")]
@@ -521,6 +655,7 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
         warnings.append(f"{source.skipped} call edge(s) were left out: the caller/callee is not in the index")
     if source is not None:
         warnings.extend(source.warnings)  # exact で答えたときだけ溜まる（LSP に開かせるファイルの上限など）
+    warnings.extend(tree.warnings)
     return ToolOutput(
         records=records,
         max_confidence=Confidence.EXACT,

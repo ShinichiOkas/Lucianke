@@ -61,6 +61,7 @@ from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
     FileFacts,
     IngestStats,
+    NameCallFact,
     RelationFact,
     SymbolExtra,
     SyntaxErrorFact,
@@ -844,6 +845,7 @@ class Indexer:
         relations: Sequence[RelationFact] = (),
         syntax_errors: Sequence[SyntaxErrorFact] = (),
         import_stems: Sequence[str] = (),
+        name_calls: Sequence[NameCallFact] = (),
     ) -> FileFacts:
         support = get_support(detected.language_id)
         extra_globs = tuple(getattr(support, "test_path_globs", ()) or ())
@@ -862,6 +864,7 @@ class Indexer:
             syntax_errors=tuple(syntax_errors),
             symbol_extras=extras or {},
             import_stems=tuple(import_stems),
+            name_calls=tuple(name_calls),
         )
 
     def _analyze_code(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
@@ -882,7 +885,7 @@ class Indexer:
         records = [e.record for e in extraction.symbols]
         extras = {str(e.record.urn): SymbolExtra(body_sha256=e.body_sha256) for e in extraction.symbols}
         probes: set[str] = set()
-        relations = self._relations(parsed, lang, support, records, rel, probes)
+        relations, name_calls = self._relations(parsed, lang, support, records, rel, probes)
         errors: list[SyntaxErrorFact] = [
             (r.start.line, r.start.col, r.end.line, r.end.col, _SYNTAX_ERROR_MESSAGE)
             for r in parsed.error_ranges
@@ -898,6 +901,7 @@ class Indexer:
             relations=relations,
             syntax_errors=errors,
             import_stems=sorted(probes),
+            name_calls=name_calls,
         )
 
     def _relations(
@@ -908,8 +912,12 @@ class Indexer:
         records: list[SymbolRecord],
         rel: RelPath,
         probes: set[str],
-    ) -> list[RelationFact]:
-        """関係の候補 → ``RelationFact``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順で、解決できなければ捨てる。"""
+    ) -> tuple[list[RelationFact], list[NameCallFact]]:
+        """関係の候補 → ``(RelationFact, NameCallFact)``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順。
+
+        解決できない候補は ``relations`` に入れない。そのうち受け手の型が分からない属性呼び出し（``name_only``）だけは、位置と名前を
+        ``NameCallFact``（内部表 ``_name_calls``）にする（T-06 / T-07 が名前で結ぶ。BUG-0071）。
+        """
         ws_id = self._ws.workspace_id
         external: dict[str, str] = {}
         # def / class の中の import 文（開始位置ごと）
@@ -971,7 +979,7 @@ class Indexer:
             builtins_package=BUILTINS_PACKAGE if lang == "python" else GLOBALS_PACKAGE,
             resolve_import=resolve_import,
         )
-        return [
+        rel_facts = [
             RelationFact(
                 source_urn=c.source_urn,
                 target_urn=c.target_urn,
@@ -985,6 +993,18 @@ class Indexer:
             for c in candidates
             if c.target_urn is not None
         ]
+        name_calls = [
+            NameCallFact(
+                source_urn=c.source_urn,
+                name=c.target_name,
+                call_site_line=c.call_site_line,
+                call_site_col=c.call_site_col,
+                guard_condition=c.guard_condition,
+            )
+            for c in candidates
+            if c.target_urn is None and c.name_only
+        ]
+        return rel_facts, name_calls
 
     def _exists(self, rel: RelPath) -> bool:
         return (self._ws.root / str(rel)).is_file() and not is_excluded(self._ws, rel)
