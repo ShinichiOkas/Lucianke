@@ -6,7 +6,8 @@
   ``WiredServices`` + ``Pipeline``（全ツールを ``register_tools`` で登録）。索引（差分索引の背景ジョブ）の完了を待ってから渡す。
 * LSP は ``.venv`` の basedpyright と ruff（Python）。TypeScript の LSP（typescript-language-server / vtsls）は、見つかれば使い、
   無ければ構文層（Tree-sitter）の降格応答で事後条件を確かめる（``Rig.lsp_ready``）。
-* 取得されていない環境（CI など）は ``FixtureMissing``。試験側が ``skip`` の理由に使う。
+* 取得されていなければ ``FixtureMissing``。``conftest.py`` の ``fetched_fixtures`` が取得しにいき、失敗なら赤にする（BUG-0062）。
+  ``LUCIANKE_NO_FIXTURE_FETCH=1`` のときだけ、これを理由（NOT CHECKED）に skip する。
 """
 
 from __future__ import annotations
@@ -66,11 +67,23 @@ def fixture_dir(key: str) -> Path:
             f"{key} ({spec['name']}) is not fetched: run `uv run --no-project python bench/fetch_fixtures.py`"
         )
     try:
-        head = subprocess.run(  # noqa: S603  固定の引数列
-            ["git", "rev-parse", "HEAD"], cwd=d, capture_output=True, text=True, check=False, timeout=30
-        ).stdout.strip()
+        proc = subprocess.run(  # noqa: S603  固定の引数列
+            ["git", "rev-parse", "--verify", "-q", "HEAD"],
+            cwd=d,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         raise FixtureMissing(f"{key}: cannot read the fixture HEAD ({exc})") from exc
+    head = proc.stdout.strip()
+    if proc.returncode != 0 or not head:
+        # git init の後で取得が失敗した残骸（コミットが無い）
+        raise FixtureMissing(
+            f"{key} ({spec['name']}) is not fetched (incomplete clone, no commit): "
+            "run `uv run --no-project python bench/fetch_fixtures.py`"
+        )
     if head != spec["sha"]:
         raise FixtureMissing(
             f"{key} ({spec['name']}) is at {head[:12]}, fixtures.toml pins {str(spec['sha'])[:12]}"

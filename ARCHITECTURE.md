@@ -196,9 +196,10 @@ LuciankeはAIエージェントに対して以下の決定論的ツール群を�
 ### 開発環境のセットアップ
 ```powershell
 git pull
-uv sync --extra langs                  # tree-sitter 文法パッケージ群の同期
-uv run --no-project python bench/fetch_fixtures.py  # 契約テスト用フィクスチャ（httpx, ky等）の取得
+uv sync                                # dev 組（tree-sitter 文法 lucianke[langs] を含む）の同期。uv run でも自動で同期される
 ```
+- 契約テスト用フィクスチャ（F-PY: httpx・F-TS: ky）は、`tests/contract_fixtures/` を走らせると conftest が `bench/fetch_fixtures.py` で自動取得する（取得失敗は赤。BUG-0062）。
+  オフラインでは `LUCIANKE_NO_FIXTURE_FETCH=1`（未取得分は NOT CHECKED の skip）。
 
 ### テスト実行
 ```powershell

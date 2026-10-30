@@ -11,13 +11,14 @@
 
 ```powershell
 git pull
-uv sync --extra langs                # 新 .venv では必須。無いと tree_sitter_rust の import で収集エラー（BUG-0062）
-uv run --no-project python bench/fetch_fixtures.py   # F-PY(httpx)・F-TS(ky) を取得。無いと契約テストが skip=未検査（BUG-0062）
-uv run pytest -q                     # 期待: 全 green（0 failed）。BUG-0061 は 2a42a50 で解消済み
+uv run pytest -q                     # 期待: BUG-0065 の 7 件以外 green（§3）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
-- ⚠ 新しい `.venv` で上の `uv sync --extra langs` と `fetch_fixtures.py` を飛ばすと、期待状態に**到達できない**（収集エラーで止まるか、契約テストが skip に化けて赤が隠れる）。詳細は **BUG-0062**。
+- 手で `uv sync --extra langs` と `fetch_fixtures.py` を流す必要は**もう無い**（BUG-0062）。
+  - langs の文法は dev 依存組に入れた（`pyproject.toml` の `[dependency-groups].dev` に `lucianke[langs]`）。`uv run` が既定で同期する。
+  - F-PY(httpx)・F-TS(ky) は、`tests/contract_fixtures/` を走らせると conftest がセッションに 1 回 `bench/fetch_fixtures.py` で取得する。**取得に失敗したら赤（エラー）**になる（黙って skip しない）。初回は git と GitHub への通信が要る。
+  - オフラインで走らせるときだけ `LUCIANKE_NO_FIXTURE_FETCH=1`。未取得分の契約テストは「NOT CHECKED」と明記した skip になる（**skip は pass ではない**。この状態で green と言わない）。
 - **新しく赤が出たら、それは引き継いだ変更のせい**なので先に直す（今は全 green が基準）。
 - `uv run ruff check src tests` は clean。`ruff format --check` は 56 ファイルが未整形になるが、**これはインストール済み ruff とリポジトリの版のずれ**。全体整形はしない（差分が膨らむだけ）。触ったファイルだけ手で揃える。
 
@@ -27,7 +28,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `7 failed, 3774 passed, 32 skipped`（2026-10-31・989 秒）。落ちる 7 件は T-02 skeleton の json の形（BUG-0065・対応中）。langs extra 同期・フィクスチャ取得が前提（BUG-0062） |
+| 全体テスト | `7 failed, 3774 passed, 32 skipped`（2026-10-31・989 秒）。落ちる 7 件は T-02 skeleton の json の形（BUG-0065・対応中）。新 .venv でも `uv run pytest -q` だけで届く（BUG-0062 で langs を dev 組に・フィクスチャを自動取得） |
 | 索引 DB のスキーマ | v4（`_exact_marks`、`index/exact_marks.py`、ADR-16） |
 
 ## 2. このコミットで入ったもの
@@ -62,7 +63,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 ## 3. 次にやること（優先順）
 
 1. **BUG-0065**（T-02 skeleton 系の 7 件が落ちる。`KeyError: 'children'` など）— 並行で直す役が対応中。直るまで全体テストの基準は「この 7 件以外 green」
-2. **BUG-0062**（新 .venv で langs extra・フィクスチャを手で入れないと全体テストに届かない）— 並行で直す役が対応中。入ったら §0 の手順が変わる
+2. ~~**BUG-0062**（新 .venv で langs extra・フィクスチャを手で入れないと全体テストに届かない）~~ — **解消済み**（langs を dev 組に・契約テストのフィクスチャを自動取得し、取れなければ赤。§0 は `uv run pytest -q` だけ）
 3. **BUG-0058**（レイテンシ）— 師匠判断（2026-10-30）で優先度を下げた。再開は「毎回別シンボル＋exact 経路強制」で計時ログを拾うところから（票の末尾）
 4. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する（2026-10-31 時点で BUG-0041〜0064 はすべて対応コミットあり（BUG-0065 は対応中）。BUG-0058 は実測の記録のみ）
 
@@ -70,7 +71,8 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 
 - **`Node.text` を書くと番人テストが落ちる**。`source[node.start_byte : node.end_byte]` で切る。ノードでない `.text`（自前の型・`re.Match` など）は `test_syntax_skeleton_realfiles.py` の `_NOT_A_NODE` に**受け手がノードでないことを確かめてから**足す
 - 関数ノードの集合は `imports.JS_FUNCTION_NODES` が唯一の定義。`relations.py` 側に写しを作らない（ずれると使用が落ちるか解決できなくなる）
-- `bench/.cache/` に F-PY（httpx）・F-TS（ky）を `uv run python bench/fetch_fixtures.py` で置いてから、`tests/contract_fixtures/` が本物の索引で走る。無いと skip になる（**skip は pass ではない**）
+- `tests/contract_fixtures/` は `bench/.cache/` の F-PY（httpx）・F-TS（ky）で本物の索引を組んで走る。無ければ conftest が自動で取得し、取得できなければ赤にする（BUG-0062）。`LUCIANKE_NO_FIXTURE_FETCH=1` のときだけ NOT CHECKED の skip（**skip は pass ではない**）。`bench/run_exit_criteria.py` は `network = "none"` を守るためこれを立てて走る
+- テストが無条件に import する文法パッケージは dev 依存組（`lucianke[langs]`）に入れる。利用者向けの optional extra だけに置くと、新しい `.venv` で収集エラーになる（BUG-0062）
 - `.pair-agent/current/` のポインタの鍵はホスト名 + リポジトリのパスで決まる。**別 PC では別のポインタになる**ので、現在地はこの文書と `.pair-agent/sprints/m1-impl-20261029.json` を読む
 - 区切りごとにコミット・push（常に sync）。作業の前に `git pull`
 

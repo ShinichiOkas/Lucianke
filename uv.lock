@@ -464,6 +464,7 @@ xml = [
 dev = [
     { name = "ast-grep-py" },
     { name = "basedpyright" },
+    { name = "lucianke", extra = ["langs"] },
     { name = "pip-licenses" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -508,6 +509,7 @@ provides-extras = ["langs", "python", "edit", "verify", "xml", "all"]
 dev = [
     { name = "ast-grep-py", specifier = ">=0.51" },
     { name = "basedpyright", specifier = ">=1.40" },
+    { name = "lucianke", extras = ["langs"] },
     { name = "pip-licenses", specifier = ">=5.5" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },

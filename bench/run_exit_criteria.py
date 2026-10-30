@@ -117,7 +117,9 @@ def kill_tree(proc: subprocess.Popen[bytes]) -> None:
 
 
 def run_argv(argv: list[str], timeout_s: float, scratch: Path, tag: str) -> dict[str, Any]:
-    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    # 検査の実行中は外向き通信をしない（exit_criteria.toml の network = "none"）。契約テストの conftest がフィクスチャを
+    # 自動取得しないように止める（BUG-0062）。未取得なら needs で blocked、片方だけ未取得ならその試験は NOT CHECKED の skip
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", LUCIANKE_NO_FIXTURE_FETCH="1")
     out_path, err_path = scratch / f"{tag}.out", scratch / f"{tag}.err"
     t0 = time.perf_counter()
     timed_out = False

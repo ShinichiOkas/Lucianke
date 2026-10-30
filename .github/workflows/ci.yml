@@ -26,6 +26,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-extras --python ${{ matrix.python }}
       - run: uv run ruff check
+      # 契約テスト（tests/contract_fixtures）の F-PY（httpx）・F-TS（ky）を先に取る。取らなくても conftest が取りにいき、
+      # 失敗すれば赤にする（BUG-0062: skip は pass ではない）。取得の失敗を試験の赤と分けて見るために別の段にする
+      - run: uv run --no-project python bench/fetch_fixtures.py
       - run: uv run pytest -q
 
   license:
