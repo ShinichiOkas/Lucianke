@@ -456,6 +456,101 @@ def meta_level(r: dict[str, Any]) -> str:
 
 # --- T-07 -----------------------------------------------------------------------------------------
 
+# guard_for（syntax/guards.py）が遡りを止める関数の節。呼び出し箇所を含む最も外側のものの本文が、条件を探す範囲になる。
+GUARD_SCOPES = frozenset(
+    {
+        "function_definition", "lambda",  # Python
+        "function_declaration", "function_expression", "function", "generator_function",
+        "generator_function_declaration", "arrow_function", "method_definition",  # TypeScript / JavaScript
+    }
+)  # fmt: skip
+
+
+def _split_top(text: str, sep: str) -> list[str]:
+    """括弧の外にある ``sep`` で分ける（``!(a && b)`` の中の ``&&`` では分けない）。"""
+    out, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        if text[i] in "([{":
+            depth += 1
+        elif text[i] in ")]}":
+            depth -= 1
+        elif depth == 0 and text.startswith(sep, i):
+            out.append(text[start:i])
+            i += len(sep)
+            start = i
+            continue
+        i += 1
+    return [*out, text[start:]]
+
+
+def _unwrap(text: str, opener: str) -> str | None:
+    """``opener``（``!(`` / ``(``）で始まり対の ``)`` で終わる 1 つの項なら中身。120 文字の省略で ``)`` が切れたなら残り全部。"""
+    if not text.startswith(opener):
+        return None
+    depth = 0
+    for i in range(len(opener) - 1, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[i], 0)
+        if depth == 0:
+            return text[len(opener) : i] if i == len(text) - 1 else None
+    return text[len(opener) :]
+
+
+def guard_sources(guard: str) -> list[str]:
+    """``when`` の文字列から、ソーステキストであるべき部分を取り出す（仕様書 T-07 処理規約 4 の書き方）。
+
+    項は `` && `` で連ねる。``else`` と前の ``elif`` の条件は ``!(条件)``、``or`` などを含む条件は ``(条件)``、``except`` は
+    ``on: 例外型``（型なしは ``*``、TS の型なし ``catch`` は ``catch``）。120 文字を超えたら末尾が ``…``。
+    """
+    parts: list[str] = []
+    for conj in _split_top(guard.removesuffix("…"), " && "):
+        conj = conj.strip()
+        for opener in ("!(", "("):
+            inner = _unwrap(conj, opener)
+            if inner is not None:
+                conj = inner
+                break
+        if conj.startswith("on: "):
+            exc = conj.removeprefix("on: ")
+            conj = {"*": "except", "catch": "catch"}.get(exc, exc)
+        if conj:
+            parts.append(conj)
+    return parts
+
+
+def guard_window(rig: Rig, rel: str, line: int) -> str:
+    """呼び出し箇所（1 始まりの ``line``）を含む最も外側の関数の本文（``squash`` 済み）。関数の外ならファイル全体。
+
+    guard_for は呼び出しから囲みの関数まで遡るので、条件はこの範囲にある。行数の窓（前の 40 行）では、離れた外側の ``if`` や、
+    呼び出しの後ろの行にある三項の条件を取りこぼし、どの辺が返るか（exact か structural か）で結果が変わっていた（BUG-0074）。
+    """
+    data = (rig.root / rel).read_bytes()
+    lang = (
+        Language(tree_sitter_python.language())
+        if rig.language == "python"
+        else Language(tree_sitter_typescript.language_typescript())
+    )
+    node, scope = Parser(lang).parse(data).root_node, None
+    while scope is None:
+        node = next((c for c in node.children if c.start_point[0] + 1 <= line <= c.end_point[0] + 1), None)
+        if node is None:
+            break
+        if node.type in GUARD_SCOPES:
+            scope = node
+    text = data[scope.start_byte : scope.end_byte] if scope is not None else data
+    return squash(text.decode("utf-8"))
+
+
+def test_t07_guard_sources_reads_the_when_grammar() -> None:
+    """契約テストの ``when`` の読み方（BUG-0074）。否定の ``!(...)``・括弧・``on:``・省略を、ソーステキストの部分に戻す。"""
+    assert guard_sources("!(isinstance(url, str)) && isinstance(url, URL)") == [
+        "isinstance(url, str)",
+        "isinstance(url, URL)",
+    ]
+    assert guard_sources("!(a && b) && (c || d) && on: OSError") == ["a && b", "c || d", "OSError"]
+    assert guard_sources("on: * && x") == ["except", "x"]
+    assert guard_sources("on: catch && case 'a'") == ["catch", "case 'a'"]
+    assert guard_sources("ok && !(isinstance(url, st…") == ["ok", "isinstance(url, st"]
+
 
 async def test_t07_postcondition_1_2_3_4_5_6_call_hierarchy(rig: Rig) -> None:
     """PC:T-07#1 PC:T-07#2 PC:T-07#3 PC:T-07#4 PC:T-07#5 PC:T-07#6 — depth・LSP の incoming との一致・when・循環・外部の葉・予算。"""
@@ -481,22 +576,11 @@ async def test_t07_postcondition_1_2_3_4_5_6_call_hierarchy(rig: Rig) -> None:
             assert n["urn"] not in path_urns, ("expanded twice on one path", n["urn"])
         path_urns.append(n["urn"])
         prev = n
-    # 事後条件 3: when（guard）は呼び出し箇所を囲む条件のソーステキストだけから構成される
-    guarded = [e for e in data["edges"] if e.get("guard")]
-    for e in guarded:
-        window = squash(
-            "".join(
-                rig.read(e["call_site_path"]).split("\n")[
-                    max(e["call_site_line"] - 40, 0) : e["call_site_line"]
-                ]
-            )
-        )
-        for part in re.split(r"\s*(?:&&|\|\||\band\b|\bor\b|\bnot\b)\s*", e["guard"]):
-            if part.strip():
-                assert squash(part.strip().removeprefix("if ").strip("()")) in window, (
-                    e["guard"],
-                    e["call_site_line"],
-                )
+    # 事後条件 3: when（guard）は呼び出し箇所を囲む条件のソーステキストだけから構成される（BUG-0074: どちらの経路で答えても同じ検査）
+    for e in [e for e in data["edges"] if e.get("guard")]:
+        window = guard_window(rig, e["call_site_path"], e["call_site_line"])
+        for part in guard_sources(e["guard"]):
+            assert squash(part) in window, (e["guard"], e["call_site_path"], e["call_site_line"], part)
     # 事後条件 2: exact 水準のとき depth = 1 の incoming ノード集合は LSP の incoming calls と等しい
     d1 = await rig.ok(
         "query_call_hierarchy", target=tgt, direction="incoming", depth=1, max_children=500, max_tokens=8000
