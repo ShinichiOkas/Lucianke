@@ -296,6 +296,32 @@ async def test_t06_first_call_is_exact_from_lsp_and_second_call_is_exact_from_pa
 
 
 @needs_basedpyright
+async def test_t06_a_timed_out_references_request_does_not_degrade_later_calls(
+    real: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """負荷で references が期限を超えて 1 回降格しても、次の問い合わせは exact（BUG-0090）。
+
+    以前は期限切れで送る ``$/cancelRequest`` が basedpyright の references をプロセスが続く間ずっと壊し、以後の T-06 は
+    「LSP が利用できない」と言いながら ``lsp_status=ready`` の structural を返し続けた。"""
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 0)
+    r1 = await real.refs(PC)
+    assert not r1.is_error, r1.text
+    meta1 = r1.structured["_resolution_meta"]
+    assert meta1["confidence_level"] == "structural" and meta1["lsp_status"] == "ready", meta1
+    assert "0 ms" in (meta1["accuracy_warning"] or ""), meta1  # 期限切れの警告（事実どおり）
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 30_000)
+    await asyncio.sleep(0.5)  # 打ち切った要求をサーバーが終える間（以前はこの後の要求が壊れていた）
+    r = await real.refs(PC)  # 1 回目は降格したので PaaD の目印は無い: LSP に聞く
+    assert not r.is_error, r.text
+    meta = r.structured["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and "basedpyright" in meta["engine_used"], meta
+    assert meta["lsp_status"] == "ready", meta
+    assert r.structured["data"]["totals"] == {"files": 2, "sites": 3, "tests": 1}
+    handle = real.pool.get("python", real.ws, start_if_needed=False)
+    assert handle is not None and handle.restarts == 0
+
+
+@needs_basedpyright
 async def test_t06_editing_a_file_makes_the_cache_stale_and_lsp_is_asked_again(real: Env) -> None:
     first = await real.refs(PC)
     assert first.structured["_resolution_meta"]["confidence_level"] == "exact"
@@ -491,9 +517,8 @@ SILENT_DEF = LspServerDef(
 TARGET_URN = str(Urn("fk", "pkg/a.py", CodeSel("target")))
 
 
-@pytest.fixture
-async def silent(registry: ProcessRegistry, tmp_path: Path):
-    _lsp_exact.MEMO.clear()
+def make_fk(tmp_path: Path) -> Path:
+    """偽サーバー用の小さなワークスペース（``pkg/a.py`` の ``target`` を ``pkg/b.py`` の ``caller`` が呼ぶ）。"""
     root = tmp_path / "fk"
     (root / "pkg").mkdir(parents=True)
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -501,6 +526,13 @@ async def silent(registry: ProcessRegistry, tmp_path: Path):
     (root / "pkg" / "b.py").write_text(
         "from pkg.a import target\n\n\ndef caller():\n    return target()\n", encoding="utf-8"
     )
+    return root
+
+
+@pytest.fixture
+async def silent(registry: ProcessRegistry, tmp_path: Path):
+    _lsp_exact.MEMO.clear()
+    root = make_fk(tmp_path)
     script = tmp_path / "silent_lsp.py"
     script.write_text(SILENT_SERVER, encoding="utf-8")
     ws = Workspace(workspace_id="fk", root=root.resolve())
@@ -541,3 +573,140 @@ async def test_t07_lsp_timeout_degrades_to_structural(silent: Env) -> None:
     assert "5000 ms" in (meta["accuracy_warning"] or ""), meta
     assert [n["name"] for n in r.structured["data"]["nodes"]] == ["caller"]
     assert silent.pool.status("python", silent.ws).status.value == "ready"
+
+
+# --- 偽サーバー: references が 1 度だけ basedpyright の「壊れた」エラーを返す -> 起動し直す（BUG-0090） -------------
+
+BROKEN_MARK = "this._token.cancel is not a function"
+
+BROKEN_SERVER = r"""
+import json
+import os
+import sys
+
+inp, out = sys.stdin.buffer, sys.stdout.buffer
+marker, a_uri, b_uri = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def read():
+    length = None
+    while True:
+        line = inp.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        key, _, value = line.decode("ascii").partition(":")
+        if key.lower() == "content-length":
+            length = int(value)
+    return json.loads(inp.read(length))
+
+
+def send(msg):
+    body = json.dumps(msg).encode("utf-8")
+    out.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    out.flush()
+
+
+def rng(sl, sc, el, ec):
+    return {"start": {"line": sl, "character": sc}, "end": {"line": el, "character": ec}}
+
+
+while True:
+    msg = read()
+    if msg is None:
+        break
+    method, mid = msg.get("method"), msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {}}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": mid, "result": None})
+    elif method == "exit":
+        break
+    elif method == "textDocument/didOpen":
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+              "params": {"uri": msg["params"]["textDocument"]["uri"], "diagnostics": []}})
+    elif method == "textDocument/references":
+        if not os.path.exists(marker):  # 偽サーバーの全プロセスを通じて最初の 1 回だけ（起動し直した後は答える）
+            open(marker, "x").close()
+            send({"jsonrpc": "2.0", "id": mid, "error": {
+                "code": -32603,
+                "message": "Request textDocument/references failed with message: this._token.cancel is not a function"}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "result": [
+                {"uri": a_uri, "range": rng(0, 4, 0, 10)}, {"uri": b_uri, "range": rng(4, 11, 4, 17)}]})
+    elif method == "textDocument/definition":
+        send({"jsonrpc": "2.0", "id": mid, "result": [{"uri": a_uri, "range": rng(0, 4, 0, 10)}]})
+    elif mid is not None and method is not None:
+        send({"jsonrpc": "2.0", "id": mid, "result": None})
+"""
+
+BROKEN_DEF = LspServerDef(
+    language_id="python",
+    name="broken",
+    argv_candidates=(("broken",),),
+    locale="en",
+    requests_m1=frozenset(),
+    restart_on_errors=(BROKEN_MARK,),
+)
+
+
+@pytest.fixture
+async def broken(registry: ProcessRegistry, tmp_path: Path):
+    _lsp_exact.MEMO.clear()
+    root = make_fk(tmp_path).resolve()
+    script = tmp_path / "broken_lsp.py"
+    script.write_text(BROKEN_SERVER, encoding="utf-8")
+    argv = [
+        sys.executable,
+        str(script),
+        str(tmp_path / "broken.once"),
+        (root / "pkg" / "a.py").as_uri(),
+        (root / "pkg" / "b.py").as_uri(),
+    ]
+    ws = Workspace(workspace_id="fk", root=root)
+    pool = LspPool(
+        registry,
+        servers=[BROKEN_DEF],
+        resolver=lambda defn, w: list(argv),
+        ready_fallback_s=0.2,
+        grace_ms=200,
+    )
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    async with opened_env(registry, root, cache, pool, ws) as env:
+        await pool.ensure_started("python", ws)
+        assert await pool.wait_ready("python", ws, READY_WAIT_MS)
+        yield env
+
+
+async def test_t06_a_broken_lsp_is_restarted_and_the_answer_says_so(broken: Env) -> None:
+    """LSP が references に以後答えられない壊れ方をしたら（basedpyright の BUG-0090 のエラー文）、その答えは ``lsp_status`` を
+    ``ready`` と言わず（``indexing``）、警告は何が起きたか（サーバー・要求・エラー文・再起動中）を書く。LSP は起動し直され、
+    次の問い合わせは exact。"""
+    handle = broken.pool.get("python", broken.ws, start_if_needed=False)
+    assert handle is not None
+    pid = handle.pid
+    r = await broken.refs({"urn": TARGET_URN})
+    assert not r.is_error, r.text
+    meta = r.structured["_resolution_meta"]
+    assert meta["confidence_level"] == "structural" and meta["is_degraded"] is True, meta
+    assert meta["lsp_status"] == "indexing", meta  # 再起動中: ready とは言わない
+    warning = meta["accuracy_warning"] or ""
+    assert "LSP（broken）が textDocument/references に以後答えられない状態になった" in warning, warning
+    assert BROKEN_MARK in warning and "LSP を再起動しています" in warning, warning
+    assert "利用できない" not in warning, warning
+    assert {x["path"] for x in r.structured["data"]["references"]} == {"pkg/b.py"}  # 構文木の答えは出す
+
+    assert await broken.pool.wait_ready("python", broken.ws, READY_WAIT_MS), broken.pool.status(
+        "python", broken.ws
+    )
+    assert handle.pid != pid and handle.restarts == 1
+    r2 = await broken.refs({"urn": TARGET_URN})
+    assert not r2.is_error, r2.text
+    meta2 = r2.structured["_resolution_meta"]
+    assert meta2["confidence_level"] == "exact" and meta2["engine_used"] == "broken+tree-sitter", meta2
+    assert meta2["lsp_status"] == "ready" and meta2.get("accuracy_warning") is None, meta2
+    refs = r2.structured["data"]["references"]
+    assert [(x["path"], x["enclosing_name"]) for x in refs] == [("pkg/b.py", "caller")]

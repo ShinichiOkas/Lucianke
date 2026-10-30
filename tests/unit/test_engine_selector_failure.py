@@ -78,7 +78,7 @@ def _lsp_error(reason: str) -> LuciankeError:
 
 @pytest.mark.parametrize(
     "reason",
-    ["indexing", "standby", "unavailable", "disconnected", "position_clamped", "lsp_error"],
+    ["indexing", "restarting", "standby", "unavailable", "disconnected", "position_clamped", "lsp_error"],
 )
 def test_lsp_unavailable_reasons_are_degradations(reason: str) -> None:
     assert is_lsp_degradation(_lsp_error(reason))
@@ -165,14 +165,68 @@ def test_down_reasons_go_to_the_unavailable_column(cap: Capability, reason: str)
     assert got.warning == STRUCTURAL + "`configure_workspace status` で LSP の状態を確認してください。"
 
 
-def test_lsp_error_keeps_ready_and_uses_the_unavailable_text() -> None:
-    got = on_lsp_failure(_ready(C.DEFINITION), C.DEFINITION, _lsp_error("lsp_error"))
-    assert (got.engine, got.confidence, got.lsp_status) == ("tree-sitter+imports", S, "ready")
-    assert got.warning is not None and got.warning.startswith(STRUCTURAL)
+def _server_said(reason: str) -> LuciankeError:
+    """``lsp.features._call`` がサーバーのエラー応答から作る形（``server`` / ``method`` / ``lsp_message`` 付き）。"""
+    return LuciankeError(
+        ErrorCode.E_LSP_UNAVAILABLE,
+        "LSP basedpyright failed textDocument/references: ...",
+        details={
+            "reason": reason,
+            "server": "basedpyright",
+            "language": "python",
+            "method": "textDocument/references",
+            "lsp_code": -32603,
+            "lsp_message": "Request textDocument/references failed with message: this._token.cancel is not a function",
+        },
+    )
+
+
+def test_lsp_error_keeps_ready_and_says_which_server_and_request_failed() -> None:
+    """``lsp_error``（サーバーは動いたまま、この要求にエラーを返した）は ``ready`` のまま。警告は「LSP が利用できない」と言わず、
+    どのサーバーのどの要求が何と答えたかを書く（BUG-0090: 以前は ``ready`` なのに「利用できない」と書いていた）。"""
+    got = on_lsp_failure(_ready(C.REFERENCES), C.REFERENCES, _server_said("lsp_error"))
+    assert (got.engine, got.confidence, got.lsp_status) == ("relations", S, "ready")
+    assert got.warning == selector.lsp_error_warning(_server_said("lsp_error"))
+    assert got.warning == (
+        "LSP（basedpyright）が textDocument/references の要求にエラーを返した（Request textDocument/references failed with "
+        "message: this._token.cancel is not a function）ため構文木で解決しました。"
+        "型・オーバーロード・再エクスポート越しの参照は区別されていません。"
+    )
+    assert "利用できない" not in got.warning and "configure_workspace" not in got.warning
+    # details が無いとき（古い呼び手）も「利用できない」とは言わない
+    bare = on_lsp_failure(_ready(C.DEFINITION), C.DEFINITION, _lsp_error("lsp_error"))
+    assert (bare.engine, bare.confidence, bare.lsp_status) == ("tree-sitter+imports", S, "ready")
+    assert bare.warning is not None and bare.warning.startswith(
+        "LSP が要求にエラーを返したため構文木で解決しました。"
+    )
+
+
+@pytest.mark.parametrize("cap", READ_CAPS, ids=lambda c: c.value)
+def test_restarting_is_indexing_and_says_the_lsp_is_restarting(cap: Capability) -> None:
+    """``restarting``（サーバーがその method に以後答えられないので ``LspPool`` が起動し直している。BUG-0090）は列 2。
+    ``lsp_status`` は ``ready`` ではなく ``indexing``、警告はサーバー・method・エラー文と「再起動しています」。"""
+    got = on_lsp_failure(_ready(cap), cap, _server_said("restarting"))
+    assert (got.engine, got.confidence, got.lsp_status) == (DOWN_ENGINE[cap], S, "indexing")
+    assert got.lsp_progress is None
+    assert got.warning == (
+        "LSP（basedpyright）が textDocument/references に以後答えられない状態になった（Request textDocument/references "
+        "failed with message: this._token.cancel is not a function）ため、LSP を再起動しています。今回は構文木で解決しました。"
+        "型・オーバーロード・再エクスポート越しの参照は区別されていません。再起動の完了後に呼び直すと `exact` になります。"
+    )
+    assert "利用できない" not in got.warning
+    assert is_degraded(got.confidence, E)
+
+
+def test_a_long_server_message_is_shortened_to_one_line_in_the_warning() -> None:
+    err = _server_said("lsp_error")
+    err.details["lsp_message"] = "line one\n  line two " + "x" * 400
+    warning = selector.lsp_error_warning(err)
+    assert "\n" not in warning and "line one line two" in warning and "…" in warning
+    assert len(warning) < 320
 
 
 @pytest.mark.parametrize("cap", [C.RENAME, C.CODE_ACTION], ids=lambda c: c.value)
-@pytest.mark.parametrize("reason", ["position_clamped", "indexing", "unavailable", "lsp_error"])
+@pytest.mark.parametrize("reason", ["position_clamped", "indexing", "restarting", "unavailable", "lsp_error"])
 def test_rename_and_code_action_fall_to_lsp_unavailable_without_a_warning(
     cap: Capability, reason: str
 ) -> None:
@@ -192,7 +246,8 @@ def test_lsp_name_is_dropped_from_the_demoted_engine() -> None:
 
 
 @pytest.mark.parametrize(
-    "reason", ["position_clamped", "indexing", "unavailable", "lsp_error", "disconnected", "standby"]
+    "reason",
+    ["position_clamped", "indexing", "restarting", "unavailable", "lsp_error", "disconnected", "standby"],
 )
 def test_demotion_is_one_step_only(reason: str) -> None:
     once = on_lsp_failure(_ready(C.REFERENCES), C.REFERENCES, _lsp_error(reason))

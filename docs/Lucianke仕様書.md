@@ -834,6 +834,8 @@ lex-sel      = "lex:" , ident , "@L" , DIGIT , { DIGIT } ;                      
 | `heuristic` | 「言語の文法が無いため ctags とブロック推定で境界を求めました。終了行は推定であり、編集前に `get_symbol_bodies` で範囲を確かめてください。」 |
 | `lexical_fallback` | 「未知の言語のため単語境界 grep に降格しました。同名の誤検知と動的参照の見落としが含まれます。」 |
 
+`structural` の雛形の「LSP が利用できない」は、LSP が本当に使えないとき（未導入・`unavailable`・切断）だけに使う。LSP が動いたままその要求にエラーを返したときは「LSP（<サーバー名>）が <method> の要求にエラーを返した（<エラー文>）ため構文木で解決しました。」（`lsp_status` は `ready` のまま）、サーバーが壊れて起動し直しているときは「…以後答えられない状態になった（<エラー文>）ため、LSP を再起動しています。…再起動の完了後に呼び直すと `exact` になります。」（`lsp_status` は `indexing`）と、起きたことをそのまま書く（実装で確定 2026-10-31、BUG-0090。設計書 §7.8.4）。
+
 ## 8.5 `revision` 指定時の解析
 
 - `revision` が `WORKING_TREE` 以外のとき、サーバーは Git オブジェクトから当該断面のファイル内容を読み、**作業ツリーに触れずに** メモリ上の仮想ツリーを作って解析する（MUST）。`STAGED` はインデックス（ステージ）の内容を用いる。
@@ -3103,8 +3105,8 @@ json の `data`:
 | 発見 | 実行ファイルの探索順: 環境変数 `LUCIANKE_LSP_<サーバー名>_CMD`（サーバー名単位。先）→ `LUCIANKE_LSP_<LANG>_CMD`（言語単位。lint 役は `…_LINT_CMD`）→ ワークスペースの `.venv/bin`・`node_modules/.bin` → `PATH`。見つからなければ `lsp_status: "unavailable"` とし、理由を `configure_workspace status` に出す |
 | 状態 | `standby`（未起動）→ `indexing`（起動済み・初期索引中。`$/progress` または `window/workDoneProgress` から進捗を取る。取れなければ最初の `publishDiagnostics` 受信まで）→ `ready` → `unavailable`（起動失敗・クラッシュ上限到達） |
 | 文書同期 | `textDocument/didOpen` は要求で初めて触れたファイルに送り、編集後は `didChange`（全文または増分）、外部変更は `workspace/didChangeWatchedFiles`。開いた文書は LRU で 200 件を上限とし、超えた分は `didClose` |
-| 要求のタイムアウト | 定義・参照・ホバー: 3,000 ms。`callHierarchy`: 5,000 ms。`codeAction`: 5,000 ms。`rename`: 10,000 ms。超過は段を 1 つ降りて応答し、`warnings[]` に記録する |
-| 再起動 | クラッシュ時は指数バックオフ（1 s, 2 s, 4 s）で最大 3 回再起動。超えたら `unavailable`。`configure_workspace reindex_scope: "lsp"` で手動リセット |
+| 要求のタイムアウト | 定義・参照・ホバー: 3,000 ms。`callHierarchy`: 5,000 ms。`codeAction`: 5,000 ms。`rename`: 10,000 ms。超過は段を 1 つ降りて応答し、`warnings[]` に記録する。超過した要求には `$/cancelRequest` を送る。ただし取り消しを受けるとその種類の要求に以後答えられなくなるサーバーの要求（basedpyright / pyright の参照・実装・`executeCommand`）には送らず、遅れて届く応答を捨てる（実装で確定 2026-10-31、BUG-0090） |
+| 再起動 | クラッシュ時は指数バックオフ（1 s, 2 s, 4 s）で最大 3 回再起動。超えたら `unavailable`。`configure_workspace reindex_scope: "lsp"` で手動リセット。プロセスが生きたまま、ある要求に以後答えられない壊れ方をした（サーバーごとに既知のエラー文が返った）ときも起動し直し、その間は `ready` と言わない（`lsp_status: "indexing"`、`configure_workspace status` の `reason: "restarting"`）。起動から 60 s 未満で 3 回続いたら `unavailable`（`reason: "broken_3x"`）（実装で確定 2026-10-31、BUG-0090） |
 | 待機解放 | 30 分間要求が無い LSP は `shutdown` → `exit` して `standby` に戻してよい（MAY） |
 | 候補サーバー | Python: pyright / basedpyright + ruff。TypeScript / JavaScript: typescript-language-server（既定）または vtsls（TypeScript が見つからず前者が起動できないときの代替）。Rust: rust-analyzer。Go: gopls。C / C++: clangd。C#: csharp-ls または OmniSharp。Kotlin: kotlin-language-server。Swift: sourcekit-lsp。いずれも採用前に実機で `initialize` と主要要求を確かめる |
 

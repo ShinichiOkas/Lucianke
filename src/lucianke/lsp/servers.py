@@ -91,6 +91,11 @@ class LspServerDef:
         ready_signal: ``ready`` とみなす合図。``"progress"``（既定）は ``$/progress`` の ``end`` が揃う・最初の
             ``publishDiagnostics``・``ready_fallback_s`` 経過のいちばん早いもの（解析に時間がかかるサーバー用）。
             ``"initialized"`` は ``initialize`` の応答が返った時点（索引を持たず、起動の直後から要求に答えるサーバー用。ruff。BUG-0050）。
+        no_cancel_methods: 期限切れ・取り消しのときも ``$/cancelRequest`` を **送らない** method。遅れて届いた応答は client が捨てる。
+            取り消しを受けるとプロセスがその method に以後答えられなくなるサーバー用（basedpyright / pyright の
+            references・implementation・executeCommand。BUG-0090）。
+        restart_on_errors: エラー応答の ``message`` にこのどれかを含むと、そのプロセスはその method に以後答えられない壊れ方を
+            したとみなして起動し直す（``LspHandle.record_broken``。BUG-0090）。``no_cancel_methods`` で防げなかったときの回復。
     """
 
     language_id: str
@@ -106,6 +111,8 @@ class LspServerDef:
     tsserver_via: TsserverVia | None = None
     needs_workspace_tsserver: bool = False
     ready_signal: ReadySignal = "progress"
+    no_cancel_methods: frozenset[str] = frozenset()
+    restart_on_errors: tuple[str, ...] = ()
 
     @property
     def document_language_id(self) -> str:
@@ -146,6 +153,25 @@ def server_env_var_name(server_name: str) -> str:
 
 # S-4 の実測で確認した設定（basedpyright は workspace/configuration で python / basedpyright(.analysis) を問い合わせる）。
 _PYRIGHT_ANALYSIS: dict[str, Any] = {"typeCheckingMode": "standard", "diagnosticMode": "openFilesOnly"}
+
+
+# basedpyright / pyright（pyright の languageServerBase と cancellationUtils）は、要求の取り消しが **処理の始まる前** に届くと
+# （要求がキューで待っている間、または ``window/workDoneProgress/create`` の往復を待っている間）、その種類の要求に以後ずっと
+# ``this._token.cancel is not a function`` を返す（BUG-0090。basedpyright 1.40.2 = pyright 1.1.414 で再現）。
+#   1. ``CancelAfter`` → ``setupCombinedTokensFor`` は、要求の token が取り消し済みなら ``source.token`` に触れる前に
+#      ``source.cancel()`` を呼ぶ。vscode-jsonrpc の ``CancellationTokenSource`` は token が未生成だと ``_token`` に凍結された
+#      ``CancellationToken.Cancelled``（``cancel`` を持たない）を入れる。
+#   2. ``onReferences`` / ``onImplementation`` / 長い ``onExecuteCommand`` はその source を ``_pending*CancellationSource`` に残し、
+#      ``finally`` では ``dispose()`` するだけ（凍結 token には何もしない）。
+#   3. 次の同じ種類の要求は、まず ``_pending*CancellationSource.cancel()`` を呼び、``this._token.cancel()`` が TypeError で落ちる。
+#      欄を ``undefined`` に戻す前に落ちるので、プロセスが続く間ずっと失敗する（他の method は影響を受けない）。前の要求の処理中に
+#      次が届いたときは、次の要求が欄を健全な source で上書きするので壊れない（壊れるのは、前の要求が終わってから次が届いたとき。
+#      期限切れで降格した後の次の問い合わせはふつうこれに当たる）。
+# 取り消しを送らなければ token は取り消されない（次の同じ種類の要求が、サーバー自身の健全な source で前の要求を止める）。
+_PYRIGHT_NO_CANCEL = frozenset(
+    {"textDocument/references", "textDocument/implementation", "workspace/executeCommand"}
+)
+_PYRIGHT_BROKEN = ("this._token.cancel is not a function",)
 
 
 def _python_settings(*, based: bool) -> dict[str, Any]:
@@ -195,6 +221,8 @@ SERVERS: tuple[LspServerDef, ...] = (
         settings=_python_settings(based=True),
         locale="en",
         requests_m1=_NAVIGATION,
+        no_cancel_methods=_PYRIGHT_NO_CANCEL,
+        restart_on_errors=_PYRIGHT_BROKEN,
     ),
     LspServerDef(
         language_id="python",
@@ -203,6 +231,8 @@ SERVERS: tuple[LspServerDef, ...] = (
         settings=_python_settings(based=False),
         locale="en",
         requests_m1=_NAVIGATION,
+        no_cancel_methods=_PYRIGHT_NO_CANCEL,
+        restart_on_errors=_PYRIGHT_BROKEN,
     ),
     LspServerDef(
         language_id="python",

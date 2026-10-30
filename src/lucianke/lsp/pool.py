@@ -19,6 +19,9 @@
   数え直す。コマンドが見つからなければ即 ``unavailable``（``not_found``）。
 * 呼び手（機能呼び出し）が数える要求のタイムアウトは ``LspHandle.record_timeout`` / ``record_ok``。連続 3 回で
   プロセスを落として ``unavailable``（``timeout_3x``）。
+* プロセスが生きたまま、ある method に以後答えられない壊れ方をした（``LspServerDef.restart_on_errors`` のエラーが返った）と
+  機能呼び出しが知らせたら ``LspHandle.record_broken``: その場で ``starting``（理由 ``restarting``）にして ``ready`` と偽らず、
+  落として起動し直す。``stable_after_s`` 内に ``LSP_RESTART_MAX`` 回続いたら ``unavailable``（``broken_3x``）。BUG-0090。
 * 終了は ``LspClient.shutdown``（``shutdown`` → ``exit`` → ``ProcessRegistry.terminate``。Windows は Job Object で孫ごと）。
 * ``LspHandle.started_at``（ISO 8601・UTC・ミリ秒）は直近に起動を始めた時刻（T-00 ``lsp_daemons[].started_at``）。再起動のたびに
   進み、止めると ``None``。``LspHandle.rebind(ws)`` / ``LspPool.rebind(ws)`` はワークスペースの設定変更を取り込む
@@ -189,6 +192,7 @@ class LspHandle:
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
+        self._broken_restart = False
         self._waiters: list[asyncio.Future[None]] = []
         self._tokens: set[Any] = set()
         self._gen = 0
@@ -284,6 +288,51 @@ class LspHandle:
         )
         self._pool._spawn_bg(self._pool._stop(self, LspState.UNAVAILABLE, "timeout_3x"))
         return True
+
+    def record_broken(self, method: str, detail: str) -> LspState | None:
+        """プロセスは生きているが ``method`` に以後答えられない（``LspServerDef.restart_on_errors`` のエラーが返った。BUG-0090）。
+
+        その場で（``await`` なしで）状態を変えて、以後の要求の経路と ``status`` が ``ready`` と言わないようにし、プロセスを落とす
+        （``LspPool._restart_broken``）。戻り値はその状態:
+
+        * ``STARTING``（理由 ``restarting``）: 起動し直す（すでに起動し直している最中も）。
+        * ``UNAVAILABLE``（理由 ``broken_3x``）: 起動から ``stable_after_s`` 未満で ``LSP_RESTART_MAX`` 回壊れ続けたので、もう起こさない。
+        * ``None``: 止めている最中（``timeout_3x`` など）・止まっているので何もしない。
+        """
+        if self._broken_restart:
+            return (
+                self.state if self.state in (LspState.STARTING, LspState.UNAVAILABLE) else LspState.STARTING
+            )
+        if self._stopping or self.state not in (LspState.INDEXING, LspState.READY):
+            return None
+        pool = self._pool
+        if self._up_since is not None and pool._clock() - self._up_since >= pool._stable_after_s:
+            self.restarts = 0  # 長く動いていた: 起動直後から壊れ続けるのとは別扱い
+        give_up = self.restarts >= pool._restart_max
+        self._stopping = True  # 二重に止めない（_stop が最後に戻す）
+        self._broken_restart = True
+        self.last_error = f"{method} failed: {detail}"
+        if give_up:
+            _log.error(
+                "LSP %s/%s can no longer answer %s after %d restarts; marking it unavailable: %s",
+                self.language_id,
+                self.server_name,
+                method,
+                self.restarts,
+                _brief(detail),
+            )
+            self._set_state(LspState.UNAVAILABLE, "broken_3x")
+        else:
+            _log.warning(
+                "LSP %s/%s can no longer answer %s (%s); restarting it",
+                self.language_id,
+                self.server_name,
+                method,
+                _brief(detail),
+            )
+            self._set_state(LspState.STARTING, "restarting")
+        pool._spawn_bg(pool._restart_broken(self, give_up=give_up))
+        return self.state
 
     # --- 内部: 状態 -----------------------------------------------------------------
 
@@ -637,7 +686,7 @@ class LspPool:
         h.documents.reset()
         h.diagnostics.reset()
 
-        client = LspClient(defn.name)
+        client = LspClient(defn.name, no_cancel_methods=defn.no_cancel_methods)
         env = h.ws.python_env
         python = env.interpreter if env is not None else None
         extra = [h.ws.root / p for p in env.extra_paths] if env is not None else []
@@ -701,7 +750,11 @@ class LspPool:
         h._cancel_fallback()
         task = h._task
         if task is not None and task is not asyncio.current_task():
-            task.cancel()
+            # 別の ``_stop`` がすでに取り消した監督タスクは取り消し直さない（終わるのを待つだけ）。取り消し直すと、監督タスクの
+            # ``finally`` が待っている ``client.shutdown`` の途中に CancelledError が入り、``ProcessRegistry.terminate`` に届かず
+            # 子プロセスが残る（``record_broken`` / ``record_timeout`` の停止と ``shutdown_all`` が重なったとき。BUG-0090 の試験で実測）。
+            if not task.done() and not task.cancelling():
+                task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         client = h.client
         if client is not None:
@@ -716,6 +769,25 @@ class LspPool:
         h.started_at = None
         h._set_state(final, reason)
         h._stopping = False
+
+    async def _restart_broken(self, h: LspHandle, *, give_up: bool) -> None:
+        """``LspHandle.record_broken`` の続き: 落として起動し直す（BUG-0090）。クラッシュの再起動と同じ ``restarts`` を数える。
+
+        ``give_up``（``record_broken`` が決めた。短い間に ``restart_max`` 回壊れ続けた）なら起動し直さず ``unavailable``（``broken_3x``）。
+        起動し直している間の ``reason`` は ``restarting``（``status`` に出る）。
+        """
+        try:
+            if give_up:
+                await self._stop(h, LspState.UNAVAILABLE, "broken_3x")
+                return
+            await self._stop(h)
+            h.restarts += 1
+            h.timeouts = 0
+            self._begin(h)  # ``_stop`` の戻りから ``_begin`` まで ``await`` が無い: 他の要求に割り込まれない
+            if h.state is LspState.STARTING:
+                h.reason = "restarting"
+        finally:
+            h._broken_restart = False
 
     async def reset(self, language_id: str | None, ws: Workspace) -> None:
         """``reindex_scope: "lsp"``: 該当のハンドルを止めて ``standby`` に戻す（``unavailable`` も解く。次の要求で再起動）。"""

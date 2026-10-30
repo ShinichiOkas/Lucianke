@@ -441,13 +441,11 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
         "max_tokens": 6000,
     }
     # LSP があれば最初の答えを exact で得て（BUG-0080）、すぐ真値も取る。以降の問い合わせは PaaD の exact 行から答えるので、
-    # 事後条件 2〜6 も LSP の期限（負荷）で経路が揺れない。最初から延ばした期限で聞く: basedpyright は references の要求が
-    # 1 度取り消されると、同じプロセスの references がすべて失敗する（票 BUG-0090）。製品の期限 3 秒で切れたら exact も真値も取れない。
+    # 事後条件 2〜6 も LSP の期限（負荷）で経路が揺れない。製品の期限で降格しても聞き直せば exact になる（期限切れで references を
+    # 取り消すと basedpyright の references が壊れていた票 BUG-0090 は直した。T-06 も製品の期限から聞く）。
     want: set[tuple[str, int, int]] = set()
     if rig.lsp_ready:
-        r = await ask_exact(
-            rig, "find_references_and_implementations", what=T06_EXACT, product_first=False, **first
-        )
+        r = await ask_exact(rig, "find_references_and_implementations", what=T06_EXACT, **first)
         want = await _lsp_references(rig, t.sym_path, r["data"]["target"]["selection_range"])
     else:
         r = await rig.ok("find_references_and_implementations", **first)
@@ -460,9 +458,7 @@ async def test_t06_postcondition_1_2_3_4_5_6_references(rig: Rig) -> None:
     # 結ばないので、テストの参照が 0 件で件数が減らず、落ちていた。
     second = {**first, "include_tests": False}
     no_tests = (
-        await ask_exact(
-            rig, "find_references_and_implementations", what=T06_EXACT, product_first=False, **second
-        )
+        await ask_exact(rig, "find_references_and_implementations", what=T06_EXACT, **second)
         if rig.lsp_ready
         else await rig.ok("find_references_and_implementations", **second)
     )

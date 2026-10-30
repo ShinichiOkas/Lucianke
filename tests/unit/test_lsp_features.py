@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import shutil
 import sys
@@ -19,7 +21,8 @@ from typing import Any
 import pytest
 
 from lucianke.core.errors import ErrorCode, LuciankeError
-from lucianke.core.model import Confidence, Position, Range, RelPath
+from lucianke.core.limits import LSP_RESTART_MAX
+from lucianke.core.model import Confidence, LspStatus, Position, Range, RelPath
 from lucianke.core.procs import ProcessRegistry
 from lucianke.index.ingest import RelationFact
 from lucianke.lsp import features
@@ -227,6 +230,90 @@ async def test_real_code_action_for_a_type_error(real: Real):
     assert any(a.get("edit") for a in actions)
 
 
+# --- 実機: 取り消した references の後も references が答える（BUG-0090） -------------------------------
+
+BROKEN_MARK = "this._token.cancel is not a function"
+
+
+async def abandon_references(real: Real, monkeypatch: pytest.MonkeyPatch, pos: Position) -> None:
+    """``references`` を期限 0 ms で打ち切り（製品の期限切れの経路）、サーバーがその要求を終える（client が捨てる応答が届く）まで待つ。
+
+    期限 0 ms では要求の直後に（送るなら）``$/cancelRequest`` が続くので、basedpyright の処理の始まる前に必ず届く。次の
+    references を **前の要求が終わってから** 送るのは、前の要求の途中で次が届くと、次の要求が壊れた欄を上書きして直してしまい
+    （実測）、壊れたかどうかが見えないため。
+    """
+    client = real.handle.client
+    assert client is not None
+    finished: dict[Any, asyncio.Event] = {}
+    original = client._handle_response  # noqa: SLF001
+
+    def watch(msg: dict[str, Any]) -> None:
+        finished.setdefault(msg.get("id"), asyncio.Event()).set()
+        original(msg)
+
+    monkeypatch.setattr(client, "_handle_response", watch)
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 0)
+    rid = client._next_id  # noqa: SLF001  打ち切る要求の id
+    with pytest.raises(TimeoutError):
+        await features.references(real.handle, ROUTES, pos, include_declaration=True)
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 30_000)
+    await asyncio.wait_for(finished.setdefault(rid, asyncio.Event()).wait(), 30)
+
+
+@needs_basedpyright
+async def test_real_timed_out_references_do_not_break_later_references(
+    real: Real, monkeypatch: pytest.MonkeyPatch
+):
+    """期限切れで references を打ち切っても、同じプロセスの次の references が答える（BUG-0090）。
+
+    以前は期限切れで ``$/cancelRequest`` を送り、それが basedpyright の処理の始まる前に届くと、そのプロセスの references が以後
+    すべて ``this._token.cancel is not a function`` で失敗した（下の試験がその振る舞いを再現する）。今は basedpyright の references に
+    取り消しを送らない（``LspServerDef.no_cancel_methods``）ので、次の要求はふつうに答え、起動し直しもしない。
+    """
+    assert real.handle.client is not None and features.M_REFERENCES in real.handle.client.no_cancel_methods
+    call = pos_of(real.path(ROUTES), "process_charge", line=15)
+    before = await features.references(real.handle, ROUTES, call, include_declaration=True)
+    assert len(before) == 3
+    pid = real.handle.pid
+    await abandon_references(real, monkeypatch, call)
+    for _ in range(2):
+        assert await features.references(real.handle, ROUTES, call, include_declaration=True) == before
+    assert real.handle.state is LspState.READY and real.handle.pid == pid and real.handle.restarts == 0
+
+
+@needs_basedpyright
+async def test_real_broken_references_are_recognised_and_basedpyright_is_restarted(
+    real: Real, monkeypatch: pytest.MonkeyPatch
+):
+    """それでも references が壊れたら（ここでは、client がもう送らない早い ``$/cancelRequest`` をわざと送る）、エラー文の印を
+    見て起動し直し、その間は ``ready`` と言わない。起動し直した後は references が答える（BUG-0090）。"""
+    call = pos_of(real.path(ROUTES), "process_charge", line=15)
+    pid = real.handle.pid
+    assert real.handle.client is not None
+    monkeypatch.setattr(
+        real.handle.client, "no_cancel_methods", frozenset()
+    )  # 以前の振る舞い: 期限切れで取り消す
+    await abandon_references(real, monkeypatch, call)
+    try:
+        await features.references(real.handle, ROUTES, call, include_declaration=True)
+    except LuciankeError as e:
+        err = e
+    else:
+        info = real.handle.client.server_info if real.handle.client is not None else None
+        pytest.skip(
+            f"basedpyright {(info or {}).get('version', '?')} no longer breaks references after an early "
+            "$/cancelRequest (BUG-0090); the restart path is covered by the fake-server tests"
+        )
+    assert err.code is ErrorCode.E_LSP_UNAVAILABLE and err.details["reason"] == "restarting", err.details
+    assert BROKEN_MARK in err.details["lsp_message"] and err.details["method"] == features.M_REFERENCES
+    st = real.pool.status("python", real.ws)  # 起動し直しを待たずに: もう ready とは言わない
+    assert (st.status, st.reason) == (LspStatus.INDEXING, "restarting")
+    assert await real.pool.wait_ready("python", real.ws, 60_000), real.pool.status("python", real.ws)
+    assert real.handle.pid != pid and real.handle.restarts == 1
+    await warm_up(real.handle, real.ws, [ROUTES, PAYMENT])
+    assert len(await features.references(real.handle, ROUTES, call, include_declaration=True)) == 3
+
+
 # --- 偽サーバー -------------------------------------------------------------------------
 
 FAKE_SERVER = r"""
@@ -263,7 +350,8 @@ def send(msg):
 
 def log(msg):
     with open(LOG, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"method": msg.get("method"), "params": msg.get("params")}, ensure_ascii=False) + "\n")
+        row = {"method": msg.get("method"), "params": msg.get("params"), "id": msg.get("id")}
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 while True:
@@ -302,6 +390,15 @@ while True:
     if "sleep" in rule:
         time.sleep(rule["sleep"])
         continue
+    if "error_once" in rule:  # 偽サーバーの全プロセスを通じて 1 回だけエラー（印のファイルは起動し直しても残る）
+        marker = LOG + ".once." + method.replace("/", "_")
+        try:
+            open(marker, "x").close()
+        except FileExistsError:
+            pass
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "error": rule["error_once"]})
+            continue
     if "error" in rule:
         send({"jsonrpc": "2.0", "id": mid, "error": rule["error"]})
         continue
@@ -317,11 +414,17 @@ class Fake:
     def __init__(self, pool: LspPool, handle: LspHandle, ws: Workspace, log: Path) -> None:
         self.pool, self.handle, self.ws, self.log = pool, handle, ws, log
 
-    def requests(self, method: str) -> list[Any]:
+    def _rows(self) -> list[dict[str, Any]]:
         if not self.log.exists():
             return []
-        rows = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
-        return [r["params"] for r in rows if r["method"] == method]
+        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def requests(self, method: str) -> list[Any]:
+        return [r["params"] for r in self._rows() if r["method"] == method]
+
+    def ids(self, method: str) -> list[Any]:
+        """偽サーバーが受けた ``method`` の要求の id（受けた順）。"""
+        return [r["id"] for r in self._rows() if r["method"] == method]
 
 
 FakeFactory = Callable[..., Awaitable[Fake]]
@@ -340,6 +443,7 @@ async def fake(registry: ProcessRegistry, tmp_path: Path):
         capabilities: dict[str, Any] | None = None,
         apply_edit: dict[str, Any] | None = None,
         files: dict[str, str] | None = None,
+        defn: LspServerDef = FAKE_DEF,
     ) -> Fake:
         nonlocal counter
         counter += 1
@@ -363,8 +467,8 @@ async def fake(registry: ProcessRegistry, tmp_path: Path):
         spec_path.write_text(spec_text, encoding="utf-8")
         pool = LspPool(
             registry,
-            servers=[FAKE_DEF],
-            resolver=lambda defn, w: [sys.executable, str(script), str(spec_path)],
+            servers=[defn],
+            resolver=lambda _defn, w: [sys.executable, str(script), str(spec_path)],
             ready_fallback_s=0.2,
             grace_ms=200,
         )
@@ -520,6 +624,102 @@ async def test_fake_lsp_error_and_disconnect_become_lsp_unavailable(fake: FakeFa
         await features.references(f.handle, RelPath("src/a.py"), Position(0, 4))
     assert e.value.code is ErrorCode.E_LSP_UNAVAILABLE
     assert e.value.details["reason"] == "lsp_error" and e.value.details["lsp_code"] == -32603
+    assert e.value.details["lsp_message"] == "boom" and e.value.details["method"] == features.M_REFERENCES
+    assert f.handle.state is LspState.READY  # ふつうのエラー応答では起動し直さない
+
+
+# --- 取り消しを受けると壊れるサーバー（BUG-0090） ------------------------------------------------------
+
+A = RelPath("src/a.py")
+BROKEN_ERROR = {
+    "code": -32603,
+    "message": f"Request textDocument/references failed with message: {BROKEN_MARK}",
+}
+BROKEN_DEF = dataclasses.replace(FAKE_DEF, restart_on_errors=(BROKEN_MARK,))
+
+
+async def test_fake_no_cancel_methods_time_out_without_a_cancel_request(
+    fake: FakeFactory, monkeypatch: pytest.MonkeyPatch
+):
+    """``no_cancel_methods`` の要求は期限切れでも ``$/cancelRequest`` を送らない。他の method には送る（BUG-0090）。"""
+    defn = dataclasses.replace(FAKE_DEF, no_cancel_methods=frozenset({features.M_REFERENCES}))
+    f = await fake(
+        defn=defn,
+        responses={
+            "textDocument/references": {"sleep": 0.5},
+            "textDocument/definition": {"sleep": 0.5},
+            "textDocument/hover": {"result": None},
+        },
+    )
+    monkeypatch.setattr(features, "LSP_TIMEOUT_REFERENCES_MS", 100)
+    monkeypatch.setattr(features, "LSP_TIMEOUT_DEFINITION_MS", 100)
+    with pytest.raises(TimeoutError):
+        await features.references(f.handle, A, Position(0, 4))
+    with pytest.raises(TimeoutError):
+        await features.definition(f.handle, A, Position(0, 4))
+    # 偽サーバーは 2 つの sleep の後に、取り消し（送ったなら）と hover を順に読む。hover の答えが届けば、取り消しはもう記録済み
+    assert await features.hover(f.handle, A, Position(0, 4)) is None
+    cancelled = [p["id"] for p in f.requests("$/cancelRequest")]
+    assert cancelled == f.ids("textDocument/definition")
+    assert not set(cancelled) & set(f.ids("textDocument/references"))
+
+
+async def test_fake_broken_references_restart_the_server_and_it_is_not_ready_meanwhile(fake: FakeFactory):
+    """エラー文に ``restart_on_errors`` の印があれば、その場で ``starting``（``restarting``）にして起動し直す（BUG-0090）。"""
+    f = await fake(
+        defn=BROKEN_DEF,
+        responses={
+            "textDocument/references": {
+                "error_once": BROKEN_ERROR,
+                "result": [{"uri": "{ROOT}/src/a.py", "range": rng(1, 11, 1, 12)}],
+            }
+        },
+    )
+    pid = f.handle.pid
+    with pytest.raises(LuciankeError) as e:
+        await features.references(f.handle, A, Position(0, 4), include_declaration=True)
+    assert e.value.code is ErrorCode.E_LSP_UNAVAILABLE and e.value.details["reason"] == "restarting"
+    assert (
+        e.value.details["method"] == features.M_REFERENCES and BROKEN_MARK in e.value.details["lsp_message"]
+    )
+    # 起動し直しを待たずに（同じタスクの続き）: もう ready とは言わず、要求の経路にも渡さない
+    assert f.handle.state is LspState.STARTING
+    st = f.pool.status("python", f.ws)
+    assert (st.status, st.reason) == (LspStatus.INDEXING, "restarting")
+    assert f.pool.get("python", f.ws, start_if_needed=False) is None
+    assert f.handle.last_error is not None and BROKEN_MARK in f.handle.last_error
+    assert await f.pool.wait_ready("python", f.ws, 10_000), f.pool.status("python", f.ws)
+    assert f.handle.pid != pid and f.handle.restarts == 1
+    refs = await features.references(f.handle, A, Position(0, 4), include_declaration=True)
+    assert refs == [features.RefLocation(A, Range(Position(1, 11), Position(1, 12)))]
+
+
+async def test_fake_an_error_without_the_mark_is_a_plain_lsp_error(fake: FakeFactory):
+    f = await fake(
+        defn=BROKEN_DEF,
+        responses={"textDocument/references": {"error": {"code": -32603, "message": "something else"}}},
+    )
+    with pytest.raises(LuciankeError) as e:
+        await features.references(f.handle, A, Position(0, 4), include_declaration=True)
+    assert e.value.details["reason"] == "lsp_error"
+    assert f.handle.state is LspState.READY and f.handle.restarts == 0
+
+
+async def test_fake_references_broken_after_every_restart_end_unavailable(fake: FakeFactory):
+    """起動し直しても壊れ続けるなら、``LSP_RESTART_MAX`` 回で起こすのをやめて ``unavailable``（``broken_3x``）。そのときの
+    要求の理由は ``restarting`` ではなく ``unavailable``（再起動していないのに「再起動しています」と言わない）。"""
+    f = await fake(defn=BROKEN_DEF, responses={"textDocument/references": {"error": BROKEN_ERROR}})
+    for _ in range(LSP_RESTART_MAX):
+        with pytest.raises(LuciankeError) as e:
+            await features.references(f.handle, A, Position(0, 4), include_declaration=True)
+        assert e.value.details["reason"] == "restarting"
+        assert await f.pool.wait_ready("python", f.ws, 10_000), f.pool.status("python", f.ws)
+    with pytest.raises(LuciankeError) as e:
+        await features.references(f.handle, A, Position(0, 4), include_declaration=True)
+    assert e.value.details["reason"] == "unavailable"
+    st = f.pool.status("python", f.ws)
+    assert (st.status, st.reason) == (LspStatus.UNAVAILABLE, "broken_3x")
+    assert not await f.pool.wait_ready("python", f.ws, 2_000)
 
 
 async def test_fake_not_ready_handle_raises_lsp_unavailable(registry: ProcessRegistry, tmp_path: Path):

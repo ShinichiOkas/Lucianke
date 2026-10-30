@@ -14,9 +14,11 @@
    内部の ``Position`` に直すには、その位置を含むファイルの内容が要るので、ディスクから読む（呼び出し 1 回の間だけ覚える）。
    ワークスペース外の URI は ``RelPath`` にできないので ``external_uri`` として返す（``from_file_uri`` が ``None`` を返すもの。
    ドライブ文字が小文字・``:`` が ``%3A`` の URI も ``from_file_uri`` が正規化する）。
-4. 要求は ``LSP_TIMEOUT_*_MS`` で打ち切る。超過は ``TimeoutError`` をそのまま上げる（``$/cancelRequest`` は client が送る）。
+4. 要求は ``LSP_TIMEOUT_*_MS`` で打ち切る。超過は ``TimeoutError`` をそのまま上げる（``$/cancelRequest`` は client が送る。
+   ``LspServerDef.no_cancel_methods`` の method には送らない。BUG-0090）。
    連続タイムアウトの計数（3 回で ``unavailable``）はここで ``LspHandle.record_timeout`` / ``record_ok`` に伝える。
-   降格（``engine.selector.on_lsp_timeout``）は呼び手。
+   サーバーのエラー応答は ``lsp_error``。そのうち ``LspServerDef.restart_on_errors`` の印を含むもの（プロセスがその method に以後
+   答えられない）は ``LspHandle.record_broken`` で起動し直させて ``restarting``。降格（``engine.selector.on_lsp_failure``）は呼び手。
 
 WorkspaceEdit（rename・codeAction）は ``edit`` を import できないので **dict のまま** 返す。``Plan`` への変換は edit 層
 （``edit.plan.from_workspace_edit``）の仕事。サーバーが ``workspace/applyEdit`` を **要求として** 送ってくる経路
@@ -409,8 +411,20 @@ def _lsp_range(handle: LspHandle, client: LspClient, index: LineIndex, rng: Rang
     }
 
 
+def _breaks_the_server(handle: LspHandle, message: str) -> bool:
+    """エラー応答の ``message`` が、そのサーバーの「以後この method に答えられない」印（``LspServerDef.restart_on_errors``）を含む。"""
+    markers = handle.defn.restart_on_errors if handle.defn is not None else ()
+    return any(marker in message for marker in markers)
+
+
 async def _call(handle: LspHandle, client: LspClient, method: str, params: Any, timeout_ms: int) -> Any:
-    """要求を 1 つ送る。タイムアウトは数えて ``TimeoutError`` のまま上げ、切断・サーバーのエラーは ``E_LSP_UNAVAILABLE`` にする。"""
+    """要求を 1 つ送る。タイムアウトは数えて ``TimeoutError`` のまま上げ、切断・サーバーのエラーは ``E_LSP_UNAVAILABLE`` にする。
+
+    サーバーのエラーは ``details.reason="lsp_error"``（``server`` / ``method`` / ``lsp_code`` / ``lsp_message`` 付き。LSP は動いている）。
+    ただしエラーが ``LspServerDef.restart_on_errors`` の印を含むとき（プロセスがその method に以後答えられない。BUG-0090）は
+    ``LspHandle.record_broken`` で起動し直させ、``details.reason="restarting"`` にする（呼び手の警告と ``lsp_status`` が「再起動中」になる）。
+    起動し直しが上限に達して ``unavailable``（``broken_3x``）になったときは ``details.reason="unavailable"``。
+    """
     try:
         result = await client.request(method, params, timeout_ms=timeout_ms)
     except TimeoutError:
@@ -419,12 +433,20 @@ async def _call(handle: LspHandle, client: LspClient, method: str, params: Any, 
     except ConnectionError as e:
         raise _unavailable(handle, "disconnected", str(e)) from e
     except LspError as e:
+        reason, tail = "lsp_error", ""
+        if _breaks_the_server(handle, e.message):
+            state = handle.record_broken(method, e.message)
+            if state is LspState.STARTING:
+                reason, tail = "restarting", "; restarting the LSP"
+            elif state is LspState.UNAVAILABLE:
+                reason, tail = "unavailable", f"; the LSP is now unavailable ({handle.reason})"
         raise _unavailable(
             handle,
-            "lsp_error",
-            f"LSP {handle.server_name} failed {method}: {e.message}",
+            reason,
+            f"LSP {handle.server_name} failed {method}: {e.message}{tail}",
             method=method,
             lsp_code=e.code,
+            lsp_message=e.message,
         ) from e
     handle.record_ok()
     return result

@@ -53,6 +53,8 @@ __all__ = [
     "WarningReason",
     "is_degraded",
     "is_lsp_degradation",
+    "lsp_error_warning",
+    "lsp_restarting_warning",
     "on_lsp_failure",
     "on_lsp_timeout",
     "on_nothing_found",
@@ -455,8 +457,50 @@ LSP は動いているので ``lsp_unavailable`` の案内（``configure_workspa
 この規則の定数）。"""
 
 _INDEXING_REASONS: Final = frozenset({"indexing"})
+_RESTART_REASONS: Final = frozenset({"restarting"})
 _DOWN_REASONS: Final = frozenset({"standby", "unavailable", "disconnected"})
-_DEGRADING_REASONS: Final = _INDEXING_REASONS | _DOWN_REASONS | {"position_clamped", "lsp_error"}
+_DEGRADING_REASONS: Final = (
+    _INDEXING_REASONS | _RESTART_REASONS | _DOWN_REASONS | {"position_clamped", "lsp_error"}
+)
+
+_STRUCTURAL_CAVEAT: Final = "型・オーバーロード・再エクスポート越しの参照は区別されていません。"
+
+
+def _lsp_said(exc: BaseException) -> tuple[str, str, str]:
+    """``lsp.features`` の ``E_LSP_UNAVAILABLE`` の ``details`` から ``(サーバー名, method, サーバーのエラー文)``（無ければ空文字）。
+    エラー文は 1 行・200 字までに縮める（警告文に埋めるため）。"""
+    details = exc.details if isinstance(exc, LuciankeError) else {}
+    server = str(details.get("server") or "")
+    method = str(details.get("method") or "")
+    message = " ".join(str(details.get("lsp_message") or "").split())
+    if len(message) > 200:
+        message = message[:199] + "…"
+    return server, method, message
+
+
+def lsp_error_warning(exc: BaseException) -> str:
+    """``lsp_error``（サーバーが動いたまま、この要求にエラー応答を返した）の降格の警告文。
+
+    LSP は動いているので「利用できない」とは言わず、どのサーバーのどの要求が何と答えたかを書く（BUG-0090: 以前は
+    ``lsp_unavailable`` の雛形で「LSP が利用できない」と言いながら ``lsp_status`` は ``ready`` だった）。
+    """
+    server, method, message = _lsp_said(exc)
+    who = f"LSP（{server}）が" if server else "LSP が"
+    what = f" {method} の要求に" if method else "要求に"
+    said = f"（{message}）" if message else ""
+    return f"{who}{what}エラーを返した{said}ため構文木で解決しました。{_STRUCTURAL_CAVEAT}"
+
+
+def lsp_restarting_warning(exc: BaseException) -> str:
+    """``restarting``（サーバーがある method に以後答えられない壊れ方をしたので、``LspPool`` が起動し直している）の降格の警告文。"""
+    server, method, message = _lsp_said(exc)
+    who = f"LSP（{server}）が" if server else "LSP が"
+    what = f" {method} に" if method else "要求に"
+    said = f"（{message}）" if message else ""
+    return (
+        f"{who}{what}以後答えられない状態になった{said}ため、LSP を再起動しています。今回は構文木で解決しました。"
+        f"{_STRUCTURAL_CAVEAT}再起動の完了後に呼び直すと `exact` になります。"
+    )
 
 
 def _lsp_reason(exc: BaseException) -> str | None:
@@ -470,8 +514,8 @@ def is_lsp_degradation(exc: BaseException) -> bool:
     """この例外は「LSP が使えなかった」降格の合図か。
 
     * ``TimeoutError``（``lsp.features`` が上限で打ち切ったもの）。
-    * ``LuciankeError(E_LSP_UNAVAILABLE)`` で ``details.reason`` が ``indexing`` / ``standby`` / ``unavailable`` / ``disconnected`` /
-      ``position_clamped`` / ``lsp_error``。
+    * ``LuciankeError(E_LSP_UNAVAILABLE)`` で ``details.reason`` が ``indexing`` / ``restarting`` / ``standby`` / ``unavailable`` /
+      ``disconnected`` / ``position_clamped`` / ``lsp_error``。
     それ以外（``prepare_rename_rejected`` など LSP の判断の結果、``E_TARGET_NOT_FOUND`` など入力の誤り）は降格ではない。
     """
     if isinstance(exc, TimeoutError):
@@ -486,11 +530,15 @@ def on_lsp_failure(choice: EngineChoice, cap: Capability, exc: BaseException) ->
     * ``TimeoutError``: ``on_lsp_timeout``（``lsp_status`` は ``ready`` のまま、``lsp_timeout`` の警告）。
     * ``E_LSP_UNAVAILABLE`` の ``reason``:
         - ``indexing``: 列 2（起動・索引中）。``lsp_status`` は ``indexing``、警告は ``lsp_indexing``（進捗は不明なので省く）。
+        - ``restarting``: サーバーがその method に以後答えられない壊れ方をしたので ``LspPool`` が起動し直している（BUG-0090）。
+          列 2。``lsp_status`` は ``indexing``（``LspPool`` の状態も ``starting``）、警告は ``lsp_restarting_warning``（サーバー・
+          method・エラー文と「再起動しています」）。
         - ``standby`` / ``unavailable`` / ``disconnected``: 列 3（利用不可）。``lsp_status`` は ``unavailable``、警告は ``lsp_unavailable``。
           選択（``select``）の後に LSP が落ちた競合で起きる。
         - ``position_clamped``: 位置が文字境界に当たらず要求を送らなかった。LSP は動いているので ``lsp_status`` は ``ready`` のまま、
           警告は ``POSITION_CLAMPED_WARNING``。
-        - ``lsp_error``: サーバーがエラー応答を返した。``lsp_status`` は ``ready`` のまま、警告は ``lsp_unavailable``。
+        - ``lsp_error``: サーバーがエラー応答を返した。LSP は動いているので ``lsp_status`` は ``ready`` のまま、警告は
+          ``lsp_error_warning``（サーバー・method・エラー文。「利用できない」とは言わない。BUG-0090）。
     * 降格先が ``lsp_unavailable``（RENAME / CODE_ACTION）のときは警告なしで、ツールが ``E_LSP_UNAVAILABLE`` を返す
       （``on_lsp_timeout`` と同じ）。
     * LSP に要求を送らない選択（``ready`` 以外、``exact`` でない、LSP に要求しない能力）には何もせず ``choice`` を返す（降格は 1 段だけ）。
@@ -507,7 +555,7 @@ def on_lsp_failure(choice: EngineChoice, cap: Capability, exc: BaseException) ->
     ):
         return choice
     reason = _lsp_reason(exc) or ""
-    if reason in _INDEXING_REASONS:
+    if reason in _INDEXING_REASONS or reason in _RESTART_REASONS:
         column, status = Column.INDEXING, LspStatus.INDEXING
     elif reason in _DOWN_REASONS:
         column, status = Column.UNAVAILABLE, LspStatus.UNAVAILABLE
@@ -516,14 +564,15 @@ def on_lsp_failure(choice: EngineChoice, cap: Capability, exc: BaseException) ->
     cell = _TABLE[cap][column]
     if cell.engine in NOT_PROVIDED_ENGINES:
         return _make_choice(replace(cell, warning=None), status, None)
-    if reason == "position_clamped":
-        warning_cell = replace(cell, warning=None)
-        made = _make_choice(warning_cell, status, None)
-        return replace(made, warning=POSITION_CLAMPED_WARNING)
-    why = {
-        "indexing": WarningReason.LSP_INDEXING,
-        "lsp_error": WarningReason.LSP_UNAVAILABLE,
-    }.get(reason, WarningReason.LSP_UNAVAILABLE)
+    custom = {
+        "position_clamped": lambda: POSITION_CLAMPED_WARNING,
+        "lsp_error": lambda: lsp_error_warning(exc),
+        "restarting": lambda: lsp_restarting_warning(exc),
+    }.get(reason)
+    if custom is not None:
+        made = _make_choice(replace(cell, warning=None), status, None)
+        return replace(made, warning=custom())
+    why = WarningReason.LSP_INDEXING if reason in _INDEXING_REASONS else WarningReason.LSP_UNAVAILABLE
     return _make_choice(replace(cell, warning=why), status, None)
 
 

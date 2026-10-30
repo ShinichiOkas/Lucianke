@@ -105,8 +105,8 @@ LSP_FAILURES = (TimeoutError, LuciankeError)
 def is_lsp_failure(exc: BaseException) -> bool:
     """降格すべき失敗か。``engine.selector.is_lsp_degradation`` に従う（降格の規則はセレクターの 1 か所）。
 
-    時間切れ、``E_LSP_UNAVAILABLE`` の ``indexing`` / ``standby`` / ``unavailable`` / ``disconnected`` / ``position_clamped`` /
-    ``lsp_error``。索引の位置がディスクの範囲外（``E_INVALID_ARGUMENT`` / ``param=position``）は ``position_clamped`` と同じ扱い。
+    時間切れ、``E_LSP_UNAVAILABLE`` の ``indexing`` / ``restarting`` / ``standby`` / ``unavailable`` / ``disconnected`` /
+    ``position_clamped`` / ``lsp_error``。索引の位置がディスクの範囲外（``E_INVALID_ARGUMENT`` / ``param=position``）は ``position_clamped`` と同じ扱い。
     それ以外は呼び手の誤りで、握らずに上げる。
     """
     return is_lsp_degradation(_normalized(exc))

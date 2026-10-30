@@ -1081,6 +1081,7 @@ class LspHandle:   # 状態の読み取りと、機能呼び出しが使う clie
     async def rebind(self, ws) -> bool      # 新しい Workspace に差し替える（documents / diagnostics の ws も）。再起動したら True
     def record_ok(self) -> None             # 要求が時間内に答えた: 連続タイムアウトの数え直し
     def record_timeout(self) -> bool        # 連続 3 回に達したらプロセスを落として unavailable（timeout_3x）にし True を返す
+    def record_broken(self, method, detail) -> LspState | None   # その method に以後答えられない壊れ方（LspServerDef.restart_on_errors）: その場で starting（restarting）にして起動し直す。上限なら unavailable（broken_3x）。BUG-0090
 ```
 
 | 状態 | 入る契機 | 動作 | 出る契機 |
@@ -1088,8 +1089,8 @@ class LspHandle:   # 状態の読み取りと、機能呼び出しが使う clie
 | `standby` | 初期状態。30 分無要求（MAY） | 何もしない | 当該言語への最初の要求 → `starting` |
 | `starting` | 要求 | コマンド探索 → `ProcessRegistry.spawn` → `initialize` / `initialized` を送る。要求元には降格応答（待たない） | `initialize` 成功 → `indexing`。失敗 → 再試行判定 |
 | `indexing` | 初期化直後 | `$/progress` / `window/workDoneProgress` を `progress` に反映。取れないサーバーは最初の `publishDiagnostics` 受信で `ready`（basedpyright は単一文書では `$/progress` を出さない。`ready` は「`initialize` 応答後、最初に開いた文書の実診断を受信」または「`$/progress end`」の早い方。S-4 で確認） | 進捗完了 → `ready` |
-| `ready` | 索引完了 | 要求を通す | クラッシュ / 無応答（連続 3 回のタイムアウト）→ 再試行判定。`reset` → `standby` |
-| `unavailable` | 再試行上限 | `status.reason` に理由（`not_found` / `crashed_3x` / `init_failed` / `timeout_3x`）。T-00 `status` に出す | `reset` → `standby` |
+| `ready` | 索引完了 | 要求を通す | クラッシュ / 無応答（連続 3 回のタイムアウト）→ 再試行判定。壊れ方の印（`record_broken`）→ `starting`（`reason: restarting`）。`reset` → `standby` |
+| `unavailable` | 再試行上限 | `status.reason` に理由（`not_found` / `crashed_3x` / `init_failed` / `timeout_3x` / `broken_3x`）。T-00 `status` に出す | `reset` → `standby` |
 
 再試行は `LSP_RESTART_BACKOFF_S = (1, 2, 4)`、`LSP_RESTART_MAX = 3`。起動後 `stable_after_s`（60 s）以上動いていたクラッシュは数え直す。コマンドが見つからなければバックオフせず即 `unavailable`（`not_found`）。`EngineSelector` は `status()` だけを見る。
 
@@ -1102,6 +1103,8 @@ class LspHandle:   # 状態の読み取りと、機能呼び出しが使う clie
 - `LspHandle.documents`（`DocumentSync`）と `.diagnostics`（`DiagnosticsHub`）はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。外へ出す `LspStatus` では `starting` を `indexing` に含める。
 - **`rebind`（8a6f40f・c84b7a0、BUG-0023）**: 設定が変わったとき（`set_python_env`・`set_roots`・除外・`default_base_ref`）、`LspPool.rebind(ws)` が `workspace_id` の同じ既存のハンドルすべてに `LspHandle.rebind(ws)` を呼ぶ。`ws` と `documents.ws` / `diagnostics.ws`（URI の変換に使う）を差し替え、`on_diagnostics` の 5 引数目も新しい `ws` になる。**再起動するのは、ルートが変わったとき（言語を問わない）と、Python 系でインタープリタが変わったとき**だけ（basedpyright はインタープリタを `workspace/configuration` の応答でしか受け取らず、起動時の値で環境を作る〔§7.5.1〕ため、`set_python_env` の後は `started_at` が呼び出し時刻より後になる〔仕様書 T-00 事後条件 3〕）。除外などは LSP の設定に出ない（`build_settings` が使うのはインタープリタと tsserver だけ）ので再起動も `workspace/didChangeConfiguration` も要らない。再起動はクラッシュではないので `restarts` は増えない。`unavailable` は再起動せず `standby` に戻す（`reset` と同じ。次の要求で、新しい venv にサーバーが入っていれば起動する）。`standby` は差し替えだけ。**再起動の責任は `rebind` にある**（c613fb4、BUG-0035）: T-00 の `set_python_env` のジョブは、`workspace_changed` が返した「`rebind` が再起動したハンドル」をもう一度止めない（1 回の呼び出しで二重に起動し直さない）。ジョブが受け持つのは `rebind` が起こさなかった分だけ: 同じインタープリタを指定し直したとき（`pip install` 後の取り直し。動いていても止めて起動し直す）と、まだ起動していない・`unavailable` から戻した `standby` を起動するとき。
 - **`started_at`**: ハンドルが `starting` に入るたびにプールの壁時計（UTC）で ISO 8601（ミリ秒）に更新し、停止で `None` に戻す。
+- **壊れたプロセスの起動し直し（BUG-0090、実装で確定 2026-10-31）**: プロセスは生きているのに、ある method に以後答えられない壊れ方がある（basedpyright 1.40.2 = pyright 1.1.414 は、references の取り消しが処理の始まる前に届くと、そのプロセスの references に以後ずっと `this._token.cancel is not a function` を返す。§7.5.3）。`LspServerDef.restart_on_errors` にそのエラー文の印を持ち、`lsp/features.py` の `_call` がエラー応答に印を見つけたら `LspHandle.record_broken(method, detail)` を呼ぶ。ハンドルは **その場で（`await` なしで）** `starting`（`reason: restarting`）になり、以後の要求の経路も `status`（T-00 の `lsp_daemons[]`、各ツールの `lsp_status` / `lsp_sources[]`）も `ready` と言わない。続けて `_stop` → `_begin` で起動し直す（クラッシュと同じ `restarts` を数え、起動から `stable_after_s` 以上動いていれば数え直す）。`restart_max` 回に達していれば起動し直さず `unavailable`（`broken_3x`）。その要求は `E_LSP_UNAVAILABLE`（`details.reason: "restarting"`、上限のときは `"unavailable"`）で降格する。要求の経路は起動を待たない（§8.3）ので、その場で聞き直さず、再起動の完了後の呼び出しが `exact` になる。
+- **`_stop` の重なり**: 別の `_stop`（`record_broken` / `record_timeout` の停止と `shutdown_all` など）がすでに取り消した監督タスクは取り消し直さず、終わるのを待つだけにする。取り消し直すと監督タスクの `finally` が待つ `client.shutdown` の途中に `CancelledError` が入り、`ProcessRegistry.terminate` に届かず子プロセスが残る（BUG-0090 の試験で実測）。
 
 `didOpen` 直後（解析中）の `definition` はサーバー内で約 0.6 s 待たされて正しい結果が返る（`null` は返さない。3 秒の `LSP_TIMEOUT_*` に収まる）ので、`indexing` 中の要求を `None` で返す設計（ADR-6 (b)）は安全側で変更不要（S-4 で確認）。
 
@@ -1122,6 +1125,7 @@ class LspClient:
         # initialize → initialized。応答の positionEncoding を negotiated_encoding に入れる
     async def request(self, method: str, params: Any, *, timeout_ms: int | float) -> Any
         # 超過で $/cancelRequest を送ってから TimeoutError（呼び手が降格）。エラー応答は LspError、切断は ConnectionError
+        # no_cancel_methods（LspClient(name, no_cancel_methods=LspServerDef.no_cancel_methods)）の method には送らない（BUG-0090）
     def notify(self, method: str, params: Any = None) -> None
     def on_notification(self, method: str, handler) -> None
     def on_request(self, method: str, handler) -> None     # client/registerCapability, workspace/configuration, window/workDoneProgress/create
@@ -1132,7 +1136,7 @@ class LspClient:
 ```
 
 1. フレーミングは `Content-Length` ヘッダ。読み取りタスク 1 本が応答を `id → Future` に配り、通知をハンドラへ回す。子の `stderr` は別タスクでログへ（`debug`）。`window/logMessage` / `showMessage` もログへ。
-2. タイムアウトは `core/limits.py` の定数: `LSP_TIMEOUT_DEFINITION_MS=3000`、`LSP_TIMEOUT_REFERENCES_MS=3000`、`LSP_TIMEOUT_HOVER_MS=3000`、`LSP_TIMEOUT_CALL_HIERARCHY_MS=5000`、`LSP_TIMEOUT_CODE_ACTION_MS=5000`、`LSP_TIMEOUT_RENAME_MS=10000`。超過時は `$/cancelRequest` を送ってから呼び手に返す。
+2. タイムアウトは `core/limits.py` の定数: `LSP_TIMEOUT_DEFINITION_MS=3000`、`LSP_TIMEOUT_REFERENCES_MS=3000`、`LSP_TIMEOUT_HOVER_MS=3000`、`LSP_TIMEOUT_CALL_HIERARCHY_MS=5000`、`LSP_TIMEOUT_CODE_ACTION_MS=5000`、`LSP_TIMEOUT_RENAME_MS=10000`。超過時は `$/cancelRequest` を送ってから呼び手に返す。**例外（BUG-0090、実装で確定 2026-10-31）**: `LspServerDef.no_cancel_methods` の method（basedpyright / pyright の `textDocument/references`・`textDocument/implementation`・`workspace/executeCommand`）には送らない。pyright の `onReferences` などは `CancelAfter` の source を `_pending*CancellationSource` に残し、要求の token が処理の始まる前（キューで待つ間・`window/workDoneProgress/create` の往復を待つ間）に取り消されていると、その source の token が vscode-jsonrpc の凍結された `CancellationToken.Cancelled`（`cancel` を持たない）になる。次の同じ種類の要求は最初にその source の `cancel()` を呼んで TypeError（`this._token.cancel is not a function`）で落ち、欄を戻す前に落ちるのでプロセスが続く間ずっと失敗する。送らなければ token は取り消されず、次の同じ種類の要求がサーバー自身の健全な source で前の要求を止める。遅れて届いた応答は client が捨てる（LSP 仕様の上で `$/cancelRequest` は任意の通知）。それでも壊れたときの回復は §7.5.2 の `record_broken`。
 3. **位置変換はこの境界だけ**（MUST）。`core/textpos.LineIndex` の `to_unit(pos, unit)`（コードポイント → 列）と `from_unit(line, col, unit)`（列 → コードポイント）が、`negotiated_encoding` の単位（UTF-8 / UTF-16）で変換する（バイトオフセットは Tree-sitter 用に `position_to_offset`）。`LineIndex` は `didOpen` / `didChange` に送った本文そのものから作る。`Range` / `Location` / `TextEdit` を越境させる関数はここに閉じる。**サーバーへは文字境界の列だけを送る**（MUST）。`to_unit` の丸め（`clamped=True`）が出たら要求を送らず降格応答にする（UTF-16 の 3 サーバーは境界でない列だと黙って別のシンボルや `null` を返し、ruff は文字の途中を指す増分 `didChange` でパニックして終了する〔exit 101〕。S-11 で確認）。`didChange` は全文なので、位置を送るのは definition・references・hover・rename・codeAction の range だけ。増分 `didChange` を入れる（MAY）ときは境界検査を必須にする。`LineIndex` は 4 サーバーの全件で一致した（S-11）。**実装の差**: `LspClient.to_lsp_position` は丸めて返し `debug` ログに残すだけで、受信側は丸めてよい（行末超過・文書末超過・文字の途中は直前の境界へ。TypeScript の `2147483647` もこれで足りる）。送信側の降格は `lsp/features.py` の `_lsp_position` が `to_unit` を直接呼び、`clamped` なら `E_LSP_UNAVAILABLE(details.reason="position_clamped")` を投げて行う。
 4. URI: 送信は realpath の絶対パスから `file://` を作る（Windows は `file:///S:/...`）。受信は先に正規化してから `confine` を通し、ルート外は外部シンボル扱い。正規化は `unquote` → 先頭の `/` を落とす（`/s:/work` → `s:/work`）→ `os.path.normcase(realpath)`。basedpyright・vtsls・tsls は小文字ドライブ＋`%3A`（`file:///s%3A/work/...`）で返す（S-4・S-5 で確認）。
 
@@ -1648,6 +1652,8 @@ class EngineSelector:
 | `lsp_unavailable` | structural | 仕様書 §8.4 の `structural` 雛形 + 「`configure_workspace status` で LSP の状態を確認してください。」 |
 | `lsp_timeout` | structural | 「LSP の応答が {timeout} ms 内に得られなかったため構文木で解決しました。」 |
 | `position_clamped`（理由別の警告ではなく `engine/selector.py` の定数 `POSITION_CLAMPED_WARNING`） | structural | 「解決する位置が文字の境界に当たらないため LSP に要求を送らず構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。」LSP は動いているので `lsp_status` は `ready` のまま、`lsp_unavailable` の案内（`configure_workspace status`）は付けない（9259466。実装で確定 2026-10-29） |
+| `lsp_error`（`engine/selector.py` の `lsp_error_warning`。`details` の `server` / `method` / `lsp_message` から組む） | structural | 「LSP（{server}）が {method} の要求にエラーを返した（{エラー文}）ため構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。」LSP は動いているので `lsp_status` は `ready` のまま、「利用できない」とは言わない（以前は `lsp_unavailable` の雛形で、`ready` なのに「LSP が利用できない」と書いていた。BUG-0090、実装で確定 2026-10-31） |
+| `restarting`（`engine/selector.py` の `lsp_restarting_warning`） | structural | 「LSP（{server}）が {method} に以後答えられない状態になった（{エラー文}）ため、LSP を再起動しています。今回は構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。再起動の完了後に呼び直すと `exact` になります。」`lsp_status` は `indexing`（§7.5.2 の `record_broken`。BUG-0090、実装で確定 2026-10-31） |
 | `no_grammar_ctags` | heuristic | 仕様書 §8.4 の `heuristic` 雛形 |
 | `no_grammar_lexical` | lexical_fallback | 仕様書 §8.4 の `lexical_fallback` 雛形 |
 | `mixed` | （最低水準） | 上の雛形に「{n} 件のファイルがこの水準です（内訳は `confidence_breakdown`）。」を足す |

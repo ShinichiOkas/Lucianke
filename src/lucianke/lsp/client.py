@@ -5,7 +5,9 @@
 * ``Content-Length`` 枠の読み書き（UTF-8）。読み取りは 1 本のタスクが行い、応答を ``id → Future`` に配り、通知と
   サーバーからの要求をハンドラへ回す。枠が壊れたら（ヘッダ不正・長さ不正・JSON でない本文・途中の EOF）ログに残して
   **切断扱い**にする: 待っている要求は ``ConnectionError`` で失敗し、以後の ``request`` / ``notify`` も ``ConnectionError``。
-* 要求のタイムアウト: 超過で ``$/cancelRequest`` を送ってから ``TimeoutError``（呼び手が降格する）。
+* 要求のタイムアウト: 超過で ``$/cancelRequest`` を送ってから ``TimeoutError``（呼び手が降格する）。ただし
+  ``no_cancel_methods``（``LspServerDef.no_cancel_methods``。取り消しを受けると壊れるサーバーの method。BUG-0090）は
+  ``$/cancelRequest`` を送らず、遅れて届いた応答を捨てる。
 * サーバーからの要求への既定の応答（``workspace/configuration`` は ``set_settings`` の設定木から引き、無ければ空の
   ``{}``。``client/registerCapability`` などは ``null``。未登録の method は MethodNotFound）。
 * 位置の変換（ADR-14）。内部の ``Position``（0 始まり・コードポイント）と、``initialize`` で交渉した単位
@@ -218,8 +220,10 @@ class LspClient:
     ``await c.initialize(...)`` →（要求・通知）→ ``await c.shutdown(grace_ms)``。
     """
 
-    def __init__(self, name: str = "lsp") -> None:
+    def __init__(self, name: str = "lsp", *, no_cancel_methods: frozenset[str] = frozenset()) -> None:
         self.name = name
+        self.no_cancel_methods = frozenset(no_cancel_methods)
+        """期限切れ・取り消しのときも ``$/cancelRequest`` を送らない method（``LspServerDef.no_cancel_methods``。BUG-0090）。"""
         self.negotiated_encoding: Unit = Unit.UTF16
         """位置の単位。``initialize`` の応答の ``positionEncoding``（無ければ UTF-16。仕様書 §12.2）。"""
         self.server_capabilities: dict[str, Any] = {}
@@ -451,6 +455,8 @@ class LspClient:
         * ``timeout_ms`` を超えたら ``$/cancelRequest`` を送ってから ``TimeoutError``（呼び手が降格する）。
         * 切断扱い（未起動を含む）、または待っている間に切断されたら ``ConnectionError``。
         * 待っているタスクが取り消されたときも ``$/cancelRequest`` を送る。
+        * ``method`` が ``no_cancel_methods`` にあるときは、どちらの場合も ``$/cancelRequest`` を送らない（待つのをやめるだけ。
+          遅れて届いた応答は ``_handle_response`` が捨てる）。LSP 仕様の上で取り消しは任意の通知で、送らなくても約束は破らない。
         """
         self._check_connected()
         rid = self._next_id
@@ -465,8 +471,13 @@ class LspClient:
             result = await asyncio.wait_for(fut, timeout=max(timeout_ms, 0) / 1000)
         except (TimeoutError, asyncio.CancelledError):
             self._pending.pop(rid, None)
-            with contextlib.suppress(ConnectionError):
-                self.notify("$/cancelRequest", {"id": rid})
+            if method in self.no_cancel_methods:
+                _log.debug(
+                    "[%s] gave up waiting for %s id=%s without $/cancelRequest", self.name, method, rid
+                )
+            else:
+                with contextlib.suppress(ConnectionError):
+                    self.notify("$/cancelRequest", {"id": rid})
             raise
         except BaseException:
             self._pending.pop(rid, None)

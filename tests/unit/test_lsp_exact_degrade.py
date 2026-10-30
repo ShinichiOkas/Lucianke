@@ -50,6 +50,7 @@ def _err(reason: str) -> LuciankeError:
         _err("disconnected"),
         _err("position_clamped"),
         _err("lsp_error"),
+        _err("restarting"),
     ],
     ids=lambda e: type(e).__name__ + str(getattr(e, "details", {}).get("reason", "")),
 )
@@ -74,6 +75,22 @@ def test_timeout_keeps_the_lsp_ready_with_the_timeout_warning(cap: Capability) -
     got = lx.degraded_choice(_route(cap), TimeoutError())
     assert got.confidence is Confidence.STRUCTURAL and got.lsp_status == LspStatus.READY.value
     assert got.warning is not None and "ms 内に得られなかった" in got.warning
+
+
+@pytest.mark.parametrize("cap", CAPS)
+def test_a_restarting_lsp_is_not_reported_ready(cap: Capability) -> None:
+    """LSP がその method に以後答えられないので起動し直している（BUG-0090）: ``lsp_status`` は ``ready`` ではない。"""
+    got = lx.degraded_choice(_route(cap), _err("restarting"))
+    assert got.confidence is Confidence.STRUCTURAL and got.lsp_status == LspStatus.INDEXING.value
+    assert got.warning is not None and "再起動しています" in got.warning and "利用できない" not in got.warning
+
+
+@pytest.mark.parametrize("cap", CAPS)
+def test_a_server_error_is_not_reported_as_lsp_unavailable(cap: Capability) -> None:
+    """サーバーのエラー応答（``lsp_error``）は LSP が動いている: ``ready`` のまま、「利用できない」とは言わない（BUG-0090）。"""
+    got = lx.degraded_choice(_route(cap), _err("lsp_error"))
+    assert got.confidence is Confidence.STRUCTURAL and got.lsp_status == LspStatus.READY.value
+    assert got.warning is not None and "エラーを返した" in got.warning and "利用できない" not in got.warning
 
 
 @pytest.mark.parametrize("cap", CAPS)

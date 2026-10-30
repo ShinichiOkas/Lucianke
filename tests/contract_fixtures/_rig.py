@@ -330,8 +330,8 @@ async def ask_exact(
        LSP が ready のままか確かめてから、期限を延ばして（``patient_lsp``）聞き直す（最大 ``EXACT_RETRIES`` 回）。
     4. それでも exact でなければ **fail**（skip しない）。各回の水準・エンジン・``lsp_status``・警告・所要を書く。
 
-    ``product_first=False`` は最初から延ばした期限で聞く。製品の期限で要求が取り消されると、同じ LSP のプロセスでその後の
-    同じ種類の要求が失敗し続ける組み合わせ（basedpyright の references。票 BUG-0090）に使う。
+    ``product_first=False`` は最初から延ばした期限で聞く（製品の期限で 1 度降格すると、その後の要求が失敗し続ける組み合わせ用。
+    basedpyright の references がそうだった票 BUG-0090 は製品の側で直したので、今は使っていない）。
     """
     require_exact_lsp(rig, what)
     tries: list[str] = []
