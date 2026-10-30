@@ -1,0 +1,168 @@
+    assert ws.workspace_id == "_ext-2"
+
+
+def test_register_same_root_twice_keeps_id_and_does_not_duplicate(ctx: WorkspaceContext, tmp_path: Path):
+    a, b = _dir(tmp_path, "a", "app"), _dir(tmp_path, "b", "app")
+    first = ctx.register_roots([str(a)])[0]
+    ctx.register_roots([str(b)])
+    again = ctx.register_roots([str(a)])[0]
+    assert again is first
+    assert [w.workspace_id for w in ctx.list()] == ["app", "app-2"]
+    assert ctx.active() is first  # 呼び出しの最初のルートがアクティブ
+
+
+def test_register_duplicate_paths_in_one_call_collapse(ctx: WorkspaceContext, tmp_path: Path):
+    a = _dir(tmp_path, "a")
+    got = ctx.register_roots([str(a), str(a / "."), str(a)])
+    assert len(got) == 1
+    assert len(ctx.list()) == 1
+
+
+def test_register_reuses_ids_from_a_previous_session(tmp_path: Path):
+    a, b = _dir(tmp_path, "a", "app"), _dir(tmp_path, "b", "app")
+    known = {str(Path(os.path.realpath(b))): "app", str(Path(os.path.realpath(a))): "app-2"}
+    fresh = WorkspaceContext(cwd=tmp_path, env={"PATH": ""}, known_roots=known)
+    got = fresh.register_roots([str(a), str(b)])
+    assert [w.workspace_id for w in got] == ["app-2", "app"]
+    # 前回の ID は、今回登録していない別のルートにも渡さない
+    solo = WorkspaceContext(cwd=tmp_path, env={"PATH": ""}, known_roots=known)
+    (c,) = solo.register_roots([str(_dir(tmp_path, "c", "app"))])
+    assert c.workspace_id == "app-3"
+
+
+def test_register_with_a_missing_path_changes_nothing(ctx: WorkspaceContext, tmp_path: Path):
+    a, b = _dir(tmp_path, "a"), _dir(tmp_path, "b")
+    ctx.register_roots([str(a)])
+    before_list, before_active = ctx.list(), ctx.active()
+    some_file = _mk(tmp_path / "file.txt")
+    for bad in (str(tmp_path / "missing"), str(some_file), "", "nul\x00byte"):
+        with pytest.raises(LuciankeError) as err:
+            ctx.register_roots([str(b), bad])
+        assert err.value.code is ErrorCode.E_INVALID_ARGUMENT
+        assert err.value.details["param"] == "root_paths"
+        assert ctx.list() == before_list
+        assert ctx.active() is before_active
+    assert [w.workspace_id for w in ctx.list()] == ["a"]
+    # 失敗した呼び出しは ID を使い込んでいない
+    assert ctx.register_roots([str(b)])[0].workspace_id == "b"
+
+
+@pytest.mark.parametrize("bad", [[], "not-a-list", None])
+def test_register_requires_a_non_empty_list(ctx: WorkspaceContext, bad):
+    with pytest.raises(LuciankeError) as err:
+        ctx.register_roots(bad)
+    assert err.value.code is ErrorCode.E_INVALID_ARGUMENT
+
+
+def test_register_relative_path_is_relative_to_active_root_else_cwd(tmp_path: Path):
+    cwd = _dir(tmp_path, "cwd")
+    _dir(cwd, "sub")
+    first = WorkspaceContext(cwd=cwd, env={"PATH": ""})
+    (sub,) = first.register_roots(["sub"])  # アクティブが無いので cwd 基準
+    assert sub.root == Path(os.path.realpath(cwd / "sub"))
+    _dir(sub.root, "inner")
+    (inner,) = first.register_roots(["inner"])  # アクティブ (sub) 基準
+    assert inner.root == sub.root / "inner"
+
+
+def test_register_replace_drops_others_but_remembers_ids(ctx: WorkspaceContext, tmp_path: Path):
+    a, b = _dir(tmp_path, "a", "app"), _dir(tmp_path, "b", "app")
+    ctx.register_roots([str(a), str(b)])
+    ctx.register_roots([str(b)], replace=True)
+    assert [w.workspace_id for w in ctx.list()] == ["app-2"]
+    assert ctx.active().workspace_id == "app-2"
+    assert ctx.register_roots([str(a)])[0].workspace_id == "app"  # 外した ID を再び得る
+    with pytest.raises(LuciankeError):
+        ctx.get("missing")
+
+
+def test_register_poly_fixture_detects_its_subproject():
+    ctx = WorkspaceContext(env={"PATH": ""})
+    (ws,) = ctx.register_roots([str(POLY)])
+    assert ws.workspace_id == "poly"
+    assert SubProject(path=".", marker="pyproject.toml") in ws.sub_projects
+    assert all("/" not in sp.marker for sp in ws.sub_projects)
+
+
+def test_register_records_python_env(ctx: WorkspaceContext, tmp_path: Path):
+    root = _dir(tmp_path, "withvenv")
+    exe = _touch_exe(_venv_exe(root / ".venv"))
+    (ws,) = ctx.register_roots([str(root)])
+    assert ws.python_env is not None
+    assert ws.python_env.manager == "venv"
+    assert _same(ws.python_env.interpreter, exe)
+
+
+def test_register_applies_lucianke_toml_and_collects_warnings(ctx: WorkspaceContext, tmp_path: Path):
+    root = _dir(tmp_path, "cfg")
+    _write_settings(
+        root,
+        'exclude_globs = ["build/**"]\npython_interpreter = "does/not/exist"\nmystery = 1\nmax_file_bytes = 99\n',
+    )
+    (ws,) = ctx.register_roots([str(root)])
+    assert ws.exclude_globs == ("build/**",)
+    assert ctx.settings("cfg")["max_file_bytes"] == 99
+    warnings = ctx.take_warnings()
+    assert any("mystery" in w and w.startswith("cfg:") for w in warnings)
+    assert any("python_interpreter" in w and "not executable" in w for w in warnings)
+    assert ctx.take_warnings() == []  # 取り出したら空
+
+
+def test_register_environment_variables_beat_the_settings_file(tmp_path: Path):
+    root = _dir(tmp_path, "cfg")
+    _write_settings(root, "max_file_bytes = 99\n")
+    ctx = WorkspaceContext(cwd=tmp_path, env={"PATH": "", "LUCIANKE_MAX_FILE_BYTES": "7"})
+    ctx.register_roots([str(root)])
+    assert ctx.settings("cfg")["max_file_bytes"] == 7
+
+
+# =========================================================================================
+# WorkspaceContext.from_mcp_roots
+# =========================================================================================
+
+
+def test_from_mcp_roots_reads_file_uris(ctx: WorkspaceContext, tmp_path: Path):
+    a = _dir(tmp_path, "with space")
+    b = _dir(tmp_path, "日本")
+    got = ctx.from_mcp_roots([a.as_uri(), b.as_uri()])
+    assert [w.root for w in got] == [Path(os.path.realpath(a)), Path(os.path.realpath(b))]
+    assert ctx.take_warnings() == []
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="Windows のドライブ文字つき URI")
+def test_from_mcp_roots_reads_percent_encoded_drive_letter(ctx: WorkspaceContext, tmp_path: Path):
+    a = _dir(tmp_path, "drive")
+    uri = "file:///" + str(a).replace("\\", "/").replace(":", "%3A", 1)
+    (ws,) = ctx.from_mcp_roots([uri])
+    assert ws.root == Path(os.path.realpath(a))
+
+
+def test_from_mcp_roots_skips_unusable_entries_with_warnings(ctx: WorkspaceContext, tmp_path: Path):
+    good = _dir(tmp_path, "good")
+    got = ctx.from_mcp_roots(["https://example.com/x", (tmp_path / "gone").as_uri(), good.as_uri()])
+    assert [w.workspace_id for w in got] == ["good"]
+    assert len(ctx.take_warnings()) == 2
+
+
+@pytest.mark.parametrize("uris", [None, [], ["https://example.com/x"]])
+def test_from_mcp_roots_falls_back_to_cwd(tmp_path: Path, uris):
+    cwd = _dir(tmp_path, "the-cwd")
+    ctx = WorkspaceContext(cwd=cwd, env={"PATH": ""})
+    (ws,) = ctx.from_mcp_roots(uris)
+    assert ws.root == Path(os.path.realpath(cwd))
+    assert ctx.active() is ws
+
+
+# =========================================================================================
+# WorkspaceContext.resolve
+# =========================================================================================
+
+
+def test_resolve_explicit_id(ctx: WorkspaceContext, tmp_path: Path):
+    a, b = _dir(tmp_path, "a"), _dir(tmp_path, "b")
+    ctx.register_roots([str(a), str(b)])
+    assert ctx.resolve("b").workspace_id == "b"
+    assert ctx.resolve("b", path_hint=str(a / "x.py")).workspace_id == "b"  # ID が最優先
+
+
+def test_resolve_unknown_id_lists_known_workspaces(ctx: WorkspaceContext, tmp_path: Path):

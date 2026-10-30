@@ -1,0 +1,152 @@
+            if name == "typescript-language-server" and find_tsserver(root) is None:
+                detail += " (workspace has no node_modules/typescript/lib/tsserver.js: falls back to vtsls)"
+            checks.append(Check("lsp", label, "ok", detail, path=argv[0]))
+        elif name in broken:
+            checks.append(
+                Check(
+                    "lsp", label, "warn", f"environment override points to a missing command: {broken[name]}"
+                )
+            )
+        elif others := peers_found(name):
+            checks.append(
+                Check("lsp", label, "info", f"not found; not needed while {', '.join(others)} is available")
+            )
+        elif defs[0].best_effort:
+            checks.append(
+                Check("lsp", label, "info", "not found on PATH (best effort; falls back to Tree-sitter)")
+            )
+        else:
+            defaults = {group_default[(d.language_id, d.role)] for d in defs}
+            if name not in defaults:  # 既定が無くても、代替まで warn を重ねない
+                checks.append(
+                    Check("lsp", label, "info", f"not found (alternative to {', '.join(sorted(defaults))})")
+                )
+            else:
+                where = f"; try: {hint}" if hint else ""
+                note = (
+                    " — F-TS exact postconditions unverifiable; contract tests skip exact checks"
+                    if name in ("typescript-language-server", "vtsls")
+                    else ""
+                )
+                checks.append(
+                    Check("lsp", label, "warn", f"not found (falls back to Tree-sitter{where}){note}")
+                )
+    return checks, ts_found
+
+
+# --- 全体 -------------------------------------------------------------------------------
+
+
+def collect(
+    *,
+    cache_root: Path,
+    env: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    run: VersionRunner | None = None,
+    selftest: bool = True,
+) -> list[Check]:
+    """全項目を調べる。``env`` / ``run`` は差し替え用（テスト）。``selftest=False`` は stdout 隔離の子プロセスを省く。"""
+    environment: Mapping[str, str] = os.environ if env is None else env
+    runner = run or run_version
+    lsp_checks, ts_found = check_lsp(Path(root) if root is not None else Path.cwd(), environment)
+    checks = check_runtime() + check_dependencies()
+    if selftest:
+        checks += check_stdout_isolation()
+    checks += check_cache(cache_root)
+    checks += check_tools(environment, runner, ts_server_found=ts_found)
+    checks += lsp_checks
+    return checks
+
+
+def summarize(checks: Sequence[Check]) -> dict[str, int]:
+    counts = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
+    for c in checks:
+        counts[c.status] += 1
+    return counts
+
+
+def exit_code(checks: Sequence[Check], *, strict: bool = False) -> int:
+    counts = summarize(checks)
+    return 1 if counts["fail"] or (strict and counts["warn"]) else 0
+
+
+def render_text(checks: Sequence[Check], *, cache_root: Path) -> str:
+    labels = {"ok": "ok", "warn": "WARN", "fail": "FAIL", "info": "info"}
+    lines = [
+        f"lucianke doctor {__version__} (Python {'.'.join(map(str, sys.version_info[:3]))}, {sys.platform})",
+        f"cache: {cache_root}",
+    ]
+    groups: dict[str, list[Check]] = {}
+    for c in checks:
+        groups.setdefault(c.group, []).append(c)
+    for group, items in groups.items():
+        width = max(len(c.name) for c in items)
+        lines += ["", f"[{group}]"]
+        for c in items:
+            lines.append(f"  {labels[c.status]:<4}  {c.name:<{width}}  {c.detail}")
+    counts = summarize(checks)
+    lines += [
+        "",
+        f"result: {counts['ok']} ok, {counts['warn']} warn, {counts['fail']} fail, {counts['info']} info"
+        + ("" if not counts["fail"] else "  (required items are missing: exit 1)"),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_json(checks: Sequence[Check], *, cache_root: Path) -> str:
+    payload = {
+        "lucianke": __version__,
+        "python": ".".join(map(str, sys.version_info[:3])),
+        "platform": sys.platform,
+        "cache_root": str(cache_root),
+        "ok": not summarize(checks)["fail"],
+        "summary": summarize(checks),
+        "checks": [asdict(c) for c in checks],
+    }
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
+
+
+class _Parser(argparse.ArgumentParser):
+    """``--help`` も stderr へ（診断コマンドは stdout に何も書かない）。"""
+
+    def print_help(self, file: TextIO | None = None) -> None:
+        super().print_help(file or sys.stderr)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="lucianke doctor", description="Diagnose the environment (output goes to stderr).")
+    parser.add_argument("--json", action="store_true", help="print one line of JSON instead of the table")
+    parser.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
+    parser.add_argument(
+        "--no-selftest",
+        action="store_true",
+        help="skip the stdout-isolation self-test (it spawns a Python child)",
+    )
+    parser.add_argument(
+        "--root", type=Path, default=None, help="workspace root to probe for LSP servers (default: cwd)"
+    )
+    return parser
+
+
+def main(
+    argv: Sequence[str],
+    *,
+    cache_root: Path,
+    env: Mapping[str, str] | None = None,
+    run: VersionRunner | None = None,
+    selftest: bool = True,
+    stream: TextIO | None = None,
+) -> int:
+    """``lucianke doctor`` の本体。``cache_root`` は ``__main__`` が ``config`` から渡す。出力先は ``stream``（既定 stderr）。"""
+    args = build_parser().parse_args(list(argv))
+    out = stream if stream is not None else sys.stderr
+    checks = collect(
+        cache_root=cache_root, env=env, root=args.root, run=run, selftest=selftest and not args.no_selftest
+    )
+    out.write(
+        render_json(checks, cache_root=cache_root)
+        if args.json
+        else render_text(checks, cache_root=cache_root)
+    )
+    out.flush()
+    return exit_code(checks, strict=args.strict)

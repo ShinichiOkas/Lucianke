@@ -1,0 +1,6 @@
+service:
+  name: shop
+  workers: 4
+retry:
+  max_attempts: 3
+  backoff_ms: [100, 200, 400]

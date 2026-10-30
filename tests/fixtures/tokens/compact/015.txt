@@ -1,0 +1,10 @@
+# rename_symbol ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~300/1500tok
+applied: true  edit_id=ed_0008  process_charge -> charge
+files_changed: 3 files, 5 edits
+src/services/payment.py:40:15  async def charge(self, req: PaymentRequest) -> Receipt:
+src/api/routes.py:88:36  [call] in create_order  receipt = await processor.charge(req)
+src/api/routes.py:131:36  [call] in retry_order  receipt = await processor.charge(req)
+tests/test_payment.py:44:24  [call] in test_charge_ok  r = await p.charge(req)
+urn_map: lk://app/src/services/payment.py#PaymentProcessor.process_charge -> lk://app/src/services/payment.py#PaymentProcessor.charge
+syntax_check: ok
+new_diagnostics: complete (+0 -0) checked=3 files

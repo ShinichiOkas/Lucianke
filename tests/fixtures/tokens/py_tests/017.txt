@@ -1,0 +1,172 @@
+    rec = py()
+    data = rec.data
+    assert data["ok"] is True
+    assert (data["path"], data["language"], data["tier"]) == (PY_REL, "python", 1)
+    assert data["line_count"] == 64
+    assert data["skeleton_line_count"] == len(rec.lines) - 1
+    assert len(data["file_sha256"]) == 64
+    assert data["confidence_level"] == "structural"
+    assert data["truncated_members"] == 0
+    assert data["imports"][0] == "os"
+    top = [s["name"] for s in data["symbols"]]
+    assert top == ["transactional", "PaymentRequest", "PaymentDeclined", "PaymentProcessor"]
+    first = data["symbols"][1]
+    for key in (
+        "urn",
+        "path",
+        "name",
+        "qualified_name",
+        "kind",
+        "modifiers",
+        "range",
+        "signature",
+        "children",
+        "fold_lines",
+    ):
+        assert key in first
+
+
+#: 仕様書 §6.2 の SymbolRecord のキー（null でも出す。例の ``"scip_symbol": null``）と、§11 T-02 で加えるキー。
+SPEC_SYMBOL_KEYS = frozenset(
+    {
+        "urn",
+        "scip_symbol",
+        "path",
+        "name",
+        "qualified_name",
+        "kind",
+        "modifiers",
+        "range",
+        "selection_range",
+        "signature",
+        "return_type",
+        "doc_summary",
+        "confidence_level",
+        "children",
+        "fold_lines",
+        "decorators",
+        "raises",
+    }
+)
+
+
+@pytest.mark.parametrize(("rel", "lang"), [(PY_REL, "python"), (TS_REL, "typescript")])
+def test_json_symbols_keep_null_and_empty_keys(rel: str, lang: str) -> None:
+    """BUG-0065: null・空の値でもキーを省かない（全段・縮退版も）。子の無い記号にも ``children: []`` がある。"""
+    rec = build(rel, lang)[0]
+    shrunk = rec.shrink(10_000) if rec.shrink else None
+    assert shrunk is not None
+    for r in (rec, shrunk):
+        symbols = flatten(r.data["symbols"])
+        assert symbols
+        for s in symbols:
+            assert set(s) >= SPEC_SYMBOL_KEYS, (s["qualified_name"], sorted(SPEC_SYMBOL_KEYS - set(s)))
+    leaves = [s for s in flatten(rec.data["symbols"]) if s["kind"] in ("Field", "Property")]
+    assert leaves  # null・空の値を持つ記号で確かめている
+    assert all(s["children"] == [] and s["decorators"] == [] and s["raises"] == [] for s in leaves)
+    assert any(s["signature"] is None for s in flatten(rec.data["symbols"]))
+
+
+# --- オプション ------------------------------------------------------------------------------------
+
+
+def test_include_private_false_drops_private() -> None:
+    full, hidden = text_of(py()), text_of(py(include_private=False))
+    assert "_validate_limit" in full
+    assert "_validate_limit" not in hidden
+    assert "truncated" not in hidden  # 注文による除外は予算の省略ではない
+    assert "process_charge" in hidden
+    names = {s["name"] for s in flatten(py(include_private=False).data["symbols"])}
+    assert "_validate_limit" not in names
+
+
+def test_urn_modes() -> None:
+    none, public, every = (text_of(py(include_urns=m)) for m in ("none", "public", "all"))
+    assert "urn:" not in none
+    assert "urn: lk://app/src/shop/services/payment.py#PaymentProcessor.process_charge" in public
+    assert "#PaymentProcessor._validate_limit" not in public
+    assert "urn: lk://app/src/shop/services/payment.py#PaymentProcessor._validate_limit" in every
+
+
+def test_doc_and_imports_switches() -> None:
+    rec = py(include_doc_summary=False, include_imports=False)
+    assert "doc:" not in text_of(rec)
+    assert "imports:" not in text_of(rec)
+    assert rec.data["imports"] == []
+
+
+def test_doc_line_is_cut_at_200_chars() -> None:
+    source = ("def f():\n    '''" + "あ" * 300 + "'''\n    return 1\n").encode()
+    parsed, symbols = parse(source, "python", "m.py")
+    rec = build_file_record(parsed, symbols, rel="m.py", opts=SkeletonOptions())
+    doc = next(line for line in rec.lines if line.strip().startswith("doc:"))
+    assert len(doc) <= 200
+    assert doc.endswith("…") or len(doc) < 200
+
+
+# --- TypeScript ------------------------------------------------------------------------------------
+
+
+def test_typescript_skeleton() -> None:
+    rec = ts()
+    lines = text_of(rec).splitlines()
+    assert "[Interface] pub export PaymentRequest @L1-5" in lines
+    assert "[Class] pub export PaymentClient @L7-19" in lines
+    assert (
+        "  [Method] pub async charge(req: PaymentRequest, retries = 0): Promise<string> @L13-18 { ...5 lines omitted }"
+        in lines
+    )
+    # オーバーロード宣言（本体なし）は畳まない
+    assert "  [Method] pub charge(req: PaymentRequest): Promise<string> @L10" in lines
+    impl = lines.index(
+        "  [Method] pub async charge(req: PaymentRequest, retries = 0): Promise<string> @L13-18 { ...5 lines omitted }"
+    )
+    assert lines[impl + 1].strip().startswith("doc: 決済を要求する")
+    assert "    raises: Error" in lines
+    assert rec.data["tier"] == 1
+    assert rec.data["language"] == "typescript"
+
+
+def test_typescript_imports_and_private_toplevel() -> None:
+    source = (
+        b'import X, { A, B as C } from "mod";\nimport * as ns from "./ns";\nimport "side";\n'
+        b"function helper(): void {}\nexport function pub(a: number): number { return a; }\n"
+    )
+    parsed, symbols = parse(source, "typescript", "m.ts")
+    assert extract_imports(parsed) == [
+        "X from mod",
+        "A from mod",
+        "B as C from mod",
+        "* as ns from ./ns",
+        "side",
+    ]
+    shown = build_file_record(parsed, symbols, rel="m.ts", opts=SkeletonOptions(include_private=False))
+    assert "helper" not in text_of(shown)  # 非 export の最上位は非公開
+    assert "pub(a: number): number" in text_of(shown)
+
+
+def test_python_imports_summary() -> None:
+    source = (
+        b"import a.b as c, d\nfrom . import y\nfrom .m import (p as q, r)\nfrom x import *\n"
+        b"from __future__ import annotations\nif TYPE_CHECKING:\n    from t import T\n"
+        b"def f():\n    import inside\n"
+    )
+    parsed, _ = parse(source, "python", "m.py")
+    assert extract_imports(parsed) == [
+        "a.b as c",
+        "d",
+        "y from .",
+        "p as q from .m",
+        "r from .m",
+        "* from x",
+        "T from t",
+    ]
+
+
+def test_raises_do_not_leak_across_nested_definitions() -> None:
+    source = (
+        b"def outer(x):\n    def inner():\n        raise KeyError('k')\n    raise ValueError('v')\n"
+        b"def one(): return 1\n"
+    )
+    parsed, symbols = parse(source, "python", "m.py")
+    rec = build_file_record(parsed, symbols, rel="m.py", opts=SkeletonOptions())

@@ -1,0 +1,3 @@
+領収書 {{ receipt.order_id }}
+金額: {{ receipt.amount }} {{ context.currency }}
+{% if context.user_id %}お客様番号: {{ context.user_id }}{% endif %}

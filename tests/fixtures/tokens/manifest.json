@@ -1,0 +1,960 @@
+{
+ "about": "tests/unit/test_core_tokens_calibration.py の標本（凍結）。ref は o200k_base のトークン数。作り直しは bench/tokens/freeze_corpus.py（BUG-0068）",
+ "encoding": "o200k_base",
+ "tiktoken": "0.14.0",
+ "date": "2026-10-31",
+ "source_commit": "c149e0dc8bb4ec4e71049d136e922c697a952cf0",
+ "budget_chars": {
+  "py_src": 100000,
+  "py_tests": 100000,
+  "md_ja": 80000,
+  "md_spikes": 40000
+ },
+ "segment_max_chars": 8000,
+ "samples": [
+  {
+   "kind": "compact",
+   "name": "spec#block3:# get_file_skeleton ok conf=exact lsp=re",
+   "file": "compact/000.txt",
+   "sha256": "d66c3ff282a74c8bccabff49f7f8657bcb37f5deee120f9b6ca4df7c02ee1696",
+   "chars": 197,
+   "ref": 68
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block7:# get_file_skeleton ok conf=exact lsp=re",
+   "file": "compact/001.txt",
+   "sha256": "6656014133fd9a969dc2811b272914b5a9ac1c3c32cf1de568a52cc755b09a11",
+   "chars": 819,
+   "ref": 256
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block8:# find_references_and_implementations ok",
+   "file": "compact/002.txt",
+   "sha256": "4dbcbf6f3d074c36024dafa342a50a8f564c770f3dbe4c552484a20a31dc5cd2",
+   "chars": 519,
+   "ref": 138
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block9:# get_diagnostics ok conf=exact lsp=read",
+   "file": "compact/003.txt",
+   "sha256": "7088c694c6d65ebc529edc165b438e162b90b66a66bcf52ecfa4df301cb0348c",
+   "chars": 262,
+   "ref": 97
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block13:# configure_workspace ok conf=exact lsp=",
+   "file": "compact/004.txt",
+   "sha256": "fe24bf3f2aa2e54e118e944f1041e60ad22f7806c0e2e81678f73e793e74fd4c",
+   "chars": 421,
+   "ref": 157
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block14:# get_repo_map ok conf=exact lsp=ready r",
+   "file": "compact/005.txt",
+   "sha256": "8339b2fdd638e392048d6feeb42167ef6be0447d1d57acff2bb60e547019d55f",
+   "chars": 574,
+   "ref": 201
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block15:# get_file_skeleton ok conf=structural l",
+   "file": "compact/006.txt",
+   "sha256": "eefbb768571bb38673324062ae982e258baa84ad226b07282a1da46d6daa263e",
+   "chars": 851,
+   "ref": 363
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block16:# get_file_skeleton ok conf=heuristic ls",
+   "file": "compact/007.txt",
+   "sha256": "29668c41892dbb0e608e4533ea0fae651f59aa80f43873e434d24ccd8f12c87b",
+   "chars": 421,
+   "ref": 137
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block17:# search_workspace_symbols ok conf=exact",
+   "file": "compact/008.txt",
+   "sha256": "f3c43f4fe16f26bc9da8e6389528f293c0fe7f1ffa8631e8e29d24c49b533cbb",
+   "chars": 580,
+   "ref": 164
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block18:# resolve_symbols ok conf=exact lsp=read",
+   "file": "compact/009.txt",
+   "sha256": "8ed5c11c80fec311fe35e49a298fae398fa524c5fe748b79f1546fec156f06ad",
+   "chars": 604,
+   "ref": 187
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block21:# find_references_and_implementations ok",
+   "file": "compact/010.txt",
+   "sha256": "f53d708d079e7066bbc306cc50bc8efab4a2ccc96fa843632cbb913ede734f2c",
+   "chars": 611,
+   "ref": 175
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block22:# query_call_hierarchy ok conf=exact lsp",
+   "file": "compact/011.txt",
+   "sha256": "cdc961a018739bc61394dc557a7567f21ac9cad5f038d49f34c8cf2db947505f",
+   "chars": 516,
+   "ref": 152
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block23:# get_diagnostics ok conf=exact lsp=read",
+   "file": "compact/012.txt",
+   "sha256": "62dce768dab42d1135328422089f071c0fbce742f89bbf6ad3829c305ba17dac",
+   "chars": 399,
+   "ref": 150
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block24:# analyze_change_impact ok conf=exact ls",
+   "file": "compact/013.txt",
+   "sha256": "81fc5e55a337feda9e2d134f6e88d59a741b5a15849d8260ead40576726e45fd",
+   "chars": 758,
+   "ref": 217
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block25:# edit_symbol_body ok conf=exact lsp=rea",
+   "file": "compact/014.txt",
+   "sha256": "bbc12c680a949bb4b96c91c27932d14e2c0315dfd37c240795a502dffda6c1bf",
+   "chars": 438,
+   "ref": 144
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block26:# rename_symbol ok conf=exact lsp=ready ",
+   "file": "compact/015.txt",
+   "sha256": "ec55e034e60736de4a38090987752b1f9110f30abebf28f9c59049637b4f763b",
+   "chars": 707,
+   "ref": 199
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block29:# apply_code_action ok conf=exact lsp=re",
+   "file": "compact/016.txt",
+   "sha256": "259bfee68b520b491f58eaec6dbb0cfccfb965b18c47311443bd2807b9b7294e",
+   "chars": 413,
+   "ref": 129
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block30:# find_code_paths ok conf=exact lsp=read",
+   "file": "compact/017.txt",
+   "sha256": "c62e6fd8f9cbc9440fae0b6d995f5c3d2a396e820e2b5e6ef492750042352934",
+   "chars": 561,
+   "ref": 181
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block31:# extract_code_contracts ok conf=exact l",
+   "file": "compact/018.txt",
+   "sha256": "30ff080c4e4c77ee72020beebfd6d5d8c92a71d3c871d29438bda44e7902bd95",
+   "chars": 535,
+   "ref": 196
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block33:# verify_contract ok conf=exact lsp=read",
+   "file": "compact/019.txt",
+   "sha256": "5d41fa17187d638b49f86af120b6b7d3e49e779bd1909e230bf533194407d09e",
+   "chars": 518,
+   "ref": 179
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block34:# get_symbol_history ok conf=exact lsp=n",
+   "file": "compact/020.txt",
+   "sha256": "fb5ea7027a972ddd83ffe7cb1570cc6a75a42e7f0c2320f03b21b7087f4bd0d5",
+   "chars": 632,
+   "ref": 267
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block35:# analyze_git_diff_symbols ok conf=exact",
+   "file": "compact/021.txt",
+   "sha256": "bc6abff1eaf294feb2086d9348793d40137da100b9d103f29e277a93ef9c61d8",
+   "chars": 726,
+   "ref": 234
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block36:# get_project_db_schema ok conf=exact ls",
+   "file": "compact/022.txt",
+   "sha256": "40298579f1a57612bd72e9596cf3a202170cc84113bb999aa2ab32947260848c",
+   "chars": 956,
+   "ref": 329
+  },
+  {
+   "kind": "compact",
+   "name": "spec#block37:# query_project_db ok conf=exact lsp=n/a",
+   "file": "compact/023.txt",
+   "sha256": "caeeb0b0fbcb0688128ae325547bb7dd3f1e36810e94041a4a16cece8737dc4a",
+   "chars": 372,
+   "ref": 122
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke アーキテクチャ設計書.md#L1174-1257",
+   "file": "md_ja/000.txt",
+   "sha256": "6593f75f38e90e3fa62d0f351e54a7a84ecb3718325cbb59bb77e3c6124a9416",
+   "chars": 7942,
+   "ref": 3834
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke アーキテクチャ設計書.md#L1585-1679",
+   "file": "md_ja/001.txt",
+   "sha256": "69c06ceb3d26625c4dbfbe9171418718d86c71fc32ad85f439987107673a9cfb",
+   "chars": 8158,
+   "ref": 3624
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke アーキテクチャ設計書.md#L1907-2042",
+   "file": "md_ja/002.txt",
+   "sha256": "f365d82acbcf5ec327a1573c89946c795535d83248470116adfd4c62a838fd08",
+   "chars": 7928,
+   "ref": 3981
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke アーキテクチャ設計書.md#L402-538",
+   "file": "md_ja/003.txt",
+   "sha256": "2566d26a54f8e6084ea72388f1e2567ef20d686020a8fb6d6a88a6253ef0c7ce",
+   "chars": 7948,
+   "ref": 3526
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke仕様書.md#L1-191",
+   "file": "md_ja/004.txt",
+   "sha256": "4687f9dbfe3c45c18767abe2b6f1a0a3699cbd1da4ab2f53fb381275d02275a7",
+   "chars": 7851,
+   "ref": 5285
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke仕様書.md#L1301-1433",
+   "file": "md_ja/005.txt",
+   "sha256": "d1682b053dc12c2730d3da3c90734ff0542cd9caf34b8cc5504f0dbabcc724fe",
+   "chars": 8204,
+   "ref": 4114
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke仕様書.md#L1594-1713",
+   "file": "md_ja/006.txt",
+   "sha256": "5f5051b2b997673d0f90608ded663124a6d53722ca9a6b05c1ea64c2ed33a09b",
+   "chars": 7943,
+   "ref": 3786
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke仕様書.md#L2524-2680",
+   "file": "md_ja/007.txt",
+   "sha256": "82b637ef94a83fce535d5540fb674ee34144636bd2f6991beab7dc9ca903199a",
+   "chars": 7864,
+   "ref": 3625
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke仕様書.md#L3364-3441",
+   "file": "md_ja/008.txt",
+   "sha256": "8ada5fa0ef001c9b06642fdc668b7e41231552c16b76d45704546ad4e4713755",
+   "chars": 7832,
+   "ref": 4587
+  },
+  {
+   "kind": "md_ja",
+   "name": "docs/Lucianke仕様書.md#L494-618",
+   "file": "md_ja/009.txt",
+   "sha256": "08010974cd9ae98144822b3d2605bdc4319288dcdbae76747978d805f8c30983",
+   "chars": 7820,
+   "ref": 3471
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/S-01.md#L1-47",
+   "file": "md_spikes/000.txt",
+   "sha256": "4da8b654f15c61a72e2ecf4adb7adb2fb360c28f299c5405df954b55c50ef2dc",
+   "chars": 5121,
+   "ref": 2604
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/S-02.md#L1-78",
+   "file": "md_spikes/001.txt",
+   "sha256": "61deb4137717a7a4f7b80b2c70c554af26a0ecb95160747d325e9ca77b8b02de",
+   "chars": 5968,
+   "ref": 2933
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/S-06.md",
+   "file": "md_spikes/002.txt",
+   "sha256": "a82c35e3a5701e7ec94fda319c40bc6d418ae43640e1508424db179455d1fc67",
+   "chars": 6917,
+   "ref": 3642
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/S-07.md#L1-45",
+   "file": "md_spikes/003.txt",
+   "sha256": "046316a79e3c0562f00ebc098cf67917624f718bfc7c1f2e05d4dc2f3b22e5fc",
+   "chars": 5117,
+   "ref": 2491
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/S-07.md#L46-83",
+   "file": "md_spikes/004.txt",
+   "sha256": "1662c8788318c99bcdff7e976c37534096c2a088d8c9b6dfe2c3782ef3f9ba0a",
+   "chars": 3968,
+   "ref": 1681
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/S-09.md",
+   "file": "md_spikes/005.txt",
+   "sha256": "8864ff43fe5e2c8877069579576aa16e20b6ef2c2291e1d69eac8e59652db83c",
+   "chars": 4973,
+   "ref": 2668
+  },
+  {
+   "kind": "md_spikes",
+   "name": "docs/spikes/SYNC-4.md",
+   "file": "md_spikes/006.txt",
+   "sha256": "b7aae7a24a6a743606a56d78be6f19935f1e025f9de614c053e3bcaae5e63fa0",
+   "chars": 6556,
+   "ref": 3854
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/db/schema.sql",
+   "file": "poly_code/000.txt",
+   "sha256": "d91daa0521e930f08dc1d2ab58a5808678e9986e92b535642c16186c3e8585de",
+   "chars": 281,
+   "ref": 64
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/legacy/calc.cob",
+   "file": "poly_code/001.txt",
+   "sha256": "cf846d300539797ce3c1097bbcffc24884304db30f5107bb120d1c4f54d4ad50",
+   "chars": 430,
+   "ref": 122
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/proto/order.proto",
+   "file": "poly_code/002.txt",
+   "sha256": "15a48602214889e9279d40e36ee3a70bee511df3f1853e3552eee8c207472f65",
+   "chars": 254,
+   "ref": 67
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/src/shop/api/routes.py",
+   "file": "poly_code/003.txt",
+   "sha256": "6c064ae2240c264e92d78e1e0631f2992c0cca029d2433665495fc78b121f69e",
+   "chars": 868,
+   "ref": 198
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/src/shop/models/crlf_bom.py",
+   "file": "poly_code/004.txt",
+   "sha256": "a12f2636afb97d2089354189c041ce322c379c1c26f362c8fbe5fd23a7644a3c",
+   "chars": 184,
+   "ref": 54
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/src/shop/models/no_final_newline.py",
+   "file": "poly_code/005.txt",
+   "sha256": "15bf28ccb8c0ba52dba043d4c2f7f554fd391a67ebdee1fbede5a03c527b143d",
+   "chars": 62,
+   "ref": 19
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/src/shop/models/receipt.py",
+   "file": "poly_code/006.txt",
+   "sha256": "261f9bca9d79cd9ece3c33097591ed218b13a0a5eafe1da8552ed7a126526687",
+   "chars": 624,
+   "ref": 190
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/src/shop/services/limits.py",
+   "file": "poly_code/007.txt",
+   "sha256": "23d3d2134ae18f0a75fb4aec94470194e51cad8c96642447312046d04602f552",
+   "chars": 612,
+   "ref": 173
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/src/shop/services/payment.py",
+   "file": "poly_code/008.txt",
+   "sha256": "f8251f5a9d76427c515f5e03d37fc8003be1bc9cf2ca42c8038bdbb59d8634dd",
+   "chars": 1581,
+   "ref": 436
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/tests/test_payment.py",
+   "file": "poly_code/009.txt",
+   "sha256": "a804ad4605a15b6bf4903265b50922f952a88d4f978fdc20be46e41a4cbaa4fe",
+   "chars": 360,
+   "ref": 80
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/web/src/app.ts",
+   "file": "poly_code/010.txt",
+   "sha256": "3b9f4ef0cbbb5aa6e0197f96878cc4502724662c925672808eda110a74edf810",
+   "chars": 287,
+   "ref": 72
+  },
+  {
+   "kind": "poly_code",
+   "name": "tests/fixtures/poly/web/src/payment.ts",
+   "file": "poly_code/011.txt",
+   "sha256": "36f708098d19284fb2aa33fc1a8e07a045a8fb017fd660f3251f93022aad3a8a",
+   "chars": 549,
+   "ref": 149
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/conf/.env",
+   "file": "poly_data/000.txt",
+   "sha256": "6fc7496a05228d68405fe00b5cef1d359fbb121f18cb85ee6475107f60ad2e2e",
+   "chars": 39,
+   "ref": 11
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/conf/app.yaml",
+   "file": "poly_data/001.txt",
+   "sha256": "6d51a3bf4bd551437c48d686e3ffdef370f9a96ecd7018513a0f2870f0162be2",
+   "chars": 90,
+   "ref": 37
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/conf/rules.custom",
+   "file": "poly_data/002.txt",
+   "sha256": "7aba6e67fe301c57c70e4426cb53aae331afb0c5b59e075136db204b75688eed",
+   "chars": 104,
+   "ref": 37
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/conf/settings.json",
+   "file": "poly_data/003.txt",
+   "sha256": "c138439f91460c1bbcd847b30fd87436f89c76015a104ba22e5ef3a74d7128be",
+   "chars": 338,
+   "ref": 118
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/pyproject.toml",
+   "file": "poly_data/004.txt",
+   "sha256": "d5c65d5c5e6e216c84250ec0223594208d976c55a5cf095dd9602151391e7cb4",
+   "chars": 153,
+   "ref": 58
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/reports/junit.xml",
+   "file": "poly_data/005.txt",
+   "sha256": "2e1c13399263bd6a1d12a66f495c6af5e5e8c4410b3380ee901e7928e9ab2de0",
+   "chars": 3469,
+   "ref": 1022
+  },
+  {
+   "kind": "poly_data",
+   "name": "tests/fixtures/poly/web/tsconfig.json",
+   "file": "poly_data/006.txt",
+   "sha256": "8e7fe4eaadc3efe2ea47cb09d14d29dddb8276072df9bc0515e547cc7dea3a4f",
+   "chars": 124,
+   "ref": 44
+  },
+  {
+   "kind": "poly_doc",
+   "name": "tests/fixtures/poly/docs/api.rst",
+   "file": "poly_doc/000.txt",
+   "sha256": "5f37575033bf02cbda7841633e6b284e9f54a5621879dc3327cbd3d4dd8495b2",
+   "chars": 160,
+   "ref": 50
+  },
+  {
+   "kind": "poly_doc",
+   "name": "tests/fixtures/poly/docs/flow.dot",
+   "file": "poly_doc/001.txt",
+   "sha256": "84a3c883ed92799029e85a10b913c2572ebc933459bdea03ec43184eb621b9cc",
+   "chars": 239,
+   "ref": 60
+  },
+  {
+   "kind": "poly_doc",
+   "name": "tests/fixtures/poly/docs/flow.mmd",
+   "file": "poly_doc/002.txt",
+   "sha256": "14979251ca5e7eb9a2bffee925ad44d43a3ba7f2f1559c8619609d18f1cd729b",
+   "chars": 156,
+   "ref": 55
+  },
+  {
+   "kind": "poly_doc",
+   "name": "tests/fixtures/poly/README.md",
+   "file": "poly_doc/003.txt",
+   "sha256": "0d103122dc18a8f022cc47e81464ad46e177ef35cdec08e7236d2f1de0bf1897",
+   "chars": 1147,
+   "ref": 511
+  },
+  {
+   "kind": "poly_doc",
+   "name": "tests/fixtures/poly/templates/receipt.j2",
+   "file": "poly_doc/004.txt",
+   "sha256": "4c87a028649800c7381a4b4a0fef8c3efa8a9f85c7e1218e29cc26fde04ccc98",
+   "chars": 139,
+   "ref": 38
+  },
+  {
+   "kind": "poly_ipynb",
+   "name": "tests/fixtures/poly/notebooks/eda.ipynb",
+   "file": "poly_ipynb/000.txt",
+   "sha256": "5eef571333528f0901ed00457a21cf28a5dad9603efd229806c4c2479e0afc1e",
+   "chars": 27716,
+   "ref": 13336
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/__init__.py",
+   "file": "py_src/000.txt",
+   "sha256": "423c78c0e87400673862e436da8b0e74f484c20ec6155a237394d7c5d974812e",
+   "chars": 98,
+   "ref": 26
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/cli/doctor.py#L501-652",
+   "file": "py_src/001.txt",
+   "sha256": "dd29374dcb0062aef43ffdb73d4ced2b95e1eea114c36108746cabcb22a1ebca",
+   "chars": 5949,
+   "ref": 1527
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/core/hashing.py",
+   "file": "py_src/002.txt",
+   "sha256": "37bf31920b33c0998e78e345fd3935ecdd8ed37c25e0681ebed1b5f85510afc8",
+   "chars": 966,
+   "ref": 396
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/index/exact_marks.py",
+   "file": "py_src/003.txt",
+   "sha256": "b73d4411e9bfc38017f76b4dcf3588e7c94b63bfaf1781f30464c0cb5ad028bf",
+   "chars": 2064,
+   "ref": 769
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/index/queries.py#L521-683",
+   "file": "py_src/004.txt",
+   "sha256": "89655f290f8f21ab97a68bb58da12f8ce38958fd6cbcb1fdfcd6f6cb629f0466",
+   "chars": 6007,
+   "ref": 1661
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/lifecycle.py#L218-405",
+   "file": "py_src/005.txt",
+   "sha256": "2e58c75d5dd32aa106a6db3902b6ac068b25ede07005975a48ef2e67bc265a21",
+   "chars": 7361,
+   "ref": 2021
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/lsp/features.py#L522-678",
+   "file": "py_src/006.txt",
+   "sha256": "00ff812de778fc583911e71463d8f8538122e47dfe6879297b55984829c9b004",
+   "chars": 6630,
+   "ref": 1801
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/mcp/render/compact.py",
+   "file": "py_src/007.txt",
+   "sha256": "ddf2d566a8f8a3de5ac36975e10dc3bb604cc1428f0ac2b4543f2fa6b4cba702",
+   "chars": 4055,
+   "ref": 1307
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/mcp/render/graph.py#L199-364",
+   "file": "py_src/008.txt",
+   "sha256": "cf5fe29cc7bba5c5c7612dba8ab53c39f9568cd131144a9a6f0c51bb5d63b5e2",
+   "chars": 6328,
+   "ref": 1698
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/mcp/types.py",
+   "file": "py_src/009.txt",
+   "sha256": "fab80f7ad721e661cc8fda649e7f9f327f2d5859f89333b5010fbf15a88ad069",
+   "chars": 1849,
+   "ref": 656
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/syntax/adapters/json_.py#L1-187",
+   "file": "py_src/010.txt",
+   "sha256": "7d54defe362dee7e0e0a57f4bdc8d16bb8c9e59f303c460bdf60f31b6dcdbd63",
+   "chars": 6158,
+   "ref": 1894
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/syntax/guards.py#L152-275",
+   "file": "py_src/011.txt",
+   "sha256": "03dac087292d2c19d8c6e21129a0e2dcb2758c1303cb4f24543d2fdc99e3e218",
+   "chars": 5044,
+   "ref": 1169
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/syntax/imports.py#L169-328",
+   "file": "py_src/012.txt",
+   "sha256": "c43a462b5fc68e351f0981d641c4e4f861eae5c4d51a167b49c7b11e0b162961",
+   "chars": 6464,
+   "ref": 1597
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/tools/_lsp_exact.py#L196-389",
+   "file": "py_src/013.txt",
+   "sha256": "f22da67cf75095aa715168073bdca110fe1347a0b346fa157ae8c032c5b4df71",
+   "chars": 6888,
+   "ref": 2227
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/tools/t00_configure_workspace.py#L718-878",
+   "file": "py_src/014.txt",
+   "sha256": "2a58a3afd7583caafa2adba342287a1c2fae0a15bb6487d46c7ce6f1a1a445ba",
+   "chars": 6543,
+   "ref": 1789
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/tools/t06_find_references_and_implementations.py#L1-210",
+   "file": "py_src/015.txt",
+   "sha256": "8edbcbcfa88b5750163f6447d102c5e27ebbc98ebf97408ca749f398e197736c",
+   "chars": 7205,
+   "ref": 2432
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/tools/t10_edit_symbol_body.py#L167-349",
+   "file": "py_src/016.txt",
+   "sha256": "387e0b84eb3b80a4cd19696673ca53ad075f320caaa429235176e4cfedb5251c",
+   "chars": 6738,
+   "ref": 1699
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/tools/t11_rename_symbol.py#L392-576",
+   "file": "py_src/017.txt",
+   "sha256": "07d96dae5fa57d175d4df27595fc16f97091bdffc58eb09861024537ae98d0ef",
+   "chars": 7736,
+   "ref": 1780
+  },
+  {
+   "kind": "py_src",
+   "name": "src/lucianke/tools/t19_get_project_db_schema.py#L288-439",
+   "file": "py_src/018.txt",
+   "sha256": "5fb1c7f8d93cf394ce8d311fcec25d7aa48003c30ac43c6d689a6c8dcf9d0f30",
+   "chars": 5520,
+   "ref": 1382
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/contract/test_T03_pagerank_order.py",
+   "file": "py_tests/000.txt",
+   "sha256": "8ea14e66ed22495d3f66f0e8d76dd23314c3bb10f51ba66deee874c6a0799ebd",
+   "chars": 3935,
+   "ref": 1223
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/contract/test_T07_builtins_hidden.py",
+   "file": "py_tests/001.txt",
+   "sha256": "18d679280ad220c38db35726d26fffdbc9e43f751b10943088374317e6682ac2",
+   "chars": 3094,
+   "ref": 1033
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/contract/test_T10_delete.py#L187-348",
+   "file": "py_tests/002.txt",
+   "sha256": "efb4c3ff3359493f91d3a9c9e3287a6d279dc7b468549a5def2547d4f7b2347e",
+   "chars": 7135,
+   "ref": 2112
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/contract_fixtures/_targets.py",
+   "file": "py_tests/003.txt",
+   "sha256": "dcc935ba3d540f80ac2e1a95bb079fd226a2c045615fcd65af02762e68cc1efe",
+   "chars": 2631,
+   "ref": 866
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/contract_fixtures/test_fx_read_T00_T08.py#L1-145",
+   "file": "py_tests/004.txt",
+   "sha256": "d8f38a2a198fc01d90ba0c5737d372a200faa3a048752deeef51e8a6e7b54f8c",
+   "chars": 6706,
+   "ref": 2187
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/e2e/test_m1_6_session.py",
+   "file": "py_tests/005.txt",
+   "sha256": "b4353548641ad4fe04fa193a312339c27a38fdd05bfd3365df58774a710d236c",
+   "chars": 2842,
+   "ref": 1035
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/e2e/test_vertical_slice_stdio.py",
+   "file": "py_tests/006.txt",
+   "sha256": "33efc669b19fffdccf2fd163ea77059e06665646554b874c27a23829abd66f2b",
+   "chars": 3801,
+   "ref": 1172
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_core_compact_lines.py",
+   "file": "py_tests/007.txt",
+   "sha256": "75331fd8f353e9e0acd3acca888e2be91584630054360b0edd93839a6276cdbe",
+   "chars": 2184,
+   "ref": 657
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_core_model.py#L309-450",
+   "file": "py_tests/008.txt",
+   "sha256": "877862b4387423da613f462c94665cbdb458d0dc00b1a33149c59dd8c6bf7d3a",
+   "chars": 5295,
+   "ref": 1375
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_engine_indexer.py#L193-369",
+   "file": "py_tests/009.txt",
+   "sha256": "016ffd6210d8f6627b22baaead9d3699678e2681a0e1b57f35a6485a90f08918",
+   "chars": 6608,
+   "ref": 1722
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_index_ingest.py#L224-390",
+   "file": "py_tests/010.txt",
+   "sha256": "3765599b4e031412e663aea770c33a8634d26a2212e3fe8ff4a633aeacdf4bf5",
+   "chars": 7469,
+   "ref": 2131
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_lifecycle.py#L1-239",
+   "file": "py_tests/011.txt",
+   "sha256": "2808ac8554ad5668f74a85f18f68fb4805beabb980b3b9b777bbbc77b194198d",
+   "chars": 7912,
+   "ref": 2191
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_lsp_client.py#L787-954",
+   "file": "py_tests/012.txt",
+   "sha256": "239a41d363e71e172ecb35ca64850343476df70c78bd91330a1501e0f3ab8c19",
+   "chars": 7347,
+   "ref": 2224
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_lsp_pool.py#L940-1132",
+   "file": "py_tests/013.txt",
+   "sha256": "a233c97d97130265271db99b78487a770d8a6e707e2d1e779e6ead38d96190af",
+   "chars": 7358,
+   "ref": 2134
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_mcp_graph.py#L1-190",
+   "file": "py_tests/014.txt",
+   "sha256": "7bae2f43c66a06a02bec21338c394f3db15060848cc10d5f88e59dda45b1f6c7",
+   "chars": 6486,
+   "ref": 1978
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_schema_budget.py",
+   "file": "py_tests/015.txt",
+   "sha256": "f8023f39fbcbe18687c2ce272e7932b0ddc2093fbba7c1b99aae822125c1ef13",
+   "chars": 2376,
+   "ref": 874
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_smoke.py",
+   "file": "py_tests/016.txt",
+   "sha256": "d6946ac4ecbedeea239443d84772d5dfd1567fa2f582b9eefd7ef3c5bd9adb23",
+   "chars": 509,
+   "ref": 138
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_syntax_skeleton.py#L169-340",
+   "file": "py_tests/017.txt",
+   "sha256": "74d73f24568ffa135019c3fe28619e1fb72b4d3a78a0b97a808a4c8236f81930",
+   "chars": 6323,
+   "ref": 1758
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_tools_autoregister.py",
+   "file": "py_tests/018.txt",
+   "sha256": "124cc7e333f301fdb7acee83e9ea2d10f9bc8da7e23bf9b37859943a08e0fa58",
+   "chars": 2674,
+   "ref": 753
+  },
+  {
+   "kind": "py_tests",
+   "name": "tests/unit/test_workspace_context.py#L556-723",
+   "file": "py_tests/019.txt",
+   "sha256": "5042c8911cd260a61548d6a50b500e07f89560f09cf29865a47f6dda0f51255a",
+   "chars": 7291,
+   "ref": 2008
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block1:json",
+   "file": "spec_json_sql/000.txt",
+   "sha256": "f5fe4668c18ac374c122cb733b6a572e2f4e9e09c75459b3e8d378749f0f0d7b",
+   "chars": 195,
+   "ref": 60
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block2:json",
+   "file": "spec_json_sql/001.txt",
+   "sha256": "86d73d70399c91c19b74d5158b5d33dcef4552e69efc0baddaf6c7ec2538029d",
+   "chars": 337,
+   "ref": 130
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block4:json",
+   "file": "spec_json_sql/002.txt",
+   "sha256": "ff06be4280f35f98bb72b2c9747be9170699ef38e73e5ca760d444be2f5a2c9f",
+   "chars": 282,
+   "ref": 90
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block5:json",
+   "file": "spec_json_sql/003.txt",
+   "sha256": "932190fb29bb6064245040c674f28688467b3c92b6f4eb1a6108c2f9037bef40",
+   "chars": 112,
+   "ref": 39
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block10:json",
+   "file": "spec_json_sql/004.txt",
+   "sha256": "9a1ce9e26d2883c54cc832b0dcc4f557e2219654c986059474ca42b6df153e15",
+   "chars": 552,
+   "ref": 175
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block12:sql",
+   "file": "spec_json_sql/005.txt",
+   "sha256": "c87955f085229b88f1411e912caf13306520feafb6c9193c1bf8747808d1e881",
+   "chars": 9681,
+   "ref": 2339
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block38:sql",
+   "file": "spec_json_sql/006.txt",
+   "sha256": "eb43503eaeaf37cb686167faa05cc937483cfabfa10d1e4e4f34ee8370766b85",
+   "chars": 865,
+   "ref": 236
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block39:sql",
+   "file": "spec_json_sql/007.txt",
+   "sha256": "c555394ecdd086ee6800c9064baf3274ae15fd0e57a1a6cddb0b47094509b31a",
+   "chars": 260,
+   "ref": 71
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block40:sql",
+   "file": "spec_json_sql/008.txt",
+   "sha256": "e9aae2e39b501e4766cdbf147f2b6998c906e409ac3b8b2fb65076eb8c7501d9",
+   "chars": 239,
+   "ref": 62
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block41:sql",
+   "file": "spec_json_sql/009.txt",
+   "sha256": "75fce1febb4032db2e1db207eb993d0f3fff19c1f04d777c936e1cb8deae0160",
+   "chars": 358,
+   "ref": 120
+  },
+  {
+   "kind": "spec_json_sql",
+   "name": "spec#block42:sql",
+   "file": "spec_json_sql/010.txt",
+   "sha256": "0ca1dea7bf8f09841e2f79fa35e30befe4309ecc6cc6173b025f3475ced1b5bd",
+   "chars": 167,
+   "ref": 37
+  },
+  {
+   "kind": "syn_base64",
+   "name": "synthetic:base64 8000 chars",
+   "file": "syn_base64/000.txt",
+   "sha256": "e2e7a141383ec4536e9c01e8d973913109460bc41c215028e0a4026c674dd634",
+   "chars": 8105,
+   "ref": 5559
+  },
+  {
+   "kind": "syn_hex",
+   "name": "synthetic:sha256 hex x60",
+   "file": "syn_hex/000.txt",
+   "sha256": "6c39429cd0aa2864c1c3cf0b357ff80fdc350419330313086be90bc687867f5c",
+   "chars": 3899,
+   "ref": 2279
+  }
+ ]
+}

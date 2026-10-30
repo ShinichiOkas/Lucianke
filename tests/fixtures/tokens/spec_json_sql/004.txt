@@ -1,0 +1,15 @@
+{
+  "urn": "lk://app/src/services/payment.py#PaymentProcessor.process_charge",
+  "scip_symbol": null,
+  "path": "src/services/payment.py",
+  "name": "process_charge",
+  "qualified_name": "PaymentProcessor.process_charge",
+  "kind": "Method",
+  "modifiers": ["pub", "async"],
+  "range": { "start_line": 40, "end_line": 115 },
+  "selection_range": { "line": 40, "start_col": 15, "end_col": 29 },
+  "signature": "(self, req: PaymentRequest) -> Receipt",
+  "return_type": "Receipt",
+  "doc_summary": "注文に対する決済を実行し領収書を発行する",
+  "confidence_level": "exact"
+}

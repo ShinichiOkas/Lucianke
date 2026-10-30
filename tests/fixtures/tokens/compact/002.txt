@@ -1,0 +1,7 @@
+# find_references_and_implementations ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~420/2000tok
+target: lk://app/src/services/payment.py#PaymentProcessor.process_charge
+implementations: (none; concrete method)
+references: 3 files, 5 sites
+src/api/routes.py:88:20  [call] in create_order  receipt = await processor.process_charge(req)
+src/api/routes.py:131:20  [call] in retry_order  receipt = await processor.process_charge(req)
+tests/test_payment.py:44:12  [call] in test_charge_ok  r = await p.process_charge(req)

@@ -1,0 +1,95 @@
+    NO_WAIT = "no_wait"         # LSP に同期要求を送らない。PaaD と構文木で答える
+
+class EngineSelector:
+    async def select(self, file: FileInfo, cap: Capability, *,
+                     wait_policy: WaitPolicy | None = None) -> EngineChoice
+```
+
+参照するもの: `syntax/support.py` の登録表（文法の有無、`FormatAdapter` の有無、LSP 定義の有無）、`LspPool.status(language, workspace_id)`（`standby` / `starting` / `indexing` / `ready` / `unavailable` と進捗）、`files` 行の `tier` と `confidence`。
+
+副作用は 1 つだけ: LSP 由来の `Capability` で状態が `standby` なら `LspPool.ensure_started(language, workspace_id)` を投げる（待たない）。これが仕様書 §12.3 の遅延起動の契機である。
+
+### 7.8.2 判定表（Capability × ファイル状態 → エンジン・精度）
+
+列は「文法あり」を LSP の状態で 3 つに分け、最後に「文法なし（Tier 4）」。セルは `engine / confidence`。`→` は `WAIT_SHORT` でタイムアウトしたときの降格先。
+
+| Capability | 文法あり・LSP `ready` | 文法あり・LSP `starting` / `indexing` | 文法あり・LSP `unavailable` / 定義なし | 文法なし（Tier 4） |
+|---|---|---|---|---|
+| SKELETON | `tree-sitter` / exact（推論型の補完は `symbols.return_type` に既にある値だけ。同期 hover はしない） | `tree-sitter` / structural | `tree-sitter` / structural | `ctags` → `block-heuristic` / heuristic。何も取れなければ `internal_ripgrep_word_boundary` / lexical |
+| SEARCH | `fts5` / exact | `fts5` / structural | `fts5` / structural | `fts5`（ctags 行）/ heuristic → grep / lexical |
+| BODY | `tree-sitter` / exact | `tree-sitter` / structural | `tree-sitter` / structural | `ctags+block` / heuristic → grep ±15 行 / lexical |
+| DEFINITION | `lsp` / exact → `tree-sitter+imports` / structural | `tree-sitter+imports` / structural | `tree-sitter+imports` / structural | `ctags` / heuristic → grep 定義パターン / lexical |
+| REFERENCES | `lsp` / exact → `relations` / structural | `relations` / structural | `relations` / structural | grep 単語境界 / lexical |
+| IMPLEMENTATIONS | `lsp` / exact → `relations(IMPLEMENTS, INHERITS)` / structural | 同左 structural | 同左 structural | `(unavailable)` |
+| CALL_HIERARCHY | `lsp` / exact → `relations(CALLS)` / structural | `relations(CALLS)` / structural | `relations(CALLS)` / structural | grep `name(` 1 段 / lexical |
+| DIAGNOSTICS | `lsp-cache+tree-sitter` / exact（受信済みキャッシュのみ。同期要求なし） | `tree-sitter` / structural | `tree-sitter` / structural | なし（0 件） |
+| RENAME | `lsp` / exact | `lsp_unavailable`（ツールは `E_LSP_UNAVAILABLE`） | `lsp_unavailable` | `lexical-replace` / lexical（インターロック下） |
+| CODE_ACTION | `lsp` / exact | `lsp_unavailable` | `lsp_unavailable` | `lsp_unavailable` |
+| STRUCTURAL_EDIT | `ast-grep` / structural | `ast-grep` / structural | `ast-grep` / structural | 対象外（`warnings` に除外件数） |
+| SYMBOL_EDIT | `tree-sitter` / exact（診断差分に LSP が効く） | `tree-sitter` / structural | `tree-sitter` / structural | `ctags+block` / heuristic → grep / lexical（インターロック下） |
+
+- `indexing` の列では `EngineChoice.lsp_status = "indexing"`、`lsp_progress` に進捗を入れる。`starting` も `"indexing"` と表示し進捗は `null`。
+- Tier 2 のアダプタ（`.ipynb`、SQL、IDL）は「文法あり」として扱い、LSP の列は当該言語の LSP（`.ipynb` は Python）に従う。Tier 3 のアダプタは **LSP の状態によらず** 常に `structural` で、`lsp_status` は `n/a`（実装で確定 2026-10-29）。
+- 表に `standby` の列は無い。LSP が `standby` のとき、遅延起動の契機になる能力（`ready` 列のエンジンが `lsp` または `lsp-cache` のもの: DEFINITION・REFERENCES・IMPLEMENTATIONS・CALL_HIERARCHY・DIAGNOSTICS・RENAME・CODE_ACTION）は **`indexing` の列** で答え、`lsp_status` は `indexing`（起動を投げる）。契機にならない能力（SKELETON・SEARCH・BODY・STRUCTURAL_EDIT・SYMBOL_EDIT）は **`unavailable` の列のエンジン** で答え、`lsp_status` は `standby` のまま（LSP を起こさない。実装で確定 2026-10-29）。
+- Tier 4 の列の IMPLEMENTATIONS は `unavailable`（提供しない）、DIAGNOSTICS は 0 件、CALL_HIERARCHY は grep 1 段、RENAME は字句置換（インターロック下）。仕様書 §8.2 の表はこれに揃えてある。
+- 判定はファイル単位。1 回の応答で複数ファイルが異なる列に落ちれば `mixed`（パッカーが集計。ADR-5）。
+
+### 7.8.3 LSP を待つか待たないか（ADR-6 のポリシー表）
+
+| Capability | 既定の `wait_policy` | 上限（`core/limits.py`） | 理由 |
+|---|---|---|---|
+| DEFINITION | `WAIT_SHORT` | `LSP_TIMEOUT_DEFINITION_MS = 3000` | 型解決済みの定義は構文木で代替できない |
+| REFERENCES / IMPLEMENTATIONS | `WAIT_SHORT` | `LSP_TIMEOUT_REFERENCES_MS = 3000` | 同上。結果は `relations` に `exact` で書き戻し、次回は PaaD から答える |
+| CALL_HIERARCHY | `WAIT_SHORT` | `LSP_TIMEOUT_CALL_HIERARCHY_MS = 5000` | 同上 |
+| RENAME | `WAIT_SHORT` | `LSP_TIMEOUT_RENAME_MS = 10000` | 待たなければ提供できない |
+| CODE_ACTION | `WAIT_SHORT` | `LSP_TIMEOUT_CODE_ACTION_MS = 5000` | 同上 |
+| SKELETON / SEARCH / BODY | `NO_WAIT` | — | 構文木と PaaD で足りる |
+| DIAGNOSTICS | `NO_WAIT` | — | 受信済みキャッシュを返す。編集ツールの診断待ちは `DiagnosticsWaiter` が別に担う |
+| STRUCTURAL_EDIT / SYMBOL_EDIT | `NO_WAIT` | — | 境界と構文検証は構文木 |
+
+`WAIT_SHORT` で上限を超えたら、その要求に限り右隣の列へ降格し、`warning` に `lsp_timeout` の雛形を入れる。LSP プロセスは落とさない（タイムアウトは `LspPool` が数え、連続 3 回で `unavailable` に遷移させる）。
+
+### 7.8.4 警告文の雛形と is_degraded
+
+- `is_degraded = choice.confidence < spec.max_confidence`（`ToolSpec.max_confidence`。T-12 は `STRUCTURAL`、T-00 / T-19 は常に `EXACT` で降格なし、T-20 は行から集計。T-04 は `EXACT`〔LSP の hover で `exact` に上げる。76a2aca〕。T-01・T-02・T-03・T-05 の最高水準は `STRUCTURAL`）。
+- `accuracy_warning` は `is_degraded` のときだけ非 null。雛形は `engine/selector.py` に置き、`reason` で選ぶ:
+
+| `reason` | 水準 | 雛形（日本語） |
+|---|---|---|
+| `lsp_indexing` | structural | 「LSP が起動・索引中（{progress}%）のため構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。完了後に呼び直すと `exact` になります。」 |
+| `lsp_unavailable` | structural | 仕様書 §8.4 の `structural` 雛形 + 「`configure_workspace status` で LSP の状態を確認してください。」 |
+| `lsp_timeout` | structural | 「LSP の応答が {timeout} ms 内に得られなかったため構文木で解決しました。」 |
+| `position_clamped`（理由別の警告ではなく `engine/selector.py` の定数 `POSITION_CLAMPED_WARNING`） | structural | 「解決する位置が文字の境界に当たらないため LSP に要求を送らず構文木で解決しました。型・オーバーロード・再エクスポート越しの参照は区別されていません。」LSP は動いているので `lsp_status` は `ready` のまま、`lsp_unavailable` の案内（`configure_workspace status`）は付けない（9259466。実装で確定 2026-10-29） |
+| `no_grammar_ctags` | heuristic | 仕様書 §8.4 の `heuristic` 雛形 |
+| `no_grammar_lexical` | lexical_fallback | 仕様書 §8.4 の `lexical_fallback` 雛形 |
+| `mixed` | （最低水準） | 上の雛形に「{n} 件のファイルがこの水準です（内訳は `confidence_breakdown`）。」を足す |
+
+compact の `! DEGRADED: confidence=… engine=… lang=…` 行と 2 行目の `! Warning:` は `mcp/envelope.py` が `EngineChoice` から組み立てる。ツールは書かない。
+
+## 7.9 Git Layer（git/）
+
+### 7.9.1 M1 の範囲: リビジョン解決と仮想ツリー（vtree.py、仕様書 §8.5）
+
+dulwich（Apache-2.0 側を選択。第 16 章、OD-20）を M1 の第一候補として維持する（S-8: M1 の用途である参照解決・blob・`STAGED`・`.gitignore`・不変性は合格で 1〜5 ms）。M1 で必要なのは次の 3 つだけ。
+
+```python
+class GitRepo:                               # git/repo.py
+    @classmethod
+    def open(cls, root: Path) -> GitRepo | None      # .git が無ければ None（Git 無しでも Lucianke は動く）
+    def resolve_revision(self, rev: str) -> ResolvedRevision
+    def read_blob(self, commit_sha: str, path: str) -> bytes | None
+    def read_staged_blob(self, path: str) -> bytes | None
+    def list_tree(self, commit_sha: str, prefix: str = "") -> Iterator[TreeEntry]
+
+@dataclass(frozen=True)
+class ResolvedRevision:
+    kind: Literal["WORKING_TREE", "STAGED", "COMMIT"]
+    sha: str | None                           # COMMIT のとき 40 桁
+    display: str                              # ヘッダの rev= に出す（入力をそのまま）
+```
+
+`resolve_revision` が受けるもの: `WORKING_TREE`、`STAGED`、`HEAD`、`HEAD~N` / `HEAD^`、ブランチ名（`refs/heads/`）、タグ名（`refs/tags/`、注釈付きタグは剥がす）、リモート追跡名（`refs/remotes/`）、40 桁 SHA、4 桁以上の一意な短縮 SHA。それ以外の構文（`@{...}`、範囲 `a..b`、`:path`）は `E_REVISION_NOT_FOUND`（`details.hint: "対応する指定: WORKING_TREE, STAGED, HEAD, HEAD~N, ブランチ, タグ, SHA"`）。
+
+実装は**許可リスト方式**にする（S-8 で確認）: 前置検査で `@{…}`・`a..b`・`:path`・`^{}`・空白や `:?*[\` を含む名前を拒否し（dulwich の `parse_object` は `HEAD@{1}`・`HEAD:README.md`・`^{}` を受理してしまい、短縮 SHA を基点にした `a9477ab~1` は解せない）、基点を `parse_commit` で解決してから `~N` / `^N` を `parse_object` で辿る。`KeyError`（無い名前・3 桁以下の SHA）・`ValueError`（`HEAD~9999`・親が足りない・タグがツリーを指す）・`objectspec.AmbiguousShortId`（`Exception` 直下で `KeyError` ではない）の 3 つを `E_REVISION_NOT_FOUND` に束ねる（曖昧は `details.reason: "ambiguous"`）。4 桁以上の短縮 SHA の解決は 15,757 オブジェクトの規模（pallets/click）でも約 5 ms なので、`git_commits` を先に引く最適化は M1 では要らない。
+
+`GitRepo` は **`Repo` を保持しない**。要求ごとに `with Repo(root)` で開閉する（開き直しは +1〜3 ms。pack を開いたままだと、利用者の `git gc` / `repack` が Windows で `winerror=32` で失敗する）。`open()` は `Repo.discover` ではなく `Repo(root)` を使い、`NotGitRepository` を捕まえて `None` を返す（モノレポのサブディレクトリを作業ルートにするときのパス前置は M2）。`read_blob` は `lookup_path` の `KeyError` / `NotTreeError` / `SubmoduleEncountered`、および結果が `Tree`（ディレクトリ）のときに `None` を返す（ツリーのパスは UTF-8 の `bytes`）。`read_staged_blob` は `repo.open_index()[path]` を読むだけで（ロックも書き込みもしない）、競合中の `ConflictedIndexEntry` は `this` を採り、未追跡は `None`。

@@ -1,0 +1,157 @@
+        try:
+            declared = await _definition_locations(handle, client, index, rel, uri, pos)
+        except LuciankeError as e:
+            if e.details.get("reason") != "lsp_error":
+                raise
+            declared = []
+        starts = {(d.rel, d.range.start) for d in declared if d.rel is not None}
+        found = {r for r in found if (r.rel, r.range.start) not in starts}
+    return sorted(found, key=lambda r: (r.rel, r.range.start, r.range.end.line, r.range.end.col))
+
+
+_FENCE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
+
+
+def _first_markup(contents: Any) -> str | None:
+    """``Hover.contents``（``MarkupContent | MarkedString | MarkedString[]``）の先頭の部分を文字列にする。"""
+    if isinstance(contents, list):
+        contents = contents[0] if contents else None
+    if isinstance(contents, str):
+        return contents
+    if isinstance(contents, dict):
+        value = contents.get("value")
+        if isinstance(value, str):
+            if "language" in contents:  # MarkedString {language, value}: 値がそのまま型の文字列
+                return f"```{contents['language']}\n{value}\n```"
+            return value
+    return None
+
+
+def hover_text(contents: Any) -> str | None:
+    """Hover の中身から **型の文字列** を取り出す。
+
+    markdown なら最初のコードフェンスの中身（basedpyright・tsls とも署名はここに入る）。フェンスが無ければ最初の
+    ``---`` か空行の手前まで。空なら ``None``。
+    """
+    text = _first_markup(contents)
+    if not text or not text.strip():
+        return None
+    fence = _FENCE.search(text)
+    if fence is not None:
+        body = fence.group(1).strip()
+        return body or None
+    head = re.split(r"\n\s*---+\s*\n|\n\s*\n", text.strip(), maxsplit=1)[0].strip()
+    return head or None
+
+
+async def hover(handle: LspHandle, rel: RelPath, pos: Position) -> str | None:
+    """``pos`` の型の文字列（``hover_cache`` 用）。ホバーが無ければ ``None``。"""
+    client, index, uri = await _open(handle, rel)
+    params = {"textDocument": {"uri": uri}, "position": _lsp_position(handle, client, index, pos)}
+    result = await _call(handle, client, M_HOVER, params, LSP_TIMEOUT_HOVER_MS)
+    if not isinstance(result, dict):
+        return None
+    return hover_text(result.get("contents"))
+
+
+# --- callHierarchy ----------------------------------------------------------------------
+
+
+def _call_item(locator: _Locator, raw: Mapping[str, Any]) -> CallItem | None:
+    uri = raw.get("uri")
+    if not isinstance(uri, str) or "range" not in raw:
+        return None
+    full = locator.locate(uri, raw["range"])
+    sel = locator.locate(uri, raw.get("selectionRange") or raw["range"])
+    kind = raw.get("kind")
+    detail = raw.get("detail")
+    return CallItem(
+        name=str(raw.get("name", "")),
+        rel=full.rel,
+        range=full.range,
+        selection_range=sel.range,
+        kind=kind if isinstance(kind, int) else None,
+        detail=detail if isinstance(detail, str) else None,
+        external_uri=full.external_uri,
+        raw=dict(raw),
+    )
+
+
+async def prepare_call_hierarchy(handle: LspHandle, rel: RelPath, pos: Position) -> list[CallItem]:
+    """``pos`` の関数・メソッドの ``CallHierarchyItem``（無ければ空）。"""
+    client, index, uri = await _open(handle, rel)
+    params = {"textDocument": {"uri": uri}, "position": _lsp_position(handle, client, index, pos)}
+    result = await _call(handle, client, M_PREPARE_CALL, params, LSP_TIMEOUT_CALL_HIERARCHY_MS)
+    locator = _Locator(handle.ws, client, {rel: index})
+    items = result if isinstance(result, list) else []
+    return [it for raw in items if isinstance(raw, dict) and (it := _call_item(locator, raw)) is not None]
+
+
+async def _calls(handle: LspHandle, method: str, item: CallItem, *, incoming: bool) -> list[CallEdge]:
+    if item.raw is None:
+        raise LuciankeError(
+            ErrorCode.E_INVALID_ARGUMENT, "CallItem has no raw LSP item", details={"param": "item"}
+        )
+    client = _require_ready(handle)
+    handle.touch()
+    result = await _call(handle, client, method, {"item": dict(item.raw)}, LSP_TIMEOUT_CALL_HIERARCHY_MS)
+    locator = _Locator(handle.ws, client)
+    out: list[CallEdge] = []
+    for entry in result if isinstance(result, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        other = _call_item(locator, entry.get("from" if incoming else "to") or {})
+        if other is None:
+            continue
+        # fromRanges は呼び元の側のファイルの中の範囲（incoming は相手のファイル、outgoing は問い合わせた項目のファイル）。
+        home_uri = entry["from"]["uri"] if incoming else item.raw.get("uri")
+        located = [locator.locate(home_uri, r) for r in entry.get("fromRanges") or [] if isinstance(r, dict)]
+        ranges = tuple(
+            dict.fromkeys(loc.range for loc in located)
+        )  # basedpyright は同じ範囲を重ねて返すことがある
+        out.append(CallEdge(other, other.rel if incoming else item.rel, ranges))
+    return out
+
+
+async def incoming_calls(handle: LspHandle, item: CallItem) -> list[CallEdge]:
+    """``item`` を呼ぶもの。``item`` は ``prepare_call_hierarchy`` の戻り値（``raw`` を含む）。"""
+    return await _calls(handle, M_INCOMING, item, incoming=True)
+
+
+async def outgoing_calls(handle: LspHandle, item: CallItem) -> list[CallEdge]:
+    """``item`` が呼ぶもの。"""
+    return await _calls(handle, M_OUTGOING, item, incoming=False)
+
+
+# --- rename / codeAction / executeCommand -------------------------------------------------
+
+
+def _provides_prepare_rename(client: LspClient) -> bool:
+    provider = client.server_capabilities.get("renameProvider")
+    return isinstance(provider, dict) and bool(provider.get("prepareProvider"))
+
+
+async def rename(handle: LspHandle, rel: RelPath, pos: Position, new_name: str) -> dict[str, Any]:
+    """``prepareRename`` → ``rename`` の ``WorkspaceEdit``（dict。ファイルは書き換えない）。
+
+    ``prepareRename`` が拒否（``null`` またはエラー）したら ``E_LSP_UNAVAILABLE``（``details.reason="prepare_rename_rejected"``）。
+    ``rename`` が ``null`` を返した場合は ``details.reason="rename_rejected"``。編集の形は basedpyright が ``documentChanges``、
+    tsls が ``changes``（S-4・S-5）なので、呼び手の変換は両方を読むこと。
+    """
+    client, index, uri = await _open(handle, rel)
+    text_document = {"uri": uri}
+    position = _lsp_position(handle, client, index, pos)
+    if _provides_prepare_rename(client):
+        try:
+            prepared = await _call(
+                handle,
+                client,
+                M_PREPARE_RENAME,
+                {"textDocument": text_document, "position": position},
+                LSP_TIMEOUT_RENAME_MS,
+            )
+        except LuciankeError as e:
+            if e.details.get("reason") != "lsp_error":
+                raise
+            prepared = None
+        if prepared is None or (isinstance(prepared, dict) and prepared.get("defaultBehavior") is False):

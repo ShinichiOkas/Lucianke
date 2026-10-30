@@ -1,0 +1,10 @@
+# get_symbol_history ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~520/2000tok
+target: lk://app/src/pricing.py#apply_discount  first_seen=4c5b6a7 (2026-03-02)  commits=12
+commits:
+- a1b2c3d 2026-10-21 okas MODIFIED_BODY +4 -1  "fix: clamp discount rate to 0..100"
+- 9f8e7d6 2026-09-30 okas MODIFIED_SIG +6 -3  "feat: accept Decimal price"  was: (price: float, rate: int) -> float
+- 7d6c5b4 2026-07-11 okas MODIFIED_BODY +2 -2  "refactor: extract rounding"
+co_changed_hotspots:
+- tests/test_pricing.py  0.92 (11/12)  last=a1b2c3d
+- config/limits.yaml  0.58 (7/12)  last=9f8e7d6
+# more: cursor=eyJhZnRlciI6IjdkNmM1YjQifQ remaining≈9

@@ -1,0 +1,7 @@
+# apply_code_action ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~200/1500tok
+applied: true  edit_id=ed_0009  action=qf_7a1c kind=quickfix "Add import 'Decimal' from 'decimal'"
+files_changed: src/services/payment.py (+1 -0)
+syntax_check: ok
+new_diagnostics: complete (+0 -1) checked=1 files  target_resolved=true
+resolved:
+E src/services/payment.py:58:16 [pyright:reportUndefinedVariable] "Decimal" が定義されていません

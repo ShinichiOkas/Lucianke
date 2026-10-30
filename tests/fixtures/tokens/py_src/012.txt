@@ -1,0 +1,160 @@
+    anc = node.parent
+    while anc is not None:
+        if anc.type in _PY_SCOPE_BODIES:
+            return True
+        anc = anc.parent
+    return False
+
+
+def _python_facts(node: Node, rng: Range, src: bytes) -> list[ImportFact]:
+    if node.type == "import_statement":
+        out: list[ImportFact] = []
+        for child in node.children_by_field_name("name"):
+            if child.type == "aliased_import":
+                module = _text(child.child_by_field_name("name"), src)
+                alias = _text(child.child_by_field_name("alias"), src)
+                if module and alias:
+                    out.append(ImportFact(module, [("*", alias)], False, 0, rng, "import"))
+            elif child.type == "dotted_name":
+                out.append(ImportFact(_text(child, src), [], False, 0, rng, "import"))
+        return out
+    # import_from_statement / future_import_statement
+    if node.type == "future_import_statement":
+        module, level = "__future__", 0
+    else:
+        mod = node.child_by_field_name("module_name")
+        if mod is None:
+            return []
+        if mod.type == "relative_import":
+            prefix = next((c for c in mod.children if c.type == "import_prefix"), None)
+            level = _text(prefix, src).count(".")
+            module = _text(next((c for c in mod.children if c.type == "dotted_name"), None), src)
+        else:
+            module, level = _text(mod, src), 0
+    names: list[tuple[str, str | None]] = []
+    for child in node.children_by_field_name("name"):
+        if child.type == "aliased_import":
+            names.append(
+                (
+                    _text(child.child_by_field_name("name"), src),
+                    _text(child.child_by_field_name("alias"), src) or None,
+                )
+            )
+        elif child.type == "dotted_name":
+            names.append((_text(child, src), None))
+    if any(c.type == "wildcard_import" for c in node.children):
+        names.append(("*", None))
+    return [ImportFact(module, names, level > 0, level, rng, "from")]
+
+
+# --- TypeScript / JavaScript ------------------------------------------------------------
+
+# 関数のノード型。``syntax/relations.py`` の ``_JS_FUNCTIONS`` はこの集合そのもの（関数の中の束縛を import として扱う側と、ここで
+# ``nested`` にする側がずれると、使用が落ちるか解決できなくなるので、定義は 1 か所に置く）
+JS_FUNCTION_NODES = frozenset(
+    {
+        "function_declaration",
+        "function_expression",
+        "function",
+        "generator_function",
+        "generator_function_declaration",
+        "arrow_function",
+        "method_definition",
+    }
+)
+
+
+def _in_js_function(node: Node) -> bool:
+    """``node`` が関数（アロー・メソッド・ジェネレータを含む）の中にあるか。"""
+    anc = node.parent
+    while anc is not None:
+        if anc.type in JS_FUNCTION_NODES:
+            return True
+        anc = anc.parent
+    return False
+
+
+def _js_fact(
+    module: str,
+    names: list[tuple[str, str | None]],
+    rng: Range,
+    kind: ImportKind,
+    *,
+    reexport: bool = False,
+) -> ImportFact:
+    return ImportFact(module, names, module.startswith("."), 0, rng, kind, reexport)
+
+
+def _specifier(node: Node, src: bytes) -> tuple[str, str | None]:
+    """``import_specifier`` / ``export_specifier`` → ``(name, alias)``（名前が文字列リテラルのこともある）。"""
+    name_node = node.child_by_field_name("name")
+    name = (
+        _string_value(name_node, src)
+        if name_node is not None and name_node.type == "string"
+        else _text(name_node, src)
+    )
+    alias = node.child_by_field_name("alias")
+    return (name or "", _text(alias, src) or None)
+
+
+def _es_facts(node: Node, rng: Range, src: bytes) -> list[ImportFact]:
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "import_require_clause":  # ``import x = require("y")``（source は節の中）
+                ident = next((c for c in child.children if c.type == "identifier"), None)
+                mod = _string_value(child.child_by_field_name("source"), src)
+                return (
+                    [_js_fact(mod, [("*", _text(ident, src))], rng, "require")]
+                    if ident is not None and mod is not None
+                    else []
+                )
+    module = _string_value(node.child_by_field_name("source"), src)
+    if module is None:
+        return []
+    names: list[tuple[str, str | None]] = []
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "import_clause":
+                for part in child.children:
+                    if part.type == "identifier":
+                        names.append(("default", _text(part, src)))
+                    elif part.type == "namespace_import":
+                        ident = next((c for c in part.children if c.type == "identifier"), None)
+                        names.append(("*", _text(ident, src)))
+                    elif part.type == "named_imports":
+                        names.extend(_specifier(s, src) for s in part.children if s.type == "import_specifier")
+        return [_js_fact(module, names, rng, "es_import")]
+    # export_statement（source つき = 再エクスポート）
+    for child in node.children:
+        if child.type == "export_clause":
+            names.extend(_specifier(s, src) for s in child.children if s.type == "export_specifier")
+        elif child.type == "namespace_export":
+            ident = next((c for c in child.children if c.type == "identifier"), None)
+            names.append(("*", _text(ident, src) or None))
+        elif child.type == "*":
+            names.append(("*", None))
+    return [_js_fact(module, names, rng, "es_import", reexport=True)]
+
+
+def _require_facts(call: Node, rng_of: Callable[[Node], Range], src: bytes) -> list[ImportFact]:
+    args = call.child_by_field_name("arguments")
+    module = _string_value(args.named_children[0] if args is not None and args.named_children else None, src)
+    if module is None:
+        return []
+    names: list[tuple[str, str | None]] = []
+    holder = call  # 範囲に使う文
+    member: str | None = None
+    value: Node = call
+    parent = call.parent
+    if (
+        parent is not None
+        and parent.type == "member_expression"
+        and parent.child_by_field_name("object") == call
+    ):
+        prop = parent.child_by_field_name("property")
+        if prop is not None:
+            member, value, parent = _text(prop, src), parent, parent.parent
+    if (
+        parent is not None
+        and parent.type == "variable_declarator"
+        and parent.child_by_field_name("value") == value

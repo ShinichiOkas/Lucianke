@@ -1,0 +1,161 @@
+    ws = wc.resolve(args.workspace_id)
+    new_ws = wc.set_python_env(
+        ws.workspace_id, args.python_interpreter
+    )  # 実行できなければ E_INVALID_ARGUMENT（変更なし）
+    if base_ref is not None:
+        new_ws = wc.update(ws.workspace_id, default_base_ref=base_ref)
+    restarted = await _rebind(hub, new_ws, warnings)
+
+    pool = getattr(hub, "lsp_pool", None)
+    # 再起動の責任は ``LspPool.rebind``（``workspace_changed`` の中）にある: インタープリタが変わって動いていた Python 系は、
+    # そこで止めて起動し直し済み（``started_at`` も新しい）。ここでもう一度止めると 1 回の ``set_python_env`` で 2 回起動する
+    # （BUG-0035）。ここで受け持つのは rebind が起こさなかった分だけ:
+    #   * 同じインタープリタを指定し直した（pip install 後などの取り直し）: 動いていても止めて起動し直す（事後条件 3）
+    #   * まだ起動していない・止まっていた・unavailable から戻された（standby）: 起動する
+    did_restart = any(getattr(h, "language_id", None) == PYTHON_LANGUAGE for h in restarted)
+
+    async def restart() -> None:
+        if pool is None:
+            return
+        for handle in pool.handles(new_ws, PYTHON_LANGUAGE):
+            handle.ws = new_ws  # rebind を持たないハブ・プールでも、新しい環境で上がるよう差し替える（rebind 済みなら同じ値）
+        if not did_restart:
+            await pool.reset(PYTHON_LANGUAGE, new_ws)
+        await pool.ensure_started(
+            PYTHON_LANGUAGE, new_ws
+        )  # standby だけ起動する（rebind が起こした starting 以降は何もしない）
+
+    if pool is None:
+        warnings.append(f"{ws.workspace_id}: no LSP pool is running; nothing to restart")
+    started.append((ws.workspace_id, _board(hub).submit("restart_python_lsp", ws.workspace_id, restart)))
+    warnings.extend(await persist_workspaces(hub, [new_ws]))
+
+
+async def _set_excludes(
+    hub: Any, args: ConfigureWorkspaceArgs, started: list[tuple[str, str]], warnings: list[str]
+) -> None:
+    globs = args.exclude_globs
+    if globs is None:
+        raise _invalid("exclude_globs", "set_excludes needs exclude_globs (use [] to clear)", "missing")
+    if any(not g.strip() or "\x00" in g for g in globs):
+        raise _invalid("exclude_globs", "exclude_globs must be non-empty strings without NUL", "invalid_glob")
+    base_ref = _check_ref(args.default_base_ref)
+    wc = hub.context
+    ws = wc.resolve(args.workspace_id)
+    new_ws = wc.set_excludes(ws.workspace_id, globs)
+    if base_ref is not None:
+        new_ws = wc.update(ws.workspace_id, default_base_ref=base_ref)
+    await _rebind(hub, new_ws, warnings)
+    # 一致するファイルを files から除くのは再走査（scan は DB にあって列挙されないファイルを消す）
+    started.append((ws.workspace_id, _submit_scan(hub, ws.workspace_id)))
+    warnings.extend(await persist_workspaces(hub, [new_ws]))
+
+
+def _submit_scan(hub: Any, workspace_id: str) -> str:
+    indexer = getattr(hub.runtime(workspace_id), "indexer", None)
+    if indexer is None:
+        raise LuciankeError(
+            ErrorCode.E_INTERNAL,
+            "the reindex job could not be submitted (the index is not open)",
+            details={"reason": "index_not_open", "workspace_id": workspace_id},
+        )
+    try:
+        return str(indexer.start_scan_job())
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("could not submit the scan job", exc_info=True)
+        raise LuciankeError(
+            ErrorCode.E_INTERNAL,
+            f"the reindex job could not be submitted ({type(exc).__name__})",
+            details={"reason": "submit_failed", "workspace_id": workspace_id},
+        ) from None
+
+
+async def _reindex(
+    hub: Any, args: ConfigureWorkspaceArgs, started: list[tuple[str, str]], warnings: list[str]
+) -> None:
+    ws = hub.context.resolve(args.workspace_id)
+    scope = args.reindex_scope
+    if scope in ("all", "symbols"):
+        started.append((ws.workspace_id, _submit_scan(hub, ws.workspace_id)))
+        return
+    pool = getattr(hub, "lsp_pool", None)
+    if scope == "lsp":
+
+        async def reset_lsp() -> None:
+            if pool is not None:
+                await pool.reset(None, ws)
+
+        if pool is None:
+            warnings.append(f"{ws.workspace_id}: no LSP pool is running; nothing to reset")
+        started.append((ws.workspace_id, _board(hub).submit("reindex:lsp", ws.workspace_id, reset_lsp)))
+        return
+
+    async def nothing() -> None:
+        return None
+
+    warnings.append(
+        "git history is not indexed in M1 (T-17 and T-18 are M2); the git scope has nothing to do"
+    )
+    started.append((ws.workspace_id, _board(hub).submit("reindex:git", ws.workspace_id, nothing)))
+
+
+async def handler(ctx: ToolContext, args: ConfigureWorkspaceArgs) -> ToolOutput:
+    hub = _hub(ctx)
+    wc = hub.context
+    if args.workspace_id is not None:
+        wc.get(args.workspace_id)  # 未登録なら E_WORKSPACE_NOT_CONFIGURED（details.known_workspaces[]）
+    warnings: list[str] = []
+    started: list[tuple[str, str]] = []
+    action = args.action
+
+    if action == "set_roots":
+        await _set_roots(hub, args, started, warnings)
+    elif action == "set_python_env":
+        await _set_python_env(hub, args, started, warnings)
+    elif action == "set_excludes":
+        await _set_excludes(hub, args, started, warnings)
+    elif action == "reindex":
+        await _reindex(hub, args, started, warnings)
+    elif args.default_base_ref is not None:
+        warnings.append(
+            "default_base_ref ignored (status is read-only; use set_roots, set_python_env or set_excludes)"
+        )
+
+    if args.job_id is not None:
+        if action != "status":
+            warnings.append("job_id ignored (only status reports a single job)")
+        elif not any(j["job_id"] == args.job_id for j in _jobs_of(hub, wc.list())):
+            raise LuciankeError(
+                ErrorCode.E_WORKSPACE_NOT_CONFIGURED,
+                f"unknown job_id: {args.job_id!r}",
+                details={"job_id": args.job_id, "reason": "unknown_job"},
+            )
+
+    warnings.extend(wc.take_warnings())
+    return await _view(
+        ctx,
+        hub,
+        detail=action == "status",
+        job_filter=args.job_id if action == "status" else None,
+        started=started,
+        warnings=warnings,
+    )
+
+
+SPEC = ToolSpec(
+    name="configure_workspace",
+    tid="T-00",
+    args_model=ConfigureWorkspaceArgs,
+    handler=handler,
+    default_max_tokens=1500,
+    description=(
+        "Inspect and configure the analysis target. action: status (default, read-only: workspaces, LSP daemons, cache, jobs) | set_roots | set_python_env | set_excludes | reindex (background job, returns job_id). Call it at session start and when switching targets."
+    ),
+    writes=False,
+    max_confidence=Confidence.EXACT,
+    milestone="M1",
+    accepts_revision=False,
+    page_unit="workspace",
+    records_key="workspaces",
+)
+TOOL_SPEC = SPEC

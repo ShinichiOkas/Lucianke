@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "tool": "get_file_skeleton",
+  "_resolution_meta": { "...": "第 5.5 節" },
+  "data": { "...": "ツール固有（第 11 章）" },
+  "page": { "next_cursor": null, "returned": 12, "total_estimate": 12 },
+  "budget": { "max_tokens": 2000, "used_tokens_est": 1180, "truncated": false },
+  "timing_ms": 7,
+  "warnings": [],
+  "error": null
+}

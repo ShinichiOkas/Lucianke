@@ -1,0 +1,11 @@
+# get_repo_map ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~1480/1500tok
+- src/ (42 files), tests/ (18 files), notebooks/ (3 files), conf/ (2 files)
+=== src/services/payment.py (245 lines) ===
+- rank: 1.00 fan_in: 23
+[Class] PaymentProcessor @L25-240
+  [Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L40-115
+=== src/api/routes.py (310 lines) ===
+- rank: 0.92 fan_in: 17
+[Function] pub create_order(req: OrderIn) -> OrderOut @L80-120
+# summary: 38 more files (src: 30, notebooks: 3, conf: 2, tests: 3)
+# more: cursor=eyJyYW5rIjoyfQ remaining≈38

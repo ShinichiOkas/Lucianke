@@ -1,0 +1,190 @@
+"""``mcp/render/graph.py``（dot / mermaid のレンダラ）の単体テスト（仕様書 §5.4.3、§6.3、§6.4、T-06・T-07・T-20）。
+
+入力は ``ToolOutput.data_static["graph"]``、無ければ ``Record.data`` の ``source_urn`` / ``target_urn`` / ``relation_kind`` 列。
+dot の構文の妥当性は、コメントを除いた本文の括弧と二重引用符の対応（と各文の ``;``）で簡易に検査する。
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+import pytest
+
+from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.model import Confidence, EngineChoice, Tier
+from lucianke.core.records import Record, ResolutionMeta, ToolOutput
+from lucianke.mcp.render import compact
+from lucianke.mcp.render.graph import MAX_EDGES, MAX_NODES, render_dot, render_mermaid
+from lucianke.mcp.types import CallInfo, Page, Rendered, RenderInput
+
+TOOL = "query_call_hierarchy"
+A = "lk://app/src/a.py#f"
+B = "lk://app/src/b.py#B.g/2~abcd1234"
+C = "lk://app/src/c.py#h"
+
+
+def meta(*, degraded: bool = False, level: Confidence = Confidence.EXACT) -> ResolutionMeta:
+    return ResolutionMeta(
+        confidence_level=level,
+        is_degraded=degraded,
+        tier=Tier.T1,
+        detected_language="python",
+        engine_used="pyright+tree-sitter",
+        lsp_status="ready",
+        accuracy_warning="構文木のみで解決しました。" if degraded else None,
+    )
+
+
+def call(fmt: str) -> CallInfo:
+    return CallInfo(tool=TOOL, revision="WORKING_TREE", workspace_id="app", format=fmt, max_tokens=2000)
+
+
+def tool_output(
+    *,
+    graph: Mapping[str, Any] | None = None,
+    records: Sequence[Record] = (),
+    max_conf: Confidence = Confidence.EXACT,
+    head_kv: Sequence[tuple[str, str]] = (),
+    extra_static: Mapping[str, Any] | None = None,
+) -> ToolOutput:
+    static: dict[str, Any] = dict(extra_static or {})
+    if graph is not None:
+        static["graph"] = graph
+    return ToolOutput(
+        records=records,
+        max_confidence=max_conf,
+        engine=EngineChoice(engine="pyright+tree-sitter", confidence=max_conf),
+        page_unit="edge",
+        head_kv=head_kv,
+        data_static=static,
+    )
+
+
+def make_input(
+    fmt: str,
+    out: ToolOutput | None,
+    *,
+    page: Page | None = None,
+    m: ResolutionMeta | None = None,
+    error: LuciankeError | None = None,
+    warnings: Sequence[str] = (),
+) -> RenderInput:
+    return RenderInput(call=call(fmt), meta=m or meta(), out=out, page=page, error=error, warnings=warnings)
+
+
+def row(
+    source: str, target: str, kind: str | None = None, *, conf: Confidence = Confidence.EXACT, **more: Any
+) -> Record:
+    data: dict[str, Any] = {"source_urn": source, "target_urn": target, **more}
+    if kind is not None:
+        data["relation_kind"] = kind
+    return Record(kind="row", key=f"{source}>{target}", priority=0, lines=(), data=data, confidence=conf)
+
+
+def small_graph() -> dict[str, Any]:
+    return {
+        "nodes": [
+            {"id": A, "label": "f", "path": "src/a.py", "conf": "exact"},
+            {"id": B, "label": "B.g", "path": "src/b.py", "conf": "exact"},
+        ],
+        "edges": [{"source": A, "target": B, "label": "CALLS", "count": 1}],
+    }
+
+
+def dot(out: ToolOutput | None, **kw: Any) -> Rendered:
+    return render_dot(make_input("dot", out, **kw))
+
+
+def mermaid(out: ToolOutput | None, **kw: Any) -> Rendered:
+    return render_mermaid(make_input("mermaid", out, **kw))
+
+
+HEADER = "# query_call_hierarchy ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~0/2000tok"
+
+
+def check_dot_syntax(text: str) -> None:
+    """コメントを除いた本文で、``{}`` ``[]`` の対応、二重引用符の対応（``\\"`` は文字）、各文の ``;`` を確かめる。"""
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+    braces = brackets = 0
+    in_str = False
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            assert c != "\n", "引用符の中に生の改行がある"
+            if c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            braces += 1
+        elif c == "}":
+            braces -= 1
+        elif c == "[":
+            brackets += 1
+        elif c == "]":
+            brackets -= 1
+        assert braces >= 0 and brackets >= 0, f"閉じ括弧が先に来た: {body[: i + 1]!r}"
+        i += 1
+    assert not in_str, "二重引用符が閉じていない"
+    assert braces == 0 and brackets == 0
+    lines = body.splitlines()
+    assert lines[0].startswith("digraph ") and lines[0].endswith("{")
+    assert lines[-1] == "}"
+    for line in lines[1:-1]:
+        assert line.endswith(";"), f"文が ; で終わっていない: {line!r}"
+
+
+# --- 期待文字列との一致 -----------------------------------------------------------------------
+
+
+def test_dot_small_graph_exact() -> None:
+    r = dot(tool_output(graph=small_graph()))
+    assert not r.is_error and r.structured is None
+    assert r.text == (
+        f"// {HEADER}\n"
+        'digraph "query_call_hierarchy" {\n'
+        "  rankdir=LR;\n"
+        "  node [shape=box];\n"
+        f'  "{A}" [label="f" tooltip="src/a.py"];\n'
+        f'  "{B}" [label="B.g" tooltip="src/b.py"];\n'
+        f'  "{A}" -> "{B}" [label="CALLS"];\n'
+        "}\n"
+    )
+    check_dot_syntax(r.text)
+
+
+def test_mermaid_small_graph_exact() -> None:
+    r = mermaid(tool_output(graph=small_graph()))
+    assert not r.is_error and r.structured is None
+    # ノード ID は短い別名。ラベルは qualified_name、URN の末尾が違う（アリティ・sighash つき）ときだけ 2 行目に出す
+    assert r.text == (
+        f'%% {HEADER}\nflowchart LR\n  n1["f"]\n  n2["B.g<br/>B.g/2~abcd1234"]\n  n1 -->|"CALLS"| n2\n'
+    )
+
+
+def test_header_is_the_compact_header_line() -> None:
+    inp = make_input("dot", tool_output(graph=small_graph()))
+    first_compact = compact.render(inp).text.splitlines()[0]
+    assert dot(tool_output(graph=small_graph())).text.splitlines()[0] == f"// {first_compact}"
+    assert mermaid(tool_output(graph=small_graph())).text.splitlines()[0] == f"%% {first_compact}"
+
+
+# --- エスケープ -------------------------------------------------------------------------------
+
+
+def test_dot_escapes_quote_backslash_hash_japanese_newline() -> None:
+    graph = {
+        "nodes": [{"id": 'lk://app/x.py#a"b', "label": 'say "hi" \\ #1 注文\n処理', "path": 'dir\\x "y".py'}],
+        "edges": [{"source": 'lk://app/x.py#a"b', "target": "lk://app/日本語.py#関数", "label": 'CA"LLS'}],
+    }
+    r = dot(tool_output(graph=graph))
+    check_dot_syntax(r.text)
+    lines = r.text.splitlines()
+    assert (
+        '  "lk://app/x.py#a\\"b" [label="say \\"hi\\" \\\\ #1 注文 処理" tooltip="dir\\\\x \\"y\\".py"];'

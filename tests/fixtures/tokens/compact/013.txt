@@ -1,0 +1,12 @@
+# analyze_change_impact ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~610/2500tok
+target: lk://app/src/services/payment.py#PaymentProcessor.process_charge  change=signature_change depth≤3
+direct_breakage: 2 sites in 1 file
+src/api/routes.py:88:20  [call] in create_order  receipt = await processor.process_charge(req)
+src/api/routes.py:131:20  [call] in retry_order  receipt = await processor.process_charge(req)
+transitive_dependents: 2 symbols in 2 files
+  <- create_order @src/api/routes.py:80
+    <- register_routes @src/api/__init__.py:12
+affected_test_targets: 2
+- tests/test_payment.py::test_charge_ok (depth 1)
+- tests/test_api.py::test_create_order (depth 2)
+co_change_hotspots: tests/test_payment.py 0.88 (11/13)  config/limits.yaml 0.62 (8/13)

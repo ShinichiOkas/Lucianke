@@ -1,0 +1,92 @@
+# S-9 往復オーバーヘッド（Python + mcp SDK）
+
+**判定: 合格**。何もしないツールの p95 は 1.08 ms（合格条件 10 ms の約 1/9）。8 KB の応答も pydantic 検証もこの精度では差が出ない。
+
+実施日: 2026-10-29 / OS: Windows 11 Home 10.0.26300 / CPU: AMD Ryzen Threadripper 3960X（24C/48T）、RAM 64 GB / CPython 3.12.11（uv 管理）/ mcp 2.3.0 / pydantic 2.14.1。計測中、ほかの役のプロセスが同機で並行して動いていた（p95 の幅はその影響を含む）。
+
+## 確かめたこと
+
+設計書 §12.1 の S-9 のうち、骨格ツールを除く部分: SDK クライアント（stdio、子プロセス起動）から (6) 何もしないツールを 500 回、(7) 約 8 KB（約 2,000 トークン）のテキストを返すツールを 500 回、(8) 呼び出しごとに pydantic モデル（`extra="forbid"`、10 フィールド）で引数を検証するツールを 500 回呼んだときの p50 / p95 / p99。それぞれ**クライアント側の往復時間（RTT）**と**サーバー内時間**（SDK のミドルウェア内 = SDK の検証・整形を含む。ハンドラ本体も別に）。各 50 回のウォームアップを除き、全構成を 3 回ずつ回して p50/p95/p99 の中央値を取った。切り分けのため、(a) OpenTelemetry ミドルウェアの有無、(b) 2026-07-28 版プロトコル、(c) SDK を通さない生パイプのクライアント（サーバー単体の下限）も測った。`get_file_skeleton`（キャッシュ済み）の p95 < 50 ms は T-02 の実装後に測る。
+
+## 結果
+
+主計測 = SDK Client（legacy ハンドシェイク）、OTel あり（SDK 既定）。値は ms。
+
+| ツール | RTT p50 | RTT p95 | RTT p99 | （p95 の 3 回の幅） | サーバー内 p50 / p95 / p99 | ハンドラ p50 / p95 / p99 |
+|---|---|---|---|---|---|---|
+| 6 何もしない | 0.81 | **1.08** | 1.34 | 1.00〜1.55 | 0.043 / 0.060 / 0.119 | 0.006 / 0.009 / 0.018 |
+| 7 約 8 KB を返す | 0.75 | **1.18** | 1.37 | 0.90〜1.22 | 0.046 / 0.094 / 0.115 | 0.006 / 0.014 / 0.017 |
+| 8 pydantic 検証つき | 0.75 | **1.08** | 1.40 | 0.99〜1.22 | 0.046 / 0.071 / 0.111 | 0.011 / 0.018 / 0.030 |
+
+- **6 合格**: p95 = 1.08 ms（最悪の回でも 1.55 ms）。条件の 10 ms に対し 6 倍以上の余裕。NFR-PERF-1（p95 < 50 ms）に対する往復の取り分は約 2%。
+- **7 差なし**: 8 KB の応答でも RTT は何もしないツールと同等（p95 1.18 ms。差は回ごとの揺れ以下）。応答サイズ（`max_tokens` 2,000 既定）は往復コストに効かない。
+- **8 pydantic の上乗せ**: ハンドラ内で p50 +5 µs（6 → 11 µs）、p95 +9 µs。プロセス内の素の計測で `model_validate(dict)` 3.1 µs、`model_validate_json` 3.1 µs、検証失敗（例外込み）3.7 µs（10 万回。回により 2.3〜3.7 µs）。RTT には現れない（p95 1.08 → 1.08 ms）。
+- 起動直後（`initialize` の直後）の最初の呼び出しは 1.31 ms、2 回目以降は 0.6〜0.8 ms（生パイプ、5 回起動の中央値）。遅延 import や初回コンパイルは乗らない。
+
+切り分け（何もしないツールの RTT p50 / p95 / p99、ms）:
+
+| 構成 | p50 | p95 | p99 | 読み取り |
+|---|---|---|---|---|
+| SDK Client legacy / OTel あり | 0.81 | 1.08 | 1.34 | 主計測 |
+| SDK Client legacy / OTel なし | 0.90 | 1.30 | 1.41 | 差なし（揺れの範囲）。外す意味がない |
+| SDK Client 2026-07-28 | 1.33 | 1.89 | 2.10 | 約 +0.5〜0.8 ms。リクエストごとの封筒と `serverInfo` の付与。サーバー内も 2 倍（87 µs）。それでも合格 |
+| 生パイプ client / OTel あり | 0.62 | 0.88 | 1.35 | サーバー単体の下限。SDK クライアント自身が約 0.2 ms を足している |
+| 生パイプ client / OTel なし | 0.76 | 0.97 | 1.08 | 同上 |
+
+内訳: 往復の大半（約 0.6 ms）はパイプとスレッド切替（anyio の読み書きは stdin / stdout をワーカースレッドで待つ）。SDK のサーバー内処理は約 45 µs、ハンドラは 6 µs。Python の側で削れる余地はほぼ無い。
+
+## 設計への反映
+
+- **R-1（往復オーバーヘッドで NFR-PERF-1 を満たせない）: この部分は解消。** JSON 直列化・pydantic 検証の最適化は不要（検証 3 µs、直列化は 8 KB でも見えない）。OD-1 (c) の発動条件にも当たらない。
+- **§7.1.2 / §12.1:** 往復の予算として p99 でも 2.5 ms（2026-07-28 版を含む）を見込めば、ハンドラ側に 47 ms 以上を割り当てられる。骨格ツール（p95 < 50 ms）は T-02 の実装後に同じ計測の型で測る。
+- **ADR-2:** 変更不要。低水準 API のまま性能上の問題は無い。`Server.middleware` は SDK が暫定 API と明記しているので製品では使わず（S-1 と同じ）、`timing_ms` は §7.1.2 の自前計測で足りる（SDK 内の約 45 µs は計測外だが無視できる）。
+- **§12.2 タスク 4（`ping` で S-9 を計測）:** 本スパイクで先に合格しているので、`bench.py` の型を `bench/` へ移して回帰の基準にする（実ツールになったら同じ 500 回計測で p95 を CI に記録）。
+- **前提の限界:** 24 コアの機での値。低速な機では数倍になりうるが、条件の 10 ms まで約 9 倍の余裕がある。N=500 の p99 は上位 5 件の揺れに左右される。
+
+## 使うコードの型
+
+計測は `spikes/s01_mcp/bench.py`（SDK Client と生パイプの両方）。要点:
+
+```python
+import math, time
+
+def pct(xs_ns: list[int], p: float) -> float:            # p50/p95/p99（ms）。添字は ceil(p/100*n)-1
+    xs = sorted(xs_ns)
+    return xs[max(0, math.ceil(p / 100 * len(xs)) - 1)] / 1e6
+
+async with Client(StdioServerParameters(command=PY, args=[SERVER]), mode="legacy", cache=None) as c:
+    await c.list_tools()                                  # 2026-07-28 では先に list しておく（HEADER_MISMATCH の再試行を避ける）
+    for _ in range(WARM): await c.call_tool(name, args)  # ウォームアップ 50 回を捨てる
+    rtt = []
+    for _ in range(N):                                    # N = 500
+        t = time.perf_counter_ns()
+        r = await c.call_tool(name, args)
+        rtt.append(time.perf_counter_ns() - t)
+```
+
+サーバー内時間は SDK のミドルウェア（スパイクだけ。製品では §7.1.2 の自前計測を使う）:
+
+```python
+async def timing_middleware(ctx: ServerRequestContext, call_next):
+    if ctx.method != "tools/call":
+        return await call_next(ctx)
+    t0 = time.perf_counter_ns()
+    try:
+        return await call_next(ctx)                       # 引数検証・ハンドラ・結果の整形まで
+    finally:
+        MW_NS[(ctx.params or {}).get("name", "?")].append(time.perf_counter_ns() - t0)
+server.middleware.append(timing_middleware)               # --no-otel なら先に server.middleware.clear()
+```
+
+pydantic の検証は `Args10.model_validate(arguments)`（`arguments` は SDK が既に dict にして渡す。`model_validate_json` に変える利点は無い）。
+
+## 再現手順
+
+リポジトリのルートで（`uv run --frozen` は `uv.lock` を書き換えない。文字化けするなら `PYTHONUTF8=1`）:
+
+```
+uv run --frozen python spikes/s01_mcp/bench.py                         # 500 回・ウォームアップ 50・3 回 × 5 構成 + 素の pydantic + 起動直後（約 1 分）
+uv run --frozen python spikes/s01_mcp/bench.py 500 50 3 "OTel なし"    # 構成名に部分一致した構成だけ
+```
+
+サーバーは `spikes/s01_mcp/server.py`（`noop` / `big` / `validated` / `stats` / `reset` ツール）。ほかの役の負荷で p95 が揺れる場合は、機が静かなときに回し直す。

@@ -1,0 +1,84 @@
+2. `wait_for` の条件（S-4・S-5 で確認）:
+   - (a) 自分が `didChange` した文書は `version >= min_version`（`==` ではなく `>=`）。basedpyright は連続した変更を畳んで最後の版だけ、ruff は版ごとに届く。診断が変わらない変更（コメントだけ）でも basedpyright は毎回 1 件届く。想定の待ち時間は basedpyright が `didChange` から約 0.3 s、ruff が 1 ms 未満。
+   - (b) 依存元の文書は、`version` が自分の旧い版のまま再送されるので、`workspace/didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止で「揃った」とする。
+   - (c) 複数文書を続けて `didOpen` した直後の**空の診断は「きれい」と見なさない**（basedpyright は同じ版 1 の空の診断を先に送り、実診断は約 75 ms 後に `$/progress end` と同時に来る）。`$/progress end` または最初の受信から 300 ms の静止まで `unknown` とする。
+   - (d) **`version` を付けないサーバー**（vtsls・tsls）は、publish を受けた＝現行とは言えない（vtsls は誤りを消したあとも古い診断〔n=1〕を返し、次の変更で正常化する。3 回の別実行で再現）。変更ごとの発行を数えて追い越しを検出する。診断の無いファイルを開いても何も届かない vtsls に備え、「届かない＝0 件」とみなす猶予時間（設計値: 2 s）を持つ。tsls は常に最新で、空配列も届く。
+   - (e) 受信 URI は §7.5.3 の正規化を通してから `DiagnosticsHub` に入れる。
+3. Tree-sitter の構文エラーは LSP ではなく Indexer が `source: "tree-sitter"` で入れる（§7.6.2）。同一位置・同一メッセージの重複は T-08 が LSP 側を優先する。
+
+### 7.5.6 機能呼び出しと PaaD への反映（features.py、ADR-6、ADR-15）
+
+```python
+# lsp/features.py: LspHandle と作業ツリーの RelPath を受ける async 関数群（実装で確定 2026-10-29。クラスではない）
+async def definition(handle, rel, pos) -> list[Location]
+async def references(handle, rel, pos, *, include_declaration=False) -> list[RefLocation]
+async def hover(handle, rel, pos) -> str | None                      # 署名の文字列（markdown なら最初のコードフェンス）
+async def prepare_call_hierarchy(handle, rel, pos) -> list[CallItem]
+async def incoming_calls(handle, item) -> list[CallEdge]; async def outgoing_calls(handle, item) -> list[CallEdge]
+async def rename(handle, rel, pos, new_name) -> dict                 # prepareRename → rename → WorkspaceEdit（dict のまま。Plan への変換は edit.plan.from_workspace_edit）
+async def code_actions(handle, rel, rng, *, only=None, diagnostics=()) -> list[dict]   # edit が無ければ codeAction/resolve
+async def execute_command(handle, command, arguments=None) -> CommandOutcome            # tsls の _typescript.organizeImports など。applyEdit を捕まえる
+def to_exact_relations(source_urn, refs, *, locate, relation_kind="CALLS", …) -> list[RelationFact]   # confidence=exact。位置 → URN は呼び手が locate で渡す
+```
+
+実装の差: `ready` でないとき、各関数は `None` ではなく `LuciankeError(E_LSP_UNAVAILABLE, details.reason="indexing" | "standby" | "unavailable" | "disconnected")` を投げる。読み取り系（definition・references・hover・callHierarchy）は呼び手が握って `structural` に降格し、`rename` / `code_actions` は下の表どおりそのまま上へ伝える。位置は送らずに降格する（`position_clamped`。§7.5.3）。時間切れは `TimeoutError` を上げ、`record_timeout()` / `record_ok()` を呼んだうえで呼び手が降格する。ワークスペース外の URI は `RelPath` にできないので `external_uri` として返す。`WorkspaceEdit` は `edit` を import できないので dict のまま返す。サーバーが `workspace/applyEdit` を**要求として**送ってくる経路（tsls の `_typescript.organizeImports`。S-5）は `execute_command` が受けて捕まえる（`applied: true` と答えるが、書き込みは `EditTransaction` の責任）。
+
+| 能力 | LSP が `ready` | `indexing` / `starting` | `standby` / `unavailable` |
+|---|---|---|---|
+| DEFINITION / REFERENCES / CALL_HIERARCHY / HOVER | タイムアウト内で待ち `exact` | 待たずに `None`（起動は契機にする）→ 呼び手は `structural` | `None` → `structural` |
+| RENAME / CODE_ACTION | 実行 | `E_LSP_UNAVAILABLE`（`details.reason: "indexing"`） | `E_LSP_UNAVAILABLE` |
+| SKELETON / SEARCH / BODY | 使わない | 使わない | 使わない |
+
+PaaD への反映:
+
+1. `definition` / `references` / `callHierarchy` の結果は `Location` → `symbols` の範囲包含で URN に写し（ワークスペース外は `_ext`）、`relations` に `exact` で書く。同じ `(source_urn, target_urn, relation_kind)` の `structural` 行は置き換える（仕様書 §9.4）。**この書き込みは `data_version` を進めない（`bumps_version=False`。実装で確定 2026-10-29、1d8700d）**。進めると、T-06・T-07 自身が直前に返した `next_cursor` が次のページで `E_CURSOR_EXPIRED` になる（パイプラインは `data_version` をハンドラの前に引く）。書き戻しは同じ問い合わせの答えを `structural` から `exact` に置き換えるだけで、そのツールの結果集合は変わらない。以前の版（本書の初版）は「進める」と書いていた。
+
+   **T-06・T-07 の `exact` 経路（`tools/_lsp_exact.py`。実装で確定 2026-10-29、1d8700d）**: ツールは次の順で答える。
+   - **PaaD から（2 回目以降）**: 以前 LSP で取って `relations` に `exact` で書いた集合が**まだ新しい**なら、LSP を呼ばずその `exact` 行だけで答える（LSP が止まっていても `exact`）。新しさの目印はプロセス内の `MEMO`（問い合わせごとに `(files_fingerprint, exact 行の指紋)`）。ファイルが 1 つでも変わる（索引の `sha256` が変わる）か、別の書き手が同じ行を書き換えると目印は外れる。ファイルの再取り込みはそのファイルの `exact` 行を消して `structural` を入れ直すので、行の有無だけを見ると「LSP でしか見つからない参照」が編集後に黙って落ちる。目印はその穴を塞ぐ条件である。
+   - **LSP から（1 回目）**: `ready` の LSP に聞き、`to_exact_relations` で `RelationFact` にして `IndexWriter` へ**1 回のジョブで**書き戻す（`upsert_exact_relations` は `(元, 先, 種別)` ごとの置換なので、同じ組を別ジョブで書くと互いに消す）。書けて読み戻した指紋が一致し、書いている間にファイルが変わっていなかったときだけ `MEMO` に目印を置く。使用種別・囲みのシンボル・ガード条件は LSP からは来ないので、参照箇所のファイルを構文木にかけて位置から引く（索引器と同じ分類。引けない位置は `REFERENCES` / `r` で囲みはファイルの URN）。
+   - **0 件の答えは信用しない**: 起動直後の LSP は `ready` でも解析が済まず 0 件を返すことがある（basedpyright の実測）。索引に参照・呼び出しがあるのに LSP が 0 件と答えたときは、内部では `E_LSP_UNAVAILABLE`（`details.reason: "indexing"`）として扱って `structural` に降格し（ツールの応答はエラーにならない）、目印も置かない（呼び直すと `exact` になる。未完了の LSP の空振りを固定しない）。
+   - **降格**: LSP が `ready` でない・時間切れ・`E_LSP_UNAVAILABLE` なら `structural`（`relations` の全行。今までどおり）。
+   - **範囲**: T-06 の実装検索（`implementations`）と型階層（`type_hierarchy`）に LSP 版は無い。`exact` の応答でも索引の継承関係（`INHERITS` / `IMPLEMENTS`）からの推定のままで、`warnings` に書く。T-07 の外部（標準ライブラリ等）の呼び先は、LSP が返したファイルのパスから推定した `lk://_ext/` の URN の葉にする（最善努力）。
+2. `hover` の型文字列は内部テーブル `_hover_cache(urn, sha256, hover_text, cached_at)`（主キーは **`(urn, sha256)`**。`sha256` は定義ファイルの内容の SHA-256）に置き、T-04 の `signature_expanded` に使う。公開しない（`_` 接頭辞）。行があれば LSP を呼ばず（起動も促さず）`exact` で答える（R-11）ので、定義ファイルの内容が変わると鍵が外れて LSP に聞き直す（同じ `urn` の古い `sha256` の行は書くときに消す）。書き込みは `data_version` を進めない（内部表。76a2aca。実装で確定 2026-10-29）。
+3. `rename` / `codeAction` の `WorkspaceEdit` は `edit/plan.py` の `Plan`（hunk 列）に変換して返すだけで、**書き込みは `EditTransaction`** が行う（ADR-11）。ファイルの作成・削除を含む `WorkspaceEdit` は `E_UNSUPPORTED`（実測ではどのサーバーも `resourceOperations` は 0 件）。`changes` と `documentChanges` の**両方の形**を変換する（サーバーごとの形は §7.5.1 の表。`textDocument.version` は `null`＝版検査なし。S-4・S-5 で確認）。開いたのが定義側 1 ファイルだけでも、basedpyright の `rename` は呼び元の編集も返す。
+- **Python の `codeAction`（quickfix・organizeImports・fixAll）は ruff に送る**（PaaD への反映ではなく送り先の規約）。`code_actions` は Python では ruff に送り、basedpyright には送らない。`resolve_code_action` は ruff のためにある（`data` あり・`edit` 無しが返り、`codeAction/resolve` で `edit` が付く）。TypeScript の organizeImports は経路が違う（§7.5.1 の表）ため、サーバー定義ごとに持つ。
+
+受入で確かめる点:
+
+- LSP が `indexing` の間に T-04 を呼んだとき、応答は `timing_ms < 50`（LSP を待っていない）かつ `lsp_status: "indexing"`。
+- `ready` 後に T-06 を呼ぶと、`relations` の当該 `target_urn` の行が `exact` に置き換わり、`structural` の重複行が残らない。
+
+---
+
+## 7.6 Indexer と PaaD（index/）
+
+仕様書第 9 章のスキーマを唯一の書き手で更新し、読み手には一貫した断面を見せる。`index/` は `core` 以外に依存しない（§4.2）。
+
+### 7.6.1 IndexWriter とジョブ（ADR-7）
+
+```python
+@dataclass(frozen=True)
+class WriteJob:
+    fn: Callable[[sqlite3.Connection], Any]
+    bumps_version: bool          # files / symbols / relations を変えるなら True。diagnostics だけなら False
+    label: str                   # ログ用（"ingest:src/a.py", "diag:basedpyright:src/a.py"）
+    coalesce_key: str | None     # 同じキーの未実行ジョブは最後の 1 つに畳む
+    priority: int = 0            # EditTransaction の再索引は 0、通常は 10
+
+class IndexWriter:
+    def submit(self, job: WriteJob) -> concurrent.futures.Future
+    async def submit_async(self, job: WriteJob) -> Any     # 満杯（WRITE_QUEUE_MAX=1000。実装で確定 2026-10-29）なら待つ
+```
+
+1. 専用スレッドがキューから取り、`BEGIN IMMEDIATE` → `fn(conn)` → `bumps_version` なら `UPDATE _meta SET data_version = data_version + 1` → `COMMIT`。例外は `ROLLBACK` し、`label` 付きでログ、`Future` に例外を載せる。半更新の状態は読み手に見えない（MUST）。
+2. 接続は書き込み専用の 1 本（`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000`）。
+3. チェックポイントは、キューが空になり前回から 1,000 コミット以上たったとき `PASSIVE`、終了時に `TRUNCATE`。
+4. 起動時の差分索引では、1 トランザクションに最大 50 ファイルをまとめ、`data_version` はトランザクションごとに 1 回だけ進める。
+
+### 7.6.2 取り込みパイプライン（engine/indexer.py と index/ingest.py）と data_version（ADR-8）
+
+```python
+# engine/indexer.py（実装で確定 2026-10-29。当初の ingest_file(ws, rel) / rescan(ws) を分けた）
+INGEST_BATCH_FILES = 50                       # 起動時の差分索引は 1 トランザクションに最大 50 ファイル。data_version はトランザクションごとに +1
+class Indexer:                                # ワークスペース 1 つ分
+    async def index_file(self, rel) -> IngestStats | None      # 1 ファイルの再取り込み。sha256 が同じなら何もしない。消えた・除外になったなら remove

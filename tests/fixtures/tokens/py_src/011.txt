@@ -1,0 +1,124 @@
+            if child == parts[0]:
+                return [cond]
+            if child == parts[2]:
+                return [_neg(cond)]
+            return []
+        if kind == "boolean_operator":
+            if _is(child, parent.child_by_field_name("right")):
+                op = parent.child_by_field_name("operator")
+                left = _cond_text(parent.child_by_field_name("left"), parsed)
+                if op is not None and op.type == "or":
+                    return [_neg(left)]
+                return [left]
+            return []
+        if kind == "while_statement":
+            if _is(child, parent.child_by_field_name("body")):
+                return [_cond_text(parent.child_by_field_name("condition"), parsed)]
+            return []
+        if kind in ("except_clause", "except_group_clause"):
+            if child.type == "block":
+                return [f"on: {_py_exception_type(parent, parsed)}"]
+            return []
+        if kind == "case_clause":
+            if child.type == "block":
+                header = parsed.source[parent.start_byte : child.start_byte].decode(
+                    "utf-8", "surrogateescape"
+                )
+                return [_NEWLINE_WS.sub(" ", header).strip().rstrip(":").rstrip()]
+            return []
+        return []
+
+    return contrib
+
+
+# --- TypeScript / JavaScript ------------------------------------------------------------
+
+
+def _make_ts(parsed: ParsedFile) -> _Contrib:
+    def contrib(parent: Any, child: Any) -> list[str]:
+        kind = parent.type
+        if kind == "if_statement":
+            if _is(child, parent.child_by_field_name("consequence")):
+                return [_cond_text(parent.child_by_field_name("condition"), parsed)]
+            return []
+        if kind == "else_clause":
+            owner = parent.parent
+            if owner is not None and owner.type == "if_statement":
+                return [_neg(_cond_text(owner.child_by_field_name("condition"), parsed))]
+            return []
+        if kind == "ternary_expression":
+            cond = parent.child_by_field_name("condition")
+            if cond is None:
+                return []
+            if _is(child, parent.child_by_field_name("consequence")):
+                return [_cond_text(cond, parsed)]
+            if _is(child, parent.child_by_field_name("alternative")):
+                return [_neg(_cond_text(cond, parsed))]
+            return []
+        if kind == "binary_expression":
+            if _is(child, parent.child_by_field_name("right")):
+                op = parent.child_by_field_name("operator")
+                left = _cond_text(parent.child_by_field_name("left"), parsed)
+                if op is not None and op.type == "||":
+                    return [_neg(left)]
+                if op is not None and op.type == "&&":
+                    return [left]
+            return []
+        if kind == "while_statement":
+            if _is(child, parent.child_by_field_name("body")):
+                return [_cond_text(parent.child_by_field_name("condition"), parsed)]
+            return []
+        if kind == "catch_clause":
+            if _is(child, parent.child_by_field_name("body")):
+                annotation = parent.child_by_field_name("type")
+                if annotation is not None:
+                    return [f"on: {_text(annotation, parsed).lstrip(':').strip()}"]
+                return ["on: catch"]
+            return []
+        if kind == "switch_case":
+            value = parent.child_by_field_name("value")
+            if value is not None and child != value:
+                return [f"case {_cond_text(value, parsed)}"]
+            return []
+        if kind == "switch_default":
+            return ["default"]
+        return []
+
+    return contrib
+
+
+# --- 公開関数 ---------------------------------------------------------------------------
+
+
+def guard_for(call_node: Any, parsed: ParsedFile, *, language_id: str, max_chars: int = 120) -> str | None:
+    """``call_node`` を囲むガード条件を `` && `` で連ねた文字列にする。条件が無ければ ``None``。
+
+    ``max_chars`` を超えたら、全体が ``max_chars`` 文字になるよう末尾を ``…`` で省略する。
+    対応しない言語は ``None``。
+    """
+    if language_id == "python":
+        stop, contrib = _PY_FUNCTIONS, _make_py(parsed)
+    elif language_id in _TS_LANGUAGES:
+        stop, contrib = _TS_FUNCTIONS, _make_ts(parsed)
+    else:
+        return None
+
+    segments: list[list[str]] = []
+    child = call_node
+    parent = child.parent
+    while parent is not None and parent.type not in stop:
+        found = contrib(parent, child)
+        if found:
+            segments.append(found)
+        child, parent = parent, parent.parent
+
+    if not segments:
+        return None
+    # 内側から集めたので、外側から順に並べ直す（1 つの祖先が出す複数の条件はその順のまま）
+    conds = [cond for group in reversed(segments) for cond in group]
+    if len(conds) > 1:  # 連ねるとき、``or`` などを含む条件は括弧で囲んで優先順位を保つ
+        conds = [f"({c})" if isinstance(c, _Loose) else c for c in conds]
+    result = _SEP.join(conds)
+    if len(result) > max_chars:
+        result = result[: max(max_chars - 1, 0)] + _ELLIPSIS
+    return result

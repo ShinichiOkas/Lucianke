@@ -1,0 +1,6 @@
+SELECT entity_b AS path_urn, coupling_ratio, co_change_count, last_co_changed_sha
+FROM git_co_changes
+WHERE entity_a = 'lk://app/src/services/payment.py'
+  AND entity_kind = 'file'
+  AND coupling_ratio >= 0.5
+ORDER BY coupling_ratio DESC;

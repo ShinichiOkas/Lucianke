@@ -1,0 +1,12 @@
+{
+  "confidence_level": "exact",
+  "is_degraded": false,
+  "tier": 1,
+  "detected_language": "python",
+  "engine_used": "pyright+tree-sitter",
+  "lsp_status": "ready",
+  "lsp_progress": null,
+  "mixed": false,
+  "confidence_breakdown": { "exact": 12 },
+  "accuracy_warning": null
+}

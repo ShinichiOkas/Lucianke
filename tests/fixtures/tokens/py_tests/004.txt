@@ -1,0 +1,145 @@
+"""F-PY（httpx）・F-TS（ky）で、M1 の読み取り系ツール T-00〜T-08 の事後条件を確かめる契約テスト（BUG-0036、仕様書 §15.2 M1-1）。
+
+ワークスペースは ``bench/.cache`` に取得済みの F-PY・F-TS（``bench/fixtures.toml`` の SHA 固定。``bench/fetch_fixtures.py`` で取得）を
+``tmp_path`` に複製したもの（原本には触れない）。結線は本番と同じ（``_rig.open_rig``: ``RuntimeHub`` + ``LspPool`` + ``Pipeline``）。
+フィクスチャが無い環境は ``rig`` が理由つきで skip する。
+
+LSP の水準: F-PY は basedpyright + ruff が ready なので ``exact`` で確かめる。F-TS は、この環境に TypeScript の LSP
+（typescript-language-server / vtsls）が無ければ構文層（Tree-sitter）の降格応答になる。``exact`` 水準だけが条件の事後条件は
+``rig.lsp_ready`` で分岐し、LSP が無いときは降格応答の約束（``lsp_status`` が ready でない・構造層の応答・書き込みが無い）を確かめる。
+skip はしない（``bench/exit_criteria.toml`` の ``skips = "fail"``）。
+
+事後条件の印は ``bench/postcondition_map.py`` の書き方（関数名の ``postcondition_N``、docstring の ``PC:T-xx#n``）に従う。
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+import tree_sitter_python
+import tree_sitter_typescript
+from _rig import Rig, warm_up
+from _targets import TARGETS, assert_present, target_dict
+from tree_sitter import Language, Parser
+
+from lucianke.core.model import Position, RelPath
+from lucianke.lsp import features
+
+WS_ID = re.compile(r"[A-Za-z0-9._-]+")
+SEVERITY_RANK = {"error": 1, "warning": 2, "information": 3, "hint": 4}
+
+
+def meta(r: Any) -> dict[str, Any]:
+    return r.structured["_resolution_meta"]
+
+
+def flatten(symbols: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for s in symbols:
+        out.append(s)
+        out.extend(flatten(s.get("children") or []))
+    return out
+
+
+def squash(text: str) -> str:
+    """空白を除く。複数行の引数並びを 1 行にした骨格は末尾のカンマを落とすので、``,)`` / ``,]`` は括弧だけにそろえる。"""
+    return re.sub(r",([)\]}])", lambda m: m.group(1), re.sub(r"\s+", "", text))
+
+
+# --- T-00 -----------------------------------------------------------------------------------------
+
+
+async def test_t00_postcondition_1_2_4_roots_reindex_and_invalid_roots(rig: Rig, tmp_path: Path) -> None:
+    """PC:T-00#1 PC:T-00#2 PC:T-00#4 — set_roots の登録と ID、reindex の job_id、存在しないパスの拒否で状態が変わらない。"""
+    root = str(rig.root)
+    # 事後条件 1
+    r = await rig.ok("configure_workspace", action="set_roots", root_paths=[root])
+    st = await rig.ok("configure_workspace", action="status")
+    workspaces = st["data"]["workspaces"]
+    assert [w["root_path"].replace("\\", "/").lower() for w in workspaces] == [
+        root.replace("\\", "/").lower()
+    ], (r, st)
+    assert all(WS_ID.fullmatch(w["workspace_id"]) for w in workspaces)
+    # 事後条件 2: reindex は 100 ms 以内に job_id を返し、直後の status に queued / running で現れる
+    re_idx = await rig.ok("configure_workspace", action="reindex", reindex_scope="all")
+    assert re_idx["timing_ms"] <= 100
+    job_id = re_idx["data"]["job_id"]
+    assert job_id
+    jobs = {j["job_id"]: j for j in (await rig.ok("configure_workspace", action="status"))["data"]["jobs"]}
+    assert jobs[job_id]["state"] in ("queued", "running"), jobs[job_id]
+    # 事後条件 4: 存在しないパスを含む set_roots は E_INVALID_ARGUMENT で、前後の workspaces[] が同一
+    before = (await rig.ok("configure_workspace", action="status"))["data"]["workspaces"]
+    bad = await rig.call(
+        "configure_workspace", action="set_roots", root_paths=[root, str(tmp_path / "no-such-dir")]
+    )
+    assert bad.is_error and bad.structured["error"]["code"] == "E_INVALID_ARGUMENT", bad.text
+    after = (await rig.ok("configure_workspace", action="status"))["data"]["workspaces"]
+    assert after == before
+
+
+async def test_t00_postcondition_3_set_python_env_restarts_the_python_lsp(rig: Rig) -> None:
+    """PC:T-00#3 — set_python_env の正規化と、Python 系 LSP の started_at が呼び出し後であること（F-TS は Python LSP が無いので正規化だけ）。"""
+    called_at = datetime.now(UTC)
+    await rig.ok("configure_workspace", action="set_roots", root_paths=[str(rig.root)])
+    r = await rig.ok("configure_workspace", action="set_python_env", python_interpreter=sys.executable)
+    job_id = r["data"].get("job_id")
+    if job_id:
+        for _ in range(600):
+            jobs = {
+                j["job_id"]: j for j in (await rig.ok("configure_workspace", action="status"))["data"]["jobs"]
+            }
+            if jobs.get(job_id, {}).get("state") in ("done", "failed"):
+                break
+            await _tick()
+    st = await rig.ok("configure_workspace", action="status")
+    (w,) = st["data"]["workspaces"]
+    assert Path(w["python_env"]["interpreter"]).resolve() == Path(sys.executable).resolve()
+    python = [d for d in st["data"]["lsp_daemons"] if d["language"] == "python"]
+    if rig.language == "python":
+        assert {d["role"] for d in python} == {"types", "lint"}
+        assert all(datetime.fromisoformat(d["started_at"]) > called_at for d in python), python
+    else:
+        assert not any(
+            d["status"] == "ready" for d in python
+        )  # TypeScript のワークスペースに Python の LSP は起こさない
+
+
+async def _tick() -> None:
+    import asyncio
+
+    await asyncio.sleep(0.1)
+
+
+# --- T-01 -----------------------------------------------------------------------------------------
+
+
+async def test_t01_postcondition_1_2_3_4_5_repo_map(rig: Rig) -> None:
+    """PC:T-01#1 PC:T-01#2 PC:T-01#3 PC:T-01#4 PC:T-01#5 — rank の非増加・シンボル数・除外・total_estimate・予算。"""
+    full = await rig.ok("get_repo_map", max_tokens=20000, max_symbols_per_file=3, include_tests=True)
+    files = full["data"]["files"]
+    assert len(files) >= 10
+    ranks = [f["rank"] for f in files]
+    assert ranks == sorted(ranks, reverse=True)  # 事後条件 1
+    assert all(len(f["symbols"]) <= 3 for f in files)  # 事後条件 2
+    assert full["budget"]["used_tokens_est"] <= full["budget"]["max_tokens"]  # 事後条件 5
+    # 事後条件 4: 切り詰めても total_estimate は範囲内の対象ファイル総数
+    small = await rig.ok("get_repo_map", max_tokens=800, include_tests=True)
+    assert len(small["data"]["files"]) < len(full["data"]["files"])
+    assert small["page"]["total_estimate"] == full["page"]["total_estimate"] == len(full["data"]["files"])
+    assert small["budget"]["used_tokens_est"] <= 800  # 事後条件 5
+    # 事後条件 3: .gitignore と exclude_globs に一致するパスは現れない（複製に .gitignore を足して確かめる）
+    victim = files[0]["path"]
+    await rig.ok("configure_workspace", action="set_excludes", exclude_globs=[victim])
+    excluded = await rig.ok("get_repo_map", max_tokens=20000, include_tests=True)
+    assert victim not in {f["path"] for f in excluded["data"]["files"]}
+    # フィクスチャ自身の .gitignore の（ワイルドカードの無い）パターンに一致するパスは現れない
+    gitignore = rig.root / ".gitignore"
+    patterns = [
+        ln.strip().strip("/")
+        for ln in (gitignore.read_text(encoding="utf-8").splitlines() if gitignore.is_file() else [])
+        if ln.strip() and not ln.startswith(("#", "!")) and not any(c in ln for c in "*?[")

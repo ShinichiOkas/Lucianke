@@ -1,0 +1,5 @@
+SELECT language, tier, confidence_level, COUNT(*) AS files
+FROM files
+WHERE confidence_level <> 'exact'
+GROUP BY language, tier, confidence_level
+ORDER BY files DESC;

@@ -1,0 +1,8 @@
+# query_call_hierarchy ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~380/2000tok
+- root: [Method] lk://app/src/services/payment.py#PaymentProcessor.process_charge direction=incoming depth=2
+<- create_order @src/api/routes.py:88  when: req.amount > 0 && !order.paid
+  <- handle_post_order @src/api/app.py:41  when: auth.ok
+<- retry_order @src/api/routes.py:131  when: attempt < 3
+  <- scheduler_tick @src/jobs/retry.py:20
+  <- retry_order @src/api/routes.py:140 (cycle)
+<- test_charge_ok @tests/test_payment.py:44

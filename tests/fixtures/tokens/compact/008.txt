@@ -1,0 +1,8 @@
+# search_workspace_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~300/1500tok
+- query: "process_charge" match=fuzzy hits=3
+[Method] src/services/payment.py#PaymentProcessor.process_charge(self, req: PaymentRequest) -> Receipt @L40-115
+  urn: lk://app/src/services/payment.py#PaymentProcessor.process_charge
+[Function] src/legacy/charge.py#process_charge_v1(order_id: str) -> dict @L10-55
+  urn: lk://app/src/legacy/charge.py#process_charge_v1
+[Function] tests/test_payment.py#test_process_charge_ok() @L40-60
+  urn: lk://app/tests/test_payment.py#test_process_charge_ok

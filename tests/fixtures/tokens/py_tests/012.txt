@@ -1,0 +1,168 @@
+    return root / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+
+
+def test_env_var_names():
+    assert env_var_name("python") == "LUCIANKE_LSP_PYTHON_CMD"
+    assert env_var_name("python", "lint") == "LUCIANKE_LSP_PYTHON_LINT_CMD"
+    assert env_var_name("c_sharp") == "LUCIANKE_LSP_C_SHARP_CMD"
+    assert env_var_name("tsx") == "LUCIANKE_LSP_TSX_CMD"
+    assert server_env_var_name("ruff") == "LUCIANKE_LSP_RUFF_CMD"
+    assert server_env_var_name("typescript-language-server") == "LUCIANKE_LSP_TYPESCRIPT_LANGUAGE_SERVER_CMD"
+    assert default_server("python").server_env_var == "LUCIANKE_LSP_BASEDPYRIGHT_CMD"  # type: ignore[union-attr]
+
+
+def test_env_var_overrides_everything(tmp_path: Path):
+    make_exe(venv_bin(tmp_path), exe("basedpyright-langserver"))
+    based = default_server("python")
+    assert based is not None
+    argv = find_command(
+        based, workspace_root=tmp_path, environ={"LUCIANKE_LSP_PYTHON_CMD": "my-lsp --stdio -v"}
+    )
+    assert argv == ["my-lsp", "--stdio", "-v"]
+    # 空・空白だけの値は「未指定」
+    found = find_command(
+        based, workspace_root=tmp_path, environ={"LUCIANKE_LSP_PYTHON_CMD": "  ", "PATH": ""}
+    )
+    assert found is not None
+    assert Path(found[0]).parent == venv_bin(tmp_path)
+
+
+def test_env_var_override_applies_per_role(tmp_path: Path):
+    env = {"LUCIANKE_LSP_PYTHON_CMD": "my-types --stdio", "PATH": ""}
+    assert find_command(servers_for("python", "types")[0], workspace_root=tmp_path, environ=env) == [
+        "my-types",
+        "--stdio",
+    ]
+    assert find_command(servers_for("python", "types")[1], workspace_root=tmp_path, environ=env) == [
+        "my-types",
+        "--stdio",
+    ]
+    assert (
+        find_command(servers_for("python", "lint")[0], workspace_root=tmp_path, environ=env) is None
+    )  # ruff には効かない
+    env = {"LUCIANKE_LSP_PYTHON_LINT_CMD": "my-lint server", "PATH": ""}
+    assert find_command(servers_for("python", "lint")[0], workspace_root=tmp_path, environ=env) == [
+        "my-lint",
+        "server",
+    ]
+
+
+def test_server_name_env_var_overrides_only_that_server(tmp_path: Path):
+    based, pyright = servers_for("python", "types")
+    ruff = default_server("python", "lint")
+    assert ruff is not None
+    env = {
+        "LUCIANKE_LSP_BASEDPYRIGHT_CMD": "my-based --stdio",
+        "LUCIANKE_LSP_RUFF_CMD": "my-ruff server",
+        "PATH": "",
+    }
+    assert find_command(based, workspace_root=tmp_path, environ=env) == ["my-based", "--stdio"]
+    assert find_command(ruff, workspace_root=tmp_path, environ=env) == ["my-ruff", "server"]
+    assert find_command(pyright, workspace_root=tmp_path, environ=env) is None  # 代替には効かない
+    # サーバー名 → 言語の順。サーバー名の値が不正なら言語単位に落ちる
+    env = {"LUCIANKE_LSP_BASEDPYRIGHT_CMD": "by-name", "LUCIANKE_LSP_PYTHON_CMD": "by-language", "PATH": ""}
+    assert find_command(based, workspace_root=tmp_path, environ=env) == ["by-name"]
+    assert find_command(pyright, workspace_root=tmp_path, environ=env) == ["by-language"]
+    env = {"LUCIANKE_LSP_BASEDPYRIGHT_CMD": '"broken', "LUCIANKE_LSP_PYTHON_CMD": "by-language", "PATH": ""}
+    assert find_command(based, workspace_root=tmp_path, environ=env) == ["by-language"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows のパスの扱い")
+def test_split_command_keeps_windows_backslashes():
+    assert split_command(r"C:\tools\ls.exe --stdio") == [r"C:\tools\ls.exe", "--stdio"]
+    assert split_command(r'"C:\Program Files\ls\ls.exe" --stdio') == [
+        r"C:\Program Files\ls\ls.exe",
+        "--stdio",
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX のシェル風の分割")
+def test_split_command_posix():
+    assert split_command("'/opt/my tools/ls' --stdio") == ["/opt/my tools/ls", "--stdio"]
+
+
+def test_invalid_env_value_is_ignored_with_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    make_exe(venv_bin(tmp_path), exe("ruff"))
+    ruff = default_server("python", "lint")
+    assert ruff is not None
+    caplog.set_level(logging.WARNING, logger="lucianke.lsp.servers")
+    argv = find_command(
+        ruff, workspace_root=tmp_path, environ={"LUCIANKE_LSP_PYTHON_LINT_CMD": '"unclosed', "PATH": ""}
+    )
+    assert argv is not None
+    assert argv[1:] == ["server"]
+    assert any("LUCIANKE_LSP_PYTHON_LINT_CMD" in r.getMessage() for r in caplog.records)
+
+
+def test_search_order_venv_then_node_modules_then_path(tmp_path: Path):
+    ruff = default_server("python", "lint")
+    assert ruff is not None
+    path_dir = tmp_path / "pathdir"
+    explicit_venv = tmp_path / "other-venv"
+    in_explicit = make_exe(venv_bin_of(explicit_venv), exe("ruff"))
+    in_venv = make_exe(venv_bin(tmp_path), exe("ruff"))
+    in_modules = make_exe(tmp_path / "node_modules" / ".bin", shim("ruff"))
+    in_path = make_exe(path_dir, exe("ruff"))
+    env = {"PATH": str(path_dir)}
+
+    def find(**kw: Any) -> list[str] | None:
+        return find_command(ruff, workspace_root=tmp_path, environ=env, **kw)
+
+    assert find(venv=explicit_venv) == [str(in_explicit), "server"]
+    assert find() == [str(in_venv), "server"]
+    in_venv.unlink()
+    assert find() == [str(in_modules), "server"]
+    in_modules.unlink()
+    assert find() == [str(in_path), "server"]
+    in_path.unlink()
+    assert find() is None
+    assert find(venv=explicit_venv) == [str(in_explicit), "server"]
+
+
+def test_host_venv_is_searched_after_workspace_and_before_path(tmp_path: Path):
+    """BUG-0037: ``.venv`` の無いワークスペースでも、Lucianke 自身の Python 環境の basedpyright を PATH 上の別の pyright より先に拾う。"""
+    based, pyright = servers_for("python", "types")
+    assert (based.name, pyright.name) == ("basedpyright", "pyright")
+    host = tmp_path / "lucianke-venv"
+    path_dir = tmp_path / "pathdir"
+    ws_root = tmp_path / "ws"
+    ws_root.mkdir()
+    in_path = make_exe(path_dir, exe("pyright-langserver"))
+    in_host = make_exe(venv_bin_of(host), exe("basedpyright-langserver"))
+    env = {"PATH": str(path_dir)}
+
+    # 症状: Lucianke の環境を見ないと、既定の basedpyright は見つからず PATH 上の pyright に落ちる
+    assert find_command(based, workspace_root=ws_root, environ=env) is None
+    assert find_command(pyright, workspace_root=ws_root, environ=env) == [str(in_path), "--stdio"]
+    # 直し: host_venv を渡すと basedpyright が見つかる（優先順の先頭）
+    assert find_command(based, workspace_root=ws_root, host_venv=host, environ=env) == [
+        str(in_host),
+        "--stdio",
+    ]
+    # ワークスペースの venv は host_venv より先（プロジェクトが固定した版が勝つ）
+    in_ws = make_exe(venv_bin(ws_root), exe("basedpyright-langserver"))
+    assert find_command(based, workspace_root=ws_root, host_venv=host, environ=env) == [
+        str(in_ws),
+        "--stdio",
+    ]
+    in_ws.unlink()
+    # host_venv の実行ファイルが無ければ見つからない（PATH に basedpyright が無い）。pyright は PATH から
+    in_host.unlink()
+    assert find_command(based, workspace_root=ws_root, host_venv=host, environ=env) is None
+    assert find_command(pyright, workspace_root=ws_root, host_venv=host, environ=env) == [
+        str(in_path),
+        "--stdio",
+    ]
+    in_path.unlink()
+    assert find_command(pyright, workspace_root=ws_root, host_venv=host, environ=env) is None
+
+
+def test_host_venv_is_the_running_interpreters_prefix():
+    assert host_venv() == Path(sys.prefix)
+
+
+def venv_bin_of(venv: Path) -> Path:
+    return venv / ("Scripts" if sys.platform == "win32" else "bin")
+
+
+def test_typescript_servers_are_found_in_node_modules_bin(tmp_path: Path):

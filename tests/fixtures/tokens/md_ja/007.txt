@@ -1,0 +1,157 @@
+9. `revision` 指定時はその断面のファイルから抽出し、DB には書き込まない。
+
+**出力**
+
+compact の例:
+
+```
+# extract_code_contracts ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~380/2000tok
+=== src/pricing.py (88 lines) ===
+[Function] apply_discount(price: Decimal, rate: int) -> Decimal @L12-30
+  urn: lk://app/src/pricing.py#apply_discount
+- PRE [TYPE] rate: int
+- PRE [GUARD] rate >= 0 and rate <= 100  @L14
+- PRE [DOCSTRING] price > 0
+- POST [DOCSTRING] return >= 0
+- THROWS [GUARD] ValueError when rate < 0 or rate > 100  @L14
+- INVARIANT [DOCSTRING] "割引額は端数を切り捨てる"  smt=null (unparsed_text)
+# summary: contracts 6, smt generated 5/6
+```
+
+json の `data`:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `target` | object | `{path, urn}`。ファイル全体なら `urn` はファイル URN |
+| `contracts[]` | array | 契約。各要素は下表 |
+| `summary` | object | `{total, by_contract_type, by_source_kind, smt_generated}` |
+| `linked_specs[]` | array | `link_external_specs` で結び付けた外部仕様の `{path, kind, matched_symbols}` |
+
+`contracts[]` の要素:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `contract_id` | string | 処理規約 7 の決定論的 ID |
+| `target_urn` | string | 契約が属するシンボル |
+| `contract_type` | enum | `PRE` \| `POST` \| `INVARIANT` \| `THROWS` |
+| `source_kind` | enum | `TYPE` \| `GUARD` \| `DOCSTRING` \| `OPENAPI` \| `GHERKIN` |
+| `expression` | string | T-16 の制約式文法（§11.6 T-16）に従う人間可読の式。変換できなかった原文はそのまま |
+| `parsed_from_text` | boolean | 自然文の定型パターンから式を得たとき true |
+| `smt_lib` | string \| null | SMT-LIB v2 の `(assert ...)` 式 |
+| `smt_reason` | string \| null | `smt_lib` が null のときの理由（`unparsed_text`, `unsupported_type`, `nonlinear`, `include_smt_false`） |
+| `location` | object | `{path, line}`。`TYPE` はシグネチャ行、`GUARD` はガード文の行、`DOCSTRING` はタグ行、外部仕様はその仕様ファイルの行 |
+| `confidence_level` | enum | §5.5 |
+
+**エラー**
+
+- `E_TARGET_NOT_FOUND`: `path` が存在しない、または `symbol_name` が 0 件。
+- `E_TARGET_AMBIGUOUS`: `symbol_name` が 2 件以上。
+- `E_INVALID_ARGUMENT`: `sources` に未知の値。
+- `E_UNSUPPORTED`: 対象が Tier 4、バイナリ、または OpenAPI / Gherkin として解析できない仕様ファイル（`details.reason` に解析エラー位置）。
+- `E_REVISION_NOT_FOUND` / `E_WORKSPACE_NOT_CONFIGURED` / `E_CURSOR_EXPIRED`: §5.8 のとおり。
+
+**精度と降格**
+
+| 水準 | 挙動 |
+|---|---|
+| `exact` | 5 系統すべて。型エイリアス・ジェネリクスは LSP で展開してから変換する。ガード式中の名前はスコープ解決済み |
+| `structural` | 5 系統すべて。型は書かれたままの文字列で扱い、未知の型名は `smt_reason: "unsupported_type"`。ガード式は AST から取るが名前解決はしない |
+| `heuristic` | `DOCSTRING` / `OPENAPI` / `GHERKIN` のみ。`TYPE` / `GUARD` は返さず `warnings` に理由。`smt_lib` はすべて null |
+| `lexical_fallback` | ソースファイルは `E_UNSUPPORTED`。OpenAPI / Gherkin は専用パーサで扱うため、この水準には落ちない |
+
+**事後条件**
+
+1. 応答生成の過程で外部 LLM API を呼ばない。サーバーのログに LLM 呼び出しの記録が無く、処理中にワークスペース外へのネットワーク送信が発生しない。
+2. 同一のファイル内容と同一の入力に対する 2 回の呼び出しは、`contract_id` を含めて同一の `contracts[]` を返す。
+3. `smt_lib` が非 null の各契約は、SMT-LIB v2 のパーサで構文エラーなく読め、先頭の S 式が `assert` である。
+4. `source_kind: "GUARD"` の各契約の `location.line` は、`target_urn` のシンボルの `start_line` 以上 `end_line` 以下である。
+5. `revision` 省略時、返した契約数は `contracts` テーブルで `target_urn` が一致する行数と等しい。
+
+---
+
+### T-16 `verify_contract`
+
+**目的**: 対象関数の実装（AST から得た SSA 形式の制御フローと演算式）が、事前条件のもとで事後条件・不変条件・暗黙の安全性を満たすかを SMT ソルバで判定し、違反があれば具体的な反例入力を返す。
+
+**マイルストーン**: M3
+
+**対応要求**: FR-VER-3, FR-VER-2, FR-FMT-2, FR-FMT-3, NFR-PERF-2
+
+**入力**（`max_tokens` の既定は 2000）
+
+| パラメータ | 型 | 必須 | 既定 | 規約 |
+|---|---|---|---|---|
+| `target` | object | MUST | — | §5.3 の TargetRef。関数・メソッドに限る |
+| `postconditions` | array of string | MUST | — | 1 件以上。下記の制約式文法に従う |
+| `preconditions` | array of string | MAY | なし | 省略時は T-15 の `PRE` 契約を自動適用する |
+| `invariants` | array of string | MAY | なし | ループ不変条件・クラス不変条件 |
+| `check_implicit_safety` | boolean | MAY | true | ゼロ除算・配列境界外・Null 参照・整数オーバーフローを同時に検査する |
+| `loop_unroll_depth` | integer | MAY | 3 | 0〜10 |
+| `timeout_ms` | integer | MAY | 500 | 50〜5000。ソルバに与える上限 |
+| `assume_callees` | object | MAY | なし | 呼び出し先の名前または URN → 事後条件式の配列。未モデル呼び出しに仮定を与える |
+
+制約式の文法（`preconditions` / `postconditions` / `invariants` / `assume_callees` の値、および T-15 の `expression`）:
+
+```ebnf
+expr     = or-expr ;
+or-expr  = and-expr , { ( "||" | "or" ) , and-expr } ;
+and-expr = not-expr , { ( "&&" | "and" ) , not-expr } ;
+not-expr = [ "!" | "not" ] , cmp ;
+cmp      = arith , [ ( "==" | "!=" | "<" | "<=" | ">" | ">=" | "implies" ) , arith ] ;
+arith    = term , { ( "+" | "-" ) , term } ;
+term     = unary , { ( "*" | "/" | "%" ) , unary } ;
+unary    = [ "-" ] , primary ;
+primary  = number | string | "true" | "false" | "null" | "return"
+         | "old(" , ident , ")" | "len(" , ident , ")" | "is_null(" , ident , ")"
+         | ident , [ "(" , [ expr , { "," , expr } ] , ")" ] | "(" , expr , ")" ;
+ident    = name , { "." , name } ;
+```
+
+`return` は戻り値、`old(x)` は関数入口での `x` の値、`len(x)` は列・文字列の長さ、`is_null(x)` は Null 判定を表す。自然言語で書かれた仕様をこの文法の式に直すのは **ホスト側エージェントの責務** であり、Lucianke は式を受け取るだけである。
+
+**処理規約**
+
+1. `target` を §5.3 で解決する。対象が関数・メソッドでなければ `E_INVALID_ARGUMENT`。Tier 1 以外は `E_UNSUPPORTED`（Cython は MAY）。
+2. 入力の各式を上記文法で構文解析する。1 つでも失敗したら `E_INVALID_ARGUMENT`（`details.errors[] {field, index, message}`）。式中の `ident` が対象関数の引数・戻り値・ローカル変数・`self` 属性のいずれにも一致しなければ同じく `E_INVALID_ARGUMENT`。
+3. `preconditions` 省略時は T-15 を同じ `target` で実行し、`contract_type: PRE` の契約のうち `smt_lib` が非 null のものを採用する。採用した契約は応答の `preconditions_used[]` に `origin: "contracts"` として列挙する。
+4. 関数本体を SSA 形式に変換する。対象とする構文は代入・算術・比較・論理・`if` / `match` / 三項・`return` / `raise` / `for` / `while`・ローカル呼び出し。`for` / `while` は `loop_unroll_depth` 回まで展開する。
+5. 呼び出し先は、`assume_callees` に仮定があればその事後条件を使い、無ければ未解釈関数として扱い `unmodeled_calls[]` に記録する。再帰呼び出しも未解釈関数として扱う。
+6. `check_implicit_safety` が true のとき、除算・剰余のたびに「除数 ≠ 0」、添字アクセスのたびに「0 ≤ i < len」、属性アクセスのたびに「非 Null」、固定幅整数の演算のたびに「型の範囲内」を検査項目に加える。Python の `int` は任意精度のためオーバーフロー検査の対象外とし、その旨を `implicit_checks[]` に `skipped` で残す。
+7. 判定: 「事前条件 ∧ 実装の経路条件 ∧ ¬（事後条件 ∧ 暗黙検査）」の充足可能性をソルバに問う。充足なら `VIOLATED`、充足不能かつループ無しなら `VERIFIED`、充足不能かつループ有りなら `BOUNDED_VERIFIED`、`timeout_ms` 到達または非線形・未対応演算で判定不能なら `UNKNOWN_OR_TIMEOUT`。いずれも `ok: true` で返す（ソルバのタイムアウトはエラーではなく判定結果）。
+8. `VIOLATED` のとき、ソルバのモデルから引数と `self` 属性の値を `counterexample.inputs` に、経路上の各分岐の行・真偽・その時点の変数値を `execution_path_trace[]` に書く。
+9. ソルバの乱数シードは固定し（MUST）、同一入力で同一の `status` を返す。反例の具体値はソルバの実装に依存するため同一性を要求しない。
+10. `preconditions` を自動適用した場合に限り、採用した契約の `contracts.last_verify_status` を `status` で更新する。エージェントが与えた式は DB に保存しない。
+11. 本ツールはページネーションしない。`execution_path_trace[]` が予算を超えるときは末尾を省き、`# summary:` に省略ステップ数を書く。
+12. ツール全体の実行時間（抽出・SSA 変換・ソルバ）が `timeout_ms + 2000 ms` を超えたら `E_TIMEOUT`。
+
+**出力**
+
+compact の例:
+
+```
+# verify_contract ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~420/2000tok
+target: lk://app/src/pricing.py#apply_discount  status: VIOLATED  solver=smt 118ms unroll=3
+pre: rate >= 0 && rate <= 100 ; price > 0  (2 from contracts)
+post: return >= 0 ; return <= price  (2 given)
+violated: implicit_safety.division_by_zero @L54
+counterexample: price=100 rate=100
+trace:
+- 1. @L50 if rate > 0 -> true  (rate=100)
+- 2. @L54 factor = 100 / (100 - rate)  divisor=0
+unmodeled_calls: [lk://app/src/pricing.py#round_half_up]
+```
+
+json の `data`:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `target` | object | `{urn, path, signature}` |
+| `status` | enum | `VERIFIED` \| `VIOLATED` \| `BOUNDED_VERIFIED` \| `UNKNOWN_OR_TIMEOUT` |
+| `solver` | object | `{engine, time_ms, timeout_ms, loop_unroll_depth, loops_found}` |
+| `preconditions_used[]` | array | `{expression, origin: "given" \| "contracts", contract_id}` |
+| `postconditions[]` | array | `{expression, result: "holds" \| "violated" \| "unknown"}` |
+| `invariants[]` | array | 同上 |
+| `implicit_checks[]` | array | `{kind: "division_by_zero" \| "index_out_of_bounds" \| "null_dereference" \| "integer_overflow", line, result: "holds" \| "violated" \| "unknown" \| "skipped"}` |
+| `counterexample` | object \| null | `{inputs: {名前: 値}, state: {self.属性: 値}}`。`VIOLATED` 以外は null |
+| `execution_path_trace[]` | array | `{step, line, kind: "branch" \| "assign" \| "call" \| "return", text, values}` |
+| `unmodeled_calls[]` | array | `{urn, name, treated_as: "uninterpreted" \| "assumed"}` |

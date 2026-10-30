@@ -1,0 +1,11 @@
+# extract_code_contracts ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~380/2000tok
+=== src/pricing.py (88 lines) ===
+[Function] apply_discount(price: Decimal, rate: int) -> Decimal @L12-30
+  urn: lk://app/src/pricing.py#apply_discount
+- PRE [TYPE] rate: int
+- PRE [GUARD] rate >= 0 and rate <= 100  @L14
+- PRE [DOCSTRING] price > 0
+- POST [DOCSTRING] return >= 0
+- THROWS [GUARD] ValueError when rate < 0 or rate > 100  @L14
+- INVARIANT [DOCSTRING] "割引額は端数を切り捨てる"  smt=null (unparsed_text)
+# summary: contracts 6, smt generated 5/6

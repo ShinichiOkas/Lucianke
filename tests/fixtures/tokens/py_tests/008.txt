@@ -1,0 +1,142 @@
+        "kind": "Function",
+        "range": {"start_line": 1, "end_line": 1},
+        "confidence_level": "structural",
+    }
+    rec = SymbolRecord.from_json(minimal)
+    assert rec.modifiers == ()
+    assert rec.selection is None
+    assert rec.signature is None
+    assert rec.confidence is Confidence.STRUCTURAL
+
+
+def test_symbol_record_rejects_bad_json() -> None:
+    bad_unknown = {**SPEC_SYMBOL_JSON, "extra": 1}
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json(bad_unknown)
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json({k: v for k, v in SPEC_SYMBOL_JSON.items() if k != "kind"})
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json({**SPEC_SYMBOL_JSON, "kind": "method"})
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json({**SPEC_SYMBOL_JSON, "confidence_level": "certain"})
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json({**SPEC_SYMBOL_JSON, "urn": "not-a-urn"})
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json({**SPEC_SYMBOL_JSON, "range": {"start_line": 0, "end_line": 3}})
+    with pytest.raises(ValueError):
+        SymbolRecord.from_json(
+            {**SPEC_SYMBOL_JSON, "selection_range": {"line": 0, "start_col": 1, "end_col": 2}}
+        )
+
+
+def test_symbol_record_multiline_selection_cannot_be_serialized() -> None:
+    rec = _symbol(selection=Range(Position(1, 0), Position(2, 3)))
+    with pytest.raises(ValueError):
+        rec.to_json()
+
+
+def test_symbol_record_is_frozen_hashable_keyword_only() -> None:
+    rec = _symbol()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        rec.name = "g"  # type: ignore[misc]
+    assert hash(rec) == hash(_symbol())
+    with pytest.raises(TypeError):
+        SymbolRecord(rec.urn, rec.path)  # type: ignore[misc]
+
+
+# --- TargetRef ---------------------------------------------------------------------------
+
+SPEC_TARGET_EXAMPLES = [
+    {"urn": "lk://app/src/services/auth.py#AuthService.login"},
+    {"path": "src/services/auth.py", "symbol_name": "AuthService.login"},
+    {"path": "src/services/auth.py", "line": 42, "character": 9},
+]
+
+
+@pytest.mark.parametrize("data", SPEC_TARGET_EXAMPLES)
+def test_target_ref_spec_examples_roundtrip(data: dict[str, object]) -> None:
+    ref = TargetRef.from_json(data)
+    assert ref.to_json() == data
+    assert TargetRef.from_json(ref.to_json()) == ref
+
+
+def test_target_ref_line_and_character_are_zero_based_internally() -> None:
+    ref = TargetRef.from_json({"path": "a.py", "line": 42, "character": 9})
+    assert ref.line == 41
+    assert ref.character == 8
+    assert TargetRef(path="a.py", line=0, character=0).to_json() == {
+        "path": "a.py",
+        "line": 1,
+        "character": 1,
+    }
+
+
+def test_target_ref_variable_name() -> None:
+    data = {"urn": "lk://app/a.py#f", "variable_name": "x"}
+    assert TargetRef.from_json(data).to_json() == data
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"path": "a.py", "line": 0},
+        {"path": "a.py", "line": -3},
+        {"path": "a.py", "line": 1, "character": 0},
+        {"path": "a.py", "line": 1.5},
+        {"path": "a.py", "line": True},
+        {"path": "a.py", "line": "3"},
+        {"path": "a.py", "character": 3},
+        {"path": "a.py", "colon": 3},
+        {"path": ""},
+        {"urn": 5},
+    ],
+)
+def test_target_ref_rejects_invalid(data: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        TargetRef.from_json(data)
+
+
+def test_target_ref_resolution_form_precedence() -> None:
+    # 仕様書 §5.3 規則 4: urn > line > symbol_name。残りは無視（warnings 用に名前を返す）
+    both = TargetRef(urn="lk://a/x.py#f", path="x.py", line=3, symbol_name="f")
+    assert both.resolution_form() == ("urn", ("line", "symbol_name"))
+    assert TargetRef(path="x.py", line=3, symbol_name="f").resolution_form() == ("line", ("symbol_name",))
+    assert TargetRef(path="x.py", symbol_name="f").resolution_form() == ("symbol_name", ())
+    assert TargetRef(urn="lk://a/x.py#f").resolution_form() == ("urn", ())
+    assert TargetRef(path="x.py").resolution_form() == ("path", ())
+
+
+def test_target_ref_resolution_form_errors() -> None:
+    with pytest.raises(ValueError):
+        TargetRef().resolution_form()
+    with pytest.raises(ValueError):
+        TargetRef(symbol_name="f").resolution_form()
+    with pytest.raises(ValueError):
+        TargetRef(line=3).resolution_form()
+
+
+# --- FileInfo / EngineChoice -------------------------------------------------------------
+
+
+def test_file_info_and_engine_choice() -> None:
+    fi = FileInfo(
+        file_id=1,
+        workspace_id="app",
+        path=RelPath("src/a.py"),
+        language="python",
+        tier=Tier.T1,
+        sha256="0" * 64,
+        line_count=10,
+        byte_size=100,
+        is_test=False,
+        confidence=Confidence.EXACT,
+    )
+    assert fi.tier is Tier.T1
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        fi.file_id = 2  # type: ignore[misc]
+    ec = EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, lsp_status="standby")
+    assert ec.lsp_progress is None
+    assert ec.warning is None
+    assert EngineChoice(engine="x", confidence=Confidence.EXACT).lsp_status == "n/a"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ec.engine = "y"  # type: ignore[misc]

@@ -1,0 +1,8 @@
+SELECT f.path, COUNT(*) AS undocumented
+FROM symbols s JOIN files f ON f.file_id = s.file_id
+WHERE s.kind = 'Method'
+  AND s.modifiers_json LIKE '%"pub"%'
+  AND (s.doc_summary IS NULL OR s.doc_summary = '')
+GROUP BY f.path
+ORDER BY undocumented DESC
+LIMIT 20;

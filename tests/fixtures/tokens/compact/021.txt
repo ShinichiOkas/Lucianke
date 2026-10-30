@@ -1,0 +1,11 @@
+# analyze_git_diff_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~980/3000tok
+diff: HEAD..WORKING_TREE  files=3  symbols: added 1, sig 1, body 2, deleted 0, renamed 0
+=== src/pricing.py (91 lines) ===
+[Function] apply_discount(price: Decimal, rate: int) -> Decimal @L12-30
+  change: MODIFIED_SIG  was (price: float, rate: int) -> float
+[Function] clamp_rate(rate: int) -> int @L33-38
+  change: ADDED
+uncommitted_diagnostics: 1
+E src/api/routes.py:88:30 [pyright:reportArgumentType] "float" は "Decimal" に割り当てできません  fix=qf_11a0
+impact: direct_breakage 2 sites / 1 file, transitive 4 symbols, co_change 2 files
+recommended_test_suite: tests/test_pricing.py::test_apply_discount, tests/test_routes.py::test_create_order

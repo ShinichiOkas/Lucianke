@@ -1,0 +1,167 @@
+    assert scalar(conn, "SELECT count(*) FROM symbols_fts WHERE symbols_fts MATCH 'baz'") == 1
+
+
+def test_body_change_keeps_urn_and_changes_body_hash(conn: sqlite3.Connection) -> None:
+    foo = sym("src/a.py", "baz", 1, 3, signature="(x) -> int")
+    key = str(foo.urn)
+    ingest(conn, facts(symbols=(foo,), extras={key: SymbolExtra(body_sha256="h1")}))
+    ingest(
+        conn,
+        facts(
+            path="src/b.py",
+            symbols=(sym("src/b.py", "use", 1, 2),),
+            relations=(rel(urn("src/b.py", "use"), foo.urn),),
+        ),
+    )
+    rowid_before = scalar(conn, "SELECT rowid FROM symbols WHERE urn = ?", key)
+
+    stats = ingest(conn, facts(symbols=(foo,), extras={key: SymbolExtra(body_sha256="h2")}, sha="s2"))
+
+    assert (stats.symbols_updated, stats.symbols_added, stats.symbols_removed) == (1, 0, 0)
+    assert rows(conn, "SELECT urn, body_sha256 FROM symbols WHERE name = 'baz'") == [(key, "h2")]
+    assert scalar(conn, "SELECT rowid FROM symbols WHERE urn = ?", key) == rowid_before
+    # 他ファイルからの関係は保たれる
+    assert queries.count_references_to(conn, foo.urn) == 1
+
+
+def test_signature_change_updates_fts(conn: sqlite3.Connection) -> None:
+    ingest(conn, facts(symbols=(sym("src/a.py", "baz", 1, 2, signature="(alpha)"),)))
+    ingest(conn, facts(symbols=(sym("src/a.py", "baz", 1, 2, signature="(omega)"),), sha="s2"))
+    assert rows(conn, "SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'omega'") == [("baz",)]
+    assert rows(conn, "SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'alpha'") == []
+
+
+def test_removed_symbol_takes_its_relations_with_it(conn: sqlite3.Connection) -> None:
+    a_syms = class_with_method("src/a.py")
+    bar, baz = a_syms[1].urn, a_syms[2].urn
+    ingest(conn, facts(symbols=a_syms, relations=(rel(baz, bar),)))
+    ingest(
+        conn,
+        facts(
+            path="src/b.py",
+            symbols=(sym("src/b.py", "use", 1, 2),),
+            relations=(rel(urn("src/b.py", "use"), bar),),
+        ),
+    )
+    assert queries.count_references_to(conn, bar) == 2
+
+    # Foo.bar を消して再取り込み
+    stats = ingest(conn, facts(symbols=(a_syms[0], a_syms[2]), sha="s2"))
+
+    assert stats.symbols_removed == 1
+    assert rows(conn, "SELECT urn FROM symbols WHERE urn LIKE '%Foo.bar'") == []
+    assert (
+        rows(conn, "SELECT * FROM relations WHERE target_urn = ? OR source_urn = ?", str(bar), str(bar)) == []
+    )
+    assert rows(conn, "SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'bar'") == []
+    assert scalar(conn, "SELECT count(*) FROM symbols") == 3  # Foo, baz, use
+
+
+def test_removed_parent_cascades_but_surviving_child_is_kept(conn: sqlite3.Connection) -> None:
+    ingest(conn, facts(symbols=class_with_method()))
+    # 親 Foo の URN が消え、子 Foo.bar は残る（修飾名から導く親が同じファイルに無い）
+    ingest(conn, facts(symbols=(class_with_method()[1],), sha="s2"))
+    assert rows(conn, "SELECT urn, parent_urn FROM symbols") == [("lk://w/src/a.py#Foo.bar", None)]
+
+
+def test_parent_is_chosen_by_range_among_same_qualified_names(conn: sqlite3.Connection) -> None:
+    syms = (
+        sym("src/a.py", "Foo", 1, 5, kind=Kind.CLASS),
+        sym("src/a.py", "Foo", 10, 20, kind=Kind.CLASS),  # 再定義（同じ URN になるので sighash 付きにする）
+        sym("src/a.py", "Foo.run", 12, 14, kind=Kind.METHOD),
+    )
+    redefined = SymbolRecord(
+        urn=Urn(WS, "src/a.py", CodeSel("Foo", None, "0123abcd")),
+        path=syms[1].path,
+        name="Foo",
+        qualified_name="Foo",
+        kind=Kind.CLASS,
+        range=syms[1].range,
+        selection=syms[1].selection,
+        confidence=Confidence.STRUCTURAL,
+    )
+    ingest(conn, facts(symbols=(syms[0], redefined, syms[2])))
+    assert scalar(conn, "SELECT parent_urn FROM symbols WHERE name = 'run'") == str(redefined.urn)
+
+
+def test_duplicate_urns_keep_the_first(conn: sqlite3.Connection) -> None:
+    first = sym("src/a.py", "dup", 1, 2, signature="(first)")
+    second = sym("src/a.py", "dup", 5, 6, signature="(second)")
+    stats = ingest(conn, facts(symbols=(first, second)))
+    assert stats.symbols_duplicate == 1 and stats.symbols_added == 1
+    assert rows(conn, "SELECT signature FROM symbols") == [("(first)",)]
+
+
+def test_symbol_of_another_file_is_rejected_and_rolled_back(conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="does not belong"):
+        ingest(conn, facts(path="src/a.py", symbols=(sym("src/other.py", "x", 1, 2),)))
+    assert scalar(conn, "SELECT count(*) FROM files") == 0
+    assert scalar(conn, "SELECT data_version FROM _meta") == 0
+
+
+def test_ingest_outside_a_transaction_is_refused(conn: sqlite3.Connection) -> None:
+    with pytest.raises(RuntimeError, match="transaction"):
+        ingest_file(conn, facts())
+    with pytest.raises(RuntimeError, match="transaction"):
+        remove_file(conn, WS, "src/a.py")
+
+
+def test_upsert_workspace_updates_only_given_columns(conn: sqlite3.Connection) -> None:
+    root = scalar(conn, "SELECT root_path FROM workspaces")
+    tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS, "root_path": root, "head_sha": "abc"}))
+    tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS, "root_path": root, "active_branch": "main"}))
+    assert rows(conn, "SELECT head_sha, active_branch, confidence_level FROM workspaces") == [
+        ("abc", "main", "exact")
+    ]
+    with pytest.raises(ValueError, match="unknown"):
+        tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS, "root_path": root, "bogus": 1}))
+
+
+# --- ingest: relations -------------------------------------------------------------------------
+
+
+def test_relations_are_replaced_including_exact_rows(conn: sqlite3.Connection) -> None:
+    a = class_with_method()
+    baz, bar = a[2].urn, a[1].urn
+    ingest(conn, facts(symbols=a, relations=(rel(baz, bar, line=12, col=4),)))
+    tx(conn, lambda c: upsert_exact_relations(c, [rel(baz, bar, line=12, col=4)]), bump=True)
+    assert rows(conn, "SELECT confidence_level FROM relations") == [("exact",)]
+
+    stats = ingest(
+        conn, facts(symbols=a, relations=(rel(baz, a[0].urn, kind="REFERENCES", line=13, col=1),), sha="s2")
+    )
+
+    assert stats.relations_removed == 1 and stats.relations_added == 1
+    assert rows(
+        conn,
+        "SELECT target_urn, relation_kind, confidence_level, call_site_line, call_site_col FROM relations",
+    ) == [(str(a[0].urn), "REFERENCES", "structural", 14, 2)]
+
+
+def test_relation_target_file_id_is_resolved_and_backfilled(conn: sqlite3.Connection) -> None:
+    target = urn("src/a.py", "baz")
+    ingest(
+        conn,
+        facts(
+            path="src/b.py",
+            symbols=(sym("src/b.py", "use", 1, 2),),
+            relations=(rel(urn("src/b.py", "use"), target),),
+        ),
+    )
+    assert scalar(conn, "SELECT target_file_id FROM relations") is None  # a.py はまだ無い
+
+    stats = ingest(conn, facts(symbols=(sym("src/a.py", "baz", 1, 2),)))
+
+    a_id = scalar(conn, "SELECT file_id FROM files WHERE path = 'src/a.py'")
+    assert stats.file_id == a_id
+    assert scalar(conn, "SELECT target_file_id FROM relations") == a_id
+    b_id = scalar(conn, "SELECT file_id FROM files WHERE path = 'src/b.py'")
+    assert scalar(conn, "SELECT source_file_id FROM relations") == b_id
+
+
+def test_external_symbols_get_a_minimal_row(conn: sqlite3.Connection) -> None:
+    use = urn("src/a.py", "use")
+    f = facts(
+        symbols=(sym("src/a.py", "use", 1, 5),),
+        relations=(
+            rel(use, "lk://_ext/requests@2.31#Session.get", kind="CALLS", line=2),

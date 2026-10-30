@@ -1,0 +1,11 @@
+WITH RECURSIVE callers(urn, depth) AS (
+  SELECT :target, 0
+  UNION
+  SELECT r.source_urn, c.depth + 1
+  FROM relations r JOIN callers c ON r.target_urn = c.urn
+  WHERE r.relation_kind = 'CALLS' AND c.depth < 3
+)
+SELECT c.urn, c.depth, s.signature, s.confidence_level
+FROM callers c JOIN symbols s ON s.urn = c.urn
+WHERE c.depth > 0
+ORDER BY c.depth, c.urn;

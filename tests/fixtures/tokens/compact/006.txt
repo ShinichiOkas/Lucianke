@@ -1,0 +1,20 @@
+# get_file_skeleton ok conf=structural lsp=n/a rev=WORKING_TREE ws=app ~640/2000tok
+=== notebooks/eda.ipynb (310 lines, 12 cells, skeleton: 9 lines, sha=4f1e9a0b7c2d) ===
+[Cell] 1 markdown @L1-3
+  doc: # 売上データの探索
+[Cell] 3 code (exec_count: 12) @L10-48
+  [Function] load_frame(path: str) -> pd.DataFrame @L12-30 { ...19 lines omitted }
+=== reports/junit.xml (5120 lines, skeleton: 4 lines, sha=9b2c7d0e1f3a) ===
+[Tag] testsuite @L2-5120
+  type: attrs=[name,tests,failures,time]
+  [Tag] testcase ×412 @L3-5118
+    [Tag] failure ×3 @L61-4977
+=== pyproject.toml (61 lines, skeleton: 5 lines, sha=0a1b2c3d4e5f) ===
+[Key] project @L1-20
+  [Key] dependencies ×14 @L8-20
+    type: array<string>
+[Key] tool.ruff @L30-45
+=== docs/flow.mmd (88 lines, skeleton: 3 lines, sha=6c7d8e9f0a1b) ===
+[Section] flowchart TD @L1-88
+  [Node] ×23 @L2-80
+  [Edge] ×41 @L3-86

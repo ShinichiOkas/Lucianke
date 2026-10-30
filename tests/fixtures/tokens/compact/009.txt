@@ -1,0 +1,10 @@
+# resolve_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~350/2000tok
+[Method] src/services/payment.py#PaymentProcessor.process_charge @L40-115
+  urn: lk://app/src/services/payment.py#PaymentProcessor.process_charge
+  sig: (self, req: PaymentRequest) -> Receipt
+  type: PaymentRequest=lk://app/src/services/payment.py#PaymentRequest Receipt=lk://app/src/models/receipt.py#Receipt
+  doc: 注文に対する決済を実行し領収書を発行する (doc_lines=6)
+  decorators: @transactional
+[Function] src/legacy/charge.py#process_charge_v1 @L10-55
+  urn: lk://app/src/legacy/charge.py#process_charge_v1
+  sig: (order_id: str) -> dict

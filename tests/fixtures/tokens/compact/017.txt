@@ -1,0 +1,10 @@
+# find_code_paths ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~640/2500tok
+source: lk://app/src/api/routes.py#create_order  var=payload
+sink: lk://app/src/db/repo.py#OrderRepository.execute_raw  var=sql
+query: flow=data hops<=8 filter=!sanitize_sql  paths: 2
+path 1 (3 hops)
+  1. create_order @src/api/routes.py:84  var=payload
+  2. build_query @src/services/order.py:40  var=req.note  when: req.note is not None
+  3. OrderRepository.execute_raw @src/db/repo.py:112  var=sql
+path 2 (4 hops)
+  1. create_order @src/api/routes.py:91  var=payload  when: retry

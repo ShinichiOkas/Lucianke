@@ -1,0 +1,162 @@
+    after = (await removed(pipeline, root, "src/shop/head.py", "first")).decode("utf-8")
+    assert after == "def second():\n    return 2\n"  # 先頭: 直前に空行が無いので直後の空行を取り除く
+
+
+async def test_python_doc_comment_and_adjacent_comment_go_but_a_separated_comment_stays(
+    pipeline: Pipeline, root: Path
+) -> None:
+    put(
+        root,
+        "src/shop/notes.py",
+        "x = 1\n\n# standalone note\n\n# about f\ndef f():\n    return 1\n\n\ndef g():\n    return 2\n",
+    )
+    after = (await removed(pipeline, root, "src/shop/notes.py", "f")).decode("utf-8")
+    assert "# about f" not in after  # 空行のない直前の通常コメントは定義の一部
+    assert "# standalone note" in after  # 空行で隔てられたコメントは残る
+    # 直前の空行 1 行を一緒に取り除き、直後の 2 行は残す
+    assert after == "x = 1\n\n# standalone note\n\n\ndef g():\n    return 2\n"
+
+
+async def test_python_trailing_same_line_comment_goes_with_the_definition(
+    pipeline: Pipeline, root: Path
+) -> None:
+    put(root, "src/shop/trail.py", "def f(): return 1  # inline\n\n\ndef g():\n    return 2\n")
+    after = (await removed(pipeline, root, "src/shop/trail.py", "f")).decode("utf-8")
+    assert after == "def g():\n    return 2\n"
+
+
+async def test_python_file_without_final_newline_keeps_having_none(pipeline: Pipeline, root: Path) -> None:
+    put(root, "src/shop/nonl.py", "def a():\n    return 1\n\n\ndef b():\n    return 2")
+    after = await removed(pipeline, root, "src/shop/nonl.py", "b")
+    assert after == b"def a():\n    return 1"  # 最終改行を勝手に足さない
+    put(root, "src/shop/nonl2.py", "def a():\n    return 1\n\n\ndef b():\n    return 2")
+    after = await removed(pipeline, root, "src/shop/nonl2.py", "a")
+    assert after == b"def b():\n    return 2"
+
+
+async def test_deleting_the_only_symbol_of_a_file_leaves_an_empty_file(
+    pipeline: Pipeline, root: Path
+) -> None:
+    after = await removed(pipeline, root, "src/shop/models/no_final_newline.py", "no_newline_at_end")
+    assert after == b""
+
+
+# --- Python: 本体が空になる削除は拒否する（pass を補わない） -------------------------------------------------------
+
+
+async def test_deleting_the_only_member_of_a_python_class_is_refused_with_a_hint(
+    pipeline: Pipeline, root: Path
+) -> None:
+    before = snapshot(root)
+    err = error_of(await delete(pipeline, CRLF, "CrlfClass.method"))  # CRLF + BOM のファイルでも同じ
+    assert err["code"] == "E_SYNTAX_INVALID"
+    assert "pass" in err["details"]["hint"] and err["details"]["reason"] == "parent_body_would_be_empty"
+    assert snapshot(root) == before  # 事後条件 4
+
+
+async def test_a_python_body_that_keeps_a_docstring_may_lose_its_only_method(
+    pipeline: Pipeline, root: Path
+) -> None:
+    put(root, "src/shop/doc.py", 'class A:\n    """About A."""\n\n    def only(self):\n        return 1\n')
+    after = (await removed(pipeline, root, "src/shop/doc.py", "A.only")).decode("utf-8")
+    assert after == 'class A:\n    """About A."""\n'
+    assert error_node_count(after.encode()) == 0
+
+
+async def test_a_nested_only_function_in_a_python_function_is_refused(pipeline: Pipeline, root: Path) -> None:
+    put(
+        root,
+        "src/shop/nest.py",
+        "def outer():\n    def inner():\n        return 1\n\n\ndef other():\n    return 2\n",
+    )
+    before = snapshot(root)
+    err = error_of(await delete(pipeline, "src/shop/nest.py", "inner"))
+    assert err["code"] == "E_SYNTAX_INVALID" and "hint" in err["details"]
+    assert snapshot(root) == before
+
+
+async def test_a_python_method_that_is_not_alone_in_its_class_is_deleted(
+    pipeline: Pipeline, root: Path
+) -> None:
+    put(
+        root,
+        "src/shop/two.py",
+        "class A:\n    # keep me\n    x = 1\n\n    def only(self):\n        return 1\n",
+    )
+    after = (await removed(pipeline, root, "src/shop/two.py", "A.only")).decode("utf-8")
+    assert after == "class A:\n    # keep me\n    x = 1\n"
+
+
+# --- 事後条件 5: 改行・BOM -------------------------------------------------------------------------------------
+
+
+async def test_postcondition_5_crlf_and_bom_survive_a_delete(pipeline: Pipeline, root: Path) -> None:
+    before = (root / CRLF).read_bytes()
+    assert before.startswith(BOM) and b"\r\n" in before
+    after = await removed(pipeline, root, CRLF, "crlf_function")
+    assert after.startswith(BOM) and not after.startswith(BOM + BOM)
+    assert b"\n" not in after.replace(b"\r\n", b"") and b"\r" not in after.replace(b"\r\n", b"")
+    assert b"crlf_function" not in after and b"class CrlfClass" in after
+    assert error_node_count(after) == 0
+    # 定義（3 行）と直前の空行 2 行が消え、CRLF は残りの行の数だけ減る
+    assert before.count(b"\r\n") - after.count(b"\r\n") == 5
+
+
+async def test_a_delete_at_the_start_of_a_bom_file_keeps_the_bom(pipeline: Pipeline, root: Path) -> None:
+    put(
+        root,
+        "src/shop/bom_head.py",
+        BOM + b"def a():\r\n    return 1\r\n\r\n\r\ndef b():\r\n    return 2\r\n",
+    )
+    after = await removed(pipeline, root, "src/shop/bom_head.py", "a")
+    assert after == BOM + b"def b():\r\n    return 2\r\n"
+
+
+# --- TypeScript ----------------------------------------------------------------------------------------------
+
+
+async def test_typescript_first_member_takes_the_blank_line_after_it(pipeline: Pipeline, root: Path) -> None:
+    after = (await removed(pipeline, root, TS, "PaymentClient.constructor")).decode("utf-8")
+    assert "constructor" not in after
+    assert "export class PaymentClient {\n  charge(req: PaymentRequest): Promise<string>;\n" in after
+    assert error_node_count(after.encode(), "typescript") == 0
+
+
+async def test_typescript_last_member_goes_with_its_doc_comment(pipeline: Pipeline, root: Path) -> None:
+    after = (await removed(pipeline, root, TS, line=15)).decode("utf-8")  # throw の行 → charge の実装
+    assert "決済を要求する" not in after and "async charge" not in after
+    assert "charge(req: PaymentRequest, retries: number): Promise<string>;\n}\n" in after
+    assert error_node_count(after.encode(), "typescript") == 0
+
+
+async def test_typescript_exported_declaration_goes_whole_with_its_export(
+    pipeline: Pipeline, root: Path
+) -> None:
+    after = (await removed(pipeline, root, TS, "PaymentRequest")).decode("utf-8")
+    assert after.startswith("export class PaymentClient {")  # 先頭: 直後の空行も取り除く
+    assert "interface" not in after and error_node_count(after.encode(), "typescript") == 0
+
+
+async def test_typescript_last_declaration_of_the_file_takes_the_blank_line_before_it(
+    pipeline: Pipeline, root: Path
+) -> None:
+    after = (await removed(pipeline, root, TS, "PaymentClient")).decode("utf-8")
+    assert after == (
+        "export interface PaymentRequest {\n"
+        "  orderId: string;\n"
+        "  amount: number;\n"
+        '  currency: "JPY" | "USD";\n'
+        "}\n"
+    )
+
+
+async def test_typescript_only_member_may_go_because_an_empty_body_is_valid(
+    pipeline: Pipeline, root: Path
+) -> None:
+    put(root, "web/src/solo.ts", "export class A {\n  foo(): number {\n    return 1;\n  }\n}\n")
+    after = (await removed(pipeline, root, "web/src/solo.ts", "A.foo")).decode("utf-8")
+    assert after == "export class A {\n}\n"
+    assert error_node_count(after.encode(), "typescript") == 0
+
+
+async def test_typescript_function_between_two_others_keeps_one_blank_line(

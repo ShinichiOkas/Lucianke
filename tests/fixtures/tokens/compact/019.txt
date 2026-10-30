@@ -1,0 +1,10 @@
+# verify_contract ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~420/2000tok
+target: lk://app/src/pricing.py#apply_discount  status: VIOLATED  solver=smt 118ms unroll=3
+pre: rate >= 0 && rate <= 100 ; price > 0  (2 from contracts)
+post: return >= 0 ; return <= price  (2 given)
+violated: implicit_safety.division_by_zero @L54
+counterexample: price=100 rate=100
+trace:
+- 1. @L50 if rate > 0 -> true  (rate=100)
+- 2. @L54 factor = 100 / (100 - rate)  divisor=0
+unmodeled_calls: [lk://app/src/pricing.py#round_half_up]

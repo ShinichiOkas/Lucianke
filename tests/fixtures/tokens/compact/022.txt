@@ -1,0 +1,10 @@
+# get_project_db_schema ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~900/6000tok
+db: sqlite  views=10  indexed_at=2026-10-29T11:20:04+09:00  coverage: exact 94% structural 4% heuristic 1% lexical_fallback 1%
+table: symbols (14230 rows)
+  sig: urn PK, file_id FK files, parent_urn, name, qualified_name, kind, modifiers_json, start_line, end_line, signature, return_type, doc_summary, declared_in, scip_symbol, confidence_level
+  doc: クラス・関数・変数・スキーマ要素・未知言語タグ。1 行 1 シンボル
+table: relations (48910 rows)
+  sig: relation_id PK, source_urn -> symbols.urn, target_urn -> symbols.urn, relation_kind, source_file_id FK files, target_file_id FK files, call_site_line, use_kind, guard_condition, confidence_level
+  doc: シンボル間の有向エッジ（CALLS, IMPLEMENTS, INHERITS, REFERENCES, IMPORTS, TYPE_USES, READS_TABLE, WRITES_TABLE, RENDERS_TEMPLATE, EXPOSES_ENDPOINT, BINDS_NATIVE）
+sample_queries:
+- A-1 直近 N コミットで変更され、テストから参照されず、エラーを持つ関数: SELECT s.urn, ... (params: {"n": 10})

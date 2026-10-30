@@ -1,0 +1,125 @@
+- `format: "json"` では、レコードを `data` の JSON の大きさで数える（compact の行の大きさではない。同じ内容でも JSON は compact の数倍になるので、同じ `max_tokens` で入る件数は json のほうが少ない）。`structuredContent` は `content[0].text` と同じ内容の写しなので、別に数えない。
+
+## 5.8 エラー分類
+
+| コード | 意味 | 再試行の指針 | 付随情報 |
+|---|---|---|---|
+| `E_INVALID_ARGUMENT` | スキーマに違反する引数（未知のプロパティ・型違反・必須の欠落。JSON-RPC エラーにはしない。§5.1）、およびスキーマは通るが規約違反（非対応 format、小さすぎる max_tokens、ルート外パス、編集系に revision 指定） | 引数を直す | `details.param` |
+| `E_WORKSPACE_NOT_CONFIGURED` | `workspace_id` が未登録、または対象パスからルートを解決できない | `configure_workspace` を呼ぶ | `details.known_workspaces[]` |
+| `E_REVISION_NOT_FOUND` | `revision` を Git オブジェクトに解決できない | 参照名を直す | |
+| `E_TARGET_NOT_FOUND` | TargetRef が 0 件に解決 | 名前を `search_workspace_symbols` で確かめる | `details.searched_in` |
+| `E_TARGET_AMBIGUOUS` | TargetRef が 2 件以上に解決 | `candidates[]` の URN で呼び直す | `candidates[] {urn, signature, path, line}`（最大 10） |
+| `E_LSP_UNAVAILABLE` | 操作に LSP が必須だが起動できない・応答しない（降格では代替できない操作: `rename_symbol`、`apply_code_action`） | LSP の導入状況を `configure_workspace status` で確認 | `details.language`, `details.reason` |
+| `E_PRECONDITION_FAILED` | 編集の前提不一致（`expected_file_sha256` 不一致、解決から書き込みまでの間に外部変更を検知）。**ファイルは変更されていない** | 対象を読み直して再実行 | `details.path`, `details.expected`, `details.actual` |
+| `E_SYNTAX_INVALID` | `new_code` / `rewrite` が対象言語として解析できない、または適用結果に構文エラーノードが生じる | コードを直す | `details.errors[] {line, message}` |
+| `E_MUTATION_BLOCKED` | 降格ファイルへの編集で、`allow_heuristic_mutation: true` があっても安全に確定できない（推定した境界が一意に決まらない、改名後の名前が対象ファイルに既出。第 10.5 節）、または Windows で対象が読み取り専用属性を持つ（`details.reason: "read_only_file"`。第 10.6 節）。許可フラグが無いだけならエラーにせず dry_run に切り替える | 範囲を `get_symbol_bodies` で確かめ、対象を絞って再実行 | `details.confidence_level`, `details.reason` |
+| `E_QUERY_REJECTED` | `query_project_db` に SELECT / WITH 以外、または禁止関数を含む文 | 文を直す | `details.reason` |
+| `E_CURSOR_EXPIRED` | `cursor` が無効または基データが更新済み | 先頭から呼び直す | |
+| `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる | 範囲を狭める | `details.partial` |
+| `E_UNSUPPORTED` | 対象ティアではその操作を提供しない（例: Tier 3 への `rename_symbol`） | | `details.tier`、`details.reason`（`invalid_data_file`: 構文が壊れたデータファイル〔T-02〕、`revision_not_supported_until_M2`、`not_in_milestone`〔`details.milestone`〕、`file_too_large`、`secret_file`、`binary_file` など） |
+| `E_INTERNAL` | 上記以外の内部エラー。スタックはログにのみ出す | | `details.log_ref` |
+
+エラーオブジェクトの形:
+
+```json
+{ "code": "E_TARGET_AMBIGUOUS", "message": "symbol_name 'login' は 3 件に一致します", "details": {}, "candidates": [] }
+```
+
+## 5.9 冪等性と並行性
+
+- 読み取りツール（カテゴリ 0・A・B・C・E・F・G）は冪等であり、並行して呼び出してよい。
+- 編集ツール（カテゴリ D）は冪等ではない。**ワークスペースごとに単一の書き込みロック**で直列化し（MUST）、ロック待ちの上限は 5,000 ms とする。超過は `E_TIMEOUT`。
+- 編集中に到着した読み取り要求は、編集前のスナップショットではなく編集確定後の状態を見る（読み取りは書き込みロックの解放を待つ）。
+
+## 5.10 位置・パス・時刻の表記
+
+| 項目 | 規約 |
+|---|---|
+| 行番号 | 1 始まり |
+| 列番号 | 1 始まり、**Unicode コードポイント**単位。LSP の UTF-16 単位との変換はサーバー内部で行い、外に出さない |
+| 行範囲 | `@L<start>-<end>`（両端を含む）。1 行なら `@L<n>` |
+| パス | ワークスペースルート相対、`/` 区切り。`#`, `%`, 空白は URN 内でパーセントエンコード |
+| 時刻 | ISO 8601、タイムゾーン付き |
+| SHA | ファイル内容の SHA-256 を小文字 16 進 64 桁。Git のオブジェクト ID と混同しないよう、フィールド名は常に `sha256` / `commit_sha` で区別する |
+
+---
+
+# 6. 出力形式
+
+## 6.1 Compact DSL（既定）
+
+Compact DSL は、LLM が最小トークンで誤読なく読める行指向のテキスト形式である。文法を EBNF で定める（終端記号は二重引用符、`NL` は改行、`indent` は 2 スペースの 0 回以上の繰り返し）。
+
+```ebnf
+document     = header , { banner } , body , [ trailer ] ;
+
+header       = "# " , tool , " " , ( "ok" | "error " , code ) , { " " , kv } , [ " ~" , int , "/" , int , "tok" ] , NL ;   (* 成功ヘッダでは ~used/maxtok が必須 *)
+kv           = key , "=" , value ;
+banner       = "! " , text , NL ;
+
+body         = { block } ;
+block        = file-block | symbol-block | ref-line | diag-line
+             | tree-line | path-block | code-block | table | note | kv-line | banner ;   (* banner は本文中にも置ける（§5.4.2・§5.4.4）*)
+
+kv-line      = key , ":" , [ " " , text ] , NL ;   (* ツール固有の見出し行: target:, applied:, rows:, trace:, commits: など。値は空でもよい *)
+
+file-block   = "=== " , path , " (" , int , " lines" , [ ", " , int , " cells" ] ,
+               [ ", skeleton: " , int , " lines" ] , [ ", sha=" , 12*12 HEXDIG ] , ")" , " ===" , NL ,
+               { import-line | symbol-block | note } ;
+import-line  = "imports: [" , text , "]" , NL ;
+
+symbol-block = indent , "[" , kind , "] " , [ modifiers , " " ] , name , [ sig-inline ] ,
+               " @L" , range , [ " " , fold ] , NL ,
+               { indent , "  " , attr-line } ;
+kind         = "Module" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type"
+             | "Function" | "Method" | "Constructor" | "Field" | "Property" | "Variable" | "Constant"
+             | "Table" | "Column" | "Endpoint" | "Message" | "Service" | "Node" | "Edge"
+             | "Cell" | "Tag" | "Key" | "Section" | "File" ;
+modifiers    = modifier , { " " , modifier } ;
+modifier     = "pub" | "priv" | "prot" | "static" | "async" | "abstract" | "export" ;
+sig-inline   = "(" , text , ")" , [ " -> " , text ] ;
+fold         = "{ ..." , int , ( " lines" | " nodes" ) , " omitted }" ;   (* nodes は XML の max_depth 超過。T-02 の 4 *)
+attr-line    = attr-key , ": " , text , NL ;
+attr-key     = "sig" | "doc" | "urn" | "type" | "body" | "when" | "conf" | "scip" | "decorators" | "raises"
+             | "refs" | "rank" | "sha" | "declared_in" | "change" ;
+
+ref-line     = indent , path , ":" , int , [ ":" , int ] , "  " , [ "[" , use , "] " ] ,
+               [ "in " , name , "  " ] , snippet , NL ;
+use          = "r" | "w" | "rw" | "call" | "type" | "import" | "impl" ;
+
+diag-line    = sev , " " , path , ":" , int , [ ":" , int ] , " " , [ "[" , source , ":" , code , "] " ] ,
+               message , [ "  fix=" , action-id ] , NL ;
+sev          = "E" | "W" | "I" | "H" ;
+
+tree-line    = indent , ( "<- " | "-> " ) , name , " @" , path , ":" , int , [ " (cycle)" ] ,
+               [ "  when: " , text ] , [ "  conf=" , level ] , NL ;
+
+path-block   = "path " , int , " (" , int , " hops)" , NL , { indent , step-line } ;
+step-line    = int , ". " , name , " @" , path , ":" , int , [ "  var=" , text ] , [ "  when: " , text ] , NL ;
+
+code-block   = "```" , [ lang ] , NL , { [ "@L" , int , ": " ] , text , NL } , "```" , NL ;
+table        = "| " , text , { " | " , text } , " |" , NL , { "| " , text , { " | " , text } , " |" , NL } ;
+note         = "- " , text , NL ;
+
+trailer      = [ "# summary: " , text , NL ] , [ "# more: cursor=" , token , [ " remaining≈" , int ] , NL ] ;   (* summary が先 *)
+
+range        = int , [ "-" , int ] ;
+level        = "exact" | "structural" | "heuristic" | "lexical_fallback" ;
+```
+
+規約:
+
+1. `symbol-block` の `name` は、ファイルブロック内ではファイル内修飾名（`Class.method`）、ワークスペース横断の一覧では `path#qualified` とする。
+2. `urn:` 属性行は、エージェントが続けて URN で呼び直す可能性が高いツール（`search_workspace_symbols`, `resolve_symbols`, `get_file_skeleton` の公開シンボル）では付ける（SHOULD）。それ以外では省いてトークンを節約する。
+3. `doc:` は Doc コメントの 1 行目要約のみ。全文は `resolve_symbols` の JSON で返す。
+4. `conf=` は、応答内で `_resolution_meta.confidence_level` と異なる水準の要素にだけ付ける（混在時の個別表示）。
+5. `code-block` 内の `@L<n>: ` 接頭辞は `with_line_numbers: true`（既定）のとき付ける。コード本文はエスケープせずそのまま出す。コード内に ``` が含まれる場合はフェンスを ```` に延長する。
+6. 1 行の長さは 200 文字を超えたら末尾を `…` で省略する（`snippet`, `doc`, `when` に適用。`sig` とコードブロックには適用しない）。
+7. `kind` の `File` は、シンボルに分解せずファイル全体を 1 要素として扱う場合（T-18 の Tier 3 / Tier 4 のファイルの変更要素。`modified_symbols[].kind`）に使う。`symbols` テーブルには格納しない。
+8. ツール固有の見出し行（`kv-line`: `target:`、`applied:`、`resolved:` など）はインデント 0 に置く。インデントされた `key: text` は `attr-line` で、キーは `attr-key` の語彙に限る。
+9. 個数を示す要約行（`[Node] ×23 @L2-80`、`[Tag] testcase ×412 @L3-5118`）も `symbol-block` の形に従い、`@L` と範囲を省かない（範囲 `@Ls-e` は、集約した最初の要素の開始行から最後の要素の終了行まで）。範囲の後ろに `(25 lines)` のような語を置かない（行数は範囲から分かる。折りたたみは `{ ...N lines omitted }` と `{ ...N nodes omitted }` だけ）。§11 の例はこの文法に適合させてあり、検査器 `tests/contract/compact_grammar.py` が EBNF 由来の行種で検査する。なお §5.4.2 の例の `...` は省略記号であり、検査の対象ではない（実装で確定 2026-10-29）。
+
+### 6.1.1 代表例
+
+```
+# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~310/2000tok

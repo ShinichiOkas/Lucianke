@@ -1,0 +1,152 @@
+            entry["description"] = _TABLE_DOC[name]
+            entry["columns"] = _columns(con, name)
+            entry["indexes"] = _indexes(con, name) if args.include_indexes else []
+            tables.append(entry)
+        info: dict[str, Any] = {"tables": tables}
+        row = con.execute("SELECT max(indexed_at) FROM workspaces").fetchone()
+        info["indexed_at"] = row[0] if row else None
+        if args.include_stats:
+            info["coverage"] = coverage_of(con)
+        return info
+    finally:
+        con.close()
+
+
+# --- compact の行 -----------------------------------------------------------------------------
+
+
+def _sig(columns: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for c in columns:
+        text = f"{c['name']} {c['decl_type']}{'?' if c['nullable'] else ''}"
+        if c["pk"]:
+            text += " PK"
+        if c["fk"]:
+            text += f" FK {c['fk']}"
+        parts.append(text)
+    return ", ".join(parts)
+
+
+def _count_text(entry: Mapping[str, Any], include_stats: bool) -> str:
+    if not include_stats:
+        return ""
+    n = entry["row_count"]
+    if n is None:
+        return " (rows ?)"
+    return f" ({n} rows)" if entry["row_count_exact"] else f" (~{n} rows)"
+
+
+def _percent(value: float) -> str:
+    return f"{value * 100:.0f}%"
+
+
+def _table_lines(lines: Any, entry: Mapping[str, Any], include_stats: bool) -> list[str]:
+    out = [
+        lines.kv_line("table", f"{entry['name']}{_count_text(entry, include_stats)}"),
+        lines.attr_line("sig", _sig(entry["columns"]), indent=0),
+        lines.attr_line("doc", entry["description"], indent=0),
+    ]
+    if entry["indexes"]:
+        out.append(
+            lines.note(
+                "indexes: " + "; ".join(f"{i['name']}({', '.join(i['columns'])})" for i in entry["indexes"])
+            )
+        )
+    return out
+
+
+def _sample_lines(lines: Any) -> list[str]:
+    out = [lines.kv_line("sample_queries", "pass sql and params to query_project_db")]
+    for q in SAMPLE_QUERIES:
+        out.append(
+            lines.note(
+                f"{q['id']} {q['title']}: {q['sql']} (params: {json.dumps(q['params_example'], ensure_ascii=False)})"
+            )
+        )
+    return out
+
+
+# --- ハンドラ ---------------------------------------------------------------------------------
+
+
+def _wanted(args: GetProjectDbSchemaArgs) -> list[str]:
+    if not args.tables:
+        return list(PUBLIC_VIEWS)
+    unknown = [t for t in args.tables if t not in KNOWN_TABLES]
+    if unknown:
+        raise LuciankeError(
+            ErrorCode.E_INVALID_ARGUMENT,
+            f"unknown table(s): {', '.join(unknown)} (public tables: {', '.join(KNOWN_TABLES)})",
+            details={"param": "tables", "unknown": unknown, "known_tables": list(KNOWN_TABLES)},
+        )
+    return list(dict.fromkeys(args.tables))
+
+
+async def handler(ctx: ToolContext, args: GetProjectDbSchemaArgs) -> ToolOutput:
+    names = _wanted(args)
+    db_path = _db_path(ctx)
+    info = await asyncio.to_thread(_read_schema, db_path, names, args)
+    lines = ctx.services.lines  # type: ignore[attr-defined]
+    entries: list[dict[str, Any]] = info["tables"]
+    records: list[Record] = []
+    for i, entry in enumerate(entries):
+        block = _table_lines(lines, entry, args.include_stats)
+        if args.include_sample_queries and i == len(entries) - 1:
+            block += _sample_lines(lines)  # 予算の勘定に載せるため、最後の表のレコードの行として運ぶ
+        records.append(
+            Record(
+                kind="kv",
+                key=f"table:{entry['name']}",
+                priority=i,
+                lines=tuple(block),
+                data=entry,
+                confidence=Confidence.EXACT,
+            )
+        )
+
+    db_parts = [f"sqlite  views={len([n for n in names if n != FTS_TABLE])}"]
+    if info["indexed_at"]:
+        db_parts.append(f"indexed_at={info['indexed_at']}")
+    static: dict[str, Any] = {
+        "engine": {"name": "sqlite", "version": sqlite3.sqlite_version},
+        "indexed_at": info["indexed_at"],
+        "coverage": info.get("coverage"),
+        "sample_queries": [dict(q) for q in SAMPLE_QUERIES] if args.include_sample_queries else [],
+    }
+    head: list[tuple[str, str]] = []
+    coverage = info.get("coverage")
+    if coverage is not None:
+        db_parts.append("coverage: " + " ".join(f"{k} {_percent(v)}" for k, v in coverage.items()))
+    head.append(("db", "  ".join(db_parts)))
+    warnings: list[str] = []
+    if coverage is not None and coverage["lexical_fallback"] > 0:
+        warnings.append(
+            f"lexical_fallback の行が {_percent(coverage['lexical_fallback'])} 含まれる。クエリでは confidence_level 列で絞ること"
+        )
+    return ToolOutput(
+        records=records,
+        head_kv=head,
+        data_static=static,
+        max_confidence=Confidence.EXACT,
+        engine=EngineChoice(engine="sqlite", confidence=Confidence.EXACT),
+        page_unit="table",
+        total_estimate=len(records),
+        warnings=warnings,
+    )
+
+
+TOOL_SPEC = ToolSpec(
+    name="get_project_db_schema",
+    tid="T-19",
+    args_model=GetProjectDbSchemaArgs,
+    handler=handler,
+    default_max_tokens=6000,
+    description=(
+        "Describe the project knowledge DB used by query_project_db: the 10 public tables (columns, types, PK/FK, meanings), row counts, confidence_level composition, and up to 5 ready-to-run sample SQL statements. Call it once before writing SQL."
+    ),
+    max_confidence=Confidence.EXACT,
+    milestone="M1",
+    accepts_revision=False,
+    page_unit="table",
+    records_key="tables",
+)

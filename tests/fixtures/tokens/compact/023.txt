@@ -1,0 +1,6 @@
+# query_project_db ok conf=exact lsp=n/a rev=WORKING_TREE ws=app ~610/2000tok
+rows: 3 (limit 200, not truncated)  12ms  grep_fallback: none
+| urn | caller_count | current_error |
+| lk://app/src/pricing.py#apply_discount | 7 | "float" は "Decimal" に割り当てできません |
+| lk://app/src/api/routes.py#create_order | 4 | NULL |
+| lk://app/src/services/order.py#build_query | 3 | NULL |

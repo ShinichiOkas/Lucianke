@@ -1,0 +1,4 @@
+# 独自 DSL（文法なし）
+rule MAX_RETRY = 3
+rule BACKOFF = MAX_RETRY * 100
+when order.amount > LIMIT then decline

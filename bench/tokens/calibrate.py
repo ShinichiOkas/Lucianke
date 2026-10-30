@@ -1,6 +1,8 @@
 """S-12 トークン推定器の較正（TokenEstimator と o200k_base の比較、係数の改善案、速度）。
 使い方: uv run --no-project --with tiktoken --with numpy --with scipy python bench/tokens/calibrate.py
 出力: bench/tokens/result.json と coefficients_proposal.json（budget.py と pyproject は変えない。tiktoken はベンチ専用）
+回帰テスト tests/unit/test_core_tokens_calibration.py は result.json を読まない。標本は freeze_corpus.py が
+tests/fixtures/tokens/ に凍結したもの（BUG-0068。生のファイルは書き換わって記録と外れるため）。
 """
 
 from __future__ import annotations

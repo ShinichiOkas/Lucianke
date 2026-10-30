@@ -1,0 +1,38 @@
+
+## 設計への反映（推奨）
+1. **§7.6.4 手順 2・3 の順序を変える**: 接続（`mode=ro`）→ `grep` があれば temp テーブルの作成と投入 → `PRAGMA query_only=ON` → `set_authorizer` → `set_progress_handler`。`setup_phase` フラグは不要になり、authorizer の判定表から「`SQLITE_CREATE_TEMP_TABLE`・`INSERT(temp_grep_matches)` は setup のときだけ許可」の行を消す。
+2. **§7.6.4 判定表・仕様書 §9.5/§13.2**: `READ` の許可集合に `symbols_fts_config/_data/_docsize/_idx`、`json_each`、`json_tree` を足す。`PRAGMA` は `data_version`（引数なし）だけ許可する。FTS5 の内部読み取りと利用者の `SELECT * FROM symbols_fts_data` は authorizer で区別できない（内容は公開列から導出した索引なので害は無いが、仕様書の「10 テーブル + symbols_fts」の文言に「FTS5 の影テーブルを含む」を足す）。列を読まない参照（`count(*)`、CTE 別名）は `READ(名, '', None)` で届くため、DB に実在する非公開名（`_` 始まり、`sqlite_`、`pragma_`、起動時の `sqlite_master` の写し）だけ拒否し、それ以外は別名として通す。副作用として `WITH _meta AS (SELECT 1) SELECT count(*) FROM _meta` も拒否される（許容）。
+3. **§7.6.4 末尾「3 重のどれか 1 つが欠けても他が効く」への注記**: DB 本体の書き込みについては成り立つ。ただし `ATTACH` は `mode=ro` と `query_only` の組み合わせでも **任意パスに 0 バイトのファイルを作り**、`mode=ro` だけなら ATTACH 先へ書ける。`query_only` 単独は `PRAGMA journal_mode` で DB を変更でき、`PRAGMA query_only=OFF` で自分を外せる。副作用を止められるのは authorizer と手順 1 の禁止語検査だけなので、**禁止語検査は省かず、テストは「層を 1 つ外す」だけでなく「authorizer を外した状態で ATTACH が 0 バイトを作る」ことも既知として明記**する。
+4. **§7.6.4 手順 1・5**: 先頭トークン検査の前に末尾の `;` とコメントを除く（`SELECT 1;;` は複文扱い）。素の `EXPLAIN` は先頭トークン検査で拒否し、`explain=True` のときだけアプリが `EXPLAIN QUERY PLAN ` を前置する。例外の写像は上記（`DatabaseError` 1 本 + `guard.denied` / `guard.timed_out`、`ProgrammingError` → `multiple_statements` / `E_INVALID_ARGUMENT`）。
+5. **§7.6.4 手順 6・仕様書 §13.2**: 期限は `time.perf_counter()`。「再帰 CTE の深さ 10,000 上限」は SQLite に機構が無く実装できない。時間（300 ms）で止める方針に書き換える（決定的な上限が要るなら progress handler で命令数を数える MAY）。巨大値は `setlimit(SQLITE_LIMIT_LENGTH, 16 MiB)` と `SQLITE_LIMIT_SQL_LENGTH` で抑える。
+6. **§6.2 公開クエリ行・手順 7**: 「1 要求 1 接続」で十分（約 1.3 ms）。接続は `isolation_level=None`（自動コミット）とし、要求ごとに閉じる。読み取りトランザクションを保持した接続は `wal_checkpoint(TRUNCATE)` を妨げるので、プール接続も使い終わったら `BEGIN` を持ち越さない。IndexWriter は起動時にキャッシュディレクトリの書き込み権限を確認する（-shm が無いと読み手が開けない）。
+
+## 使うコードの型
+全文は `spikes/s07_sqlite/public_db.py`（`Guard`・`open_public`）。要点だけ示す。
+
+```python
+def authorize(self, action, arg1, arg2, dbname, source):          # Guard のメソッド
+    if action in (SQLITE_SELECT, SQLITE_RECURSIVE): return OK
+    if action == SQLITE_READ:                                      # arg1=表, arg2=列, dbname=main|temp|None
+        if (arg1 in READ_OK or arg1 == "temp_grep_matches") and dbname in (None, "main", "temp"): return OK
+        if arg2 == "" and dbname is None and arg1 not in self.hidden and not arg1.startswith(("_", "sqlite_", "pragma_")): return OK  # count(*)・CTE 別名
+        return self._deny("non_public_object", arg1)
+    if action == SQLITE_FUNCTION: return self._deny("forbidden_keyword", arg2) if arg2.lower() in FUNC_DENY else OK
+    if action == SQLITE_PRAGMA and arg1 == "data_version" and arg2 is None: return OK   # FTS5 の内部読み取り
+    return self._deny("forbidden_keyword", f"{ACTION_NAMES.get(action, action)} {arg1}")
+
+def open_public(db_path, *, timeout_ms=300, setup=None):
+    con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None, timeout=1.0)
+    guard = Guard(timeout_ms)
+    if setup: setup(con)                                          # temp_grep_matches の作成と投入（query_only の前）
+    con.execute("PRAGMA query_only = ON")
+    con.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 16 * 1024 * 1024); con.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 64 * 1024)
+    guard.hidden = frozenset(r[0] for r in con.execute("SELECT name FROM sqlite_master UNION SELECT name FROM sqlite_temp_master")) - READ_OK - {"temp_grep_matches"}
+    con.set_authorizer(guard.authorize)
+    con.set_progress_handler(guard.check_deadline, 1000)          # check_deadline: perf_counter() > deadline なら 1
+    return con, guard
+# 実行: guard.deadline = perf_counter() + timeout; rows = con.execute(sql, params).fetchmany(limit + 1)
+```
+
+## 再現手順
+`uv run python spikes/s07_sqlite/run.py`（全項目、約 40 秒）。番号を渡すとその項目だけ（`… run.py 3 5`）。層別の検査は項目 2、authorizer の実例は項目 3。一時ファイルは `%TEMP%` に作り終了時に消す。

@@ -1,0 +1,78 @@
+# S-02 tree-sitter 0.26 の API と文法の ABI 互換
+
+- 実施日: 2026-10-29
+- 環境: Windows 11 Home 10.0.26300 / Python 3.12.11 (MSC v.1944 64bit) / 48 論理コア / `tree-sitter` 0.26.0（`LANGUAGE_VERSION`=15、`MIN_COMPATIBLE_LANGUAGE_VERSION`=13）
+- 文法: python 0.25.0 / typescript 0.23.2 / javascript 0.25.0 / json 0.24.8 / yaml 0.7.2 / toml 0.7.0 / xml 0.7.0 / markdown 0.5.4 / rust 0.24.2 / go 0.25.0 / c 0.24.2 / cpp 0.23.4 / c-sharp 0.23.5 / rst 0.2.0 / sql 0.3.11（`uv.lock` どおり）
+- 判定: **合格**（対象 7 文法を含む全 18 言語で、読み込み・解析・タグ風クエリが通った）。ただし設計書 ADR-13 の前提 2 点（GIL、メモリ量）が実測と合わない。
+
+## 確かめたこと
+
+1. 基本 API（`Language` / `Parser` / `Node` / `Query` / `QueryCursor` / 増分解析 / ERROR・MISSING）
+2. 18 言語の読み込み・サンプル解析・タグ風クエリ  3. ABI  4. 性能  5. スレッド  6. 非 ASCII の列
+
+## 結果
+
+### 1・6. API と位置（`run_api.py`、39 項目すべて OK）
+
+| 項目 | 結果 |
+|---|---|
+| 読み込み | `Language(mod.language())`、`Parser(lang)`、`parser.parse(bytes)`。`str` は `TypeError`。`bytearray` / `memoryview` / `read_callback` も可 |
+| 罠 | `parse(src, None)` は `TypeError`（`old_tree` に `None` を渡せない。省略する）。`captures(node, None)` も同様（述語は省略する） |
+| 位置 | `start_byte` / `end_byte` はバイト。`start_point` / `end_point` は `Point(row, column)`（tuple 互換）。**column は行頭からのバイト数**。例: `s = 'あ😀' + x` の `x` はバイト 16・コードポイント 11・UTF-16 12 |
+| 行の数え方 | `\n` だけが行区切り。CRLF では `\r` が行末に残る（文ノードは `\r` の手前で終わる）。単独の `\r` は改行にならない（LSP とは不一致）。UTF-8 BOM 付きは Python 文法が受理し、1 行目の列が 3 ずれる |
+| `Node.text` | `bytes`。Tree が元のバイト列を保持する（`sys.getrefcount` が +1、コピーなし）。呼び出し側が変数を `del` しても読める |
+| `Query` | 不存在のノード型は `QueryError`（`ValueError` の子）。`#eq?` `#match?` `#any-of?` は組込みで動く。独自述語は callable を渡せば動く |
+| `QueryCursor` | `captures()` は `dict[str, list[Node]]`（`@name` と `@definition.*` の対応が失われる）。**`matches()` は `list[(pattern_index, dict[str, list[Node]])]`。タグは `matches()` で取る** |
+| ERROR / MISSING | `Node.is_error` / `is_missing` / `has_error` で列挙できる（`error_spans`）。MISSING は幅 0（JS の `foo(1, 2` で欠けた `)`）。Python は構文が壊れると 1 個の大きな ERROR になり位置が粗い |
+| 増分解析 | `tree.copy()` → `tree.edit(...)`（点はバイト列）→ `parser.parse(new, tree)`。結果は全解析と S 式が一致。`edit` は呼んだ木を直接書き換える |
+| 不正な UTF-8 | 落ちない（ERROR になる） |
+
+### 2・3. 言語取得関数・ABI・タグ（`run_grammars.py`）
+
+| lang_id | 取得関数の実名 | ABI | 解析 | 同梱 `TAGS_QUERY` | 自作タグ風クエリ（拾った名前） |
+|---|---|---|---|---|---|
+| python | `tree_sitter_python.language()` | 15 | OK | あり（3 件） | OK: A, f, m |
+| typescript | `tree_sitter_typescript.language_typescript()` | 14 | OK | **TS 固有構文のみ**（interface だけ 1 件）。JS の `TAGS_QUERY` と連結すれば 4 件 | OK: C, f, I, m |
+| tsx | `tree_sitter_typescript.language_tsx()` | 14 | OK | 同上 | OK |
+| javascript | `tree_sitter_javascript.language()` | 15 | OK | あり（4 件） | OK |
+| json | `tree_sitter_json.language()` | 14 | OK | なし | OK: pair の key |
+| yaml | `tree_sitter_yaml.language()` | 14 | OK | なし | OK: pair の key |
+| toml | `tree_sitter_toml.language()` | 14 | OK | なし | OK: table / pair |
+| xml | `tree_sitter_xml.language_xml()` | 14 | OK | なし | OK: element |
+| dtd | `tree_sitter_xml.language_dtd()` | 14 | OK | なし | OK: elementdecl / AttlistDecl |
+| markdown | `tree_sitter_markdown.language()` | 15 | OK | なし | OK: atx_heading |
+| markdown_inline | `tree_sitter_markdown.inline_language()` | 15 | OK | なし | OK: inline_link |
+| rust | `tree_sitter_rust.language()` | 15 | OK | あり | OK |
+| go | `tree_sitter_go.language()` | 15 | OK | あり | OK |
+| c | `tree_sitter_c.language()` | 15 | OK | あり | OK |
+| cpp | `tree_sitter_cpp.language()` | 14 | OK | あり | OK |
+| c_sharp | `tree_sitter_c_sharp.language()` | 15 | OK | **`TAGS_QUERY` が `None`**（.scm は `tree_sitter_c-sharp/queries/`〔ハイフン〕にあり、import 側は `tree_sitter_c_sharp/queries/` を探す。パッケージの不備。パス直読みなら compile OK） | OK |
+| rst | `tree_sitter_rst.language()` | 14 | OK | なし | OK: section |
+| sql | `tree_sitter_sql.language()` | 15 | OK | なし | OK: create_table / create_function |
+
+- **読み込めない文法・コンパイルできないクエリは無し**。2024 年で止まった 5 パッケージ（typescript / cpp / json / xml / toml）は ABI 14 で、本体の範囲 13〜15 に収まる。ほかに ABI 14 は yaml・rst。
+- ABI 14 の文法は `Language.name` と `semantic_version` が `None`（ABI 15 のメタデータ）。使わない。
+- 合格条件（設計書 §12.1）: 対象 7 文法（python, typescript, javascript, json, yaml, toml, xml）で解析とタグクエリが通る → **合格**。
+
+### 4・5. 性能とスレッド（`run_perf.py`、`run_memory.py`、`run_coldstart.py`。対象 `pdb.py` 1,987 行 69 KiB。3 回実行して幅で示す）
+
+| 項目 | 実測 |
+|---|---|
+| 初回解析（Parser 生成込み） | 9.0〜9.6 ms |
+| 全解析 100 回 | 中央値 **8.2〜8.9 ms**、p95 8.3〜9.4 ms |
+| 増分解析（1 文字挿入／1 行挿入、`edit`+`parse`）100 回 | 中央値 **1.85 ms**、p95 1.9〜2.05 ms（全解析と同一結果）。約 4.5 倍速い |
+| `read_callback` 版の全解析 | 中央値 8.5 ms（`bytes` 版と同等） |
+| タグ風クエリ（112 件）／全ノード走査（13,591 ノード）／Query のコンパイル | 2.6 ms ／ 1.9 ms ／ 2.1 ms（python のタグ 2 パターン） |
+| 687 KiB（19,870 行）／ 4.8 MB（143,064 行） | 93〜102 ms ／ 約 750 ms |
+| 4 スレッド（スレッドごとに Parser）で解析 | 直列に対し **0.80〜0.98 倍**（並列化しない）。別プロセス 4 本は 3.96〜4.30 倍 |
+| 解析中に他スレッドが止まる最長時間（687 KiB、n=1） | `parse(bytes)`: **88〜126 ms（解析全体）= GIL を握りっぱなし**。`parse(read_callback)`: 16〜23 ms（チャンク 4〜64 KiB） |
+| Parser を 4 スレッドで共有（子プロセス 3 回 × 4 スレッド × 30 回） | クラッシュ・誤結果ゼロ（ただし GIL で直列化されているだけ） |
+| Tree / Node を別スレッドから読む | 8 スレッドが同じ Tree・Query で各自 `QueryCursor` を作って実行: 全員一致。別スレッドで解析した Tree を呼び出し側で読むのも可 |
+| `progress_callback`（`Parser.parse` と `QueryCursor.captures/matches` の両方） | **アクセス違反（0xC0000005）でプロセスが落ちる**（0.26.0 / Windows / cp312） |
+| read_callback が期限後に `b""` を返すデッドライン | 4.8 MB・期限 50 ms で 53〜54 ms で解析が返る（`timed_out` で判別）。例外を投げる方式は不安定（`SystemError` になることがある） |
+| 木のメモリ | ソース 1 バイトあたり **python 20.3 倍 / json 25.3 倍 / markdown 25.9 倍**（tracemalloc。Windows の作業セットでも同等） |
+| コールドスタート | `tree_sitter` + 18 言語の import と `Language` 生成で合計約 60 ms（初回の python に importlib.resources の初期化 24 ms が乗る） |
+
+## 設計への反映
+
+1. **§7.4.1 `grammar()` / 登録表**: 登録表から外す文法は無い（`status` の警告も不要）。`Language(getattr(importlib.import_module(m), fn)())`。`typescript`/`tsx`、`xml`/`dtd`、`markdown`/`markdown_inline` は 1 パッケージ 2 言語なので、`lang_id → (モジュール, 関数名)` の表で持つ（「使うコードの型」）。起動時検査は `MIN_COMPATIBLE_LANGUAGE_VERSION <= lang.abi_version <= LANGUAGE_VERSION` で足りる。ABI 14 の 9 言語（上の 5 パッケージ + yaml・rst）は ABI 15 版が出ていないので、`tree-sitter>=0.26,<0.27` に固定し、ロック更新時に `run_grammars.py` を回す（CI の煙試験にする）。

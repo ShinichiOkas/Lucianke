@@ -1,0 +1,78 @@
+| tree-sitter-language-pack / tree-sitter-languages | パッケージ自身は MIT / Apache-2.0 | 同梱する多数の第三者文法のライセンスが未検証 | **不採用**（L-5）。個別の `tree-sitter-<lang>` パッケージを使う。確認した 20 文法はすべて MIT（付録 D 表 B） |
+| rmcp（Rust MCP SDK） | MIT から Apache-2.0 へ移行中（貢献者の同意状況で混在） | どちらも寛容。Apache-2.0 の NOTICE 義務 | 採用可（Rust を選んだ場合）。L-7 で表示 |
+| jq（PyPI バインディング） | BSD-2-Clause。wheel に jq 本体（MIT）と鬼車（BSD）を同梱 | 同梱物の表示が要る | 条件付き採用。`jq:` セレクタは M2 とし、採用時に同梱物を `THIRD_PARTY_NOTICES.md` に載せる。JSONPath（jsonpath-ng、Apache-2.0）を M1 の必須経路にする |
+| lxml | BSD-3-Clause。wheel に libxml2 / libxslt（MIT 系）を同梱 | 同梱物の表示 | 採用可。L-7 で表示。標準ライブラリの `xml.etree` で足りる範囲はそちらを使う |
+| git 本体（GitPython 経由） | GPL-2.0 | サブプロセスなので本体に影響しない | GitPython（BSD-3-Clause）は候補に残すが、§4.2 の「シェルの git を呼ばない（SHOULD NOT）」と相反するため第一候補にしない。履歴専用の読み取りだけ `git` を子プロセスで起動する例外は OD-20 で決定済みで、GitPython は介さず直接起動する（L-4: 利用者の環境のものを起動するだけで同梱しない） |
+
+### 16.2.2 問題の無いもの（要約）
+
+| 区分 | 確認結果 |
+|---|---|
+| Python の主要候補 | mcp（MIT）、tree-sitter（MIT）、ast-grep-py（MIT）、z3-solver（MIT）、watchfiles（MIT）、sqlglot（MIT）、nbformat（BSD-3）、PyYAML（MIT）、jsonpath-ng（Apache-2.0）、pydantic（MIT）。標準ライブラリの `sqlite3`・`tomllib`・`json`・`xml.etree` はライセンス問題なし |
+| Tree-sitter 文法（20 件） | python, typescript, javascript, rust, go, c, cpp, c-sharp, kotlin（fwcd）, swift（alex-pinkus）, json, yaml, toml, xml, markdown（tree-sitter-grammars）, rst（stsewd）, sql（DerekStride）, dot（rydesun）, proto（mitchellh）, graphql（bkegley）はすべて MIT |
+| Rust の主要候補 | tree-sitter（MIT）、ast-grep-core（MIT）、rusqlite（MIT。bundled の SQLite はパブリックドメイン）、gix（MIT OR Apache-2.0）、notify（CC0-1.0）、petgraph・crepe・regex（MIT OR Apache-2.0）、ascent（MIT）、z3（MIT）、grep-regex（Unlicense OR MIT）、lsp-types（MIT）、tokio（MIT）、Soufflé（UPL-1.0） |
+| LSP サーバー（利用者の環境で起動。同梱しない） | pyright（MIT）、basedpyright（MIT）、ruff（MIT）、vtsls（MIT）、typescript-language-server（Apache-2.0）、rust-analyzer（MIT OR Apache-2.0）、gopls（BSD-3）、clangd（Apache-2.0 WITH LLVM-exception）、csharp-ls（MIT）、OmniSharp（MIT）、kotlin-language-server（MIT）、sourcekit-lsp（Apache-2.0） |
+| その他 | ripgrep（Unlicense OR MIT）、Z3 バイナリ（MIT）、SQLite（パブリックドメイン） |
+
+### 16.2.3 未確認のもの
+
+| 対象 | 状態 | 扱い |
+|---|---|---|
+| Cython の Tree-sitter 文法 | 専用文法のリポジトリを特定できていない | B1b（§8.6）の着手前に決める（§17 OD-21）。無ければ `.pyx` を Python 文法で寛容に解析する |
+| Jinja2 の Tree-sitter 文法 | `tree-sitter-grammars` 配下に無い。参考の cathaysia/tree-sitter-jinja は Apache-2.0 | B7（§8.6）の着手前に決める（§17 OD-21）。Jinja2 本体（BSD-3 と推定、classifier のみ確認）は Lucianke には不要 |
+| pydot / notify / z3 crate | メタデータのみ確認、LICENSE 本文は未読 | pydot は不採用。notify・z3 crate は Rust 採用時に本文を確認する |
+| sourcekit-lsp | Apache-2.0。Swift 通例のランタイム例外の有無は未精査 | サブプロセスなので影響しない |
+| Universal Ctags の "or later" | 未確認 | 同梱しないので影響しない |
+
+## 16.3 配布物に含めるもの
+
+| ファイル | 内容 |
+|---|---|
+| `LICENSE` | 本体のライセンス全文（MIT） |
+| `THIRD_PARTY_NOTICES.md` | 依存ごとに: 名前、版、SPDX、確認した URL、デュアルの場合に選んだ側、Apache-2.0 の NOTICE 転記、wheel 同梱物（libxml2、jq、鬼車、SQLite など）の表示 |
+| `docs/licenses/`（任意） | 同梱が必要な全文（Apache-2.0、BSD の著作権表示など） |
+
+`THIRD_PARTY_NOTICES.md` は手で書かず、L-8 の検査ツールの出力から生成する（SHOULD）。実装（ec55f1b・f748e04。実装で確定 2026-10-29）: `tools/gen_notices.py` が `uv.lock` の依存木（本体と extras。dev は除く）から生成し、`--check` で最新であることを検査する。`pyproject.toml` の `license-files` で wheel に入れ、sdist は許可リスト方式にして作業用ファイル（`.claude`・`.pair-agent`・`.mcp.json`）を配らない。`tools/check_dist.py` が wheel と sdist の中身（`LICENSE`・`THIRD_PARTY_NOTICES.md` が入り、後者がリポジトリのものと一致する）を検査し、CI の license ジョブが両方を通す（M1-8）。詳細は設計書 §10.5。
+
+---
+
+# 17. 未決事項（Open Decisions）
+
+師匠にしか決められない方針・設計の判断を、推奨つきで列挙する。推奨で進めてよければ返答は不要。覆す場合だけ指示をもらう。「決める時点」は、それ以降の作業が分岐する節目を示す。
+
+| ID | 論点 | 選択肢 | 推奨と理由 | 決める時点 |
+|---|---|---|---|---|
+| OD-1 | 実装言語 | (a) Python、(b) Rust、(c) Python + 重い部分を Rust 拡張 | **(a) Python で M1 を作る**（推奨で進行中。2026-10-29 の報告に異論なし。アーキテクチャ設計書はこの前提で書く）。 リポジトリの `requirements.txt` が Python の `tree-sitter` を挙げている。Tree-sitter・SQLite・SMT・構文パターン・libgit2 はいずれも Python バインディングがある。Fast Path のレイテンシはキャッシュと I/O が支配的で、言語差より設計差が効く見込み。§14.4 で NFR-PERF-1 を満たさないコンポーネントが出たときだけ (c) に移す | M1 着手前 |
+| OD-2 | 配布形態 | (a) `uv tool install` / `pipx`、(b) 単一バイナリ | **(a)。** OD-1 と整合し、LSP の導入も同じ経路で案内できる | M1 出口 |
+| OD-3 | `query_project_db` の Datalog | (a) M1 は SQL のみ、Datalog は保留、(b) M1 から両対応 | **(a)。** 再帰 CTE で経路探索は書ける。Datalog は需要が確認できてから | 今 |
+| OD-4 | SCIP インデックスの取り込み | (a) M2 で取り込みのみ MAY、(b) M1 必須、(c) 対象外 | **(a)。** 大規模リポジトリのコールドスタート短縮に効くが、M1 の価値には不要 | M2 着手前 |
+| OD-5 | 取り消しツール | (a) `undo_edit` を 22 本目として M2 で追加、(b) 追加しない | **(a)。** ジャーナル（§10.6）があるので実装は小さく、エージェントの自己修正ループが短くなる | M2 着手前 |
+| OD-6 | URN に revision を含めるか | (a) 含めない（本書）、(b) 含める | **(a)。** 編集でずれない安定識別子が主目的。断面はヘッダと `_resolution_meta` が示す | 今 |
+| OD-7 | M1 の Tier 1 必須言語 | (a) Python + TypeScript/JavaScript 必須、他は best effort、(b) 10 言語すべて必須 | **(a)。** 受入のフィクスチャを 2 言語に絞れる。他言語は LSP の存在に依存するため、必須にすると受入が環境に揺れる | 今 |
+| OD-8 | M1 の Python 周辺ブリッジ範囲 | §8.6 の表のとおり、(a) B1a・B2 読み取り・B3 出力・B4 骨格/部分取得を M1、(b) 全ブリッジを M1 | **(a)。** `.ipynb` と構造化データの骨格が文脈節約に最も効く。SQL / IDL / テンプレートの整合は M2 | 今 |
+| OD-9 | トークン計数器 | (a) ヒューリスティック近似（誤差 ±10% を §14 で確認）、(b) トークナイザライブラリ依存 | **(a)。** 依存を増やさず、予算制御の目的には十分。tiktoken は語彙を実行時にダウンロードするため §13.7 と第 16 章 L-6 に反し、採れない | M1 着手前 |
+| OD-10 | ベンチマークのフィクスチャ | F-PY、F-TS に使う公開リポジトリ | 候補は作業開始時に規模（行数・ファイル数・テストの有無）を実測して 3 つずつ挙げ、師匠が選ぶ。**推奨は、師匠が日常で触る種類のプロジェクトに近いもの** | M1 の受入設計前 |
+| OD-11 | 準拠する MCP 仕様の版 | 概念文書は 2026-07-28 版を参照 | **実装着手時点の最新安定版を 1 つ固定し、§0 の表に書く。** 版が変わる機能（`structuredContent`、`roots`）は固定版の範囲で使う | M1 着手前 |
+| OD-12 | 秘密らしきファイルの既定 | (a) 本文を索引しない（§13.5）、(b) 通常どおり索引 | **(a)。** 文脈に秘密値が流れる経路を既定で閉じる | 今 |
+| OD-13 | `.lucianke.toml` の採否 | (a) 読むだけで採用、(b) 採用しない（環境変数とツールのみ） | **(a)。** リポジトリに設定を同梱でき、チームで同じ除外規則を共有できる。書き込みはしない | M1 出口 |
+| OD-14 | `TODO.md` の扱い | (a) 本書の M1〜M3 に合わせて書き直す、(b) 現状維持 | **(a)。** 二重管理を避ける。書き直しは師匠の指示があってから行う | 今 |
+| OD-15 | T-06 の設定ファイル横断 grep | (a) `include_lexical_in_other_files`（既定 false）で明示オプトイン、(b) 概念文書どおり自動フォールバック | **(a)。** 設定ファイル中の同名文字列が参照一覧を汚し、トークンを浪費する。必要なときだけ広げる | 今 |
+| OD-16 | T-20 の `auto_fallback_grep_pattern` | (a) 指定があれば必ず一時テーブルを作る（本書）、(b) 結果 0 件のときだけ自動実行 | **(a)。** 「0 件のとき自動で」は挙動が結果に依存して読みにくい。明示のほうが決定論的 | 今 |
+| OD-17 | T-16 の対象外 | `async` 関数とジェネレータを M3 の範囲外（`E_UNSUPPORTED`）とする | **範囲外のまま M3 を閉じ、需要があれば M4 で扱う** | M3 着手前 |
+| OD-18 | LSP 不在時の Code Action | (a) 提供しない（T-13 は `E_LSP_UNAVAILABLE`）、(b) Tree-sitter だけで安全に行える数種（未使用 import の除去など）を内蔵する | **(a) で M1 を閉じる。** 需要が見えたら (b) を M2 以降で | M2 着手前 |
+| OD-19 | 本体のライセンス | (a) MIT、(b) Apache-2.0、(c) MIT OR Apache-2.0 のデュアル | **決定済み: (a) MIT**（師匠 2026-10-29「ライセンスは MIT に確定」）。リポジトリ直下に `LICENSE` を置いた。依存側の確認は第 16 章 | 決定済み |
+| OD-20 | Git 層のライブラリ（Python を選んだ場合） | (a) dulwich（Apache-2.0 側を選択）、(b) pygit2（GPL-2.0-only + リンク例外。GPL 文面の同梱が要る）、(c) GitPython（BSD-3。シェルの git を起動） | **(a) を第一候補。** 純 Python で寛容。M2 のベンチマーク（NFR-PERF-2）で足りなければ (b) を第 16 章 L-3 の手続きで検討する。(c) は §4.2 の方針と相反。アーキテクチャ設計書 §11.1 は dulwich を M1 の必須依存に置いた（T-02 / T-05 の revision 解決に要る）。**S-8 の結果**（2026-10-29）: M1 の用途（参照解決・blob・`STAGED`・`.gitignore`・不変性）は dulwich で合格（1〜5 ms）。M2 の履歴だけ、dulwich の `Walker` が F-PY 規模で 13 秒超（`git log --follow` は 106 ms）で不合格。M2 の履歴は「(a) ＋ 履歴専用の `git` 子プロセス（読み取り専用。`git` が無い環境では (a) の dulwich で走査する〔`Walker` そのものではなく、自前の path 限定 walk を `max_commits` で区切る。設計書 §7.9.2〕）」に**決定**（師匠 2026-10-29「推奨: 読み取り専用で使うことを認る」）。`git` は別プロセスとして起動するだけで同梱しない（第 16 章の GPL 同梱禁止に触れない）。(b) pygit2 は採らない | **決定**（M1 は (a)、M2 の履歴は (a) ＋ `git` 子プロセス〔読み取り専用〕） |
+| OD-22 | HTTP 系トランスポート | (a) 提供しない（stdio のみ）、(b) Streamable HTTP を任意で提供 | **決定済み: (a)**（師匠 2026-10-29「stdio のコマンド実行型でできるよね？ HTTP 型はあまり望ましくない」）。配布物に HTTP サーバーの起動経路を持たない | 決定済み |
+| OD-21 | Cython と Jinja2 の Tree-sitter 文法 | Cython: 専用文法が未特定。Jinja2: 公式系に無く、参考の cathaysia/tree-sitter-jinja は Apache-2.0 | **着手前に一次情報で確認して決める。** 見つからなければ Cython は Python 文法で寛容に解析、Jinja2 は自前の字句解析で `{{ }}` / `{% %}` だけを拾う | B1b / B7 着手前（M2） |
+
+---
+
+# 付録 A. サンプルクエリ
+
+`query_project_db`（T-20）に渡せる SQL の例。いずれも公開テーブル（§9.2）だけを使う。
+
+**A-1. 直近 10 コミットで変わった関数のうち、3 か所以上から呼ばれ、テストから参照が無く、エラー診断を持つもの（上位 5）**
+
+```sql
+WITH recent AS (
+  SELECT commit_sha FROM git_commits ORDER BY committed_at DESC LIMIT 10

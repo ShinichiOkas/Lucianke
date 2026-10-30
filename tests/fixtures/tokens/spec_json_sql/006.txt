@@ -1,0 +1,20 @@
+WITH recent AS (
+  SELECT commit_sha FROM git_commits ORDER BY committed_at DESC LIMIT 10
+)
+SELECT s.urn, f.path, s.signature,
+       COUNT(DISTINCT r_in.source_urn) AS caller_count,
+       MAX(d.message)                  AS current_error
+FROM symbols s
+JOIN files f               ON f.file_id = s.file_id
+JOIN git_symbol_changes g  ON g.urn = s.urn AND g.commit_sha IN (SELECT commit_sha FROM recent)
+LEFT JOIN relations r_in   ON r_in.target_urn = s.urn AND r_in.relation_kind = 'CALLS'
+LEFT JOIN diagnostics d    ON d.enclosing_urn = s.urn AND d.severity = 'error'
+WHERE s.kind IN ('Function', 'Method')
+  AND NOT EXISTS (
+    SELECT 1 FROM relations rt JOIN files ft ON ft.file_id = rt.source_file_id
+    WHERE rt.target_urn = s.urn AND ft.is_test = 1
+  )
+GROUP BY s.urn
+HAVING caller_count >= 3 OR current_error IS NOT NULL
+ORDER BY caller_count DESC
+LIMIT 5;

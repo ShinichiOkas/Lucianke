@@ -1,0 +1,120 @@
+
+1. 各 TargetRef を §5.3 で解決する。項目の失敗は T-02 手順 1 のバッチ規約に従い、曖昧な項目は `candidates[]` 付きの `E_TARGET_AMBIGUOUS` を項目に入れ、他項目は処理を続ける。
+2. `exact`: LSP の定義ジャンプと hover 相当の情報からジェネリクス展開後の型を取り、SCIP 索引があれば `scip_symbol` を添える。**M1 の実装**（実装で確定 2026-10-29、76a2aca・9259466）: ツールの `max_confidence` は `EXACT`（以前は `STRUCTURAL`）。解決したシンボル 1 件ごとに、(a) 内部表 `_hover_cache` に **(`urn`, 定義ファイルの `sha256`)** の行があれば LSP を呼ばず（起動も促さず）`exact` で答える（LSP が止まっていても、別のセッションでも、定義ファイルの内容が同じなら `exact`。設計書 R-11）。(b) 無ければ LSP が `ready` のときだけ、名前の位置（`selection.start`。文字境界）に `definition` と `hover` を送り、hover の型文字列を `signature_expanded` に入れて `_hover_cache` に書き戻す（`data_version` は進めない。同じ `urn` の古い `sha256` の行は消す）。`ready` でなければ**待たずに** `structural`（`standby` は起動を促すだけ）。(c) `definition` は確認に使う: 宣言の名前の位置から引いた定義が構文木の解決と違えば（別名・再エクスポート・オーバーロード）項目の `warnings` に LSP の答えを書き、解決先は付け替えない（`definition.range` と T-05 の `range_returned` の一致〔事後条件 1〕を保つため）。hover が空なら `structural`（`warnings` に「LSP が型情報を返さなかった」旨）。(d) タイムアウトと `E_LSP_UNAVAILABLE`（`position_clamped` を含む）は `structural` に降格する（`position_clamped` は位置が文字境界に当たらず要求を送らなかったとき。設計書 §7.8.4）。`scip_symbol` は未実装。
+3. `structural`: Tree-sitter の宣言と import 文のモジュールパス→ファイル対応（ワークスペース内に限る）で定義を引く。型の展開は行わず、宣言どおりの文字列を返す。
+4. Python 周辺ブリッジ（FR-LANG-3）: `.py` に定義が無く `.pyi` スタブ、Cython の `.pxd`/`.pyx`、同一ワークスペースの PyO3 属性付き Rust 関数、`*_pb2.py` の生成元 `.proto` に対応する宣言があるときは、それを `definition` とし `declared_in` に種別（`stub` \| `cython` \| `pyo3` \| `proto`）を書く。
+5. `heuristic` / `lexical_fallback`: ctags エントリまたは定義パターンの grep 一致行を `definition` とし、`signature` は一致行のテキストを返す。
+6. 1 レコードは 1 対象。
+
+**出力**（compact）:
+
+```
+# resolve_symbols ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~350/2000tok
+[Method] src/services/payment.py#PaymentProcessor.process_charge @L40-115
+  urn: lk://app/src/services/payment.py#PaymentProcessor.process_charge
+  sig: (self, req: PaymentRequest) -> Receipt
+  type: PaymentRequest=lk://app/src/services/payment.py#PaymentRequest Receipt=lk://app/src/models/receipt.py#Receipt
+  doc: 注文に対する決済を実行し領収書を発行する (doc_lines=6)
+  decorators: @transactional
+[Function] src/legacy/charge.py#process_charge_v1 @L10-55
+  urn: lk://app/src/legacy/charge.py#process_charge_v1
+  sig: (order_id: str) -> dict
+```
+
+json の `data`:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `items[]` | object[] | 1 対象 1 項目（`ok`, `error`, `request` のエコー） |
+| `items[].symbol` | SymbolRecord | |
+| `items[].definition` | object | `path`, `range`, `selection_range`, `declared_in`（`source` \| `stub` \| `cython` \| `pyo3` \| `proto`） |
+| `items[].signature_expanded` | string | 型を展開したシグネチャ（`exact` のみ。他は `signature` と同じ） |
+| `items[].doc_full` | string | Doc 全文 |
+| `items[].decorators[]` | string[] | |
+| `items[].type_definitions[]` | object[] | `name`, `urn`, `path`, `range` |
+| `items[].confidence_level` | string | |
+
+**エラー**:
+
+- `E_INVALID_ARGUMENT`: `targets` が 0 件または 21 件以上、TargetRef が 3 形式のいずれでもない。
+- `E_TARGET_NOT_FOUND` / `E_TARGET_AMBIGUOUS`: 項目単位。全件失敗で全体のエラー。
+- `E_WORKSPACE_NOT_CONFIGURED`, `E_REVISION_NOT_FOUND`: §5.8 のとおり。LSP が未起動・索引中のときはエラーにせず `structural` に降格する。
+
+**精度と降格**: `exact` は展開済み型、別名追跡、`type_definitions` を返す。`structural` はワークスペース内の宣言と宣言どおりの型を返し、外部パッケージの定義は `E_TARGET_NOT_FOUND` ではなく `definition: null` と `warnings` で示す。`heuristic` は定義行と一致行テキストのみ。`lexical_fallback` は候補行を最大 3 件まで `candidates` に並べ、`definition` は最初の 1 件とする。
+
+**事後条件**:
+
+- 各成功項目の `definition.range` は、同じ URN を `get_symbol_bodies` に渡したときの `range_returned`（`context_lines: 0`）と一致する。
+- `resolve_type_definitions: true` で返す各 `type_definitions[].urn` を `resolve_symbols` に渡すと `E_TARGET_NOT_FOUND` にならない。
+- 曖昧な対象を含む呼び出しで、その項目は `E_TARGET_AMBIGUOUS` と 10 件以下の `candidates[]` を持ち、他の項目は `ok: true` である。
+- `exact` 項目の `signature_expanded` は、同じ位置で LSP に hover を要求して得た型文字列と一致する。
+
+### T-05 `get_symbol_bodies`
+
+**目的**: ファイル全体を読まずに、指定したシンボルの実装本体だけを AST ノード境界で切り出して返す。データファイルはセレクタで部分抽出する。
+
+**マイルストーン**: M1
+
+**対応要求**: FR-NAV-2, FR-LANG-2, FR-LANG-3, FR-WS-3, FR-FMT-2, FR-FMT-3, NFR-PERF-1
+
+**入力**（`max_tokens` 既定 3000）
+
+| パラメータ | 型 | 必須 | 既定 | 規約 |
+|---|---|---|---|---|
+| `targets` | TargetRef[] | はい | なし | 1〜20 件。`symbol_name` にセレクタ `xpath:` `jsonpath:` `jq:` `cell:` `toml:` `yaml:` を書ける |
+| `context_lines` | integer | いいえ | `2` | 0〜20。本体の直前に付ける行数（デコレータ・コメント用） |
+| `with_line_numbers` | boolean | いいえ | `true` | 各行に `@L<n>: ` を付ける |
+| `include_referenced_symbols` | boolean | いいえ | `true` | 本体内で参照しているワークスペース内シンボルの URN を最大 20 件添える |
+| `line_range` | object | いいえ | なし | `{start, end}`。巨大なシンボルの一部だけを取る（本体範囲内に丸める） |
+
+**処理規約**:
+
+1. 各 TargetRef を §5.3 で解決する（バッチ規約は T-02 手順 1）。
+2. 返す範囲は、宣言ノードの範囲に、構文上そのノードに付属するデコレータ・属性・直前の Doc コメント（JSDoc、Rustdoc、`///`、`#[...]`）を加えたものとし、さらに `context_lines` 行を前に付ける。`context_lines` の行はデコレータ等と重ならない分だけ付ける。
+3. セレクタ: `xpath:` は XML / HTML / SVG、`jsonpath:` と `jq:` は JSON / JSONL、`toml:` は TOML、`yaml:` は YAML、`cell:<n>` は `.ipynb` に適用する。ファイル種別に合わないセレクタは `E_UNSUPPORTED`。セレクタの構文誤りは `E_INVALID_ARGUMENT`。一致が複数のノードなら最初の 20 件を 1 項目内に並べ、総数を `match_count` に書く。
+4. `cell:<n>` は `cells[n].source` の連結だけを返し、`outputs` を含めてはならない（MUST）。行番号は T-02 手順 3 の仮想行。
+5. `heuristic`: ctags の開始行から、インデントまたは括弧の対応で推定した終了行までを返す。`lexical_fallback`: 定義パターンの一致行を中心に前後 15 行（最大 31 行）の窓を返し、一致が複数なら最大 3 窓を `windows[]` に並べる。先頭に `! DEGRADED` 行（MUST）。
+6. `include_referenced_symbols` は、本体内の識別子のうち `symbols` テーブルに解決できたものを `- refs:` 行に列挙する（`exact` / `structural` のみ）。
+7. 1 レコードは 1 対象。1 対象が予算に収まらないときは先頭から詰め、`truncated_at_line` を記録して `next_cursor` で同じ対象の続きを返す。**続き**（実装で確定 2026-10-29、04ed9b7、BUG-0016）: カーソルは「同じ対象の `truncated_at_line` の次の行から本体の終わりまで」を指し（前置き〔`context_lines`〕は続きには付けない）、次のページの `range_returned` は前のページの終わりの次の行から始まる。全ページを連結すると本体全体とバイト一致する。切った項目には `items[].continue_with.line_range = {start, end}` を付け、compact には注記 `truncated at line N of M: continue with the cursor, or line_range N-M` と `# more: cursor=…` を出す（`budget.truncated` は true、`remaining` はそのレコードの残り）。`line_range` を明示して続きを取ってもよい。前置き（`context_lines`）の途中では切らない（本体の先頭の行が入らないなら、そのレコードは次のページに回す）。本体が変わってカーソルの行が範囲外になったときは `E_CURSOR_EXPIRED`。切れたレコードの後ろの対象は、そのページには詰めない（順を保つ）。
+8. 各項目に対象ファイルの SHA-256 を付ける（MUST）。json は `items[].file_sha256`（64 桁）、compact はシンボル行直下の `sha:` 属性行（先頭 12 桁）。エージェントはこれを編集ツールの `expected_file_sha256` に渡す（§10.4）。
+
+**出力**（compact）:
+
+````
+# get_symbol_bodies ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~520/3000tok
+[Method] src/services/payment.py#PaymentProcessor._validate_limit @L116-140
+  sha: 3f9c1a2b4c5d
+```python
+@L116:     # 通貨ごとの上限を確認する
+@L117:     def _validate_limit(self, amount: Decimal) -> bool:
+@L118:         limit = self._limits.get(self.currency)
+@L119:         if limit is None:
+@L120:             raise LimitExceeded(self.currency)
+```
+- refs: lk://app/src/services/limits.py#LimitTable.get, lk://app/src/errors.py#LimitExceeded
+````
+
+json の `data`:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `items[]` | object[] | 1 対象 1 項目（`ok`, `error`, `request`） |
+| `items[].symbol` | SymbolRecord | セレクタ指定時は `kind` を `Tag` / `Key` / `Cell` とする |
+| `items[].range_returned` | object | `start_line`, `end_line`（`context_lines` を含む） |
+| `items[].file_sha256` | string | 対象ファイルの SHA-256（64 桁） |
+| `items[].context_before_lines` | integer | 実際に付けた前置き行数 |
+| `items[].code` | string | 本体テキスト（行番号接頭辞を含まない） |
+| `items[].truncated`, `truncated_at_line` | boolean, integer | |
+| `items[].referenced_symbols[]` | object[] | `name`, `urn` |
+| `items[].match_count` | integer | セレクタの一致総数 |
+| `items[].windows[]` | object[] | `lexical_fallback` のみ: `start_line`, `end_line`, `code` |
+| `items[].confidence_level` | string | |
+
+**エラー**:
+
+- `E_INVALID_ARGUMENT`: `targets` が 0 件または 21 件以上、`context_lines` が範囲外、セレクタの構文誤り、`line_range` の `start > end`。
+- `E_UNSUPPORTED`: ファイル種別に合わないセレクタ（例: `.py` への `xpath:`）。
+- `E_TARGET_NOT_FOUND` / `E_TARGET_AMBIGUOUS`: 項目単位。
+- `E_WORKSPACE_NOT_CONFIGURED`, `E_REVISION_NOT_FOUND`, `E_CURSOR_EXPIRED`: §5.8 のとおり。
+
+**精度と降格**: `exact` と `structural` は同じ本体を返す（差は `refs:` の解決率のみ）。`heuristic` は終了行が推定で、`accuracy_warning` に「終了行はインデントから推定」と書く。`lexical_fallback` は本体ではなく窓であり、`symbol.kind` は `Section`、`range_returned` は窓の範囲となる。

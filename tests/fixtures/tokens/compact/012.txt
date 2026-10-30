@@ -1,0 +1,5 @@
+# get_diagnostics ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~260/2000tok
+diagnostics: 3 in 2 files (1 E, 2 W; min_severity=warning)
+E src/services/payment.py:58:16 [pyright:reportArgumentType] "str" は "Decimal" に割り当てできません  fix=qf_7a1c
+W src/services/payment.py:9:1 [ruff:F401] `os` imported but unused  fix=qf_02b9
+W src/api/routes.py:131:9 [pyright:reportUnusedVariable] 変数 "retry" は使われていません

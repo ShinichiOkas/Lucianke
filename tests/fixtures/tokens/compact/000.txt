@@ -1,0 +1,4 @@
+# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~1180/2000tok
+=== src/services/payment.py (245 lines, skeleton: 28 lines) ===
+...
+# more: cursor=eyJvZmZzZXQiOjEyfQ remaining≈34

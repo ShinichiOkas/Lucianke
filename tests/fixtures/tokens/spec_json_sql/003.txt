@@ -1,0 +1,1 @@
+{ "code": "E_TARGET_AMBIGUOUS", "message": "symbol_name 'login' は 3 件に一致します", "details": {}, "candidates": [] }

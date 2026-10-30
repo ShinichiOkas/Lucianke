@@ -1,0 +1,8 @@
+# edit_symbol_body ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~240/1500tok
+applied: true  edit_id=ed_0007  op=replace_body
+target: lk://app/src/services/payment.py#PaymentProcessor._validate_limit @L117-142
+files_changed: src/services/payment.py (+4 -2)  sha256 3f9c…→a71e…
+syntax_check: ok
+new_diagnostics: complete (+0 -1) checked=2 files
+resolved:
+W src/services/payment.py:120:9 [pyright:reportUnusedVariable] 変数 "tmp" は使われていません

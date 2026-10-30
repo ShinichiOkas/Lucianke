@@ -1,0 +1,13 @@
+# get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~310/2000tok
+=== src/services/payment.py (245 lines, skeleton: 21 lines, sha=3f9c1a2b4c5d) ===
+imports: [Decimal from decimal, OrderRepository, PaymentGateway]
+[Class] PaymentRequest @L12-18
+  doc: 決済要求。amount > 0 が必須
+  urn: lk://app/src/services/payment.py#PaymentRequest
+[Class] PaymentProcessor @L25-240
+  urn: lk://app/src/services/payment.py#PaymentProcessor
+  [Constructor] __init__(self, repo: OrderRepository, gateway: PaymentGateway) @L28-32 { ...4 lines omitted }
+  [Method] pub async process_charge(self, req: PaymentRequest) -> Receipt @L40-115 { ...75 lines omitted }
+    doc: 注文に対する決済を実行し領収書を発行する
+    raises: PaymentDeclined, LimitExceeded
+  [Method] priv _validate_limit(self, amount: Decimal) -> bool @L117-140 { ...23 lines omitted }

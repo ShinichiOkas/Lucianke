@@ -1,0 +1,45 @@
+# S-7 sqlite3 の読み取り専用公開（mode=ro / query_only / authorizer / progress handler）
+
+実施日 2026-10-29。Windows 11 Home 10.0.26300、CPython 3.12.11、同梱 SQLite 3.49.1（FTS5・JSON1・MATH 有効、`load_extension` は既定で無効）。判定: **合格**（DB 本体への書き込みは 3 層のどれか 1 つだけでも拒否される。ただし下の注意 3 点を設計書へ反映する）。
+
+## 確かめたこと
+仕様書 §9.5・§13.2、設計書 ADR-7・§6.2・§7.6.4 の想定が Python 標準の `sqlite3` で成り立つか。項目 1〜6 は `spikes/s07_sqlite/run.py` の同番号。DDL は仕様書 §9.2 をそのまま使った（`spikes/s07_sqlite/schema.sql`）。
+
+## 結果
+| # | 内容 | 結果 |
+|---|---|---|
+| 1 | WAL の DB を別接続の `file:…?mode=ro`（`uri=True`）で読む | **合格**。書き手が開いている（-wal/-shm あり、WAL 上だけの行も見える、未コミットは見えずコミット後は見える）、閉じている（-wal/-shm 無し。読み手が作り、閉じても残る）の両方で読める。別プロセスの書き手が 3 秒連続コミット中に新規接続 239 回、同一プロセスの書き手スレッド中に 235 回、エラー 0。本体の sha256 は読み取りで不変。`immutable=1` は書き手の新しい行を見ないので不可。`Path.as_uri()` で空白・日本語・`#` を含むパスも開ける。ディレクトリが作成不可で -shm が無いと `unable to open database file`（書き手が開いていて -shm があれば読める） |
+| 2 | `query_only` の拒否 | **合格**。INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / VACUUM / FTS5 コマンド（delete-all・rebuild）はすべて `OperationalError: attempt to write a readonly database`。ただし `query_only` 単独は弱い（下の層別表） |
+| 3 | authorizer | **合格**（要修正点あり: 下記）。action と引数を下表に実測 |
+| 4 | `query_only=ON` で `CREATE TEMP TABLE temp_grep_matches` | **不可**（`attempt to write a readonly database`）。**作成と投入を先に済ませてから `query_only=ON`** にすれば、読めて、書き込みは拒否される（1 万行の投入込みで 23 ms） |
+| 5 | progress handler で無限の再帰 CTE を中断 | **合格**。期限 300 ms に対し 300.05 ms（`time.perf_counter()`）。呼び出し間隔は 100〜1 万命令で 300.1 ms 以内、10 万命令で 301 ms。ハンドラの費用は 300 万行の CTE で誤差内。中断後も同じ接続を再利用できる。指数的に増える CTE を 300 ms 走らせてもピーク +2 MB |
+| 6 | 複文・EXPLAIN | **合格**。`SELECT 1; SELECT 2` は `ProgrammingError: You can only execute one statement at a time.`（`SELECT 1;;` も）。末尾の `;` とコメントは通る。`EXPLAIN QUERY PLAN` は authorizer と `query_only` の下で動き、非公開表や INSERT は同じく拒否される |
+
+**層別の検査（項目 2）**: 25 種の書き込み系の文 × 層の組み合わせ 8 通りで、DB ファイル・journal_mode・user_version・全ダンプ・ディレクトリを前後比較した。差が出た行だけ示す。
+
+| 文 | ro のみ | query_only のみ | authorizer のみ | ro+query_only | 残り（ro+auth、qo+auth、3 層） |
+|---|---|---|---|---|---|
+| `PRAGMA journal_mode=DELETE` | 拒否（`disk I/O error`） | **実行され DB を変更** | 拒否 | 拒否 | 拒否 |
+| `ATTACH '新規パス'` | **0 バイトのファイルが作られる。先に CREATE/INSERT も通る** | 0 バイトのファイルが作られる | 拒否 | 0 バイトのファイルが作られる | 拒否 |
+| `BEGIN` / `SAVEPOINT` / `wal_checkpoint` | 実行（無害） | 実行 | 拒否 | 実行 | 拒否 |
+| `CREATE TEMP TABLE` | 実行（TEMP DB） | 拒否 | 拒否 | 拒否 | 拒否 |
+
+`query_only` は `PRAGMA query_only=OFF` で自分で外せる。`mode=ro` は外しても拒否のまま。上記以外の文（INSERT〜FTS5 コマンド、`WITH … INSERT/DELETE`、`INSERT … RETURNING`）は全層単独で拒否された。
+
+**authorizer が受け取る (action, arg1, arg2, dbname, source)**（Python のコールバックは 5 引数。`ATTACH`=24 は `SQLITE_FORMAT` と数値が衝突するので名前で扱う）
+
+| 文 | 受け取るもの |
+|---|---|
+| `SELECT name FROM symbols` | `SELECT`、`READ(symbols, name, 'main')` |
+| `count(*)`・`SELECT 1`（列を読まない） | `READ(表名, '', None)`。**CTE・サブクエリの別名も同じ形**（`WITH c AS (…) SELECT count(*) FROM c` → `READ('c','',None)`） |
+| `… FROM symbols_fts WHERE symbols_fts MATCH 'x'` | `READ` が **symbols_fts_config / _idx / _docsize / _data**（FTS5 の内部クエリにも authorizer が呼ばれる）、`FUNCTION(match)`、`FUNCTION(bm25)`、**`PRAGMA(data_version)`**、外部コンテンツの `READ(symbols, …)`。`PRAGMA data_version` を拒否すると MATCH が `DatabaseError: authorization denied` で失敗する |
+| 再帰 CTE | `SELECT`（source=CTE 名）、`RECURSIVE`（source=CTE 名） |
+| `json_extract(…)` / `json_each('[1]')` | `FUNCTION(json_extract)` / `READ(json_each, value, 'main')`（表値関数は表として届く） |
+| `SELECT * FROM _meta` / `sqlite_master` / `pragma_table_info('_meta')` | `READ(_meta, 列, 'main')` / `READ(sqlite_master, …)` / `READ(pragma_table_info, …)` + `PRAGMA(table_info, '_meta')` |
+| `load_extension('x')` | `FUNCTION(load_extension)`。`readfile` / `writefile` / `edit` は CPython 同梱の SQLite に無く `no such function` |
+| `ATTACH` / `DETACH` / `PRAGMA x` | `ATTACH(パス)` / `DETACH(名前)` / `PRAGMA(名前, 引数)` |
+| INSERT / UPDATE / DELETE | `INSERT(表)` / `UPDATE(表, 列)` / `DELETE(表)`。`CREATE TABLE` は `INSERT(sqlite_master)` + `CREATE_TABLE(名)` + `UPDATE(sqlite_master, …)` |
+
+**エラーの型**: 読み取り拒否 `DatabaseError: access to _meta.schema_version is prohibited`、操作の拒否 `DatabaseError: not authorized`、関数の拒否 `OperationalError: not authorized to use function: load_extension`（`OperationalError` は `DatabaseError` の子なので `except sqlite3.DatabaseError` 1 本で受け、`guard.denied` で `non_public_object` / `forbidden_keyword` を分ける）。期限切れは `OperationalError: interrupted`（`guard.timed_out` で `E_TIMEOUT` に分ける）。複文と bind 不足は `ProgrammingError`。`params` に余分なキーがあっても黙って受理される（名前の突き合わせはアプリ側）。
+
+**その他の実測**: `time.monotonic()` は Windows の CPython 3.12 で分解能 15.6 ms、期限判定に使うと 300→310 ms にずれる（`perf_counter` は 0.1 µs）。`hex(zeroblob(4e8))` のような単発の C 関数は progress handler で止まらず 1.2 秒・1.1 GB を使う。`setlimit(SQLITE_LIMIT_LENGTH, 16 MiB)` で 0 ms の即エラーになる（12 MiB の `doc_full` は読め、20 MiB は `string or blob too big`。1 MiB だと正当な大きな行を壊すので 16 MiB とした）。別スレッドの `con.interrupt()` も 300 ms で効く。開く費用: `open_public` + 1 クエリ + `close` が p50 1.3 ms、書き手が 3 秒連続コミットしていても p95 約 10 ms（毎回開く）／開きっぱなしなら 0.05 ms。なお初期の試走 2 回（項目 1c と別計測）で p95≈300 ms の停止が出たが、以後の再走 12 回では再現しなかった（最大 25 ms、1 回だけ 95 ms）。原因は未特定（WAL の読み取り位置の競合か環境）で、期限の設計には 1 要求ごとに最大 300 ms 余裕を見ておく。読み手が `BEGIN` を保持すると書き手は止まらないが `wal_checkpoint(TRUNCATE)` は完了しない（busy=1）。

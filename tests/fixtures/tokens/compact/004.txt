@@ -1,0 +1,7 @@
+# configure_workspace ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~260/1500tok
+- workspaces: 1 (active: app)
+| id | root | langs | python | branch | dirty |
+| app | S:/work/app | python(T1):42 toml(T3):2 ipynb(T2):3 | .venv/Scripts/python.exe 3.12 (manager: uv) | main | 3 |
+- lsp: pyright=ready ruff=ready vtsls=standby
+- cache: files=47 symbols=14230 relations=48910 synced=2026-10-29T11:20:03+09:00
+- jobs: (none)

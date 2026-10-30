@@ -1,0 +1,7 @@
+# get_file_skeleton ok conf=heuristic lsp=n/a rev=WORKING_TREE ws=app ~180/2000tok
+! DEGRADED: confidence=heuristic engine=ctags lang=unknown(.cob)
+! Warning: Tree-sitter grammar unavailable. Symbol ranges are estimated from indentation.
+=== legacy/calc.cob (980 lines, skeleton: 3 lines, sha=d4e5f6a7b8c9) ===
+[Section] PROCEDURE DIVISION @L120-980
+  [Function] COMPUTE-TAX @L140-210
+  [Function] WRITE-REPORT @L212-300

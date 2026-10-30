@@ -1,0 +1,166 @@
+            self.edges[key] = _Edge(
+                source=prev.source,
+                target=prev.target,
+                label=prev.label,
+                count=prev.count + count,
+                conf=prev.conf,
+                degraded=prev.degraded,
+                attrs=prev.attrs,
+            )
+            return
+        conf = str(raw["conf"]) if raw.get("conf") is not None else None
+        attrs = raw.get("attrs")
+        self.edges[key] = _Edge(
+            source=source,
+            target=target,
+            label=label,
+            count=count,
+            conf=conf,
+            degraded=_is_degraded(conf, self.max_conf),
+            attrs=attrs if isinstance(attrs, Mapping) else {},
+        )
+
+    def build(self) -> _Graph:
+        for edge in self.edges.values():  # 端点がノード表に無ければ URN から補う
+            for end in (edge.source, edge.target):
+                if end not in self.nodes:
+                    self.add_node({"id": end})
+        nodes = list(self.nodes.values())
+        edges = list(self.edges.values())
+        graph = _Graph()
+        if len(nodes) > MAX_NODES:
+            graph.dropped_nodes = len(nodes) - MAX_NODES
+            nodes = nodes[:MAX_NODES]
+            kept = {n.id for n in nodes}
+            before = len(edges)
+            edges = [e for e in edges if e.source in kept and e.target in kept]
+            graph.dropped_edges += before - len(edges)
+        if len(edges) > MAX_EDGES:
+            graph.dropped_edges += len(edges) - MAX_EDGES
+            edges = edges[:MAX_EDGES]
+        graph.nodes, graph.edges = nodes, edges
+        return graph
+
+
+def _invalid(tool: str, reason: str) -> LuciankeError:
+    return LuciankeError(
+        ErrorCode.E_INVALID_ARGUMENT,
+        f"{tool}: グラフ出力に必要な情報がありません（{reason}）。format は compact または json にしてください。",
+        details={"param": "format"},
+    )
+
+
+def _collect(inp: RenderInput) -> _Graph:
+    """入力からグラフを組み立てる。無ければ ``LuciankeError(E_INVALID_ARGUMENT)``。"""
+    tool = inp.call.tool
+    out = inp.out
+    if out is None:
+        raise _invalid(tool, "ツールの出力がない")
+    builder = _Builder(out.max_confidence)
+    raw = out.data_static.get("graph")
+    if isinstance(raw, Mapping):
+        for node in _mapping_items(raw.get("nodes"), "nodes"):
+            builder.add_node(node)
+        for edge in _mapping_items(raw.get("edges"), "edges"):
+            builder.add_edge(edge)
+        return builder.build()
+    records = inp.page.records if inp.page is not None else out.records
+    edge_rows = 0
+    for rec in records:
+        data = rec.data
+        if "source_urn" not in data or "target_urn" not in data:
+            continue
+        edge_rows += 1
+        builder.add_edge(
+            {
+                "source": data["source_urn"],
+                "target": data["target_urn"],
+                "label": data.get("relation_kind") or data.get("label") or data.get("use"),
+                "count": data.get("count", 1),
+                "conf": rec.confidence if _is_degraded(rec.confidence, out.max_confidence) else None,
+                "attrs": {"guard": data["guard"]} if data.get("guard") else None,
+            }
+        )
+    empty_but_typed = not records and _has_edge_columns(out.data_static.get("columns"))  # 0 行の T-20
+    if edge_rows == 0 and not empty_but_typed:
+        raise _invalid(tool, "data_static['graph'] も source_urn / target_urn 列も無い")
+    return builder.build()
+
+
+def _has_edge_columns(columns: object) -> bool:
+    """T-20 の ``columns[]``（``{name, decl_type}``）に ``source_urn`` と ``target_urn`` の両方があるか。"""
+    if not isinstance(columns, Sequence) or isinstance(columns, (str, bytes)):
+        return False
+    names = {str(c.get("name")) if isinstance(c, Mapping) else str(c) for c in columns}
+    return {"source_urn", "target_urn"} <= names
+
+
+# --- 文字列のエスケープ -----------------------------------------------------------------------
+
+
+def _dot_str(text: object, *, multiline: bool = False) -> str:
+    """dot の二重引用符つき文字列。``\\`` と ``"`` をエスケープし、改行は ``\\n``（``multiline``）か空白にする。"""
+    s = _CTRL.sub(" ", str(text)).replace("\\", "\\\\").replace('"', '\\"')
+    s = _NEWLINE.sub("\\\\n" if multiline else " ", s)
+    return f'"{s}"'
+
+
+def _dot_attr_value(value: object) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    text = str(value)
+    return text if _ATTR_VALUE.fullmatch(text) else None
+
+
+def _mm_text(text: object) -> str:
+    """mermaid の引用符つきラベルの中身。``# % " < > & ` |`` を実体参照にし、改行は空白にする。"""
+    s = _NEWLINE.sub(" ", _CTRL.sub(" ", str(text)))
+    return _MERMAID_SPECIAL.sub(lambda m: _MERMAID_ENTITY[m.group()], s)
+
+
+def _edge_lines(edge: _Edge) -> list[str]:
+    """エッジのラベルの行（1 行目: 関係種別と ``×N``、2 行目: ガード条件）。"""
+    first = " ".join(p for p in (edge.label, f"×{edge.count}" if edge.count > 1 else "") if p)
+    lines = [first] if first else []
+    if edge.guard:
+        lines.append(f"when: {edge.guard}")
+    return lines
+
+
+# --- コメント（ヘッダ・警告・トレーラ） --------------------------------------------------------
+
+
+def _head_lines(inp: RenderInput, error: LuciankeError | None) -> list[str]:
+    """compact と同じ中身の先頭行（ヘッダ、降格の警告、警告、``head_kv``）。失敗時はエラーの行。"""
+    call = inp.call
+    warnings = [line for w in collect_warnings(inp) for line in banner(w)]
+    if error is not None:
+        lines = [error_header_line(call.tool, error.code), *banner(error.message)]
+        lines += [candidate_line(c) for c in error.candidates]
+        return lines + warnings
+    used = inp.page.used_tokens_est if inp.page is not None else 0
+    lines = [
+        header_line(
+            call.tool,
+            conf=inp.meta.confidence_level,
+            lsp=inp.meta.lsp_status,
+            rev=call.revision,
+            ws=call.workspace_id,
+            used_tokens=used,
+            max_tokens=call.max_tokens,
+            lsp_progress=inp.meta.lsp_progress,
+        ),
+        *banner_lines(inp.meta),
+        *warnings,
+    ]
+    if inp.out is not None:
+        lines += [kv_line(k, v) for k, v in inp.out.head_kv]
+    return lines
+
+
+def _tail_lines(inp: RenderInput, graph: _Graph | None) -> list[str]:
+    lines: list[str] = []
+    if graph is not None and (graph.dropped_nodes or graph.dropped_edges):
+        lines.append(
+            trailer_summary(
+                f"graph truncated at {MAX_NODES} nodes / {MAX_EDGES} edges: "

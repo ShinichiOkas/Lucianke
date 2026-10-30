@@ -1,0 +1,3 @@
+{ "urn": "lk://app/src/services/auth.py#AuthService.login" }
+{ "path": "src/services/auth.py", "symbol_name": "AuthService.login" }
+{ "path": "src/services/auth.py", "line": 42, "character": 9 }

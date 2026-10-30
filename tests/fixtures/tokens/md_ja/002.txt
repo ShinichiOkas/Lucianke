@@ -1,0 +1,136 @@
+
+## 9.2 ログ
+
+- `logging` の JSON Lines フォーマッタを `logging_setup.py` に置く。出力先は `stderr`（人向け 1 行）とファイル（JSON Lines、日次ローテーション、7 日）。
+- 必ず残すフィールド: `ts`, `level`, `event`, `request_id`, `tool`, `workspace_id`, `timing_ms`, `confidence`, `error_code`, `edit_id`, `lsp.language`, `lsp.state`。
+- 残さないもの: ファイル本文、`new_code`、秘密らしき値。`debug` でもスニペットは 200 文字まで（仕様書 §12.6）。
+- 受入: ログファイルの各行が JSON として解析でき、`event` と `request_id` を持つ。
+
+## 9.3 設定
+
+| 層 | 実装 |
+|---|---|
+| 既定 | `config.Settings` の既定値（`core/limits.py` の定数を参照） |
+| `.lucianke.toml` | ルート直下。`settings_file.py` が読む。書かない。キー: `exclude_globs`, `python_interpreter`, `lsp.<lang>.cmd`, `test_globs`, `co_change_window`, `max_file_bytes` |
+| 環境変数 | `LUCIANKE_CACHE_DIR`, `LUCIANKE_LOG_LEVEL`, `LUCIANKE_LSP_<LANG>_CMD`, `LUCIANKE_DISABLE_LSP`, `LUCIANKE_MAX_FILE_BYTES` |
+| ツール | `configure_workspace` の設定は `workspaces` 行に保存し、次回起動でも使う |
+
+優先順位: ツール > 環境変数 > `.lucianke.toml` > 既定（仕様書 §12.7）。`Settings` は不変で、変更は `WorkspaceContext` が新しい `Settings` を作って差し替える。
+
+## 9.4 セキュリティの実装点
+
+| 仕様書 | 実装点 |
+|---|---|
+| 仕様書 §13.1 パス封じ込め | `workspace/paths.py` の `confine(ws, raw) -> RelPath`。すべてのファイルアクセスはこの戻り値だけを受け取る型（`RelPath`）にする。生の `str` を受け取る I/O 関数を置かない |
+| 仕様書 §13.2 DB 読み取り専用 | `index/public.py`（3 重防御）。`tests/invariants/test_public_db_readonly.py` が書き込み文の全パターンを投げて拒否と DB ハッシュ不変を確かめる |
+| 仕様書 §13.3 子プロセス | `core/procs.py` の `ProcessRegistry.spawn(argv, cwd, env)`。`shell=True` を使う箇所をコードベースから静的に禁止（lint） |
+| 仕様書 §13.5 秘密ファイル | `languages.py` が秘密パターンに一致したファイルを `tier=4, language="secret"` にし、`FormatAdapter` を割り当てない。骨格・本体は `E_UNSUPPORTED`（`details.reason: "secret_file"`） |
+| 仕様書 §13.6 入力検証 | pydantic（`extra="forbid"`）、正規表現は `re` のタイムアウトが無いため、長さ上限（1,000 文字）と `regex` パターンの事前検査（ネストした量化子の拒否）＋スレッドでの評価時間監視（`REGEX_TIMEOUT_MS`）で代替する |
+| 仕様書 §13.7 外部通信禁止 | 依存のうち実行時に外へ出るものを入れない（L-6）。`tests/invariants/test_no_network.py` が全ツールを実行中に `socket.socket` をモンキーパッチして外向き接続が無いことを確かめる |
+
+## 9.5 OS 差の扱い（Windows を第一級に）
+
+| 事項 | 扱い |
+|---|---|
+| パス | 内部は常に `/` 区切りの相対パス。大文字小文字を区別しないファイルシステムでは、実体パスの大文字小文字を正とし、`confine` で正規化する |
+| 改行 | ファイルの多数派を検出して保持（`core/textpos.py`）。`git` の `autocrlf` に依存しない |
+| 原子的改名 | `os.replace`。Windows で `winerror` 5・32 なら 10〜160 ms の指数間隔で再試行（合計 310 ms）。読み取り専用属性の対象は書かずに `E_MUTATION_BLOCKED`（§7.7.5。S-10 で確認） |
+| シグナル | `SIGINT` / `SIGTERM`（POSIX）、`SIGBREAK` と `stdin` EOF（Windows）。`loop.add_signal_handler` が無い環境では `signal.signal` + フラグ |
+| 子プロセス | Windows では `CREATE_NEW_PROCESS_GROUP` で起動して Job Object（`KILL_ON_JOB_CLOSE`）に入れ、孫まで落とす。終了は（LSP は `shutdown` → `exit` のあと）`terminate` → `kill`。`CTRL_BREAK_EVENT` は GUI ホスト配下で届かないので当てにしない。POSIX では `start_new_session=True` で起動し、`killpg` の `SIGTERM` → `SIGKILL`（ADR-12） |
+| ファイル監視 | `watchfiles`（Rust 製バックエンド。Windows 対応の記述あり。S-6 で挙動確認）。利用不可ならポーリング（仕様書 §12.4 の 6） |
+| 実行ビット | POSIX のみ保持。Windows では無視 |
+| Python 環境 | `.venv/Scripts/python.exe`（Windows）と `.venv/bin/python`（POSIX）の両方を探索 |
+| キャッシュ場所 | `%LOCALAPPDATA%\lucianke\cache`、`~/Library/Caches/lucianke`、`~/.cache/lucianke`（`platformdirs` は使わず自前で 3 分岐。依存を増やさない） |
+
+## 9.6 文字コードとエンコーディング
+
+- ファイルは UTF-8 として読む。BOM があれば記録して保持する。UTF-8 として読めないファイルは `files.language = "binary"`、`tier = 4` とし、骨格・本体は `E_UNSUPPORTED`。
+- Tree-sitter はバイト列で解析し、ノード範囲はバイトオフセットで返る。`LineIndex` がバイト → コードポイントに変換する（ADR-14）。列は行頭からのバイト数で、行は `\n` だけで切る（S-2 で確認）。
+- JSON 出力は `ensure_ascii=False`。
+
+---
+
+# 10. 品質戦略
+
+## 10.1 テスト階層
+
+| 階層 | 対象 | 速さ | 実 LSP |
+|---|---|---|---|
+| unit | `core`、`budget`（パッカー・推定器・カーソル）、`textpos`、`urn`、`boundaries`、`normalize`、`writer`、`paths`、`languages` | 秒 | 不要 |
+| contract | 仕様書 §11 の事後条件を T-nn ごとに。フィクスチャ F-POLY と小さな Python / TS プロジェクト。LSP は偽物（録画した応答を返す `FakeLsp`） | 分 | 不要 |
+| e2e | 実 LSP（basedpyright、ruff、vtsls）と実 MCP クライアント（SDK のクライアント）で、`.mcp.json` に書くのと同じ起動方法 | 分〜十分 | 要 |
+| invariants | `stdout` 純度、子プロセス 0、読み取りツールでの `sha256` 不変、公開 DB の読み取り専用、外向き接続なし、**再起動耐性**（プロセスを kill して再起動しても、同じ呼び出しが同じ結果を返す。cursor と code_action_id は失効して再取得できる。ADR-16） | 全テストに横断して適用 | |
+| bench | 仕様書第 14 章 | 別実行 | 要 |
+
+- `FakeLsp` は実 LSP との対話を一度録画して JSON に保存し、以後はそれを再生する。録画の更新は e2e と同じ環境で行う。
+- Windows / macOS / Linux の 3 OS で unit・contract・invariants を回す（CI）。e2e は各 OS で基本シナリオだけ。
+
+## 10.2 契約テストの作り方
+
+- 仕様書 §11 の各ツールの「事後条件」を 1 項目 1 テストに写す。テスト名は `test_T02_postcondition_3` のように仕様書の番号を含める。
+- Compact DSL の文法適合は、仕様書 §6.1 の EBNF から起こした小さなパーサ（`tests/contract/compact_grammar.py`）に全ツールの compact 出力を通して検査する。文法とパーサの乖離は仕様書の改版で直す。
+- 事後条件が「LSP の結果と等しい」と言うものは、`FakeLsp` の録画と比較する。
+
+## 10.3 編集の不変条件テスト
+
+- EP-1〜EP-9 を `tests/unit/test_edit_transaction.py` で。外部変更の競合（EP-4）は、段 1 と段 6 の間に差し込むフックでファイルを書き換えて再現する。
+- 恒等編集（EP-6）はフィクスチャの全シンボルに対して実行し、バイト一致を確かめる（CRLF・BOM・末尾改行なしのファイルを含める）。
+
+## 10.4 ベンチマーク
+
+- `bench/run_bench.py` が仕様書 §14.3〜14.6 を実行し、`bench/results/<日時>-<OS>.json` を書く。
+- トークン推定の較正（S-12）は bench の中で行う。基準のトークナイザは bench の開発依存にだけ入れ、製品の依存には入れない（L-6）。
+- 結果の要約は `.pair-agent/acceptance/` に置く。
+
+## 10.5 CI
+
+| ジョブ | 内容 |
+|---|---|
+| lint | `ruff check`、`ruff format --check`、import 方向の検査（§4.2）、`shell=True` 禁止 |
+| typecheck | basedpyright（strict ではなく standard から始め、`core` と `edit` は strict） |
+| test | unit + contract + invariants（3 OS × Python 3.12 / 3.13） |
+| e2e | 1 OS ずつ基本シナリオ |
+| license | `pip-licenses` で依存木の SPDX を許可リストと照合（仕様書第 16 章 L-8）。`python tools/gen_notices.py --check` で `THIRD_PARTY_NOTICES.md` が最新であること、`uv build` の後に `python tools/check_dist.py` で配布物の中身を確認（下記。ec55f1b・f748e04。実装で確定 2026-10-29） |
+| schema | `index/schema.sql` と仕様書 §9.2 の DDL の一致。内部テーブル（`_meta`, `_hover_cache`, `_symbol_rank`, `_import_probes`）と `symbols_fts` の追従トリガは許容リストで除外 |
+
+**`THIRD_PARTY_NOTICES.md` の生成と配布物の検査（実装で確定 2026-10-29）**:
+
+- `tools/gen_notices.py` が `THIRD_PARTY_NOTICES.md` を `uv.lock` の依存木から生成する（手で書かない。仕様書 §16.3）。対象は本体の `dependencies` と extras（`all` を除く）ごとの推移的閉包で、dev 依存は含めない（57 パッケージ）。依存の条件（`sys_platform` / Python の版）は Windows・Linux・macOS × Python 3.12〜3.14 のどれかで要るものをすべて含め、どの OS で生成しても同じ内容になる。ライセンス情報は導入済みの配布情報から `pip-licenses` で読む（ネットワーク不要）。この環境に入らない依存（例: Windows 専用の pywin32）は表の値だけを出す（`STATIC_ENTRIES`）。デュアルライセンスの選択は検査器の `DUAL_CHOICES` を使う（dulwich は Apache-2.0 側。OD-20）。`--check` は生成物が古ければ 1 を返す。単体テスト `tests/unit/test_notices_up_to_date.py` も同じことを検査する。
+- `pyproject.toml` の `license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]` で wheel の `*.dist-info/licenses/` に入る。sdist は**許可リスト方式**（`[tool.hatch.build.targets.sdist]`）にして、`.claude`・`.pair-agent`・`.mcp.json` などの作業用ファイルを配らない。
+- `tools/check_dist.py`（`dist/` または `--build`）が、wheel に `LICENSE` と `THIRD_PARTY_NOTICES.md` が入りリポジトリのものと一致すること（古い生成物を配らない）、`METADATA` に `License-Expression: MIT` と両方の `License-File` があること、sdist の直下に両ファイルがあり作業用ファイルが無いことを確かめる（`tests/unit/test_dist_contents.py`）。CI の license ジョブに接続済み。
+
+## 10.6 受入検査の役への引き渡し
+
+- 受入検査は `tests/contract` と `bench` を実行し、結果を `.pair-agent/acceptance/` に残す。人手の操作を要する項目を作らない（仕様書 §14.1）。
+- M1 の出口条件（仕様書 §15.2）を 1 項目 1 スクリプトに対応づけた表を `bench/exit_criteria.toml` に置く。
+
+---
+
+# 11. パッケージングと配布
+
+## 11.1 `pyproject.toml` の骨子
+
+```toml
+[project]
+name = "lucianke"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+  "mcp>=2.3,<2.4",                 # MCP SDK。低水準 API の形と暫定 API を避ける前提が 2.3 系の実測に依る（S-1）
+  "pydantic",
+  "tree-sitter>=0.26,<0.27",   # ABI 14 の文法が 9 言語あり、0.26 の範囲（13〜15）に収まる（S-2）
+  "tree-sitter-python", "tree-sitter-typescript", "tree-sitter-javascript",
+  "tree-sitter-json", "tree-sitter-yaml", "tree-sitter-toml", "tree-sitter-xml", "tree-sitter-markdown",
+  "watchfiles",
+  "PyYAML",
+  "jsonpath-ng",
+  "dulwich",             # M1 から必須: revision 解決と blob 取得（T-02 / T-05）、.gitignore の評価。Apache-2.0 側を選ぶ（S-8）
+]
+
+[project.optional-dependencies]
+langs   = ["tree-sitter-rust", "tree-sitter-go", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-c-sharp", "tree-sitter-rst", "tree-sitter-sql"]
+python  = ["basedpyright", "ruff"]          # Python 系 LSP を pip で入れたい人向け（Node 同梱）
+edit    = ["ast-grep-py"]                   # M2: structural_search_replace
+verify  = ["z3-solver", "sqlglot"]          # M3 / M2
+xml     = ["lxml"]                          # XPath が必要なとき
+all     = ["lucianke[langs,python,edit,verify,xml]"]

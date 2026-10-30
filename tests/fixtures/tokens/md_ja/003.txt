@@ -1,0 +1,137 @@
+| `syntax/symbols.py` | 構文木 → `SymbolRecord`。修飾名・種別・範囲・選択範囲・修飾子・doc 要約・`body_sha256` | DB 書き込み |
+| `index/ingest.py` | `FileFacts` を受けて 1 ファイルの差分取り込みを（呼び手が開いた）トランザクションの中で。`ingest_file` / `remove_file` / `upsert_workspace` / `upsert_exact_relations` / `replace_lsp_diagnostics`。`data_version` は `IndexWriter` が進める | 構文解析、走査 |
+| `engine/indexer.py` | ワークスペースの走査（`.gitignore` と `exclude_globs`）、1 ファイルの解析（`syntax`）→ `FileFacts`、バッチ化（`INGEST_BATCH_FILES` = 50）、背景ジョブ（T-00 `reindex`）、取り込み後の `_settle_relations`、import 元の解き直し（`reresolve.py`）、PageRank の再計算（`rank_scheduler.py`） | DB の SQL（`ingest.py` と `IndexWriter` に任せる） |
+| `lsp/pool.py` | 状態機械・再起動・バックオフ・待機解放 | 要求の意味 |
+| `lsp/features.py` | 各要求の呼び出し、結果の `SymbolRecord` / `relations` 化、PaaD への書き込み要求 | 直列化形式 |
+| `edit/transaction.py` | 8 段の順序と失敗時の不変条件 | hunk の内容 |
+| `engine/selector.py` | ラダーと警告文 | エンジンの実行 |
+| `tools/t*.py` | 引数モデル、サービス呼び出しの順序、レコードの優先順位付け、ツール固有の kv 行 | 予算・形式・精度集計・エラーの直列化 |
+
+---
+
+# 5. 中核ドメインモデル
+
+`core/model.py` の主要型（`Urn` と `Selector` は `core/urn.py` にあり、`model.py` はそこから import する）。すべて不変（`frozen=True` の dataclass）で、ツール・サービス間の受け渡しに使う。
+
+```python
+class Confidence(StrEnum):            # 仕様書 §8.3。順序比較できる（exact が最高）
+    EXACT = "exact"; STRUCTURAL = "structural"; HEURISTIC = "heuristic"; LEXICAL = "lexical_fallback"
+
+class Tier(IntEnum): T1 = 1; T2 = 2; T3 = 3; T4 = 4
+
+class Capability(StrEnum):            # エンジン選択の単位（ADR-10）
+    SKELETON, SEARCH, DEFINITION, BODY, REFERENCES, IMPLEMENTATIONS, CALL_HIERARCHY,
+    DIAGNOSTICS, RENAME, CODE_ACTION, STRUCTURAL_EDIT, SYMBOL_EDIT
+
+class Kind(StrEnum):                  # 仕様書 §6.1 の kind 語彙。値は外部表現（先頭大文字）。File を含む
+    MODULE, CLASS, INTERFACE, STRUCT, ENUM, TRAIT, TYPE, FUNCTION, METHOD, CONSTRUCTOR, FIELD, PROPERTY,
+    VARIABLE, CONSTANT, TABLE, COLUMN, ENDPOINT, MESSAGE, SERVICE, NODE, EDGE, CELL, TAG, KEY, SECTION,
+    FILE                              # ファイル単位の 1 要素（T-18 の Tier 3 / Tier 4）。symbols 表には入れない
+
+@dataclass(frozen=True)
+class Position:  line: int; col: int          # 0 始まり・コードポイント（内部表現。ADR-14）
+@dataclass(frozen=True)
+class Range:     start: Position; end: Position
+
+@dataclass(frozen=True)
+class Urn:                                     # 仕様書第 7 章。core/urn.py
+    workspace_id: str; path: str; selector: Selector | None
+    # Selector = CodeSel(qualified, arity, sighash) | DataSel(kind, expr) | CellSel(n, qualified) | TagSel(name, line) | LexSel(name, line)
+
+@dataclass(frozen=True)
+class TargetRef:                               # 仕様書 §5.3
+    urn: str | None = None; path: str | None = None; symbol_name: str | None = None
+    line: int | None = None; character: int | None = None; variable_name: str | None = None
+
+@dataclass(frozen=True)
+class SymbolRecord:                            # 仕様書 §6.2 と同じ形
+    urn: Urn; path: str; name: str; qualified_name: str; kind: Kind
+    modifiers: tuple[str, ...]; range: Range; selection: Range | None
+    signature: str | None; return_type: str | None; doc_summary: str | None
+    declared_in: str; confidence: Confidence; scip_symbol: str | None = None
+
+@dataclass(frozen=True)
+class FileInfo:
+    file_id: int; workspace_id: str; path: str; language: str; tier: Tier
+    sha256: str; line_count: int; byte_size: int; is_test: bool; confidence: Confidence
+
+@dataclass(frozen=True)
+class EngineChoice:                            # ADR-10 の結果
+    engine: str; confidence: Confidence; lsp_status: str; lsp_progress: int | None; warning: str | None
+```
+
+`core/records.py`（ADR-4）:
+
+```python
+@dataclass(frozen=True)
+class Record:
+    kind: str                 # "file-block" | "symbol" | "ref" | "diag" | "tree" | "path" | "code" | "kv" | "note" | "row"
+    key: str                  # 安定キー（ページ跨ぎの重複排除・並び替えに使う）
+    priority: int             # 小さいほど先に詰める。ツールが付ける
+    lines: tuple[str, ...]    # compact 表現（§6.1 の 1 ブロック）。レンダラは連結するだけ
+    data: Mapping[str, Any]   # json 表現（data 配列の 1 要素）
+    confidence: Confidence
+    group: str | None = None  # 要約の単位（例: ファイルパス）
+    tokens: int | None = None # パッカーが推定して埋める
+    shrink: Callable[[int], "Record | None"] | None = None
+                              # 任意。残り予算で収まる縮退版（T-02 の doc:→urn:→非公開→入れ子の順の省略）を返す。
+                              # 収められなければ None。パッカーは「入らないレコード」にこれがあれば一度だけ呼ぶ
+
+@dataclass(frozen=True)
+class ToolOutput:
+    records: Sequence[Record]           # 優先順位順に並べて渡す
+    head_kv: Sequence[tuple[str, str]]  # compact のヘッダ直後に出す kv 行（target:, rows: など）。常に含める
+    data_static: Mapping[str, Any]      # json の data のうち、レコード配列以外（totals, target, summary など）
+    max_confidence: Confidence          # このツールが到達しうる最高水準（ADR-5）
+    engine: EngineChoice                # 代表のエンジン選択（lsp_status, warning の元）
+    page_unit: str                      # 1 レコードの意味（事後条件の文言と一致させる）
+    summarize: Callable[[Sequence[Record]], str] | None = None   # 残りの要約文（# summary: 行）
+```
+
+`core/errors.py`:
+
+```python
+class LuciankeError(Exception):
+    code: ErrorCode          # 仕様書 §5.8 の 14 種
+    message: str
+    details: Mapping[str, Any]
+    candidates: Sequence[Mapping[str, Any]]   # E_TARGET_AMBIGUOUS 用
+    partial: ToolOutput | None               # E_TIMEOUT の部分結果
+```
+
+---
+
+# 6. 実行モデル
+
+## 6.1 スレッドとタスク
+
+| 実行単位 | 数 | 役割 | 備考 |
+|---|---|---|---|
+| メインスレッド / asyncio ループ | 1 | MCP の読み書き、ツールの非同期ハンドラ、LSP クライアントの I/O、監視イベントの受け取り | ブロックする処理を置かない（MUST） |
+| 読み取り用スレッドプール | 既定 8 | SQLite 読み取り、Tree-sitter 解析（`read_callback` 方式。ADR-13）、ファイル読み込み、ハッシュ計算 | `asyncio.to_thread`。Tree-sitter 解析と ast-grep の照合は GIL を握るので、プールでも**並列化しない**（直列比 0.80〜0.98 倍。S-2・S-3 で確認） |
+| `IndexWriter` スレッド | 1 | SQLite の全書き込み | ジョブキュー。1 ジョブ = 1 トランザクション |
+| 編集用の直列区間 | ワークスペースごとに 1 | `EditTransaction` の段 3〜7 | `asyncio.Lock`。待ち上限 5,000 ms |
+| 子プロセス | 言語 × ワークスペースごと | LSP | 標準入出力をパイプで非同期に読む |
+
+- CPU を使う処理（解析・ハッシュ・大きな JSON 生成）はループ上で行わない。p95 を守る鍵は「ループを空けること」である。ただし Tree-sitter の `parse(bytes)` は、スレッドで走らせても解析の全体にわたって GIL を握ってループを止める（5 MB で約 750 ms）。このため解析は常に `read_callback` 方式（16 KiB 刻み）で行い、ループの停止を最長約 20 ms に抑える（ADR-13。S-2 で確認）。
+- 初回索引（数千ファイル）はプールのスレッドで解析し（GIL のため並列化はしない。S-2 で確認）、書き込みはキューで直列化する。**初回索引が重く時間がかかることは許容する**（師匠 2026-10-29。仕様書 §14.4）。索引中もツールは降格応答で答え続ける設計（ADR-6、§7.8）であり、初回の所要を縮める工夫（プロセスプール、`lucianke index` の事前実行）は M1 では必須にしない（別プロセスなら 4 本で約 4 倍に伸びる。S-2 で確認）。
+
+## 6.2 SQLite 接続（ADR-7）
+
+| 接続 | 開き方 | 使い手 | 備考 |
+|---|---|---|---|
+| 書き込み | 通常。`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000` | `IndexWriter` のみ | 起動時にスキーマ版を確認・移行 |
+| 読み取りプール | 同じファイルを `mode=ro` の URI で開き、`PRAGMA query_only=ON` を設定する（読み取り側が誤って書けない構造にする。実装で確定 2026-10-29。旧版は「通常モードで開き、アプリ側で書き込み文を発行しない」）。`busy_timeout=1000` | ツール、`EngineSelector`、`EditTransaction` の読み | プールから借りて返す。スレッド境界を越えて保持しない |
+| 公開クエリ | `file:...?mode=ro` の URI、`PRAGMA query_only=ON`、`set_authorizer`、`set_progress_handler`、行数上限 | `query_project_db` | 失敗が他接続に波及しないよう独立。1 要求 1 接続で足りる（`open_public` + 1 クエリ + `close` が p50 1.3 ms、書き手が連続コミット中でも p95 約 10 ms。S-7 で確認）。`isolation_level=None`（自動コミット）で開き、読み取りトランザクションを持ち越さない（`wal_checkpoint(TRUNCATE)` を妨げる） |
+
+- WAL のチェックポイントは `IndexWriter` が暇なときと終了時に行う。
+- **作り直し**（`reindex`、移行できない古い `schema_version`）は DB ファイルを削除せず、書き込み接続の中で全オブジェクトを `DROP` して流し直す（§7.6.5。Windows では読み取り接続が開いている DB ファイルを消せない。実装で確定 2026-10-29）。
+- `data_version`: `_meta` 内部テーブルの整数。`files` / `symbols` / `relations` を変える書き込みトランザクションの最後に `+1`（`WriteJob.bumps_version=True`）。`diagnostics` だけの更新、LSP の結果を `relations` へ `exact` で書き戻す更新（`upsert_exact_relations`。§7.5.6）、PageRank の再計算（§7.6.2）は進めない。読み手は `SELECT` で読む。カーソルとキャッシュの無効化に使う（ADR-8）。
+- 内部テーブルは `_meta`（`schema_version`, `data_version`, `edit_seq`）と `_hover_cache`（LSP hover の結果。キー: `urn` + 定義ファイルの `sha256`。§7.5.6）、`_symbol_rank`（シンボル単位の PageRank と fan_in。schema v2。`index/rank.py`）、`_import_probes`（import の解決で調べたパスの語幹。schema v3。`engine/reresolve.py`）。名前が `_` で始まるものは公開クエリから見えない（仕様書 §9.1）。公開 DDL（仕様書 §9.2）に列や表を足さないための表で、`schema.sql` に写しを置く。
+
+## 6.3 ロックと順序
+
+| ロック | 範囲 | 守るもの |
+|---|---|---|
+| ワークスペース書き込みロック | `EditTransaction` の段 3〜7 | 同時編集、編集中の読み取り（読み取りは解放を待つ。仕様書 §5.9） |
+| `TreeCache` の LRU ロック | 取り出し・挿入 | 二重解析の抑止（同じキーの解析中は待つ） |

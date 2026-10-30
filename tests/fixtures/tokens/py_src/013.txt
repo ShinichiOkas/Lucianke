@@ -1,0 +1,194 @@
+            lsp_name=name,
+        )
+
+    choice = pick(st.status, st.progress, st.server_name)
+    handle = None
+    if choice.confidence is Confidence.EXACT:
+        handle = pool.get(language, ws, role="types", start_if_needed=False)
+        if handle is None:  # ready の合図の直後に落ちた
+            choice = pick(LspStatus.UNAVAILABLE, None, st.server_name)
+    return LspRoute(choice, handle, file, cap)
+
+
+def lsp_status_of(services: Any, ws: Workspace, file: FileInfo | None) -> str:
+    """LSP の今の状態（``_resolution_meta.lsp_status``）。起動はしない。PaaD の ``exact`` 行で答えるときの表示用。"""
+    pool = getattr(services, "lsp_pool", None)
+    if file is None or not servers_for(file.language, "types"):
+        return LspStatus.NOT_APPLICABLE.value
+    if pool is None:
+        return LspStatus.UNAVAILABLE.value
+    return str(pool.status(file.language, ws, "types").status.value)
+
+
+def degraded_choice(route: LspRoute, exc: BaseException) -> EngineChoice:
+    """LSP の呼び出しが ``exact`` を返せなかったときの ``structural`` の選択（その要求に限る）。``selector.on_lsp_failure`` に任せる。
+
+    ``indexing``（LSP が 0 件と答えたが索引に参照がある、を含む）は ``lsp_status=indexing`` と ``lsp_indexing`` の警告、時間切れは
+    ``ready`` のまま ``lsp_timeout``、``standby`` / ``unavailable`` / ``disconnected`` は ``unavailable``。
+    """
+    return on_lsp_failure(route.choice, route.capability, _normalized(exc))
+
+
+# --- 参照元になりうるファイルを LSP に開かせる（BUG-0047） ------------------------------------------
+
+PRIME_LANGUAGES = frozenset({"typescript", "tsx", "javascript"})
+"""tsserver 系の言語 ID。``tsconfig.json`` / ``jsconfig.json`` の ``include`` に入らないファイル（``test/`` など）は、開くまで
+どのプロジェクトにも入らず ``references`` / ``callHierarchy`` に出ない。Python（basedpyright）は未オープンの文書も探すので要らない。"""
+
+PRIME_MAX = 100
+"""1 回の問い合わせで新しく開く上限（``didOpen`` の LRU 上限 200 の半分。``get_diagnostics`` のワークスペース全体の呼び出しと同じ）。"""
+
+
+def needs_priming(language: str) -> bool:
+    return language in PRIME_LANGUAGES
+
+
+@dataclass(frozen=True, slots=True)
+class PrimeSet:
+    """LSP に開かせるファイル（``(RelPath, LSP の languageId)``）と、上限で開けなかった件数。"""
+
+    files: tuple[tuple[RelPath, str], ...] = ()
+    skipped: int = 0
+
+    def warning(self, name: str) -> str | None:
+        if not self.skipped:
+            return None
+        return (
+            f"{self.skipped} more file(s) mention {name!r} but were not opened for the LSP (limit {PRIME_MAX} per call); "
+            "references there may be missing (narrow with scope_paths)"
+        )
+
+
+def prime_candidates(
+    conn: sqlite3.Connection,
+    ws: Workspace,
+    *,
+    name: str,
+    exclude: str,
+    is_open: Callable[[RelPath], bool],
+    limit: int = PRIME_MAX,
+) -> PrimeSet:
+    """``name`` を単語境界で含む tsserver 系のファイル（索引にある Tier 1〜2）のうち、LSP がまだ開いていないもの。
+
+    参照の探す側を LSP に教えるための候補（``features.open_documents`` に渡す）。``exclude``（対象自身のファイル）は除く。
+    テストを先に、次にパス順。``limit`` を超えた分は ``skipped`` に数える。読めないファイルは飛ばす。
+    """
+    try:
+        pattern = re.compile(rb"(?<![\w$])" + re.escape(name.encode("utf-8")) + rb"(?![\w$])")
+    except re.error:
+        return PrimeSet()
+    infos = [
+        f
+        for f in queries.files_in_scope(conn, ws.workspace_id, ())
+        if f.language in PRIME_LANGUAGES and f.tier in (Tier.T1, Tier.T2) and str(f.path) != exclude
+    ]
+    infos.sort(key=lambda f: (not f.is_test, str(f.path)))
+    hits: list[tuple[RelPath, str]] = []
+    skipped = 0
+    for info in infos:
+        rel = RelPath(str(info.path))
+        if is_open(rel):
+            continue
+        try:
+            data = to_abs(ws, rel).read_bytes()
+        except (OSError, ValueError):
+            continue
+        if not pattern.search(data):
+            continue
+        if len(hits) >= limit:
+            skipped += 1
+            continue
+        defs = servers_for(info.language, "types")
+        hits.append((rel, defs[0].document_language_id if defs else info.language))
+    return PrimeSet(tuple(hits), skipped)
+
+
+async def prime_documents(handle: LspHandle, prime: PrimeSet) -> int:
+    """``prime`` のファイルを LSP に開かせる（失敗は ``LSP_FAILURES`` として呼び手が降格する）。開いた件数を返す。"""
+    if not prime.files:
+        return 0
+    return await features.open_documents(handle, prime.files)
+
+
+# --- 起動直後の部分的な答えを exact として覚えない ---------------------------------------------------
+
+FIRST_DIAGNOSTIC_LANGUAGES = frozenset({"python"})
+"""LSP に聞く前に、対象の文書の最初の ``publishDiagnostics`` を待つ言語。basedpyright は ``ready`` でも、その文書の最初の診断が
+来るまで解析が済んでいない（BUG-0012）。診断の無いファイルには何も届けないサーバー（vtsls など。``lsp/diagnostics.py`` 参照）は
+待っても来ないので対象にしない。"""
+
+FIRST_DIAGNOSTIC_WAIT_S = 5.0
+"""最初の診断を待つ上限（秒）。待ちは要求の期限（``LSP_TIMEOUT_*``）とは別で、超えても答えは返す（目印だけ置かない）。"""
+
+
+def needs_first_diagnostic(language: str) -> bool:
+    return language in FIRST_DIAGNOSTIC_LANGUAGES
+
+
+async def await_first_diagnostic(handle: LspHandle, rel: RelPath, *, timeout_s: float | None = None) -> bool:
+    """``rel`` を LSP に見せ（要求は送らない）、その文書の最初の診断が届くまで待つ。届けば ``True``、待ちの上限なら ``False``。
+
+    ``True`` は「LSP がこの文書の解析を済ませた」合図。呼び手はこのときだけ、LSP の答えを ``exact`` の集合として覚える。
+    ``False`` でも答えは ``exact`` で返してよいが、目印は置かない（解析前の部分的な答えを固定しない）。
+    すでに開いていて診断を受信済みの文書は待たずに ``True``。``ready`` でない・切断は ``E_LSP_UNAVAILABLE``（呼び手が降格する）。
+    """
+    limit = FIRST_DIAGNOSTIC_WAIT_S if timeout_s is None else min(FIRST_DIAGNOSTIC_WAIT_S, timeout_s)
+    sent_at = await features.sync_document(handle, rel)
+    if sent_at is None:
+        return False
+    return bool(
+        await handle.diagnostics.wait_for(
+            rel, min_version=None, sent_at=sent_at, timeout_ms=max(limit, 0.0) * 1000
+        )
+    )
+
+
+# --- 「この集合は完全」の目印 ------------------------------------------------------------------
+
+_MEMO_MAX = 4096
+
+
+class _Memo:
+    """``(db, ws, 種類, urn)`` → ``(ファイルの指紋, exact 行の指紋)``。LRU。スレッド安全。"""
+
+    def __init__(self) -> None:
+        self._data: OrderedDict[tuple[str, ...], tuple[str, str]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple[str, ...]) -> tuple[str, str] | None:
+        with self._lock:
+            value = self._data.get(key)
+            if value is not None:
+                self._data.move_to_end(key)
+            return value
+
+    def put(self, key: tuple[str, ...], token: str, fingerprint: str) -> None:
+        with self._lock:
+            self._data[key] = (token, fingerprint)
+            self._data.move_to_end(key)
+            while len(self._data) > _MEMO_MAX:
+                self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+
+MEMO = _Memo()
+
+
+def memo_key(db_path: Path | str, ws_id: str, kind: str, urn: str) -> tuple[str, ...]:
+    return (str(db_path), ws_id, kind, urn)
+
+
+def rows_fingerprint(rows: Iterable[queries.ReferenceRow]) -> str:
+    items = sorted(
+        (
+            r.source_urn,
+            r.target_urn,
+            r.relation_kind,
+            str(r.path),
+            r.site.line if r.site else -1,
+            r.site.col if r.site else -1,
+            r.use_kind or "",
+            r.guard_condition or "",
