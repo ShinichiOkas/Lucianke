@@ -26,11 +26,14 @@ from dataclasses import dataclass
 from lucianke.core.model import RelPath, Tier
 
 __all__ = [
+    "FIXTURE_DIRS",
     "HEAD_BYTES",
     "LANGUAGE_TIERS",
     "SECRET_PATTERNS",
     "Detected",
     "detect",
+    "dir_names_of_tests",
+    "fixture_roots",
     "is_secret_name",
     "is_test",
     "tier_of",
@@ -185,6 +188,49 @@ def is_test(rel: RelPath | str, extra_globs: Iterable[str] = ()) -> bool:
         if fnmatch.fnmatchcase(full if "/" in g else name, g):
             return True
     return False
+
+
+FIXTURE_DIRS = frozenset({"fixtures", "fixture", "__fixtures__", "testdata", "test_data"})
+"""テストフィクスチャを並べるディレクトリの名前（小文字）。テストディレクトリの配下でこの名前の直下のディレクトリが 1 つの
+フィクスチャ（入れ子のワークスペースのような見本のプロジェクト）のルート（``fixture_roots``。BUG-0077）。"""
+
+_DIR_GLOB = re.compile(r"\*\*/([^/*?\[\]]+)/\*\*")
+
+
+def dir_names_of_tests(extra_globs: Iterable[str] = ()) -> frozenset[str]:
+    """テストディレクトリの名前（小文字）: 既定の ``test`` / ``tests`` と、``extra_globs``（``LanguageSupport.test_path_globs``）
+    のうち ``**/<名前>/**`` の形のもの（JS / TS の ``**/__tests__/**`` など）。"""
+    names = set(_TEST_DIRS)
+    for glob in extra_globs:
+        m = _DIR_GLOB.fullmatch(glob.casefold())
+        if m:
+            names.add(m.group(1))
+    return frozenset(names)
+
+
+def fixture_roots(rel: RelPath | str, extra_globs: Iterable[str] = ()) -> tuple[str, ...]:
+    """``rel`` を含むテストフィクスチャのルート（外側から内側の順。無ければ空）。
+
+    ルートは、テストディレクトリ（``dir_names_of_tests(extra_globs)``）の配下にある ``FIXTURE_DIRS`` の名前のディレクトリの、直下の
+    ディレクトリ（``tests/fixtures/<名前>``）。フィクスチャの中ではテストディレクトリの判定をやり直す（``tests/fixtures/a/tests/
+    fixtures/b`` は ``a`` の中の ``b``）。``FIXTURE_DIRS`` の直下のファイル（``tests/fixtures/db.py``）はルートを作らない。
+    大文字小文字は区別しない（返すパスは ``rel`` の綴りのまま）。
+    """
+    test_dirs = dir_names_of_tests(extra_globs)
+    parts = [p for p in str(rel).split("/") if p][:-1]  # ディレクトリだけ
+    roots: list[str] = []
+    in_tests = False
+    i = 0
+    while i < len(parts):
+        low = parts[i].casefold()
+        if in_tests and low in FIXTURE_DIRS and i + 1 < len(parts):
+            roots.append("/".join(parts[: i + 2]))
+            in_tests = False  # フィクスチャのルートの名前そのものは判定に使わず、その中で数え直す
+            i += 2
+            continue
+        in_tests = in_tests or low in test_dirs
+        i += 1
+    return tuple(roots)
 
 
 # --- 判定本体 ---------------------------------------------------------------------------

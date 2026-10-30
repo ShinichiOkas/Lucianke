@@ -12,6 +12,8 @@ from lucianke.workspace.languages import (
     LANGUAGE_TIERS,
     Detected,
     detect,
+    dir_names_of_tests,
+    fixture_roots,
     is_secret_name,
     is_test,
     tier_of,
@@ -475,6 +477,38 @@ def test_is_test_extra_globs_from_language_support():
     assert is_test(js, ["lib/*/__tests__/*"]) is False
     assert is_test(rel_of("src/a/x_spec.rb"), ["*_spec.rb"]) is True
     assert is_test(rel_of("src/a/x.rb"), ["*_spec.rb"]) is False
+
+
+@pytest.mark.parametrize(
+    ("rel", "roots"),
+    [
+        ("tests/fixtures/untyped_calls/app/engine.py", ("tests/fixtures/untyped_calls",)),
+        ("tests/fixtures/untyped_calls/tests/test_pack.py", ("tests/fixtures/untyped_calls",)),
+        ("Tests/Fixtures/Poly/src/a.py", ("Tests/Fixtures/Poly",)),  # 大文字小文字は区別せず、綴りはそのまま返す
+        ("src/pkg/test/testdata/case1/x.py", ("src/pkg/test/testdata/case1",)),
+        ("web/__tests__/__fixtures__/p/a.ts", ("web/__tests__/__fixtures__/p",)),  # __tests__ は JS のグロブから
+        ("tests/fixtures/a/tests/fixtures/b/x.py", ("tests/fixtures/a", "tests/fixtures/a/tests/fixtures/b")),
+        ("tests/fixtures/tests/fixtures/q/z.py", ("tests/fixtures/tests",)),  # ルートの名前は数え直しに使わない
+        ("tests/fixtures/db.py", ()),  # fixtures の直下のファイルはルートを作らない
+        ("src/fixtures/x/a.py", ()),  # テストディレクトリの外の fixtures は見本ではない
+        ("tests/unit/test_a.py", ()),
+        ("tests/contract_fixtures/_rig.py", ()),
+        ("fixtures/x/a.py", ()),
+    ],
+)
+def test_fixture_roots(rel: str, roots: tuple[str, ...]):
+    """BUG-0077: 名前だけの一致の段（呼び出し箇所を含むテストフィクスチャ）。"""
+    assert fixture_roots(rel, ["**/__tests__/**"]) == roots
+
+
+def test_dir_names_of_tests_from_language_globs():
+    assert dir_names_of_tests() == {"test", "tests"}
+    assert dir_names_of_tests(["**/__tests__/**", "**/*.spec.*", "**/conftest.py", "src/*/__tests__/*"]) == {
+        "test",
+        "tests",
+        "__tests__",
+    }
+    assert fixture_roots("web/__tests__/__fixtures__/p/a.ts") == ()  # __tests__ を知らなければルートにならない
 
 
 def test_detected_is_hashable_and_frozen():

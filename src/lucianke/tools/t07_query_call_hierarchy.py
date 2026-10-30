@@ -20,10 +20,11 @@
   途中で止め、残りを ``# summary:`` に要約して ``next_cursor`` で続きを返す。
 * ``Class`` / ``Struct`` を渡したときはコンストラクタ（``__init__`` / ``constructor``）の呼び出しを起点にする。
 * ``dot`` / ``mermaid``: ``data_static["graph"]``。エッジは呼び出し元 → 呼び出し先（ラベル ``CALLS``、``attrs.guard`` に条件）。
-* 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071、``_name_calls``）: ``structural`` の木では、
-  incoming はノードが ``Method`` でその名前のメソッドがワークスペースに 1 つだけ（組み込み型と同名でない）なら、その名前の型不明の
-  呼び出しを呼び出し元として足す。outgoing はノードの中の型不明の呼び出しのうち、名前のメソッドが 1 つだけのものをそのメソッドへの
-  呼び出しとして足す。どちらも ``conf=heuristic``・json の ``match: "name"``。結べない（同名が複数・組み込み型と同名）ものは件数と
+* 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071 / BUG-0077、``_name_calls``）: ``structural`` の
+  木では、呼び出し箇所ごとに近い段（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース。テストダブルは同じファイルから
+  だけ）の同名のメソッドが 1 つだけ（組み込み型と同名でない）なら結ぶ。incoming はノードが ``Method`` なら、そのノードに結べる
+  型不明の呼び出しを呼び出し元として足す。outgoing はノードの中の型不明の呼び出しを、結べる先のメソッドへの呼び出しとして足す。
+  どちらも ``conf=heuristic``・json の ``match: "name"``。結べない（同じ段に同名が複数・組み込み型と同名）ものは件数と
   先頭の位置を ``warnings`` と ``data.unattributed_calls`` に書く（outgoing は組み込み型と同名のものを数えない）。``exact`` の木には
   足さず、根の incoming で結べるのに LSP の答えに無い位置の件数と先頭を ``warnings`` に書くだけにする。
 
@@ -167,9 +168,9 @@ class _Symbols:
         self.names = names  # structural の木で、型の分からない受け手の呼び出しを名前で足す（BUG-0071）
         self._sym: dict[str, SymbolRecord | None] = {}
         self._test: dict[str, bool] = {}
-        # 名前で足した呼び出し箇所（向き, パス, 行, 列）と、結ばなかったもの（向き, 名前, 言語族）→ 集まり
+        # 名前で足した呼び出し箇所（向き, パス, 行, 列）と、結ばなかったもの（向き, *Verdict.key()）→ 集まり
         self.by_name: set[tuple[str, str, int, int]] = set()
-        self.unattributed: dict[tuple[str, str, str], nc.Unattributed] = {}
+        self.unattributed: dict[tuple[Any, ...], nc.Unattributed] = {}
 
     def symbol(self, urn: str) -> SymbolRecord | None:
         if urn not in self._sym:
@@ -247,39 +248,32 @@ def _name_site(r: queries.NameCallRow) -> tuple[tuple[str, int, int], _Site]:
 def _name_edges(
     syms: _Symbols, names: nc.NameIndex, urn: str, direction: str, include_tests: bool
 ) -> list[tuple[str, tuple[str, int, int], _Site]]:
-    """型の分からない受け手の呼び出しのうち、名前で ``urn`` と結べるもの ``(子の URN, 箇所のキー, 箇所)``（BUG-0071）。
+    """型の分からない受け手の呼び出しのうち、名前で ``urn`` と結べるもの ``(子の URN, 箇所のキー, 箇所)``（BUG-0071 / BUG-0077）。
 
-    結べないもの（同名が複数・組み込み型と同名）は ``syms.unattributed`` に集める（outgoing は組み込み型と同名のものを数えない）。
+    判定は呼び出し箇所ごと（``NameIndex.verdict_for``）。結べないもの（同じ段に同名が複数・組み込み型と同名）は
+    ``syms.unattributed`` に集める（incoming は対象が候補の箇所だけ。outgoing は組み込み型と同名のものを数えない）。
     """
     out: list[tuple[str, tuple[str, int, int], _Site]] = []
     if direction == "incoming":
         sym = syms.symbol(urn)
-        verdict = names.target_verdict(sym) if sym is not None else None
-        if sym is None or verdict is None:
+        target = names.target_name(sym) if sym is not None else None
+        if sym is None or target is None:
             return out
-        rows = names.sites_named(verdict, include_tests=include_tests)
-        if not rows:
-            return out
-        if not verdict.owned_by(sym):
-            syms.unattributed.setdefault(
-                (direction, verdict.name, verdict.family), nc.Unattributed(verdict)
-            ).add(rows)
-            return out
-        for r in rows:
+        sites = names.for_target(sym, names.sites_named(*target, include_tests=include_tests))
+        for vkey, group in sites.unattributed.items():
+            syms.unattributed.setdefault((direction, *vkey), nc.Unattributed(group.verdict)).add(group.rows.values())
+        for r in sites.owned_rows:
             key, site = _name_site(r)
             out.append((r.source_urn, key, site))
         return out
     for r in names.calls_from(urn):
-        family = nc.family_of(r.language)
-        verdict = names.verdict(r.name, family) if family is not None else None
+        verdict = names.verdict_for(r)
         if verdict is None:
-            continue  # ワークスペースにその名前のメソッドが無い（外部・組み込みの呼び出し）
+            continue  # 見える段にその名前のメソッドが無い（外部・組み込みの呼び出し）
         owner = verdict.owner
         if owner is None:
             if len(verdict.candidates) > 1 and not verdict.builtin:
-                syms.unattributed.setdefault(
-                    (direction, verdict.name, verdict.family), nc.Unattributed(verdict)
-                ).add([r])
+                syms.unattributed.setdefault((direction, *verdict.key()), nc.Unattributed(verdict)).add([r])
             continue
         key, site = _name_site(r)
         out.append((str(owner.urn), key, site))
@@ -429,9 +423,10 @@ def _name_notes(syms: _Symbols, tree: _Tree) -> None:
     if syms.by_name:
         tree.warnings.append(
             f"{len(syms.by_name)} call site(s) marked conf=heuristic are matched by method name only: the receiver's"
-            " type is unknown and the workspace has exactly one method of that name"
+            " type is unknown and exactly one method of that name is in scope for the call (the calling file, else the"
+            " test fixture that holds it, else the workspace; test doubles only from their own file)"
         )
-    for (direction, _name, _family), group in sorted(syms.unattributed.items()):
+    for (direction, *_), group in sorted(syms.unattributed.items()):
         rows = group.sorted_rows()
         tree.warnings.append(
             f"{direction}: {len(rows)} call site(s) of .{group.verdict.name}() with a receiver of unknown type were"
@@ -442,19 +437,22 @@ def _name_notes(syms: _Symbols, tree: _Tree) -> None:
 
 def _exact_name_note(names: nc.NameIndex, sym: SymbolRecord, tree: _Tree, include_tests: bool) -> None:
     """exact の木には足さない。根の incoming で、名前で結べるのに LSP の答えに無い呼び出しの件数と先頭を書く（BUG-0071）。"""
-    verdict = names.target_verdict(sym)
-    if verdict is None or not verdict.owned_by(sym):
+    target = names.target_name(sym)
+    if target is None:
         return
     known = {(s.path, s.line) for n in tree.roots.get("incoming", []) for s in n.sites}
-    rows = [r for r in names.sites_named(verdict, include_tests=include_tests) if nc.site_key(r)[:2] not in known]
+    sites = names.for_target(
+        sym, (r for r in names.sites_named(*target, include_tests=include_tests) if nc.site_key(r)[:2] not in known)
+    )
+    rows = sites.owned_rows
     if not rows:
         return
     tree.warnings.append(
-        f"incoming: {len(rows)} call site(s) of .{verdict.name}() whose receiver type is unknown to the syntax tree"
-        f" are not in this exact tree (the LSP could not type the receiver, e.g. Any); {verdict.only_text()}, so"
-        f" they may call it: {nc.sample_text(rows)} (data.unattributed_calls)"
+        f"incoming: {len(rows)} call site(s) of .{target[0]}() whose receiver type is unknown to the syntax tree"
+        f" are not in this exact tree (the LSP could not type the receiver, e.g. Any); {nc.owned_text(sites.owned)},"
+        f" so they may call it: {nc.sample_text(rows)} (data.unattributed_calls)"
     )
-    group = nc.Unattributed(verdict)
+    group = nc.Unattributed(sites.owned[0][1])
     group.add(rows)
     tree.unattributed.append({"direction": "incoming", **group.to_json(enclosing_name_of, "not_in_exact_answer")})
 

@@ -15,10 +15,12 @@ LSP が ``ready`` でない・時間切れ・失敗なら ``structural``（今�
   同じ囲みからの複数参照は ``mcp/render/graph.py`` が 1 本にまとめて ``×N`` を付ける。
 * ``include_lexical_in_other_files``: 対象が Tier 1〜2 でも、Tier 3〜4 のファイルを単語境界 grep して ``lex:`` の参照を足す
   （その行は ``conf=lexical_fallback``。応答は ``mixed``）。
-* 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071、``_name_calls``）: 対象が ``Method`` で、その名前の
-  メソッドがワークスペースに対象 1 つだけ（組み込み型と同名でない）なら、``structural`` の答えにその位置を ``use=call`` ・
-  ``conf=heuristic`` ・json の ``match: "name"`` で足す。同名が複数・組み込み型と同名なら足さず、件数と先頭の位置を ``warnings`` と
-  ``data.unattributed_calls`` に書く。``exact`` の答えには足さない（結べるのに LSP の答えに無い位置の件数と先頭を ``warnings`` に書く）。
+* 型の分からない受け手の呼び出し（``x.pack(...)`` で ``x`` が ``Any`` など。BUG-0071 / BUG-0077、``_name_calls``）: 対象が ``Method`` で、
+  呼び出し箇所ごとに近い段（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース。テストダブルは同じファイルからだけ）の
+  同名のメソッドが対象 1 つだけ（組み込み型と同名でない）なら、``structural`` の答えにその位置を ``use=call`` ・
+  ``conf=heuristic`` ・json の ``match: "name"`` で足す。同じ段に同名が複数・組み込み型と同名なら足さず、件数と先頭の位置を
+  ``warnings`` と ``data.unattributed_calls`` に書く。``exact`` の答えには足さない（結べるのに LSP の答えに無い位置の件数と先頭を
+  ``warnings`` に書く）。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
 ``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
@@ -375,36 +377,43 @@ def _name_refs(
     *,
     exact: bool,
 ) -> None:
-    """型の分からない受け手の呼び出し ``x.<name>(...)`` を名前で足す・要約する（BUG-0071。``_name_calls`` の docstring）。"""
+    """型の分からない受け手の呼び出し ``x.<name>(...)`` を名前で足す・要約する（BUG-0071 / BUG-0077。``_name_calls`` の docstring）。
+
+    判定は呼び出し箇所ごと（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース）。対象より近い同名の定義がある箇所は
+    足しも書きもしない。
+    """
     if args.use_kinds and "call" not in args.use_kinds:
         return
     names = nc.NameIndex(conn, ws.workspace_id)
-    verdict = names.target_verdict(sym)
-    if verdict is None:
+    target = names.target_name(sym)
+    if target is None:
         return
+    name, family = target
     in_scope = _scope_set(conn, ws.workspace_id, args)
     known = {(r.path, r.line, r.col) for r in found.refs}
-    rows = [
-        r
-        for r in names.sites_named(verdict, include_tests=args.include_tests)
-        if nc.site_key(r) not in known and (in_scope is None or str(r.path) in in_scope)
-    ]
-    if not rows:
-        return
-    name = verdict.name
+    sites = names.for_target(
+        sym,
+        (
+            r
+            for r in names.sites_named(name, family, include_tests=args.include_tests)
+            if nc.site_key(r) not in known and (in_scope is None or str(r.path) in in_scope)
+        ),
+    )
     if exact:
-        if not verdict.owned_by(sym):
-            return  # 同名が複数あるなら LSP の答えが正。足しも書きもしない
+        rows = sites.owned_rows
+        if not rows:
+            return  # 結べない（同名が同じ近さに複数）なら LSP の答えが正。足しも書きもしない
         found.warnings.append(
             f"{len(rows)} call site(s) of .{name}() whose receiver type is unknown to the syntax tree are not in this"
-            f" exact answer (the LSP could not type the receiver, e.g. Any); {verdict.only_text()}, so they may call"
-            f" it: {nc.sample_text(rows)} (data.unattributed_calls)"
+            f" exact answer (the LSP could not type the receiver, e.g. Any); {nc.owned_text(sites.owned)}, so they"
+            f" may call it: {nc.sample_text(rows)} (data.unattributed_calls)"
         )
-        u = nc.Unattributed(verdict)
+        u = nc.Unattributed(sites.owned[0][1])
         u.add(rows)
         found.unattributed.append(u.to_json(enclosing_name_of, "not_in_exact_answer"))
         return
-    if verdict.owned_by(sym):
+    rows = sites.owned_rows
+    if rows:
         for r in rows:
             key = nc.site_key(r)
             ename = enclosing_name_of(r.source_urn)
@@ -427,16 +436,15 @@ def _name_refs(
         found.by_name = len(rows)
         found.warnings.append(
             f"{len(rows)} call site(s) marked conf=heuristic are matched by name only: the receiver's type is unknown"
-            f" and {verdict.only_text()}"
+            f" and {nc.owned_text(sites.owned)}"
         )
-        return
-    found.warnings.append(
-        f"{len(rows)} call site(s) of .{name}() with a receiver of unknown type are not listed: {verdict.reason()};"
-        f" e.g. {nc.sample_text(rows)} (data.unattributed_calls)"
-    )
-    u = nc.Unattributed(verdict)
-    u.add(rows)
-    found.unattributed.append(u.to_json(enclosing_name_of))
+    for _key, u in sorted(sites.unattributed.items()):
+        left = u.sorted_rows()
+        found.warnings.append(
+            f"{len(left)} call site(s) of .{name}() with a receiver of unknown type are not listed:"
+            f" {u.verdict.reason()}; e.g. {nc.sample_text(left)} (data.unattributed_calls)"
+        )
+        found.unattributed.append(u.to_json(enclosing_name_of))
 
 
 def _lexical_refs(
