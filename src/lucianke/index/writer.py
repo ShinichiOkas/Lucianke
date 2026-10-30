@@ -94,6 +94,7 @@ class IndexWriter:
         self._thread.start()
         if not self._ready.wait(START_TIMEOUT_S):
             self._accepting = False
+            self._queue.put_nowait(None)  # 遅れて起動したスレッドはジョブを待たずに止まる（残さない。BUG-0076）
             raise TimeoutError(f"index writer did not start within {START_TIMEOUT_S} s: {self._path}")
         if self._start_error is not None:
             self._accepting = False

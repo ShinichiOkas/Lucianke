@@ -597,6 +597,8 @@ while True:
     send({"jsonrpc": "2.0", "id": mid, "result": rule.get("result")})
 """
 
+NOTIFY_WAIT_S = 60.0  # 偽サーバーが通知を記録するまでの待ちの上限（条件待ち。記録されれば即戻る）
+
 FAKE_DEF = LspServerDef(
     language_id="python", name="fake", argv_candidates=(("fake",),), locale="en", requests_m1=frozenset()
 )
@@ -618,8 +620,25 @@ class Fake:
     def requests(self, method: str) -> list[Any]:
         if not self.log.exists():
             return []
-        rows = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        # 書きかけの最後の行（改行の前）は読まない（偽サーバーが追記している最中に読むことがある）
+        lines = self.log.read_text(encoding="utf-8").split("\n")[:-1]
+        rows = [json.loads(line) for line in lines]
         return [r["params"] for r in rows if r["method"] == method]
+
+    async def notified(
+        self, method: str, until: Callable[[list[Any]], bool], timeout_s: float = NOTIFY_WAIT_S
+    ) -> list[Any]:
+        """偽サーバーが通知 ``method`` を受けて記録するまで条件待ちする（BUG-0076）。
+
+        通知には応答が無いので、送った直後には偽サーバーがまだ読んでいないことがある（負荷の高いときに 0 件で落ちた）。
+        ``until(記録)`` が真になるか ``timeout_s`` で、その時点の記録を返す（判定は呼び手の assert）。"""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            got = self.requests(method)
+            if until(got) or loop.time() >= deadline:
+                return got
+            await asyncio.sleep(0.02)
 
 
 FakeFactory = Callable[..., Awaitable[Fake]]
@@ -796,5 +815,10 @@ async def test_fake_the_lsp_sees_the_new_content_after_the_write(fake: FakeFacto
     """適用後の didChange: 偽サーバーは新しい内容を受け取る（段 7 の再索引）。"""
     f = await fake({"textDocument/codeAction": {"result": [action("Return two", replace_return("2"))]}})
     data_of(await call_fake(f, action_kind_or_id="refactor.rewrite"))
-    texts = [c["contentChanges"][0]["text"] for c in f.requests("textDocument/didChange")]
-    assert texts and texts[-1] == "def a():\n    return 2\n"
+    want = "def a():\n    return 2\n"
+
+    def texts(rows: list[Any]) -> list[str]:
+        return [c["contentChanges"][0]["text"] for c in rows]
+
+    got = texts(await f.notified("textDocument/didChange", lambda rows: want in texts(rows)))
+    assert got and got[-1] == want

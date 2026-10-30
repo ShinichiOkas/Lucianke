@@ -79,8 +79,8 @@ async def rig(tmp_path: Path) -> AsyncIterator[Rig]:
         grace_ms=300,
     )
     hub.lsp_pool = pool
-    (ws,) = await hub.sync_roots([str(root)])
     try:
+        (ws,) = await hub.sync_roots([str(root)])  # 書き手のスレッドを作るので try の中（BUG-0076）
         runtime = hub.runtime()
         assert runtime is not None and runtime.scan_job_id is not None
         await runtime.indexer.wait_job(runtime.scan_job_id)

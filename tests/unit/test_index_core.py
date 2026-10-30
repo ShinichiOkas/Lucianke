@@ -445,12 +445,43 @@ def test_writer_creates_schema_and_reports_action(writer: IndexWriter, db_path: 
         again.close()
 
 
+def writer_threads_started_since(before: set[threading.Thread]) -> list[threading.Thread]:
+    """``before`` の後に起きた書き手スレッド（このテストが作ったものだけ。他のテストの残りは見ない。BUG-0076）。"""
+    return [t for t in threading.enumerate() if t.name == "lucianke-index-writer" and t not in before]
+
+
 def test_writer_start_failure_raises_and_leaves_no_thread(tmp_path: Path) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("x")
+    before = set(threading.enumerate())
     with pytest.raises(OSError):
         IndexWriter(blocker / "sub" / DB_FILENAME)  # 親がディレクトリではない
-    assert not any(t.name == "lucianke-index-writer" and t.is_alive() for t in threading.enumerate())
+    assert [t for t in writer_threads_started_since(before) if t.is_alive()] == []
+
+
+def test_writer_start_timeout_stops_the_thread_when_it_starts_late(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """起動の待ちが時間切れでも、遅れて DB を開いたスレッドはジョブを待たずに止まる（残らない。BUG-0076）。"""
+    from lucianke.index import writer as writer_mod
+
+    release = threading.Event()
+    real_open = writer_mod.open_writer
+
+    def slow_open(path: Path) -> sqlite3.Connection:
+        assert release.wait(30), "テストが release を立てなかった"
+        return real_open(path)
+
+    monkeypatch.setattr(writer_mod, "open_writer", slow_open)
+    monkeypatch.setattr(writer_mod, "START_TIMEOUT_S", 0.05)
+    before = set(threading.enumerate())
+    with pytest.raises(TimeoutError):
+        IndexWriter(tmp_path / DB_FILENAME)
+    [late] = writer_threads_started_since(before)
+    assert late.is_alive()  # まだ DB を開いている途中
+    release.set()
+    late.join(30)
+    assert not late.is_alive()
 
 
 def test_100_concurrent_submits_run_one_at_a_time_on_the_writer_thread(writer: IndexWriter) -> None:

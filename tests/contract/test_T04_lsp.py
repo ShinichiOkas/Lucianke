@@ -18,13 +18,14 @@ import shutil
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import compact_grammar as g
 import pytest
+from _lsp_settle import first_analysis, probe_timeouts, settle
 
 from lucianke.core.model import Position, RelPath
 from lucianke.core.procs import ProcessRegistry
@@ -54,6 +55,7 @@ CLASS = {"path": PAY_PY, "symbol_name": "PaymentProcessor"}
 TS_CLASS = {"path": PAY_TS, "symbol_name": "PaymentClient"}
 METHOD_URN = f"lk://{WS}/{PAY_PY}#PaymentProcessor.process_charge"
 METHOD_LINE0 = 38  # `async def process_charge` の行（0 始まり）
+CLASS_LINE0 = 30  # `class PaymentProcessor` の行（0 始まり）
 
 _BASEDPYRIGHT = default_server("python", "types")
 _BASEDPYRIGHT_CMD = (
@@ -117,12 +119,23 @@ async def environment(tmp_path: Path, registry: ProcessRegistry, make_pool: Pool
     shutil.copytree(POLY, root, ignore=shutil.ignore_patterns("__pycache__"))
     db = tmp_path / "db" / "paad.sqlite"
     ws = Workspace(workspace_id=WS, root=root, python_env=PythonEnv(interpreter=sys.executable))
-    writer = IndexWriter(db)
-    readers = ReaderPool(db, size=2)
-    trees = TreeCache()
-    indexer = Indexer(ws, writer, readers, trees)
     pool: LspPool | None = None
-    try:
+    # 後始末は積んだ逆順に、どれかが失敗・時間切れでも残りを必ず走らせる（書き手のスレッドを残さない。BUG-0076）
+    async with AsyncExitStack() as stack:
+        stack.push_async_callback(registry.terminate_all, 200, close=True)
+        writer = IndexWriter(db)
+        stack.callback(writer.close)
+        readers = ReaderPool(db, size=2)
+        stack.callback(readers.close)
+        trees = TreeCache()
+        indexer = Indexer(ws, writer, readers, trees)
+        stack.push_async_callback(indexer.aclose)
+
+        async def shutdown_pool() -> None:
+            if pool is not None:
+                await pool.shutdown_all(300)
+
+        stack.push_async_callback(shutdown_pool)
         report = await indexer.scan()
         assert not report.errors, report.errors
         pool, log = await make_pool(root, ws)
@@ -137,14 +150,7 @@ async def environment(tmp_path: Path, registry: ProcessRegistry, make_pool: Pool
         registry_tools = ToolRegistry()
         registry_tools.register(t04.TOOL_SPEC)
         yield Env(root, ws, svc, Pipeline(registry_tools, services=svc), writer, readers, registry, pool, log)
-    finally:
-        if pool is not None:
-            await pool.shutdown_all(300)
-        await indexer.aclose()
-        readers.close()
-        writer.close()
-        await registry.terminate_all(200, close=True)
-        assert registry.live() == []
+    assert registry.live() == []
 
 
 @pytest.fixture
@@ -213,16 +219,35 @@ async def test_real_exact_cold_warm_and_after_the_lsp_is_stopped(
         handle = env.pool.get("python", env.ws, start_if_needed=False)
         assert handle is not None
         pos = pos_of(env.root / PAY_PY, "process_charge", line=METHOD_LINE0)
+        class_pos = pos_of(env.root / PAY_PY, "PaymentProcessor", line=CLASS_LINE0)
         version0 = env.data_version()
         assert env.cache_rows() == []
+
+        # 解析の完了を待つ（BUG-0076）。負荷の高いときは起動直後の解析が遅れ、「冷」の要求が本番の期限（定義・hover 3 秒）を
+        # 超えて structural に降格する（製品としては正しい降格）。この試験が確かめるのは降格ではなく exact の経路
+        # （降格は偽サーバーの試験）なので、最初の診断と、同じ位置の定義・hover が答えるのを待ってから「冷」に入る。
+        # 準備の問い合わせは素の features を使う（spy の数にも _hover_cache にも入らない）。
+        await first_analysis(handle, [PAY_PY])
+
+        async def answers() -> bool:
+            for p in (pos, class_pos):
+                if not await real_definition(handle, RelPath(PAY_PY), p):
+                    return False
+                if not await real_hover(handle, RelPath(PAY_PY), p):
+                    return False
+            return True
+
+        await settle(answers, what="definition and hover of PaymentProcessor / process_charge")
+        assert calls == {"definition": 0, "hover": 0} and env.cache_rows() == []
 
         # --- 冷: LSP に聞いて exact ---
         t0 = time.perf_counter()
         cold = await env.resolve(targets=[METHOD, CLASS])
-        cold_ms = (time.perf_counter() - t0) * 1000  # didOpen を含む（解析待ち）
+        cold_ms = (time.perf_counter() - t0) * 1000  # LSP に聞く（解析は済んでいる）
         for item in items(cold):
             assert item["ok"] and item["confidence_level"] == "exact", item
-        hover = await real_hover(handle, RelPath(PAY_PY), pos)  # 事後条件 4 の期待値: 同じ位置の hover
+        with probe_timeouts():  # 試験自身の問い合わせ（本番の要求ではない）
+            hover = await real_hover(handle, RelPath(PAY_PY), pos)  # 事後条件 4 の期待値: 同じ位置の hover
         assert hover is not None and "process_charge" in hover and "Receipt" in hover
         assert items(cold)[0]["signature_expanded"] == hover  # 事後条件 4
         assert (

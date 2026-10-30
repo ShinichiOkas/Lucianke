@@ -15,7 +15,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from test_T06_T07_lsp import Env, build_env, close_env
+from test_T06_T07_lsp import Env, opened_env
 from test_T06_ts_outside_tsconfig import (
     _TSLS,
     _TSLS_CMD,
@@ -56,11 +56,10 @@ async def tsenv7(registry: ProcessRegistry, tmp_path: Path):  # noqa: F811
     )
     cache = tmp_path / "cache"
     cache.mkdir()
-    env = await build_env(registry, root, cache, pool, ws)
-    await pool.ensure_started("typescript", ws)
-    assert await pool.wait_ready("typescript", ws, READY_WAIT_MS), pool.status("typescript", ws)
-    yield env
-    await close_env(env, registry)
+    async with opened_env(registry, root, cache, pool, ws) as env:  # 準備で落ちても閉じる（BUG-0076）
+        await pool.ensure_started("typescript", ws)
+        assert await pool.wait_ready("typescript", ws, READY_WAIT_MS), pool.status("typescript", ws)
+        yield env
 
 
 async def _exact_incoming(env: Env):

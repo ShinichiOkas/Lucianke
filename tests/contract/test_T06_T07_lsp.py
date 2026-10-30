@@ -11,13 +11,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import sys
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _lsp_settle import first_analysis, settle
 
 from lucianke.app import build_services
 from lucianke.core.model import Position, RelPath
@@ -150,21 +153,47 @@ def make_pipeline(
 
 
 async def build_env(registry: ProcessRegistry, root: Path, cache: Path, pool: LspPool, ws: Workspace) -> Env:
+    """索引を作って ``Env`` を返す。途中で失敗したら、作った分（書き手のスレッド・読み手）を閉じてから上げる（BUG-0076）。"""
     base = build_services(lambda: [str(root)])
     db = cache / "paad.sqlite"
     writer = await asyncio.to_thread(IndexWriter, db)
     readers = ReaderPool(db)
     indexer = Indexer(ws, writer, readers, base.trees)
-    await indexer.scan()
-    return Env(ws, db, writer, readers, indexer, pool, make_pipeline(base, ws, db, pool, writer))
+    try:
+        await indexer.scan()
+        return Env(ws, db, writer, readers, indexer, pool, make_pipeline(base, ws, db, pool, writer))
+    except BaseException:
+        try:
+            await indexer.aclose()
+        finally:
+            readers.close()
+            await asyncio.to_thread(writer.close)
+        raise
 
 
 async def close_env(env: Env, registry: ProcessRegistry) -> None:
-    await env.pool.shutdown_all(300)
-    env.readers.close()
-    await asyncio.to_thread(env.writer.close)
-    await registry.terminate_all(200, close=True)
+    """LSP・索引器・読み手・書き手・子プロセスを閉じる。どこかで失敗しても残りは必ず閉じる（BUG-0076）。"""
+    async with contextlib.AsyncExitStack() as stack:
+        stack.push_async_callback(registry.terminate_all, 200, close=True)
+        stack.push_async_callback(asyncio.to_thread, env.writer.close)
+        stack.callback(env.readers.close)
+        stack.push_async_callback(env.indexer.aclose)
+        stack.push_async_callback(env.pool.shutdown_all, 300)
     assert registry.live() == []
+
+
+@contextlib.asynccontextmanager
+async def opened_env(
+    registry: ProcessRegistry, root: Path, cache: Path, pool: LspPool, ws: Workspace
+) -> AsyncIterator[Env]:
+    """``build_env`` して、本体（LSP の起動・準備の待ちを含む）が失敗・時間切れでも ``close_env`` まで走らせる（BUG-0076）。
+
+    負荷の高いときに準備の待ちで落ちたセットアップが書き手のスレッドを残し、後の別のテストまで落としていた。"""
+    env = await build_env(registry, root, cache, pool, ws)
+    try:
+        yield env
+    finally:
+        await close_env(env, registry)
 
 
 @pytest.fixture
@@ -176,21 +205,24 @@ async def registry():
 
 async def warm_up(pool: LspPool, ws: Workspace) -> None:
     """basedpyright は ``ready`` の合図のあとも解析が続き、最初の問い合わせが空や部分的な答えになる（実測）。
-    process_charge の参照と呼び出し先が揃うまで条件待ちする（固定の sleep ではない）。"""
+    対象のファイルの最初の診断（解析の完了の合図。製品と同じ）を待ち、process_charge の参照と呼び出し先が揃うまで条件待ちする
+    （固定の sleep ではない）。負荷の高いときは 1 回の問い合わせが本番の期限（参照 3 秒）を超えるので、準備の問い合わせだけ期限を
+    延ばす（BUG-0076）。開くのは対象のファイルだけ（呼び元のファイルを開くと、ディスクを書き換えて ``didChangeWatchedFiles`` を
+    送る編集の試験の前提が変わる。開いた文書の中身はディスクではなく送った版になる）。"""
     handle = pool.get("python", ws)
     assert handle is not None
+    await first_analysis(handle, [PAY])
     text = (ws.root / PAY).read_text(encoding="utf-8").splitlines()
     line = next(i for i, t in enumerate(text) if "async def process_charge" in t)
     pos = Position(line, text[line].index("process_charge"))
-    deadline = asyncio.get_running_loop().time() + 60
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def complete() -> bool:
         refs = await features.references(handle, RelPath(PAY), pos, include_declaration=False)
         items = await features.prepare_call_hierarchy(handle, RelPath(PAY), pos)
         out = await features.outgoing_calls(handle, items[0]) if items else []
-        if len(refs) >= 3 and {"_validate_limit", "Receipt"} <= {e.item.name for e in out}:
-            return
-        await asyncio.sleep(0.5)
-    raise AssertionError("basedpyright did not settle")
+        return len(refs) >= 3 and {"_validate_limit", "Receipt"} <= {e.item.name for e in out}
+
+    await settle(complete, what="references and outgoing calls of process_charge")
 
 
 @pytest.fixture
@@ -214,12 +246,11 @@ async def real(registry: ProcessRegistry, tmp_path: Path):
     )
     cache = tmp_path / "cache"
     cache.mkdir()
-    env = await build_env(registry, root, cache, pool, ws)
-    await pool.ensure_started("python", ws)
-    assert await pool.wait_ready("python", ws, READY_WAIT_MS), pool.status("python", ws)
-    await warm_up(pool, ws)
-    yield env
-    await close_env(env, registry)
+    async with opened_env(registry, root, cache, pool, ws) as env:
+        await pool.ensure_started("python", ws)
+        assert await pool.wait_ready("python", ws, READY_WAIT_MS), pool.status("python", ws)
+        await warm_up(pool, ws)
+        yield env
 
 
 # --- T-06: exact → PaaD ------------------------------------------------------------------------
@@ -482,11 +513,10 @@ async def silent(registry: ProcessRegistry, tmp_path: Path):
     )
     cache = tmp_path / "cache"
     cache.mkdir()
-    env = await build_env(registry, root, cache, pool, ws)
-    await pool.ensure_started("python", ws)
-    assert await pool.wait_ready("python", ws, 10_000)
-    yield env
-    await close_env(env, registry)
+    async with opened_env(registry, root, cache, pool, ws) as env:
+        await pool.ensure_started("python", ws)
+        assert await pool.wait_ready("python", ws, READY_WAIT_MS)  # 条件待ち（ready_fallback_s で即戻る）
+        yield env
 
 
 async def test_t06_lsp_timeout_degrades_to_structural(silent: Env) -> None:

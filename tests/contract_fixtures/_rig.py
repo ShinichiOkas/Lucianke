@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import subprocess
@@ -176,37 +177,48 @@ async def open_rig(key: str, tmp_path: Path) -> Rig:
         grace_ms=300,
     )
     hub.lsp_pool = pool
-    (ws,) = await hub.sync_roots([str(root)])
-    runtime = hub.runtime()
-    assert runtime is not None and runtime.scan_job_id is not None, hub.failed
-    await asyncio.wait_for(runtime.indexer.wait_job(runtime.scan_job_id), INDEX_WAIT_S)
-    registry = ToolRegistry()
-    register_tools(registry)
-    services = WiredServices(roots=lambda: [str(root)], trees=hub.trees, lines=compact, hub=hub)
-    rig = Rig(
-        key, language, root, ws, hub, pool, Pipeline(registry, services=services), procs,
-        servers=[s.name for s in servers],
-    )  # fmt: skip
-    for defn in servers:
-        ok = False
-        try:
-            await pool.ensure_started(defn.language_id, ws)
-            ok = await pool.wait_ready(defn.language_id, ws, READY_WAIT_MS, role=defn.role)
-        except Exception:  # noqa: BLE001  起動できないサーバーは「LSP なし」として降格応答で確かめる
+    try:
+        (ws,) = await hub.sync_roots([str(root)])
+        runtime = hub.runtime()
+        assert runtime is not None and runtime.scan_job_id is not None, hub.failed
+        await asyncio.wait_for(runtime.indexer.wait_job(runtime.scan_job_id), INDEX_WAIT_S)
+        registry = ToolRegistry()
+        register_tools(registry)
+        services = WiredServices(roots=lambda: [str(root)], trees=hub.trees, lines=compact, hub=hub)
+        rig = Rig(
+            key, language, root, ws, hub, pool, Pipeline(registry, services=services), procs,
+            servers=[s.name for s in servers],
+        )  # fmt: skip
+        for defn in servers:
             ok = False
-        if defn.role == "types":
-            rig.types_ready = ok
-        else:
-            rig.lint_ready = ok
+            try:
+                await pool.ensure_started(defn.language_id, ws)
+                ok = await pool.wait_ready(defn.language_id, ws, READY_WAIT_MS, role=defn.role)
+            except Exception:  # noqa: BLE001  起動できないサーバーは「LSP なし」として降格応答で確かめる
+                ok = False
+            if defn.role == "types":
+                rig.types_ready = ok
+            else:
+                rig.lint_ready = ok
+    except BaseException:
+        # 索引の待ちの時間切れなどで組み立てが途中で落ちても、書き手のスレッド・LSP を残さない（BUG-0076）
+        await _close_parts(pool, hub, procs)
+        raise
     return rig
 
 
+async def _close_parts(pool: LspPool, hub: RuntimeHub, procs: ProcessRegistry) -> None:
+    """LSP・監視・索引器・保存先・子プロセスを閉じる。どれかが失敗しても残りは必ず閉じる（BUG-0076）。"""
+    async with contextlib.AsyncExitStack() as stack:
+        stack.push_async_callback(procs.terminate_all, 200, close=True)
+        stack.push_async_callback(hub.close_storage)
+        stack.push_async_callback(hub.stop_indexers)
+        stack.push_async_callback(hub.stop_watchers)
+        stack.push_async_callback(pool.shutdown_all, 300)
+
+
 async def close_rig(rig: Rig) -> None:
-    await rig.pool.shutdown_all(300)
-    await rig.hub.stop_watchers()
-    await rig.hub.stop_indexers()
-    await rig.hub.close_storage()
-    await rig.procs.terminate_all(200, close=True)
+    await _close_parts(rig.pool, rig.hub, rig.procs)
 
 
 async def warm_up(rig: Rig, rels: list[str]) -> None:
