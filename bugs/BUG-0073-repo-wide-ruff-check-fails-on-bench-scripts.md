@@ -25,3 +25,9 @@ Found 4 errors.
 ```powershell
 uv run ruff check
 ```
+
+## 原因・直し方・確認（2026-10-31）
+
+- 原因: `bench/_budget_probe.py`（import の並び）・`bench/_bug0026_repro.py`（未使用の import など 3 件）。台本を足したコミットが `ruff check src tests` だけを流し、CI と同じ引数なしの `uv run ruff check` を流していなかった。
+- 直し方: `uv run ruff check --fix bench/`（4 件とも自動修正。動作は変えない）。
+- 確認: `uv run ruff check`（引数なし・CI と同じ）→ All checks passed。2 本とも `py_compile` が通る。

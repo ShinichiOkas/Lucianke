@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Final, Literal, TextIO
 
 from lucianke import __version__
-from lucianke.cli.selftest import SUBCOMMAND as SELFTEST_SUBCOMMAND
 from lucianke.core.procs import minimal_env
 from lucianke.lsp.servers import SERVERS, LspServerDef, find_command, find_tsserver
 
@@ -48,6 +47,9 @@ DISK_WARN_FREE_BYTES: Final = 1024**3  # キャッシュのあるディスクの
 VERSION_TIMEOUT_S: Final = 5.0
 SELFTEST_TIMEOUT_S: Final = 60.0
 SELFTEST_MARKER: Final = "LUCIANKE-DOCTOR-STDOUT-OK"
+# exe 自身を自己診断に起こす隠しサブコマンド。同じ綴りを ``__main__`` が振り分ける（cli から合成ルートを import できないので
+# 定数は共有しない。一致は tests/unit/test_cli_doctor.py が exe と同じ経路で起動して確かめる）
+SELFTEST_SUBCOMMAND: Final = "_doctor-selftest"
 CTAGS_CANDIDATES: Final = (
     "ctags",
     "universal-ctags",
@@ -234,19 +236,19 @@ def check_dependencies(*, frozen: bool | None = None) -> list[Check]:
     return checks
 
 
-# 子プロセスで実行する自己診断（本体は ``cli/selftest.py``）。本物の stdout には退避 fd のトランスポートの 1 行だけが
-# 届くことを親が確かめる。
+# 子プロセスで実行する自己診断（本体は ``bootstrap_io.run_stdout_selftest``）。本物の stdout には退避 fd のトランスポートの
+# 1 行だけが届くことを親が確かめる。
 _SELFTEST_CODE: Final = r"""
 import sys
 sys.path.insert(0, sys.argv[1])
-from lucianke.cli.selftest import main
-raise SystemExit(main(sys.argv[2]))
+from lucianke.bootstrap_io import run_stdout_selftest
+raise SystemExit(run_stdout_selftest(sys.argv[2]))
 """
 
 
 def selftest_argv(*, frozen: bool | None = None) -> list[str]:
     """自己診断の子プロセスの argv。exe（PyInstaller。``sys.frozen``）には ``-c`` を受ける Python が無いので、exe 自身を
-    隠しサブコマンド（``selftest.SUBCOMMAND``）で起動する。ソースからは ``python -I -c`` で利用者の環境を見ずに起動する。
+    隠しサブコマンド（``SELFTEST_SUBCOMMAND``）で起動する。ソースからは ``python -I -c`` で利用者の環境を見ずに起動する。
     """
     if frozen is None:
         frozen = bool(getattr(sys, "frozen", False))

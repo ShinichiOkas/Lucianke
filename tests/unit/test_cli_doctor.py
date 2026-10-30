@@ -227,7 +227,7 @@ def test_selftest_argv_in_an_exe_starts_the_exe_itself_with_the_hidden_subcomman
 def test_hidden_selftest_subcommand_keeps_stdout_pure():
     # exe が通る経路（``lucianke _doctor-selftest <marker>``）を、ソースの入口で同じように通す
     cp = subprocess.run(
-        [sys.executable, "-m", "lucianke", "_doctor-selftest", doctor.SELFTEST_MARKER],
+        [sys.executable, "-m", "lucianke", *doctor.selftest_argv(frozen=True)[1:]],  # doctor の綴りを __main__ が受けること
         capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=False,
     )  # fmt: skip
     assert cp.returncode == 0, cp.stderr[-500:]

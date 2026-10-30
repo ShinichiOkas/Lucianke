@@ -5,9 +5,10 @@ Run: PYTHONUTF8=1 uv run python bench/_bug_triage.py
 Non-ASCII chars are intentionally avoided in this file.
 """
 from __future__ import annotations
+
 import asyncio
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 

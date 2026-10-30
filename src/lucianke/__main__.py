@@ -10,6 +10,9 @@ import sys
 
 from lucianke import __version__
 
+# ``cli.doctor.SELFTEST_SUBCOMMAND`` と同じ綴り（exe には -c を受ける Python が無いので、doctor は exe 自身をこの名前で起こす）
+_SELFTEST_SUBCOMMAND = "_doctor-selftest"
+
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
@@ -18,11 +21,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args[:1] == ["doctor"]:
         return _run_doctor(args[1:])
-    if args:
-        from lucianke.cli import selftest  # 軽い（bootstrap_io だけ）
+    if args[:1] == [_SELFTEST_SUBCOMMAND]:  # doctor が exe 自身を起動する隠しサブコマンド（stdout 隔離の自己診断）
+        from lucianke.bootstrap_io import run_stdout_selftest
 
-        if args[0] == selftest.SUBCOMMAND:  # doctor が exe 自身を起動する隠しサブコマンド（stdout 隔離の自己診断）
-            return selftest.main(args[1] if len(args) > 1 else "")
+        return run_stdout_selftest(args[1] if len(args) > 1 else "")
+    if args:
         print(f"lucianke: unknown subcommand {args[0]!r} (not implemented yet)", file=sys.stderr)
         return 2
     from lucianke.app import run_stdio  # 遅延 import: --version を軽く保つ

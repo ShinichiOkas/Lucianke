@@ -14,7 +14,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -193,7 +192,7 @@ def run_once(run_idx: int) -> dict:
 
 def main():
     print(f"[BUG-0026] repo={REPO}", flush=True)
-    print(f"[BUG-0026] HEAD commit: ", end="", flush=True)
+    print("[BUG-0026] HEAD commit: ", end="", flush=True)
     r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(REPO), capture_output=True, text=True)
     head_sha = r.stdout.strip()
     print(head_sha, flush=True)
@@ -210,7 +209,7 @@ def main():
         status = "HUNG (reproduced)" if res["hung"] else "OK (no hang)"
         print(f"  Run {res['run_idx']}: {status} timeouts={res['timeout_count']} result={res['result_path']}", flush=True)
         if res["pyspy_dump"]:
-            print(f"    py-spy dump (first 2000 chars):", flush=True)
+            print("    py-spy dump (first 2000 chars):", flush=True)
             print(res["pyspy_dump"][:2000], flush=True)
 
     any_hung = any(r["hung"] for r in results)

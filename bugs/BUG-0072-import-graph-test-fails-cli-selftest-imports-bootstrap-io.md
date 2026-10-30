@@ -26,3 +26,9 @@ E       assert not ["cli\\selftest.py imports composition root 'bootstrap_io'"]
 ```
 uv run pytest -q -p no:cacheprovider tests/unit/test_import_graph.py
 ```
+
+## 原因・直し方・確認（2026-10-31）
+
+- 原因: exe 配布のコミット `4ba7c0a`（親が入れた）で足した `cli/selftest.py` が、合成ルートの `bootstrap_io` を import していた（設計書 §4.2: サブパッケージから合成ルートを import しない）。親は変更範囲の単体だけ流して全体テストを流さずに push した。
+- 直し方: 自己診断の本体を合成ルートの `bootstrap_io.run_stdout_selftest(marker)` に移し、`cli/selftest.py` を消した。`cli/doctor.py` は綴り `SELFTEST_SUBCOMMAND = "_doctor-selftest"` を持ち、`__main__` が同じ綴りで振り分ける（cli から合成ルートを import できないので定数は共有しない）。綴りの一致は `test_hidden_selftest_subcommand_keeps_stdout_pure` が `doctor.selftest_argv(frozen=True)` の argv で `python -m lucianke` を起動して確かめる。
+- 確認: `tests/unit/test_import_graph.py`・`test_cli_doctor.py`・`test_server_launch_guard.py`・`test_smoke.py` → 34 passed。`build.ps1 -NoInstall` の smoke（exe の `doctor` の stdout isolation が隠しサブコマンドを通る）→ PASSED。`uv run ruff check` clean。

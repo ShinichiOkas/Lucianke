@@ -62,3 +62,35 @@ def open_transport_streams(fds: StdioFds) -> tuple[io.TextIOWrapper, io.TextIOWr
     )
     stdout = io.TextIOWrapper(os.fdopen(fds.real_out, "wb", closefd=False), encoding="utf-8", newline="\n")
     return stdin, stdout
+
+
+def run_stdout_selftest(marker: str) -> int:
+    """``lucianke doctor`` の stdout 隔離の自己診断の本体（子プロセスで走る）。
+
+    ``bootstrap_io`` の後に重い import と各経路の出力を行い、本物の stdout には退避 fd のトランスポートの 1 行（``marker``）
+    だけが届くことを、親（``cli.doctor.check_stdout_isolation``）が確かめる。起動は 2 通りで、本体はこの 1 つ:
+    ソースからは ``python -I -c``（``doctor._SELFTEST_CODE``）、exe（PyInstaller）からは隠しサブコマンド
+    ``lucianke.exe _doctor-selftest <marker>``（exe には ``-c`` を受ける Python が無い。``__main__`` が振り分ける）。
+    合成ルートに置くのは、``cli`` から合成ルートを import できないため（設計書 §4.2。``tests/unit/test_import_graph.py``）。
+    """
+    fds = bootstrap_io()
+    try:
+        import dulwich.repo  # noqa: F401
+        import jsonpath_ng  # noqa: F401
+        import mcp.server  # noqa: F401
+        import pydantic  # noqa: F401
+        import tree_sitter  # noqa: F401
+        import watchfiles  # noqa: F401
+        import yaml  # noqa: F401
+    except ImportError as exc:
+        sys.stderr.write(f"import failed: {exc}\n")
+        return 3
+    print("doctor-noise-print")
+    os.write(1, b"doctor-noise-fd1\n")
+    assert sys.__stdout__ is not None
+    sys.__stdout__.write("doctor-noise-dunder\n")
+    sys.__stdout__.flush()
+    _, out = open_transport_streams(fds)
+    out.write(marker + "\n")
+    out.flush()
+    return 0
