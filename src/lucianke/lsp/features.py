@@ -432,7 +432,9 @@ class LspRequestTimeout(TimeoutError):
         self.server = server
 
 
-async def _call(handle: LspHandle, client: LspClient, method: str, params: Any, timeout_ms: int) -> Any:
+async def _call(
+    handle: LspHandle, client: LspClient, method: str, params: Any, timeout_ms: float, *, strike: bool = True
+) -> Any:
     """要求を 1 つ送る。タイムアウトは数えて ``LspRequestTimeout`` で上げ（実際に渡した期限を持つ。BUG-0091）、切断・サーバーの
     エラーは ``E_LSP_UNAVAILABLE`` にする。
 
@@ -440,11 +442,14 @@ async def _call(handle: LspHandle, client: LspClient, method: str, params: Any, 
     ただしエラーが ``LspServerDef.restart_on_errors`` の印を含むとき（プロセスがその method に以後答えられない。BUG-0090）は
     ``LspHandle.record_broken`` で起動し直させ、``details.reason="restarting"`` にする（呼び手の警告と ``lsp_status`` が「再起動中」になる）。
     起動し直しが上限に達して ``unavailable``（``broken_3x``）になったときは ``details.reason="unavailable"``。
+    ``strike=False`` の時間切れは連続時間切れ（3 回で ``unavailable``）に数えない: 1 問い合わせの予算の残りを期限にした要求で、
+    その残りが要求 1 つの期限より短かった（予算が尽きて切れただけで、LSP の無応答ではない。BUG-0091）。
     """
     try:
         result = await client.request(method, params, timeout_ms=timeout_ms)
     except TimeoutError as e:
-        handle.record_timeout()
+        if strike:
+            handle.record_timeout()
         raise LspRequestTimeout(method, timeout_ms, getattr(handle, "server_name", None)) from e
     except ConnectionError as e:
         raise _unavailable(handle, "disconnected", str(e)) from e
@@ -636,24 +641,40 @@ def _call_item(locator: _Locator, raw: Mapping[str, Any]) -> CallItem | None:
     )
 
 
-async def prepare_call_hierarchy(handle: LspHandle, rel: RelPath, pos: Position) -> list[CallItem]:
-    """``pos`` の関数・メソッドの ``CallHierarchyItem``（無ければ空）。"""
+async def prepare_call_hierarchy(
+    handle: LspHandle, rel: RelPath, pos: Position, *, timeout_ms: float | None = None, strike: bool = True
+) -> list[CallItem]:
+    """``pos`` の関数・メソッドの ``CallHierarchyItem``（無ければ空）。
+
+    ``timeout_ms`` を省くと ``LSP_TIMEOUT_CALL_HIERARCHY_MS``。T-07 の根の要求は 1 問い合わせの予算の残りを渡す（``strike`` は
+    時間切れを連続時間切れに数えるか。``_call``。BUG-0091）。
+    """
     client, index, uri = await _open(handle, rel)
     params = {"textDocument": {"uri": uri}, "position": _lsp_position(handle, client, index, pos)}
-    result = await _call(handle, client, M_PREPARE_CALL, params, LSP_TIMEOUT_CALL_HIERARCHY_MS)
+    limit = LSP_TIMEOUT_CALL_HIERARCHY_MS if timeout_ms is None else timeout_ms
+    result = await _call(handle, client, M_PREPARE_CALL, params, limit, strike=strike)
     locator = _Locator(handle.ws, client, {rel: index})
     items = result if isinstance(result, list) else []
     return [it for raw in items if isinstance(raw, dict) and (it := _call_item(locator, raw)) is not None]
 
 
-async def _calls(handle: LspHandle, method: str, item: CallItem, *, incoming: bool) -> list[CallEdge]:
+async def _calls(
+    handle: LspHandle,
+    method: str,
+    item: CallItem,
+    *,
+    incoming: bool,
+    timeout_ms: float | None = None,
+    strike: bool = True,
+) -> list[CallEdge]:
     if item.raw is None:
         raise LuciankeError(
             ErrorCode.E_INVALID_ARGUMENT, "CallItem has no raw LSP item", details={"param": "item"}
         )
     client = _require_ready(handle)
     handle.touch()
-    result = await _call(handle, client, method, {"item": dict(item.raw)}, LSP_TIMEOUT_CALL_HIERARCHY_MS)
+    limit = LSP_TIMEOUT_CALL_HIERARCHY_MS if timeout_ms is None else timeout_ms
+    result = await _call(handle, client, method, {"item": dict(item.raw)}, limit, strike=strike)
     locator = _Locator(handle.ws, client)
     out: list[CallEdge] = []
     for entry in result if isinstance(result, list) else []:
@@ -672,14 +693,18 @@ async def _calls(handle: LspHandle, method: str, item: CallItem, *, incoming: bo
     return out
 
 
-async def incoming_calls(handle: LspHandle, item: CallItem) -> list[CallEdge]:
+async def incoming_calls(
+    handle: LspHandle, item: CallItem, *, timeout_ms: float | None = None, strike: bool = True
+) -> list[CallEdge]:
     """``item`` を呼ぶもの。``item`` は ``prepare_call_hierarchy`` の戻り値（``raw`` を含む）。"""
-    return await _calls(handle, M_INCOMING, item, incoming=True)
+    return await _calls(handle, M_INCOMING, item, incoming=True, timeout_ms=timeout_ms, strike=strike)
 
 
-async def outgoing_calls(handle: LspHandle, item: CallItem) -> list[CallEdge]:
+async def outgoing_calls(
+    handle: LspHandle, item: CallItem, *, timeout_ms: float | None = None, strike: bool = True
+) -> list[CallEdge]:
     """``item`` が呼ぶもの。"""
-    return await _calls(handle, M_OUTGOING, item, incoming=False)
+    return await _calls(handle, M_OUTGOING, item, incoming=False, timeout_ms=timeout_ms, strike=strike)
 
 
 # --- rename / codeAction / executeCommand -------------------------------------------------

@@ -627,6 +627,10 @@ EXACT_LANES = 1
 _ASK_SLOW_S = 0.5
 """BUG-0058: 1 ノードの LSP 呼び出し（``_ask``）がこの秒数を超えたら、各段の内訳をログに落とす（閾値ガード付きの計時）。"""
 
+_ROOT_GRACE_S = 0.5
+"""根の子を聞く段だけ、ループ側の打ち切りを予算より少し遅らせる。根の要求は予算の残りを自分の期限にするので、要求の時間切れ
+（連続時間切れに数えるかの判断つき）が打ち切りより先に起きるようにする（BUG-0091）。"""
+
 _BACKSTOP_S = 2.0
 """ワーカースレッドがイベントループの答えを待つ上限の上乗せ（ループ側が予算で打ち切るので、通常は使わない歯止め）。"""
 
@@ -1234,6 +1238,7 @@ class CallEdgeSource:
                 self._settle_task(job.sym.path)  # 根のファイルを開いて、最初の診断の待ちを始める
         lane = asyncio.Semaphore(max(1, EXACT_LANES))
         out: dict[tuple[str, str], Any] = {}
+        grace = _ROOT_GRACE_S if any(job.depth <= 1 for job in jobs) else 0.0
 
         async def run(job: _Job) -> None:
             try:
@@ -1248,7 +1253,7 @@ class CallEdgeSource:
                         self.cut = self._cut_of(exc, job)
 
         tasks = {asyncio.ensure_future(run(job)): job for job in jobs}
-        done, pending = await asyncio.wait(tasks, timeout=max(self.deadline - time.monotonic(), 0.0))
+        done, pending = await asyncio.wait(tasks, timeout=max(self.deadline - time.monotonic(), 0.0) + grace)
         if pending:
             self._stop = True
             if self.cut is None:
@@ -1270,8 +1275,8 @@ class CallEdgeSource:
     def _cut_of(self, exc: BaseException, job: _Job) -> ExactCut:
         elapsed = time.monotonic() - self.started
         node = str(job.sym.qualified_name)
-        if isinstance(exc, ExactBudgetExceeded):
-            return ExactCut("budget", elapsed, node=node)
+        if isinstance(exc, ExactBudgetExceeded) or (isinstance(exc, TimeoutError) and job.depth <= 1):
+            return ExactCut("budget", elapsed, node=node)  # 根の要求の期限は予算の残り（_root_limits）
         if isinstance(exc, TimeoutError):
             method = getattr(exc, "method", None)
             limit = getattr(exc, "timeout_ms", None)
@@ -1307,6 +1312,19 @@ class CallEdgeSource:
     async def _settle(self, rel: RelPath) -> bool:
         """``rel`` の最初の診断を待つ（共有の待ち。取り消されても待ちそのものは他のノードのために残す）。"""
         return await asyncio.shield(self._settle_task(rel))
+
+    def _root_limits(self, job: _Job) -> dict[str, Any]:
+        """根の要求（根の子を求める prepare と incoming / outgoing）の期限と、時間切れを連続時間切れに数えるか（BUG-0091）。
+
+        根の要求は要求 1 つの期限（``LSP_TIMEOUT_CALL_HIERARCHY_MS``）ではなく、1 問い合わせの予算の残りまで待つ（冷えた LSP の
+        最初の要求は 5 秒を超えることがあり、そこで切ると予算を残したまま木ごと降格していた）。時間切れを数えるのは、要求 1 つの
+        期限以上待っても答えなかったときだけ（本当の無応答）。予算の残りが期限より短くて切れたのは数えない。予算の内に遅れて
+        答えた要求は ``record_ok``（数えない）。深いノードの要求は今までどおり（省略 = 要求 1 つの期限・数える）。
+        """
+        if job.depth > 1:
+            return {}
+        left_ms = max(self.deadline - time.monotonic(), 0.0) * 1000
+        return {"timeout_ms": left_ms, "strike": left_ms >= self._request_limit_ms()}
 
     def _needs_settle(self, job: _Job) -> bool:
         """このノードを聞く前に、そのファイルの最初の診断を待つか。
@@ -1348,7 +1366,9 @@ class CallEdgeSource:
             item = job.item
             if item is None:
                 start = (sym.selection or sym.range).start
-                items = await features.prepare_call_hierarchy(handle, sym.path, start)
+                items = await features.prepare_call_hierarchy(
+                    handle, sym.path, start, **self._root_limits(job)
+                )
                 item = next(
                     (i for i in items if i.rel == sym.path and i.selection_range.start == start),
                     next((i for i in items if i.rel == sym.path), None),
@@ -1361,7 +1381,7 @@ class CallEdgeSource:
                     details={"reason": "lsp_error"},
                 )
             call = features.incoming_calls if direction == "incoming" else features.outgoing_calls
-            edges = await call(handle, item)
+            edges = await call(handle, item, **self._root_limits(job))
             spans["calls"], t = time.monotonic() - t, time.monotonic()
         rels = sorted({str(e.from_rel) for e in edges if e.from_rel is not None})
         # 呼び出し箇所の構文木はスレッドで、ファイルごとに並行（LSP の要求の枠の外。次のノードの要求と重なる）

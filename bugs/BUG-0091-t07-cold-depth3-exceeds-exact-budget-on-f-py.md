@@ -189,3 +189,27 @@ F-PY の rig（`tests/contract_fixtures/_rig.open_rig`。本番と同じ結線�
 ### 見つけた別の不具合
 
 - なし。
+
+### 追記（2026-10-31）: 根の要求は予算の残りまで待ち、予算の内の遅れは連続時間切れに数えない
+
+上の「直し方」で入れなかった案（T-07 の根の要求を予算の残りに揃える）を、親の判断で入れた（判断の理由: 冷えたサーバーが最初の
+問い合わせで遅いだけで LSP をセッションの間 `unavailable` にするのは、呼ぶ側の AI にとって最初の答えが数秒遅いことよりずっと悪い）。
+
+- T-07 の根の要求（根の子を求める prepare と incoming / outgoing）は、要求 1 つの期限 5000 ms ではなく 1 問い合わせの予算
+  （10 秒）の残りを期限にする（`CallEdgeSource._root_limits` → `features.prepare_call_hierarchy` / `incoming_calls` /
+  `outgoing_calls` の `timeout_ms`）。深いノードの要求は 5000 ms のまま。
+- 連続時間切れ（3 回で `unavailable`）に数えるのは、要求 1 つの期限以上待っても答えなかった要求だけ（`features._call` の
+  `strike`）。予算の内に遅れて答えた要求は `record_ok`、予算の残りが期限より短くて切れた要求・予算で取り消した要求は数えない。
+  根の段だけループ側の打ち切りを 0.5 秒遅らせ（`_ROOT_GRACE_S`）、根の要求の時間切れ（数えるかの判断つき）を先に起こす。
+  根が予算の内に答えなければ、警告は予算（「…予算 10 秒…を使い切りました（URL.copy_with を聞いている途中）」）。
+- T-06 を確かめた: references の要求 1 つ（期限 3000 ms）で答え、1 問い合わせの予算が無い。「予算の無いツールの期限切れ」なので
+  今までどおり数える（変えていない）。
+- 仕様書 §12.3 の「要求のタイムアウト」と T-07 処理規約 2、設計書 §7.5.2（要求のタイムアウトと数え）・§7.5.6 に理由つきで書いた。
+- 試験（`tests/contract/test_T07_exact_budget.py`、偽 LSP）: 製品の既定で根が 7 秒で答える → exact・数えない／根が要求の期限
+  （1000 ms に縮めた）を超えて予算（4 秒）の内に答えるのが 3 回続く → 3 回とも exact・LSP は ready・数え 0（以前の作りなら
+  3 回とも期限切れで LSP を落としていた）／根が予算（3 秒）の内に答えず期限（1500 ms）以上待った → 数え 1・木ごと structural・
+  警告は予算 3 秒／予算（3 秒）が期限（5000 ms）より短くて根が切れた → 数え 0（前からある試験）。`test_T06_T07_lsp.py` の
+  答えない偽サーバーの T-07 は、根が予算まで待つので予算を 2 秒にし、警告が予算を書くことを確かめるようにした。
+- 確認: T-06・T-07 の契約テスト一式とセレクター・LSP の単体テスト（`test_engine_selector*.py`・`test_lsp_exact_degrade.py`・
+  `test_lsp_features.py`・`test_lsp_prime.py`・`test_lsp_pool.py`）: 467 passed, 6 skipped（skip は TypeScript の LSP が無い 6 件）。
+  `uv run ruff check`: All checks passed。

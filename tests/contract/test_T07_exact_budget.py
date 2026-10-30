@@ -8,14 +8,18 @@
 * 確かめること:
   1. 1 問い合わせの予算（``EXACT_BUDGET_S``）が切れた: LSP が答えたノードは exact のまま、残りのノードの子を構文木で補う（mixed）。
      警告は予算とその値・どこまで exact か・呼び直すことを書き、要求の期限を理由にしない。呼び直すと exact で答えきる。
-  2. 要求 1 つの期限（``LSP_TIMEOUT_CALL_HIERARCHY_MS``）が切れた: 警告はその要求・期限の値・ノードを書き、予算を理由にしない。
-  3. 根の子が取れない（予算・期限）: 木ごと structural。警告は切れた上限の値と、呼び直すことを書く。
+  2. 深いノードの要求が要求 1 つの期限（``LSP_TIMEOUT_CALL_HIERARCHY_MS``）で切れた: 警告はその要求・期限の値・ノードを書き、
+     予算を理由にしない。
+  3. 根の子が取れない（予算の内に根が答えない）: 木ごと structural。警告は予算の値と、呼び直すことを書く。
+  4. 根の要求は要求 1 つの期限ではなく予算の残りまで待つ。予算の内に遅れて答えた根・予算が期限より短くて切れた根は連続時間切れ
+     （3 回で unavailable）に数えない。要求 1 つの期限以上待っても答えなかった根（本当の無応答）は数える。
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -168,8 +172,9 @@ class Scripted:
     def delay(self, **seconds: float) -> None:
         write_config(self.config, self.env.ws, seconds)
 
-    async def tree(self, depth: int = 2) -> dict[str, Any]:
-        r = await self.env.calls(TARGET, "incoming", depth=depth)
+    async def tree(self, depth: int = 2, root: str = "target") -> dict[str, Any]:
+        rel = DEFS[root][0]
+        r = await self.env.calls({"urn": str(Urn("fk", rel, CodeSel(root)))}, "incoming", depth=depth)
         assert not r.is_error, r.text
         return r.structured
 
@@ -316,17 +321,51 @@ async def test_root_budget_cut_degrades_the_whole_tree_and_names_the_budget(
     assert scripted.timeouts() == 0
 
 
-async def test_root_request_timeout_degrades_the_whole_tree_and_names_the_limit(
+async def test_a_cold_root_answering_in_7_seconds_is_exact_and_not_a_strike(scripted: Scripted) -> None:
+    """4: 製品の既定（予算 10 秒・要求の期限 5000 ms）で、根の incomingCalls が 7 秒で答える → exact、連続時間切れに数えない。"""
+    assert _lsp_exact.EXACT_BUDGET_S == 10.0 and features.LSP_TIMEOUT_CALL_HIERARCHY_MS == 5000
+    scripted.delay(target=7.0)
+    started = time.monotonic()
+    r = await scripted.tree()
+    assert time.monotonic() - started >= 7.0
+    meta = r["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["accuracy_warning"] is None, meta
+    assert levels(r) == {"caller": "exact", "top": "exact", "other": "exact"}
+    assert scripted.timeouts() == 0
+    assert scripted.env.pool.status("python", scripted.env.ws).status.value == "ready"
+
+
+async def test_three_slow_cold_roots_in_a_row_keep_the_lsp_available(
     scripted: Scripted, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """3: 根の incomingCalls が要求の期限（1500 ms）の内に答えない → 木ごと structural、警告は incomingCalls の 1500 ms。"""
+    """4: 根の要求が要求 1 つの期限（1000 ms に縮めた）を超えて予算（4 秒）の内に答えるのが 3 回続く → 3 回とも exact、LSP は ready。
+
+    以前は根の要求も要求 1 つの期限で切れ、3 回続くと LSP を落としていた（timeout_3x）。"""
+    monkeypatch.setattr(features, "LSP_TIMEOUT_CALL_HIERARCHY_MS", 1000)
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", 4.0)
+    scripted.delay(target=2.0, caller=2.0, top=2.0)
+    for root in ("target", "caller", "top"):  # 別々の根なので、どれも LSP に聞く（PaaD の目印は無い）
+        r = await scripted.tree(depth=1, root=root)
+        meta = r["_resolution_meta"]
+        assert meta["confidence_level"] == "exact" and "scripted" in meta["engine_used"], (root, meta)
+        assert scripted.timeouts() == 0, root
+    assert scripted.env.pool.status("python", scripted.env.ws).status.value == "ready"
+
+
+async def test_a_root_hanging_past_the_budget_still_counts_as_a_strike(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """4: 根の incomingCalls が予算（3 秒）の内に答えず、要求 1 つの期限（1500 ms）以上待った → 本当の無応答として 1 回数える。
+    木ごと structural、警告は予算 3 秒。"""
     monkeypatch.setattr(features, "LSP_TIMEOUT_CALL_HIERARCHY_MS", REQUEST_MS)
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
     scripted.delay(target=SLOW_S)
     r = await scripted.tree()
     meta = r["_resolution_meta"]
     assert levels(r) == {"caller": "structural", "top": "structural", "other": "structural"}
+    assert meta["lsp_status"] == "ready", meta  # 1 回では落とさない
     warning = meta["accuracy_warning"] or ""
-    assert "callHierarchy/incomingCalls" in warning and "要求 1 つの期限 1500 ms" in warning, warning
-    assert "（target。" in warning and "木全体を構文木" in warning, warning
-    assert "使い切りました" not in warning, warning
-    assert scripted.timeouts() == 1  # 期限で切れた要求は数える（LspPool の規則どおり）
+    assert "予算 3 秒（この問い合わせで LSP に使える時間の合計）を使い切りました" in warning, warning
+    assert "（target を聞いている途中）" in warning and "木全体を構文木" in warning, warning
+    assert "1500 ms" not in warning, warning  # 根は要求の期限で切っていない
+    assert scripted.timeouts() == 1

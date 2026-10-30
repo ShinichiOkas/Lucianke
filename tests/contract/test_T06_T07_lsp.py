@@ -564,13 +564,15 @@ async def test_t06_lsp_timeout_degrades_to_structural(silent: Env) -> None:
     assert silent.pool.status("python", silent.ws).status.value == "ready"
 
 
-async def test_t07_lsp_timeout_degrades_to_structural(silent: Env) -> None:
+async def test_t07_lsp_timeout_degrades_to_structural(silent: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T-07 の根の要求は要求 1 つの期限（5000 ms）ではなく 1 問い合わせの予算の残りまで待つ（BUG-0091）。予算を縮めて速く切る
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", 2.0)
     r = await silent.calls({"urn": TARGET_URN}, "incoming", depth=1)
     assert not r.is_error, r.text
     meta = r.structured["_resolution_meta"]
     assert meta["confidence_level"] == "structural" and meta["is_degraded"] is True, meta
     assert meta["lsp_status"] == "ready", meta
-    assert "5000 ms" in (meta["accuracy_warning"] or ""), meta
+    assert "予算 2 秒" in (meta["accuracy_warning"] or ""), meta  # 切れたのは予算（警告は事実どおり）
     assert [n["name"] for n in r.structured["data"]["nodes"]] == ["caller"]
     assert silent.pool.status("python", silent.ws).status.value == "ready"
 
