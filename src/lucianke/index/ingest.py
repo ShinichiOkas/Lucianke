@@ -29,6 +29,7 @@ from lucianke.core.model import Confidence, Kind, RelPath, SymbolRecord, Tier
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, Urn, parse
 
 __all__ = [
+    "AttrDefFact",
     "DiagnosticFact",
     "FileFacts",
     "IngestStats",
@@ -37,8 +38,10 @@ __all__ = [
     "SuperRefFact",
     "SymbolExtra",
     "SyntaxErrorFact",
+    "VarTypeFact",
     "TREE_SITTER_SOURCE",
     "SEVERITIES",
+    "ensure_external_symbol",
     "ingest_file",
     "remove_file",
     "replace_lsp_diagnostics",
@@ -128,13 +131,34 @@ class RelationFact:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NameCallFact:
-    """内部表 ``_name_calls`` の 1 行分: 受け手の型が分からない属性呼び出し ``x.name(...)``（BUG-0071）。位置は 0 始まり。"""
+    """内部表 ``_name_calls`` の 1 行分: 受け手の型が分からない属性呼び出し ``x.name(...)``（BUG-0071）と属性の読み書き
+    ``x.name`` / ``x.name = v`` / ``x.name += 1``（``use_kind`` が ``r`` / ``w`` / ``rw``。BUG-0095）。位置は 0 始まり。"""
 
     source_urn: Urn | str
     name: str
     call_site_line: int
     call_site_col: int
     guard_condition: str | None = None
+    use_kind: str = "call"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttrDefFact:
+    """内部表 ``_attr_defs`` の 1 行分: インスタンス属性の定義（``self.x = ...`` / ``this.x = ...``。シンボルにはならない）。
+    型の分からない受け手の属性の参照を名前で結ぶときの候補（BUG-0095）。位置は 0 始まり。"""
+
+    class_urn: str
+    name: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VarTypeFact:
+    """内部表 ``_var_types`` の 1 行分: モジュール直下の変数の構文から分かる型（``settings = Settings()``。BUG-0094）。"""
+
+    var_urn: str
+    type_urn: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -202,6 +226,10 @@ class FileFacts:
     """受け手の型が分からない属性呼び出し（``_name_calls``。BUG-0071）。``ingest_file`` がファイルごとに全置換する。"""
     super_refs: Sequence[SuperRefFact] = field(default_factory=tuple)
     """``super()`` 経由の参照（``_member_refs`` の ``via_super = 1``。BUG-0081）。``ingest_file`` がファイルごとに全置換する。"""
+    attr_defs: Sequence[AttrDefFact] = field(default_factory=tuple)
+    """インスタンス属性の定義（``_attr_defs``。BUG-0095）。``ingest_file`` がファイルごとに全置換する。"""
+    var_types: Sequence[VarTypeFact] = field(default_factory=tuple)
+    """モジュール直下の変数の型（``_var_types``。BUG-0094）。``ingest_file`` がファイルごとに全置換する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +371,11 @@ def external_kind(qualified: str | None, relation_kinds: Iterable[str]) -> Kind:
     if called:
         return Kind.METHOD if owner_is_class else Kind.FUNCTION
     return Kind.PROPERTY if owner_is_class else Kind.VARIABLE
+
+
+def ensure_external_symbol(conn: sqlite3.Connection, target_urn: str, relation_kinds: Iterable[str]) -> int:
+    """``_ensure_external`` の公開名（関係を整える段が外部の型のメンバーに結ぶとき。``index/inherited.py``。BUG-0094）。"""
+    return _ensure_external(conn, target_urn, relation_kinds)
 
 
 def _ensure_external(conn: sqlite3.Connection, target_urn: str, relation_kinds: Iterable[str]) -> int:
@@ -767,8 +800,8 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
     conn.execute("DELETE FROM _name_calls WHERE file_id = ?", (file_id,))
     if facts.name_calls:
         conn.executemany(
-            "INSERT INTO _name_calls (file_id, source_urn, name, call_site_line, call_site_col, guard_condition)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO _name_calls (file_id, source_urn, name, call_site_line, call_site_col, guard_condition, use_kind)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     file_id,
@@ -777,9 +810,22 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
                     c.call_site_line + 1,
                     c.call_site_col + 1,
                     c.guard_condition,
+                    c.use_kind,
                 )
                 for c in facts.name_calls
             ],
+        )
+    conn.execute("DELETE FROM _attr_defs WHERE file_id = ?", (file_id,))
+    if facts.attr_defs:
+        conn.executemany(
+            "INSERT INTO _attr_defs (file_id, class_urn, name, line, col) VALUES (?, ?, ?, ?, ?)",
+            [(file_id, a.class_urn, a.name, a.line + 1, a.col + 1) for a in facts.attr_defs],
+        )
+    conn.execute("DELETE FROM _var_types WHERE file_id = ?", (file_id,))
+    if facts.var_types:
+        conn.executemany(
+            "INSERT OR REPLACE INTO _var_types (file_id, var_urn, type_urn) VALUES (?, ?, ?)",
+            [(file_id, v.var_urn, v.type_urn) for v in facts.var_types],
         )
 
     return IngestStats(

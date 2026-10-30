@@ -15,10 +15,13 @@ from __future__ import annotations
 __all__ = [
     "BUILTINS_PACKAGE",
     "GLOBALS_PACKAGE",
+    "JS_BUILTIN_ATTRIBUTES",
     "JS_BUILTIN_METHODS",
     "JS_GLOBALS",
     "PYTHON_BUILTINS",
+    "PYTHON_BUILTIN_ATTRIBUTES",
     "PYTHON_BUILTIN_METHODS",
+    "is_builtin_attribute",
 ]
 
 BUILTINS_PACKAGE = "builtins"
@@ -99,3 +102,33 @@ _JS_METHOD_NAMES = """
 
 PYTHON_BUILTIN_METHODS: frozenset[str] = frozenset(_PYTHON_METHOD_NAMES.split())
 JS_BUILTIN_METHODS: frozenset[str] = frozenset(_JS_METHOD_NAMES.split())
+
+# 組み込み型の属性の名前（BUG-0095）。受け手の型が分からない属性の読み書き ``x.name`` は、この名前（と組み込み型のメソッド名。
+# ``x.append`` を渡すのはメソッドの参照）なら組み込み型の属性でもありうるので、ワークスペースに同名の属性が 1 つしか無くても名前では
+# 結ばない（``tools/_name_calls.py``）。Python は str / bytes / list / dict / set / int / float / complex / memoryview / range / slice /
+# 例外（BaseException・OSError・SyntaxError・UnicodeDecodeError・StopIteration・SystemExit・ImportError）/ io のファイル /
+# 関数・メソッド・モジュール・type・property の公開のデータ属性（Python 3.12 の ``dir()`` から採取。メソッドは除く）。``__x__`` の
+# 名前はすべて組み込みのプロトコルとして扱う（``is_builtin_attribute``）。TS / JS は Array / String / Map / Set / Error / RegExp /
+# ArrayBuffer / Function / Symbol / 反復の結果（``done`` / ``value``）の属性。
+_PYTHON_ATTRIBUTE_NAMES = """
+    args buffer c_contiguous characters_written closed closefd code contiguous denominator encoding end
+    end_lineno end_offset errno errors f_contiguous fdel fget filename filename2 format fset imag itemsize
+    line_buffering lineno mode msg name name_from nbytes ndim newlines numerator obj object offset path
+    print_file_and_line raw readonly real reason shape start step stop strerror strides suboffsets text value
+    winerror write_through
+"""
+
+_JS_ATTRIBUTE_NAMES = """
+    buffer byteLength byteOffset cause constructor description done dotAll flags global hasIndices
+    ignoreCase lastIndex length message multiline name prototype size source stack sticky unicode value
+"""
+
+PYTHON_BUILTIN_ATTRIBUTES: frozenset[str] = frozenset(_PYTHON_ATTRIBUTE_NAMES.split()) | PYTHON_BUILTIN_METHODS
+JS_BUILTIN_ATTRIBUTES: frozenset[str] = frozenset(_JS_ATTRIBUTE_NAMES.split()) | JS_BUILTIN_METHODS
+
+
+def is_builtin_attribute(name: str, family: str) -> bool:
+    """``x.name``（読み書き）の ``name`` が組み込み型の属性・メソッドの名前か（``family`` は ``"python"`` / ``"js"``）。"""
+    if family == "python":
+        return name in PYTHON_BUILTIN_ATTRIBUTES or (name.startswith("__") and name.endswith("__"))
+    return name in JS_BUILTIN_ATTRIBUTES

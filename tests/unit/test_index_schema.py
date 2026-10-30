@@ -30,6 +30,8 @@ ALLOWED_INTERNAL_TABLES = {
     "_exact_marks",
     "_name_calls",
     "_member_refs",
+    "_attr_defs",  # BUG-0095
+    "_var_types",  # BUG-0094
 }
 ALLOWED_TRIGGERS = {"symbols_ai", "symbols_ad", "symbols_au"}
 ALLOWED_INTERNAL_INDEXES = {
@@ -39,6 +41,10 @@ ALLOWED_INTERNAL_INDEXES = {
     "_name_calls_file",
     "_member_refs_class",
     "_member_refs_file",
+    "_attr_defs_name",
+    "_attr_defs_file",
+    "_var_types_type",
+    "_var_types_file",
 }
 
 

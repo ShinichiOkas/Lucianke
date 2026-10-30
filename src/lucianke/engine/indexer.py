@@ -59,6 +59,7 @@ from lucianke.engine.rank_scheduler import RANK_DEBOUNCE_S, RankScheduler
 from lucianke.index import inherited, queries, rank
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
+    AttrDefFact,
     FileFacts,
     IngestStats,
     NameCallFact,
@@ -66,6 +67,7 @@ from lucianke.index.ingest import (
     SuperRefFact,
     SymbolExtra,
     SyntaxErrorFact,
+    VarTypeFact,
     ingest_file,
     remove_file,
     upsert_workspace,
@@ -75,6 +77,7 @@ from lucianke.syntax import heuristic, relations
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
 from lucianke.syntax.imports import (
     ImportFact,
+    dotted_module_path,
     external_name_map,
     extract_imports,
     imported_name_map,
@@ -205,6 +208,17 @@ _Gone = Literal["gone"]
 class _Prepared:
     facts: FileFacts
     degraded: str | None = None  # 解析に失敗して files 行だけにしたときの理由
+
+
+@dataclass(frozen=True, slots=True)
+class _Extracted:
+    """``Indexer._relations`` の結果（``FileFacts`` の関係の列と内部表の行）。"""
+
+    relations: list[RelationFact]
+    name_calls: list[NameCallFact]
+    super_refs: list[SuperRefFact]
+    attr_defs: list[AttrDefFact]
+    var_types: list[VarTypeFact]
 
 
 def _now() -> str:
@@ -873,6 +887,8 @@ class Indexer:
         import_stems: Sequence[str] = (),
         name_calls: Sequence[NameCallFact] = (),
         super_refs: Sequence[SuperRefFact] = (),
+        attr_defs: Sequence[AttrDefFact] = (),
+        var_types: Sequence[VarTypeFact] = (),
     ) -> FileFacts:
         support = get_support(detected.language_id)
         extra_globs = tuple(getattr(support, "test_path_globs", ()) or ())
@@ -893,6 +909,8 @@ class Indexer:
             import_stems=tuple(import_stems),
             name_calls=tuple(name_calls),
             super_refs=tuple(super_refs),
+            attr_defs=tuple(attr_defs),
+            var_types=tuple(var_types),
         )
 
     def _analyze_code(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
@@ -913,7 +931,7 @@ class Indexer:
         records = [e.record for e in extraction.symbols]
         extras = {str(e.record.urn): SymbolExtra(body_sha256=e.body_sha256) for e in extraction.symbols}
         probes: set[str] = set()
-        relations, name_calls, super_refs = self._relations(parsed, lang, support, records, rel, probes)
+        extracted = self._relations(parsed, lang, support, records, rel, probes)
         errors: list[SyntaxErrorFact] = [
             (r.start.line, r.start.col, r.end.line, r.end.col, _SYNTAX_ERROR_MESSAGE)
             for r in parsed.error_ranges
@@ -926,11 +944,13 @@ class Indexer:
             confidence=Confidence.STRUCTURAL,
             symbols=records,
             extras=extras,
-            relations=relations,
+            relations=extracted.relations,
             syntax_errors=errors,
             import_stems=sorted(probes),
-            name_calls=name_calls,
-            super_refs=super_refs,
+            name_calls=extracted.name_calls,
+            super_refs=extracted.super_refs,
+            attr_defs=extracted.attr_defs,
+            var_types=extracted.var_types,
         )
 
     def _relations(
@@ -941,15 +961,19 @@ class Indexer:
         records: list[SymbolRecord],
         rel: RelPath,
         probes: set[str],
-    ) -> tuple[list[RelationFact], list[NameCallFact], list[SuperRefFact]]:
-        """関係の候補 → ``(RelationFact, NameCallFact, SuperRefFact)``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順。
+    ) -> _Extracted:
+        """関係の候補 → ``_Extracted``。目標は 同じファイル内 → import 表 → 外部（未解決の import・組み込み名）の順。
 
-        解決できない候補は ``relations`` に入れない。そのうち受け手の型が分からない属性呼び出し（``name_only``）だけは、位置と名前を
-        ``NameCallFact``（内部表 ``_name_calls``）にする（T-06 / T-07 が名前で結ぶ。BUG-0071）。``super().name``（``super_of``）は
-        ``SuperRefFact``（内部表 ``_member_refs`` の ``via_super = 1``）にし、整えが基底の C3 線形化から先を決める（BUG-0081）。
+        解決できない候補は ``relations`` に入れない。そのうち受け手の型が分からない属性呼び出し・属性の読み書き（``name_only``）だけは、
+        位置と名前と使用種別を ``NameCallFact``（内部表 ``_name_calls``）にする（T-06 / T-07 が名前で結ぶ。BUG-0071・BUG-0095）。
+        ``super().name``（``super_of``）は ``SuperRefFact``（内部表 ``_member_refs`` の ``via_super = 1``）にし、整えが基底の C3 線形化から
+        先を決める（BUG-0081）。インスタンス属性の定義（``_attr_defs``。BUG-0095）とモジュール直下の変数の型（``_var_types``。BUG-0094）も添える。
+        点つきのモジュールのパス（``pkg.helpers``）は、import 表とファイルの在り処からサブモジュールに解く（BUG-0093。調べたパスは語幹に残す）。
         """
         ws_id = self._ws.workspace_id
         external: dict[str, str] = {}
+        module_facts: list[ImportFact] = []
+        resolver: Callable[[ImportFact], RelPath | None] | None = None
         # def / class の中の import 文（開始位置ごと）
         nested: dict[relations.ImportKey, list[ImportFact]] = {}
         try:
@@ -994,6 +1018,22 @@ class Indexer:
         def resolve_name(name: str) -> str | None:
             return urn_of(name_map, external, name)
 
+        def resolve_dotted(dotted: str) -> str | None:
+            if resolver is None:
+                return None
+            try:
+                found = dotted_module_path(
+                    dotted,
+                    facts=module_facts,
+                    names=name_map,
+                    resolve=resolver,
+                    exists=reresolve.ProbeRecorder(self._exists, probes),
+                )
+                return None if found is None else str(Urn(ws_id, str(found)))
+            except Exception:
+                _log.warning("dotted module resolution failed for %s in %s", dotted, rel, exc_info=True)
+                return None
+
         scoped: dict[relations.ImportKey, tuple[dict[str, tuple[RelPath, str]], dict[str, str]]] = {}
 
         def resolve_import(key: relations.ImportKey, name: str) -> str | None:
@@ -1001,6 +1041,8 @@ class Indexer:
             if key not in scoped:
                 group = nested.get(key, [])
                 try:
+                    if resolver is None:
+                        raise LookupError("import resolution failed for the module")
                     names = imported_name_map(group, resolver)
                     scoped[key] = (names, external_name_map(group, language_id=lang, internal=names))
                 except Exception:
@@ -1008,7 +1050,7 @@ class Indexer:
                     scoped[key] = ({}, {})
             return urn_of(*scoped[key], name)
 
-        candidates = relations.extract_relations(
+        detailed = relations.extract_relations_detailed(
             parsed,  # type: ignore[arg-type]
             language_id=lang,
             language=support.grammar(),  # type: ignore[attr-defined]
@@ -1018,7 +1060,9 @@ class Indexer:
             resolve_name=resolve_name,
             builtins_package=BUILTINS_PACKAGE if lang == "python" else GLOBALS_PACKAGE,
             resolve_import=resolve_import,
+            resolve_dotted=resolve_dotted,
         )
+        candidates = detailed.relations
         rel_facts = [
             RelationFact(
                 source_urn=c.source_urn,
@@ -1040,6 +1084,7 @@ class Indexer:
                 call_site_line=c.call_site_line,
                 call_site_col=c.call_site_col,
                 guard_condition=c.guard_condition,
+                use_kind=c.use_kind,
             )
             for c in candidates
             if c.target_urn is None and c.name_only
@@ -1059,7 +1104,11 @@ class Indexer:
             for c in candidates
             if c.target_urn is None and c.super_of is not None
         ]
-        return rel_facts, name_calls, super_refs
+        attr_defs = [
+            AttrDefFact(class_urn=a.class_urn, name=a.name, line=a.line, col=a.col) for a in detailed.attr_defs
+        ]
+        var_types = [VarTypeFact(var_urn=v.var_urn, type_urn=v.type_urn) for v in detailed.var_types]
+        return _Extracted(rel_facts, name_calls, super_refs, attr_defs, var_types)
 
     def _exists(self, rel: RelPath) -> bool:
         return (self._ws.root / str(rel)).is_file() and not is_excluded(self._ws, rel)

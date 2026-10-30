@@ -105,10 +105,15 @@ def test_known_receiver_without_the_member_is_not_name_only() -> None:
     assert imported.target_urn == f"lk://{WS}/app/engine.py#Runner.pack" and imported.name_only is False
 
 
-def test_only_calls_are_name_only() -> None:
-    cands = _candidates("def f(x):\n    y = x.pack\n    return y\n")
-    [read] = [c for c in cands if c.target_name == "pack"]
-    assert read.relation_kind == "REFERENCES" and read.name_only is False
+def test_attribute_reads_and_writes_are_name_only_too() -> None:
+    """呼び出しでない属性の読み書きも、受け手の型が分からなければ名前の一致に任せる（使用種別つき。BUG-0095）。"""
+    cands = _candidates("def f(x):\n    y = x.pack\n    x.size = 1\n    x.count += 1\n    return y\n")
+    got = {c.target_name: (c.relation_kind, c.use_kind, c.name_only) for c in cands}
+    assert {k: got[k] for k in ("pack", "size", "count")} == {
+        "pack": ("REFERENCES", "r", True),
+        "size": ("REFERENCES", "w", True),
+        "count": ("REFERENCES", "rw", True),
+    }
 
 
 def test_typescript_any_receiver_is_name_only() -> None:

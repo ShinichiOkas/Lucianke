@@ -1,4 +1,4 @@
--- schema_version: 8
+-- schema_version: 9
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -233,28 +233,55 @@ CREATE TABLE _exact_marks (
   PRIMARY KEY (workspace_id, kind, urn)
 ) WITHOUT ROWID;
 
--- 受け手の型が構文から分からない属性呼び出し（`x.name(...)`）の位置と名前（BUG-0071。engine/indexer.py が書き、tools/_name_calls.py が読む）。
--- relations には先の URN が決まらないので入らない。T-06 / T-07 が問い合わせのときに名前で対象に結ぶ（同名のメソッドが 1 つだけなら heuristic で）。
+-- 受け手の型が構文から分からない属性呼び出し（`x.name(...)`）と属性の読み書き（`x.name`・`x.name = v`・`x.name += 1`。BUG-0095）の
+-- 位置と名前（BUG-0071。engine/indexer.py が書き、tools/_name_calls.py が読む）。関係を整える段（index/inherited.py）も、型の分からない
+-- import した変数の `settings.reload()` をここに書く（BUG-0094）。relations には先の URN が決まらないので入らない。T-06 / T-07 が
+-- 問い合わせのときに名前で対象に結ぶ（同名の候補が 1 つだけなら heuristic で）。T-07 は use_kind = 'call' だけを読む。
 CREATE TABLE _name_calls (
   file_id         INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
   source_urn      TEXT NOT NULL,             -- 呼び出し箇所を含む最内の定義（モジュール直下ならファイルの URN）
-  name            TEXT NOT NULL,             -- 呼んだメンバーの名前
+  name            TEXT NOT NULL,             -- 呼んだ・読み書きしたメンバーの名前
   call_site_line  INTEGER NOT NULL,          -- 1 始まり（relations と同じ外部表現）
   call_site_col   INTEGER NOT NULL,          -- 1 始まり
-  guard_condition TEXT
+  guard_condition TEXT,
+  use_kind        TEXT NOT NULL DEFAULT 'call' -- call / r / w / rw（schema v9）
 );
 CREATE INDEX _name_calls_name   ON _name_calls(name);
 CREATE INDEX _name_calls_source ON _name_calls(source_urn);
 CREATE INDEX _name_calls_file   ON _name_calls(file_id);
 
+-- インスタンス属性の定義（クラスのメソッドの中の `self.x = ...` / `this.x = ...`。シンボルにはならない。BUG-0095）。
+-- 型の分からない受け手の属性の参照（`mon.x`）を名前で結ぶときの候補に数える（tools/_name_calls.py）。クラス自身か同じファイルの
+-- 基底に同名のシンボル・インスタンス属性があるものは入れない（別ファイルの基底は問い合わせのときに C3 でたどってまとめる）。
+CREATE TABLE _attr_defs (
+  file_id   INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  class_urn TEXT NOT NULL,                   -- 属性を持つクラス
+  name      TEXT NOT NULL,                   -- 属性の名前
+  line      INTEGER NOT NULL,                -- 1 始まり（最初の代入の名前のトークン）
+  col       INTEGER NOT NULL
+);
+CREATE INDEX _attr_defs_name ON _attr_defs(name);
+CREATE INDEX _attr_defs_file ON _attr_defs(file_id);
+
+-- モジュール直下の変数の構文から分かる型（`settings = Settings()`・`settings: Settings = ...`・TS の `const s = new S()`。BUG-0094）。
+-- 関係を整える段（index/inherited.py）が、import した変数の `settings.reload()` をこの型のメンバーに結ぶ。
+CREATE TABLE _var_types (
+  file_id  INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  var_urn  TEXT NOT NULL PRIMARY KEY,        -- 変数のシンボル
+  type_urn TEXT NOT NULL                     -- ワークスペースのクラスか外部の型
+);
+CREATE INDEX _var_types_type ON _var_types(type_urn);
+CREATE INDEX _var_types_file ON _var_types(file_id);
+
 -- 受け手のクラスに無いメンバーへの参照（`self.helper()`・`s: Sub` の `s.helper()` で helper が基底クラスにある。BUG-0075。index/inherited.py）。
 -- 関係を整える段が relations から移し、受け手のクラスの C3 線形化（INHERITS 行）で最初に見つかったメンバーを先にした relations の行を作る。
 -- 基底のメンバー・基底の並びが変わったら、そのクラスのファイルを整えるときに結び直す（resolved_urn は前に結んだ先）。
 -- `super().save()`（BUG-0081）は取り込みが via_super = 1 で直接入れ、class_urn の C3 線形化の次のクラスから探す。
+-- import した変数の `settings.reload()`（BUG-0094）は class_urn が変数で、_var_types の型の線形化で探す（型が分からなければ _name_calls）。
 CREATE TABLE _member_refs (
   file_id          INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,  -- 参照箇所のファイル（relations.source_file_id）
   source_urn       TEXT NOT NULL,
-  class_urn        TEXT NOT NULL,             -- 受け手のクラス（`Sub`）
+  class_urn        TEXT NOT NULL,             -- 受け手のクラス（`Sub`）。モジュール直下の変数のこともある（BUG-0094）
   name             TEXT NOT NULL,             -- メンバー名（`helper`）
   relation_kind    TEXT NOT NULL,             -- CALLS / REFERENCES
   use_kind         TEXT,

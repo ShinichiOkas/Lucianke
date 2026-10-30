@@ -29,15 +29,26 @@
   3. 素の名前（と属性アクセスのレシーバに使う名前）だけ: ``builtins_package`` が渡されていて、言語の組み込み名
      （Python の ``builtins``、TS / JS の標準グローバル。``syntax/builtin_names.py``）なら ``lk://_ext/<builtins_package>#<name>``。
   4. 解決できなければ ``None``（``target_name`` だけ残す。取り込み側は ``relations`` に入れない）。ただし **受け手の型が分からない
-     属性呼び出し**（``x.name(...)`` で ``x`` の型が構文から読めない。注釈の無い引数・ローカル、注釈が ``Any`` のもの、``self.x`` の
-     型が不明なもの、呼び出しの戻り値などを含む）は ``name_only=True`` にする。取り込み側は内部表 ``_name_calls`` に位置と名前を残し、
-     T-06 / T-07 が問い合わせのときに名前で対象に結ぶ（BUG-0071・BUG-0077。``tools/_name_calls.py``）。受け手の型が分かっていて
+     属性呼び出しと属性の読み書き**（``x.name(...)``・``x.name``・``x.name = v``・``x.name += 1`` で ``x`` の型が構文から読めない。
+     注釈の無い引数・ローカル、注釈が ``Any`` のもの、``self.x`` の型が不明なもの、呼び出しの戻り値などを含む）は ``name_only=True``
+     にする。取り込み側は内部表 ``_name_calls`` に位置と名前と使用種別（``call`` / ``r`` / ``w`` / ``rw``）を残し、T-06 / T-07 が
+     問い合わせのときに名前で対象に結ぶ（BUG-0071・BUG-0077・BUG-0095。``tools/_name_calls.py``）。受け手の型が分かっていて
      メンバーが無い（同じファイルのクラスにその名前が無い）ものは ``name_only`` にしない（別のクラスの同名に結ばない）。
 
   受け手の名前がモジュール（``import m`` / ``from pkg import m`` の ``m``、TS の ``import * as m``）なら、``m.f()`` はメソッドではなく
-  モジュールの関数 ``<m の URN>#f``（1 の ``resolve_name`` が ``#`` なしの URN を返す名前）。外部 URN は属性アクセスの連鎖にも伸びる
-  （``import os`` の ``os.path.join(...)`` → ``lk://_ext/os#path.join``、``from decimal import Decimal`` の ``Decimal(x).quantize()`` →
-  ``lk://_ext/decimal#Decimal.quantize``）。
+  モジュールの関数 ``<m の URN>#f``（1 の ``resolve_name`` が ``#`` なしの URN を返す名前）。点つきのモジュールのパス（``import pkg.helpers`` /
+  ``import a.b as ab`` / ``from pkg import sub`` の ``pkg.helpers``・``ab.c``・``sub.inner``）も、索引器の ``resolve_dotted`` がワークスペースの
+  サブモジュールのファイルを返せばモジュールの受け手（``pkg.helpers.flush()`` → ``pkg/helpers.py#flush``。BUG-0093）。モジュールの名前の
+  属性の連鎖（``conf.Settings.make()``）は ``conf.py#Settings.make``（``Settings`` が変数・再び公開した名前なら整えが決める）。外部 URN は
+  属性アクセスの連鎖にも伸びる（``import os`` の ``os.path.join(...)`` → ``lk://_ext/os#path.join``、``from decimal import Decimal`` の
+  ``Decimal(x).quantize()`` → ``lk://_ext/decimal#Decimal.quantize``）。
+
+  import した名前（``from conf import settings``）の ``settings.reload()`` は ``conf.py#settings.reload`` になる。``settings`` が変数なら、
+  索引の整え（``index/inherited.py``）が定義元の変数の型（``var_types``。``settings = Settings()``・``settings: Settings = ...``）の
+  メンバーに結ぶか、型が分からなければ名前だけの呼び出し・参照にする（BUG-0094）。
+
+* 抽出の添え物（``extract_relations_detailed``）: インスタンス属性の定義（``self.x = ...`` / ``this.x = ...``。名前の一致の候補。
+  BUG-0095）と、モジュール直下の変数の構文から分かる型（BUG-0094）。
 
   素の識別子は、囲みの定義を内側から外へたどった修飾名（``outer.name``）→ トップレベルの定義 → ``resolve_name`` の順。
   ローカルに束縛された名前は参照に数えない。ただし ``def`` / ``class`` の中の ``import`` が束縛した名前は、そのスコープ
@@ -67,7 +78,16 @@ from lucianke.syntax.guards import guard_for
 from lucianke.syntax.imports import JS_FUNCTION_NODES, js_require_bindings
 from lucianke.syntax.types import ParsedFile
 
-__all__ = ["ImportKey", "RelationCandidate", "extract_relations", "load_refs_source"]
+__all__ = [
+    "AttrDefCandidate",
+    "ImportKey",
+    "RelationCandidate",
+    "RelationExtraction",
+    "VarTypeCandidate",
+    "extract_relations",
+    "extract_relations_detailed",
+    "load_refs_source",
+]
 
 # import 文の開始位置（0 始まりの行, コードポイント列）。``ImportFact.range.start`` と同じ
 ImportKey = tuple[int, int]
@@ -143,6 +163,8 @@ _PY_SKIP_ANCESTORS = frozenset(
 )
 _JS_SKIP_ANCESTORS = frozenset({"import_statement", "import_require_clause", "import_alias"})
 _CALL_NODES = frozenset({"call", "call_expression", "new_expression"})
+_NAME_ONLY_KINDS = frozenset({"CALLS", "REFERENCES"})
+_VAR_KINDS = frozenset({Kind.VARIABLE, Kind.CONSTANT})
 _ATTRIBUTE_NODES = frozenset({"attribute", "member_expression"})
 
 
@@ -150,11 +172,47 @@ _ATTRIBUTE_NODES = frozenset({"attribute", "member_expression"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AttrDefCandidate:
+    """インスタンス属性の定義（``self.x = ...`` / TS・JS の ``this.x = ...``。クラスのメソッドの中）。シンボルにはならないが、
+    型の分からない受け手の属性の参照（``mon.x``）を名前で結ぶときの候補に数える（BUG-0095。``tools/_name_calls.py``）。
+
+    同じクラス・同じ名前は最初の代入 1 つ。クラス自身か同じファイルの基底にその名前のシンボル（クラス属性・dataclass のフィールド・
+    property・メソッド）があるものは入れない（その定義と同じ属性）。位置は 0 始まりの名前のトークン。
+    """
+
+    class_urn: str
+    name: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VarTypeCandidate:
+    """モジュール直下の変数の型が構文から分かるもの（``settings = Settings()``・``settings: Settings = ...``・TS の
+    ``export const settings = new Settings()``）。別のファイルが ``from conf import settings`` の ``settings.reload()`` を
+    その型のメンバーに結ぶのに使う（BUG-0094。``index/inherited.py``）。``type_urn`` はワークスペースのクラスか外部の型の URN。
+    """
+
+    var_urn: str
+    type_urn: str
+
+
+@dataclass(frozen=True, slots=True)
+class RelationExtraction:
+    """``extract_relations_detailed`` の結果: 関係の候補と、インスタンス属性の定義・モジュール直下の変数の型。"""
+
+    relations: list[RelationCandidate]
+    attr_defs: list[AttrDefCandidate]
+    var_types: list[VarTypeCandidate]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RelationCandidate:
     """``index.ingest.RelationFact`` と同じ形の候補。URN は正準形の文字列、位置は 0 始まり。
 
     ``target_urn`` が ``None`` のときは解決できなかった（``target_name`` は参照された名前そのまま）。
-    ``name_only`` は、``target_urn`` が ``None`` の属性呼び出しのうち、受け手の型が分からないもの（名前でしか結べない。BUG-0071）。
+    ``name_only`` は、``target_urn`` が ``None`` の属性呼び出し・属性の参照（読み・書き。BUG-0095）のうち、受け手の型が分からないもの
+    （名前でしか結べない。BUG-0071）。
     ``super_of`` は ``super().name``（``super(C, self).name``・TS / JS の ``super.name``）の ``C`` のクラスの URN。先は ``C`` の C3 線形化で
     ``C`` の次から最初にその名前を持つクラスのメンバーで、索引の整え（``index/inherited.py``）が決める（``target_urn`` は ``None``。BUG-0081）。
     """
@@ -201,6 +259,7 @@ def extract_relations(
     resolve_name: Callable[[str], str | None] | None = None,
     builtins_package: str | None = None,
     resolve_import: Callable[[ImportKey, str], str | None] | None = None,
+    resolve_dotted: Callable[[str], str | None] | None = None,
 ) -> list[RelationCandidate]:
     """構文木から ``structural`` の関係の候補を作る。文書順（行、列）。構文エラーがあっても拾えた分を返す。
 
@@ -209,11 +268,41 @@ def extract_relations(
     ``builtins_package`` は言語の組み込み名の外部パッケージ名（Python は ``"builtins"``、TS / JS は ``"globals"``）。``None`` なら
     組み込み名を解決しない。``resolve_import`` は ``def`` / ``class`` の中の import（``ImportFact.nested``）が束縛した名前の解決
     （``(import 文の開始位置, 名前) → URN``）。``None`` なら ``resolve_name`` で引く（名前表がスコープを区別しないときの代用）。
+    ``resolve_dotted`` は点つきのモジュールのパス（``pkg.helpers``。先頭の名前はモジュール直下の import が束ねたもの）→ その
+    サブモジュールのファイルの URN（ワークスペースに在るときだけ。BUG-0093）。``None`` なら点つきのパスをモジュールとして引かない。
     """
+    return extract_relations_detailed(
+        parsed,
+        language_id=language_id,
+        language=language,
+        symbols=symbols,
+        workspace_id=workspace_id,
+        rel=rel,
+        resolve_name=resolve_name,
+        builtins_package=builtins_package,
+        resolve_import=resolve_import,
+        resolve_dotted=resolve_dotted,
+    ).relations
+
+
+def extract_relations_detailed(
+    parsed: ParsedFile,
+    *,
+    language_id: str,
+    language: Language,
+    symbols: list[SymbolRecord],
+    workspace_id: str,
+    rel: RelPath,
+    resolve_name: Callable[[str], str | None] | None = None,
+    builtins_package: str | None = None,
+    resolve_import: Callable[[ImportKey, str], str | None] | None = None,
+    resolve_dotted: Callable[[str], str | None] | None = None,
+) -> RelationExtraction:
+    """``extract_relations`` と同じ候補に、インスタンス属性の定義（BUG-0095）とモジュール直下の変数の型（BUG-0094）を添える。"""
     family = _FAMILIES.get(language_id)
     if family is None:
         raise ValueError(f"relation extraction is not supported for language {language_id!r}")
-    return _Extractor(
+    ex = _Extractor(
         parsed,
         language_id,
         family,
@@ -224,7 +313,10 @@ def extract_relations(
         resolve_name,
         builtins_package,
         resolve_import,
-    ).run()
+        resolve_dotted,
+    )
+    relations = ex.run()
+    return RelationExtraction(relations, ex.attr_defs(), ex.var_types())
 
 
 # --- 内部 -------------------------------------------------------------------------------
@@ -256,6 +348,8 @@ class _Scan:
     # 関数・クラスノード → import で束縛した名前 → 文の位置
     imports: dict[int, dict[str, ImportKey]] = field(default_factory=dict)
     nested_imports: set[ImportKey] = field(default_factory=set)  # def / class の中の import 文の位置
+    # クラスノード → インスタンス属性の名前 → 最初の代入の名前ノード（``self.x = ...`` / ``this.x = ...``。BUG-0095）
+    instance_attrs: dict[int, dict[str, Node]] = field(default_factory=dict)
 
 
 class _Extractor:
@@ -271,8 +365,11 @@ class _Extractor:
         resolve_name: Callable[[str], str | None] | None,
         builtins_package: str | None = None,
         resolve_import: Callable[[ImportKey, str], str | None] | None = None,
+        resolve_dotted: Callable[[str], str | None] | None = None,
     ) -> None:
         self.parsed = parsed
+        self._resolve_dotted_raw = resolve_dotted
+        self._dotted_cache: dict[str, str | None] = {}
         self.language_id = language_id
         self.family = family
         self.language = language
@@ -374,6 +471,56 @@ class _Extractor:
                 out.append(cand)
         return out
 
+    def attr_defs(self) -> list[AttrDefCandidate]:
+        """インスタンス属性の定義（``run`` の後に呼ぶ）。クラス自身か同じファイルの基底に同名のシンボル・インスタンス属性があれば入れない。"""
+        out: list[AttrDefCandidate] = []
+        for qualified, cid in self.class_ids.items():
+            attrs = self.scan.instance_attrs.get(cid)
+            class_urn = self._local_urn(qualified) if attrs else None
+            if not attrs or class_urn is None:
+                continue
+            order = c3_linearize(("local", qualified), self._local_bases) or [("local", qualified)]
+            for name, node in attrs.items():
+                if f"{qualified}.{name}" in self.by_qualified or self._declared_in_local_base(order, name):
+                    continue
+                p = self.pos(node)
+                out.append(AttrDefCandidate(class_urn=class_urn, name=name, line=p.line, col=p.col))
+        out.sort(key=lambda a: (a.line, a.col))
+        return out
+
+    def _declared_in_local_base(self, order: list[tuple[str, str]], name: str) -> bool:
+        """線形化 ``order`` の基底（先頭のクラス自身を除く）のうち、別ファイル・外部の基底より前の同じファイルの基底が ``name`` を持つか。"""
+        for kind, value in order[1:]:
+            if kind != "local":
+                return False  # その先は分からない（索引の問い合わせで基底をたどって同じ属性にまとめる）
+            if f"{value}.{name}" in self.by_qualified:
+                return True
+            cid = self.class_ids.get(value)
+            if cid is not None and name in self.scan.instance_attrs.get(cid, {}):
+                return True
+        return False
+
+    def var_types(self) -> list[VarTypeCandidate]:
+        """モジュール直下の変数・定数のうち、型が構文から分かるもの（``run`` の後に呼ぶ）。"""
+        out: list[VarTypeCandidate] = []
+        root = self.parsed.tree.root_node
+        for name, tname in self.scan.var_types.get(root.id, {}).items():
+            sym = self.by_qualified.get(name)
+            if sym is None or sym.kind not in _VAR_KINDS:
+                continue
+            ref = self._name_ref(tname, [])
+            if ref is None:
+                continue
+            kind, value = ref
+            if kind == "local":
+                local = self.by_qualified.get(value)
+                type_urn = self._local_urn(value) if local is not None and local.kind in _CLASS_KINDS else None
+            else:
+                type_urn = value if "#" in value else None  # モジュールそのものは型ではない
+            if type_urn is not None:
+                out.append(VarTypeCandidate(var_urn=str(sym.urn), type_urn=type_urn))
+        return out
+
     # --- 候補の収集 ---
 
     def _collect(self, root: Node) -> tuple[dict[int, _Ref], list[_Import]]:
@@ -473,7 +620,9 @@ class _Extractor:
             call_site_col=position.col,
             use_kind=use_kind,
             guard_condition=guard,
-            name_only=is_member and target is None and not receiver_known and relation_kind == "CALLS",
+            # 呼び出しも属性の読み書き（BUG-0095）も、受け手の型が分からなければ名前の一致に任せる（型注釈・基底クラスの
+            # ``a.B`` は対象外: 受け手はモジュールかクラスの名前で、型が分からないことはまず無い）
+            name_only=is_member and target is None and not receiver_known and relation_kind in _NAME_ONLY_KINDS,
             super_of=super_of,
         )
 
@@ -636,6 +785,11 @@ class _Extractor:
         """
         if recv is None:
             return None, False
+        whole = node.parent
+        if whole is not None and whole.type == "attribute":
+            module = self._dotted_module(whole, node)
+            if module is not None:
+                return module, True  # ``pkg.helpers`` の ``helpers`` はサブモジュールそのものへの参照（BUG-0093）
         ref = self._type_ref(recv, node, chain)
         if ref is not None:
             hit = self._member_of(ref, name)
@@ -799,6 +953,10 @@ class _Extractor:
                 text, chain, node
             )  # クラス名・モジュール名そのもの（``Foo.create()``、``mod.f()``）
         if t in _ATTRIBUTE_NODES:
+            module = self._dotted_module(recv, node)
+            if module is not None:
+                # ``import pkg.helpers`` の ``pkg.helpers.flush()``: 受け手はサブモジュール（``flush`` はその関数。BUG-0093）
+                return ("urn", module)
             # ``a.b`` の型は ``b`` の型（``a`` の型ではない。BUG-0079）。構文から分かるときだけ決める
             obj = recv.child_by_field_name("object")
             prop = recv.child_by_field_name("attribute" if t == "attribute" else "property")
@@ -812,11 +970,13 @@ class _Extractor:
                 # フィールド・戻り値の注釈つきの property（``self.b = T()`` もここに入る）。同じファイルの基底も C3 の順に見る
                 tname = self._attr_type(inner[1], self._text(prop))
                 return self._name_ref(tname, chain, node) if tname is not None else None
-            if inner[1].startswith(_EXTERNAL_PREFIX):
-                # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）
+            if inner[1].startswith(_EXTERNAL_PREFIX) or "#" not in inner[1]:
+                # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）と、ワークスペースのモジュールの名前
+                # （``model.Capability.DEFINITION`` の ``model.Capability`` は ``model.py#Capability``。それが変数なら整えが型で結び、
+                # シンボルでない〈再び公開した名前〉なら名前だけにする。BUG-0093・BUG-0094）
                 joined = _append_member(inner[1], self._text(prop))
                 return ("urn", joined) if joined is not None else None
-            return None  # 別ファイルのクラス・モジュールの属性の型はこの場では分からない
+            return None  # 別ファイルのクラスの属性の型はこの場では分からない
         if t in ("call", "new_expression"):
             fn = recv.child_by_field_name("constructor" if t == "new_expression" else "function")
             if fn is not None and fn.type == "identifier":
@@ -824,6 +984,33 @@ class _Extractor:
                 if t == "new_expression" or self._looks_like_class(text):
                     return self._name_ref(text, chain, node)
         return None
+
+    def _dotted_module(self, recv: Node, node: Node) -> str | None:
+        """受け手 ``recv`` が点つきのモジュールのパス（``pkg.helpers``・``a.b.c``）なら、そのサブモジュールのファイルの URN（BUG-0093）。
+
+        Python だけ。識別子だけの連鎖で、先頭の名前がモジュール直下の import が束ねた名前（ローカル・関数の中の import・同じ
+        ファイルの定義に隠されていない）のとき、``resolve_dotted`` に引く（索引器が import 表とファイルの在り処から決める）。
+        """
+        if self._resolve_dotted_raw is None or self.family != _PYTHON:
+            return None
+        parts: list[str] = []
+        cur = recv
+        while cur.type == "attribute":
+            attr = cur.child_by_field_name("attribute")
+            obj = cur.child_by_field_name("object")
+            if attr is None or obj is None or attr.type != "identifier":
+                return None
+            parts.append(self._text(attr))
+            cur = obj
+        if cur.type != "identifier" or not parts:
+            return None
+        head = self._text(cur)
+        if head in _RECEIVER_SELF or head in self.by_qualified or self._binding(head, node)[0] != "none":
+            return None
+        dotted = ".".join([head, *reversed(parts)])
+        if dotted not in self._dotted_cache:
+            self._dotted_cache[dotted] = self._resolve_dotted_raw(dotted)
+        return self._dotted_cache[dotted]
 
     def _looks_like_class(self, name: str) -> bool:
         local = self.by_qualified.get(name)
@@ -1125,16 +1312,23 @@ class _Extractor:
         elif left.type in ("pattern_list", "tuple_pattern", "list_pattern"):
             for n in self._py_targets(left):
                 self._bind(n, fn)
+            for n in left.named_children:  # ``self.a, self.b = ...``
+                if n.type == "attribute":
+                    self._py_self_attr(n, fn, cls)
         elif left.type == "attribute":
-            obj = left.child_by_field_name("object")
-            attr = left.child_by_field_name("attribute")
-            if (
-                obj is not None
-                and attr is not None
-                and obj.type == "identifier"
-                and self._text(obj) in _RECEIVER_SELF
-            ):
+            attr = self._py_self_attr(left, fn, cls)
+            if attr is not None:
                 self._set_attr_type(cls, self._text(attr), tname)
+
+    def _py_self_attr(self, left: Node, fn: Node | None, cls: Node | None) -> Node | None:
+        """``self.x``（``cls.x``）の左辺なら ``x`` の名前ノード。メソッドの中ならインスタンス属性の定義として控える（BUG-0095）。"""
+        obj = left.child_by_field_name("object")
+        attr = left.child_by_field_name("attribute")
+        if obj is None or attr is None or obj.type != "identifier" or self._text(obj) not in _RECEIVER_SELF:
+            return None
+        if fn is not None and cls is not None:
+            self.scan.instance_attrs.setdefault(cls.id, {}).setdefault(self._text(attr), attr)
+        return attr
 
     # TypeScript / JavaScript
 
@@ -1253,6 +1447,8 @@ class _Extractor:
                         self._set_attr_type(
                             cls, self._text(prop), self._js_value_type(node.child_by_field_name("right"), fn)
                         )
+                        if fn is not None and cls is not None:  # インスタンス属性の定義（BUG-0095）
+                            self.scan.instance_attrs.setdefault(cls.id, {}).setdefault(self._text(prop), prop)
             elif t == "catch_clause":
                 for n in self._js_targets(node.child_by_field_name("parameter")):
                     self._bind(n, fn)

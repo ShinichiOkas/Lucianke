@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,6 +35,10 @@ from lucianke.core.model import (
 from lucianke.core.urn import Urn, parse
 
 __all__ = [
+    "CALL_USES",
+    "MEMBER_KINDS",
+    "REF_USES",
+    "AttrDefRow",
     "DiagnosticRow",
     "NameCallRow",
     "ReferenceRow",
@@ -44,6 +49,9 @@ __all__ = [
     "files_by_paths",
     "files_fingerprint",
     "files_in_scope",
+    "attr_defs_named",
+    "external_members_named",
+    "members_named",
     "methods_named",
     "name_calls_from",
     "name_calls_named",
@@ -589,7 +597,8 @@ def count_references_to(
 
 @dataclass(frozen=True, slots=True)
 class NameCallRow:
-    """``_name_calls`` の 1 行（``x.name(...)`` で ``x`` の型が分からない呼び出し）。``site`` は内部表現（0 始まり）。"""
+    """``_name_calls`` の 1 行（``x.name(...)`` で ``x`` の型が分からない呼び出し。``use_kind`` が ``r`` / ``w`` / ``rw`` なら
+    属性の読み書き ``x.name``。BUG-0095）。``site`` は内部表現（0 始まり）。"""
 
     source_urn: str
     name: str
@@ -598,11 +607,21 @@ class NameCallRow:
     site: Position
     guard_condition: str | None
     is_test: bool
+    use_kind: str = "call"
 
+
+CALL_USES: Final = ("call",)
+"""``_name_calls`` の呼び出しの使用種別（T-07 はこれだけを読む）。"""
+REF_USES: Final = ("r", "w", "rw")
+"""``_name_calls`` の属性の読み書きの使用種別（BUG-0095）。"""
 
 _NAME_CALL_SELECT: Final = (
     "SELECT nc.source_urn, nc.name, f.path, f.language, nc.call_site_line, nc.call_site_col, nc.guard_condition,"
-    " f.is_test FROM _name_calls nc JOIN files f ON f.file_id = nc.file_id"
+    " f.is_test, nc.use_kind FROM _name_calls nc JOIN files f ON f.file_id = nc.file_id"
+)
+_NAME_CALL_SELECT_V8: Final = (  # v9 より前（use_kind が無い）。呼び出しだけ
+    "SELECT nc.source_urn, nc.name, f.path, f.language, nc.call_site_line, nc.call_site_col, nc.guard_condition,"
+    " f.is_test, 'call' FROM _name_calls nc JOIN files f ON f.file_id = nc.file_id"
 )
 
 
@@ -614,13 +633,23 @@ def _in_clause(column: str, values: Iterable[str], prefix: str, params: dict[str
     return f" AND {column} IN ({', '.join(names)})" if names else " AND 0"
 
 
-def _name_call_rows(conn: sqlite3.Connection, sql: str, params: dict[str, object]) -> list[NameCallRow]:
+def _name_call_rows(
+    conn: sqlite3.Connection, where: str, params: dict[str, object], uses: Iterable[str]
+) -> list[NameCallRow]:
+    """``_NAME_CALL_SELECT`` + ``where``（``ORDER BY`` を含む）。``uses`` は読む使用種別。"""
+    wanted = set(uses)
+    use_filter = _in_clause("nc.use_kind", wanted, "uk", params)
+    head, _, order = where.partition(" ORDER BY ")
     try:
-        rows = conn.execute(sql, params).fetchall()
-    except sqlite3.OperationalError as exc:  # v5 より前の DB（移行前に読んだ）。無いものとして答える
-        if "no such table" in str(exc):
+        rows = conn.execute(_NAME_CALL_SELECT + head + use_filter + " ORDER BY " + order, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):  # v5 より前の DB（移行前に読んだ）。無いものとして答える
             return []
-        raise
+        if "no such column" not in str(exc):
+            raise
+        if "call" not in wanted:  # v9 より前の DB: 属性の読み書きは無い
+            return []
+        rows = conn.execute(_NAME_CALL_SELECT_V8 + head + " ORDER BY " + order, params).fetchall()
     return [
         NameCallRow(
             source_urn=src,
@@ -630,8 +659,9 @@ def _name_call_rows(conn: sqlite3.Connection, sql: str, params: dict[str, object
             site=Position(int(line) - 1, max(int(col) - 1, 0)),
             guard_condition=guard,
             is_test=bool(is_test),
+            use_kind=str(use),
         )
-        for src, name, path, lang, line, col, guard, is_test in rows
+        for src, name, path, lang, line, col, guard, is_test, use in rows
     ]
 
 
@@ -642,20 +672,23 @@ def name_calls_named(
     languages: Iterable[str],
     *,
     include_tests: bool = True,
+    uses: Iterable[str] = CALL_USES,
 ) -> list[NameCallRow]:
-    """ワークスペースの ``languages`` のファイルにある、``name`` という名前の型不明の属性呼び出し。並びは（パス、行、列）。"""
+    """ワークスペースの ``languages`` のファイルにある、``name`` という名前の型不明の属性呼び出し（``uses`` に ``r`` / ``w`` / ``rw`` を
+    入れると属性の読み書きも）。並びは（パス、行、列）。"""
     params: dict[str, object] = {"ws": workspace_id, "name": name}
     where = " WHERE f.workspace_id = :ws AND nc.name = :name" + _in_clause("f.language", languages, "lg", params)
     if not include_tests:
         where += " AND f.is_test = 0"
-    sql = _NAME_CALL_SELECT + where + " ORDER BY f.path, nc.call_site_line, nc.call_site_col"
-    return _name_call_rows(conn, sql, params)
+    return _name_call_rows(conn, where + " ORDER BY f.path, nc.call_site_line, nc.call_site_col", params, uses)
 
 
-def name_calls_from(conn: sqlite3.Connection, source_urn: Urn | str) -> list[NameCallRow]:
+def name_calls_from(
+    conn: sqlite3.Connection, source_urn: Urn | str, *, uses: Iterable[str] = CALL_USES
+) -> list[NameCallRow]:
     """``source_urn`` の中にある型不明の属性呼び出し（T-07 の outgoing 用）。並びは（行、列）。"""
-    sql = _NAME_CALL_SELECT + " WHERE nc.source_urn = :src ORDER BY nc.call_site_line, nc.call_site_col"
-    return _name_call_rows(conn, sql, {"src": str(source_urn)})
+    where = " WHERE nc.source_urn = :src ORDER BY nc.call_site_line, nc.call_site_col"
+    return _name_call_rows(conn, where, {"src": str(source_urn)}, uses)
 
 
 def methods_named(
@@ -670,6 +703,111 @@ def methods_named(
         + " ORDER BY f.path, s.start_line, s.urn"
     )
     return [(_symbol(r[:-1]), bool(r[-1])) for r in conn.execute(sql, params).fetchall()]
+
+
+MEMBER_KINDS: Final = (Kind.METHOD, Kind.FIELD, Kind.PROPERTY, Kind.CONSTANT)
+"""型の分からない受け手の属性の読み書き ``x.name`` の名前の一致の候補になるシンボルの種別（クラスのメンバー。BUG-0095）。"""
+
+
+def members_named(
+    conn: sqlite3.Connection, workspace_id: str, name: str, languages: Iterable[str]
+) -> list[tuple[SymbolRecord, bool]]:
+    """ワークスペースの ``languages`` のファイルで ``name`` という名前のクラスのメンバー（``MEMBER_KINDS`` で、修飾名に持ち主があるもの）。
+    ``(シンボル, テストファイルか)``、（パス、行）順。"""
+    params: dict[str, object] = {"ws": workspace_id, "name": name}
+    sql = (
+        f"SELECT {_SYMBOL_COLUMNS}, COALESCE(f.is_test, 0) FROM symbols s JOIN files f ON f.file_id = s.file_id"
+        " WHERE f.workspace_id = :ws AND s.name = :name AND instr(s.qualified_name, '.') > 0"
+        + _in_clause("s.kind", (k.value for k in MEMBER_KINDS), "kd", params)
+        + _in_clause("f.language", languages, "lg", params)
+        + " ORDER BY f.path, s.start_line, s.urn"
+    )
+    return [(_symbol(r[:-1]), bool(r[-1])) for r in conn.execute(sql, params).fetchall()]
+
+
+def external_members_named(
+    conn: sqlite3.Connection, workspace_id: str, name: str, languages: Iterable[str]
+) -> list[str]:
+    """外部の型のメンバー ``lk://_ext/<pkg>#<Class>.name``（持ち主の最後の語が大文字で始まる）のうち、ワークスペースの ``languages`` の
+    ファイルから参照されているものの URN（型の分かる受け手が使った外部のメンバー。``node: Node`` の ``node.parent`` など。BUG-0095）。"""
+    params: dict[str, object] = {"ws": workspace_id, "name": name}
+    langs = _in_clause("f.language", languages, "lg", params)
+    sql = (
+        "SELECT s.urn, s.qualified_name FROM symbols s WHERE s.file_id IS NULL AND s.name = :name"
+        " AND substr(s.urn, 1, 10) = 'lk://_ext/' AND EXISTS (SELECT 1 FROM relations r"
+        " JOIN files f ON f.file_id = r.source_file_id WHERE r.target_urn = s.urn AND f.workspace_id = :ws"
+        + langs
+        + ") ORDER BY s.urn"
+    )
+    out: list[str] = []
+    for urn, qualified in conn.execute(sql, params).fetchall():
+        owner = str(qualified or "").rpartition(".")[0]
+        if owner and owner.rpartition(".")[2][:1].isupper() and not _sibling_module(conn, workspace_id, str(urn)):
+            out.append(str(urn))
+    return out
+
+
+def _sibling_module(conn: sqlite3.Connection, workspace_id: str, urn: str) -> bool:
+    """外部 URN ``lk://_ext/<pkg>#...`` の ``<pkg>`` が、それを参照するファイルと同じディレクトリのワークスペースのモジュール
+    （``<pkg>.py`` / ``<pkg>/__init__.py``）か。``sys.path`` を足して読む兄弟のモジュール（``spikes`` の ``import rawclient``）は
+    import の解決が外部にするが、中身はワークスペースのクラスなので外部の型の証拠にしない。標準ライブラリの名前は調べない。"""
+    package = urn.removeprefix("lk://_ext/").partition("#")[0]
+    if not package or package in sys.stdlib_module_names or "/" in package:
+        return False
+    for (path,) in conn.execute(
+        "SELECT DISTINCT f.path FROM relations r JOIN files f ON f.file_id = r.source_file_id"
+        " WHERE r.target_urn = ? AND f.workspace_id = ?",
+        (urn, workspace_id),
+    ):
+        folder = str(path).rpartition("/")[0]
+        prefix = f"{folder}/" if folder else ""
+        hit = conn.execute(
+            "SELECT 1 FROM files WHERE workspace_id = ? AND path IN (?, ?) LIMIT 1",
+            (workspace_id, f"{prefix}{package}.py", f"{prefix}{package}/__init__.py"),
+        ).fetchone()
+        if hit is not None:
+            return True
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class AttrDefRow:
+    """``_attr_defs`` の 1 行（インスタンス属性の定義 ``self.x = ...``。BUG-0095）。``site`` は内部表現（0 始まり）。"""
+
+    class_urn: str
+    name: str
+    path: RelPath
+    site: Position
+    is_test: bool
+
+
+def attr_defs_named(
+    conn: sqlite3.Connection, workspace_id: str, name: str, languages: Iterable[str]
+) -> list[AttrDefRow]:
+    """ワークスペースの ``languages`` のファイルで ``name`` という名前のインスタンス属性の定義。（パス、行）順。v9 より前の DB は空。"""
+    params: dict[str, object] = {"ws": workspace_id, "name": name}
+    sql = (
+        "SELECT a.class_urn, a.name, f.path, a.line, a.col, f.is_test FROM _attr_defs a"
+        " JOIN files f ON f.file_id = a.file_id WHERE f.workspace_id = :ws AND a.name = :name"
+        + _in_clause("f.language", languages, "lg", params)
+        + " ORDER BY f.path, a.line, a.col"
+    )
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+    return [
+        AttrDefRow(
+            class_urn=str(cls),
+            name=str(n),
+            path=RelPath(path),
+            site=Position(int(line) - 1, max(int(col) - 1, 0)),
+            is_test=bool(is_test),
+        )
+        for cls, n, path, line, col, is_test in rows
+    ]
 
 
 # --- 診断 -------------------------------------------------------------------------------

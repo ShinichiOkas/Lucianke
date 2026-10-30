@@ -21,6 +21,11 @@ LSP が ``ready`` でない・時間切れ・失敗なら ``structural``（今�
   ``conf=heuristic`` ・json の ``match: "name"`` で足す。同じ段に同名が複数・組み込み型と同名なら足さず、件数と先頭の位置を
   ``warnings`` と ``data.unattributed_calls`` に書く。``exact`` の答えには足さない（結べるのに LSP の答えに無い位置の件数と先頭を
   ``warnings`` に書く）。
+* 型の分からない受け手の属性の読み書き（``mon.count += 1``・``x.count``。BUG-0095、``_name_calls`` の ``use_kind`` が ``r`` / ``w`` /
+  ``rw``）: 対象がクラスの ``Field`` / ``Property`` / ``Constant`` か ``Method``（メソッドの参照）なら、同じ段の規則で同名のメンバーと
+  インスタンス属性（``self.x = ...``）が対象 1 つだけ（組み込み型の属性・メソッドとも、型の分かる受け手が使った外部の型の
+  メンバーとも同名でない）のとき、その位置を ``use=r/w/rw``・
+  ``conf=heuristic``・``match: "name"`` で足す。足せない位置は件数・候補・先頭の位置を ``warnings`` と ``data.unattributed_refs`` に書く。
 * 結ばなかった ``super()``・継承メンバーの参照（BUG-0081、``_blocked_refs``）: 受け手のクラスの線形化で中身の分からない外部の基底などに
   先に当たって結ばなかった参照のうち、対象のクラスがその基底の後ろにあるものを、``structural`` の答えで件数・理由・先頭の位置として
   ``warnings`` と ``data.unattributed_calls``（``reason: external_base | unknown_base``）に書く。
@@ -161,6 +166,7 @@ class _Found:
     warnings: list[str] = field(default_factory=list)
     by_name: int = 0  # 名前だけで結んで足した参照の数
     unattributed: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_calls
+    unattributed_refs: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_refs（属性の読み書き。BUG-0095）
 
 
 def _glob_list(scope_paths: list[str]) -> list[str]:
@@ -381,74 +387,98 @@ def _name_refs(
     *,
     exact: bool,
 ) -> None:
-    """型の分からない受け手の呼び出し ``x.<name>(...)`` を名前で足す・要約する（BUG-0071 / BUG-0077。``_name_calls`` の docstring）。
+    """型の分からない受け手の呼び出し ``x.<name>(...)`` と属性の読み書き ``x.<name>``（BUG-0095）を名前で足す・要約する
+    （BUG-0071 / BUG-0077。``_name_calls`` の docstring）。
 
-    判定は呼び出し箇所ごと（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース）。対象より近い同名の定義がある箇所は
-    足しも書きもしない。
+    判定は箇所ごと（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース）。対象より近い同名の定義がある箇所は
+    足しも書きもしない。呼び出しは ``data.unattributed_calls``、属性の読み書きは ``data.unattributed_refs`` に書く。
     """
-    if args.use_kinds and "call" not in args.use_kinds:
-        return
     names = nc.NameIndex(conn, ws.workspace_id)
-    target = names.target_name(sym)
+    target = names.target_member(sym)
     if target is None:
         return
-    name, family = target
+    name, family, uses = target
+    if args.use_kinds:
+        uses = tuple(u for u in uses if u in args.use_kinds)
+    if not uses:
+        return
     in_scope = _scope_set(conn, ws.workspace_id, args)
     known = {(r.path, r.line, r.col) for r in found.refs}
     sites = names.for_target(
         sym,
         (
             r
-            for r in names.sites_named(name, family, include_tests=args.include_tests)
+            for r in names.sites_named(name, family, include_tests=args.include_tests, uses=uses)
             if nc.site_key(r) not in known and (in_scope is None or str(r.path) in in_scope)
         ),
     )
+    owned_calls = [(r, v) for r, v in sites.owned if r.use_kind == "call"]
+    owned_refs = [(r, v) for r, v in sites.owned if r.use_kind != "call"]
     if exact:
-        rows = sites.owned_rows
-        if not rows:
-            return  # 結べない（同名が同じ近さに複数）なら LSP の答えが正。足しも書きもしない
-        found.warnings.append(
-            f"{len(rows)} call site(s) of .{name}() whose receiver type is unknown to the syntax tree are not in this"
-            f" exact answer (the LSP could not type the receiver, e.g. Any); {nc.owned_text(sites.owned)}, so they"
-            f" may call it: {nc.sample_text(rows)} (data.unattributed_calls)"
-        )
-        u = nc.Unattributed(sites.owned[0][1])
-        u.add(rows)
-        found.unattributed.append(u.to_json(enclosing_name_of, "not_in_exact_answer"))
-        return
-    rows = sites.owned_rows
-    if rows:
-        for r in rows:
-            key = nc.site_key(r)
-            ename = enclosing_name_of(r.source_urn)
-            found.refs.append(
-                _Ref(
-                    path=key[0],
-                    line=key[1],
-                    col=key[2],
-                    use="call",
-                    source_urn=r.source_urn,
-                    enclosing_urn=r.source_urn if ename is not None else None,
-                    enclosing_name=ename,
-                    snippet=source.text(key[0], r.site.line) if args.context_snippet else "",
-                    is_test=r.is_test,
-                    confidence=Confidence.HEURISTIC,
-                    match=nc.MATCH_NAME,
-                )
+        # 結べない（同名が同じ近さに複数）なら LSP の答えが正。足しも書きもしない
+        for owned, what, sink in (
+            (owned_calls, f"call site(s) of .{name}()", found.unattributed),
+            (owned_refs, f"reference(s) of .{name}", found.unattributed_refs),
+        ):
+            rows = [r for r, _ in owned]
+            if not rows:
+                continue
+            key = "data.unattributed_calls" if sink is found.unattributed else "data.unattributed_refs"
+            verb = "call" if sink is found.unattributed else "use"
+            found.warnings.append(
+                f"{len(rows)} {what} whose receiver type is unknown to the syntax tree are not in this"
+                f" exact answer (the LSP could not type the receiver, e.g. Any); {nc.owned_text(owned)}, so they"
+                f" may {verb} it: {nc.sample_text(rows)} ({key})"
             )
+            u = nc.Unattributed(owned[0][1])
+            u.add(rows)
+            sink.append(u.to_json(enclosing_name_of, "not_in_exact_answer"))
+        return
+    for r, _v in sites.owned:
+        key = nc.site_key(r)
+        ename = enclosing_name_of(r.source_urn)
+        found.refs.append(
+            _Ref(
+                path=key[0],
+                line=key[1],
+                col=key[2],
+                use=use_of(r.use_kind, "CALLS" if r.use_kind == "call" else "REFERENCES"),
+                source_urn=r.source_urn,
+                enclosing_urn=r.source_urn if ename is not None else None,
+                enclosing_name=ename,
+                snippet=source.text(key[0], r.site.line) if args.context_snippet else "",
+                is_test=r.is_test,
+                confidence=Confidence.HEURISTIC,
+                match=nc.MATCH_NAME,
+            )
+        )
+    if sites.owned:
         found.refs.sort(key=lambda x: (x.path, x.line, x.col))
-        found.by_name = len(rows)
+        found.by_name = len(sites.owned)
+    if owned_calls:
         found.warnings.append(
-            f"{len(rows)} call site(s) marked conf=heuristic are matched by name only: the receiver's type is unknown"
-            f" and {nc.owned_text(sites.owned)}"
+            f"{len(owned_calls)} call site(s) marked conf=heuristic are matched by name only: the receiver's type is"
+            f" unknown and {nc.owned_text(owned_calls)}"
+        )
+    if owned_refs:
+        found.warnings.append(
+            f"{len(owned_refs)} read/write reference(s) marked conf=heuristic are matched by name only: the receiver's"
+            f" type is unknown and {nc.owned_text(owned_refs)}"
         )
     for _key, u in sorted(sites.unattributed.items()):
         left = u.sorted_rows()
-        found.warnings.append(
-            f"{len(left)} call site(s) of .{name}() with a receiver of unknown type are not listed:"
-            f" {u.verdict.reason()}; e.g. {nc.sample_text(left)} (data.unattributed_calls)"
-        )
-        found.unattributed.append(u.to_json(enclosing_name_of))
+        if u.verdict.pool == "call":
+            found.warnings.append(
+                f"{len(left)} call site(s) of .{name}() with a receiver of unknown type are not listed:"
+                f" {u.verdict.reason()}; e.g. {nc.sample_text(left)} (data.unattributed_calls)"
+            )
+            found.unattributed.append(u.to_json(enclosing_name_of))
+        else:
+            found.warnings.append(
+                f"{len(left)} read/write reference(s) of .{name} through a receiver of unknown type are not listed:"
+                f" {u.verdict.reason()}; e.g. {nc.sample_text(left)} (data.unattributed_refs)"
+            )
+            found.unattributed_refs.append(u.to_json(enclosing_name_of))
 
 
 def _blocked_refs(
@@ -825,6 +855,8 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     }
     if found.unattributed:
         data["unattributed_calls"] = found.unattributed
+    if found.unattributed_refs:
+        data["unattributed_refs"] = found.unattributed_refs
     if args.format in ("dot", "mermaid"):
         data["graph"] = _graph(found, ws.workspace_id)
     return ToolOutput(

@@ -560,8 +560,8 @@ def test_untyped_name_receiver_is_left_to_name_matching():
     by_line = {r.call_site_line: r for r in _where(rels, kind="CALLS", name="save")}
     for line in (16, 29, 30, 32, 39):
         assert by_line[line].target_urn is None and by_line[line].name_only, (line, by_line[line])
-    ref = _one(rels, kind="REFERENCES", name="ref")  # 呼び出しでない参照は結ばず、名前の一致にも回さない
-    assert ref.target_urn is None and not ref.name_only
+    ref = _one(rels, kind="REFERENCES", name="ref")  # 呼び出しでない参照も結ばず、名前の一致に回す（BUG-0095）
+    assert ref.target_urn is None and ref.name_only and ref.use_kind == "r"
 
 
 def test_name_receiver_with_a_known_type_binds_structurally():

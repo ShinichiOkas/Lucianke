@@ -32,7 +32,7 @@ from __future__ import annotations
 import functools
 import posixpath
 import sys
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -51,6 +51,7 @@ __all__ = [
     "ImportFact",
     "ImportKind",
     "ImportRoot",
+    "dotted_module_path",
     "external_name_map",
     "extract_imports",
     "imported_name_map",
@@ -710,6 +711,47 @@ def imported_name_map(
             if base is not None:
                 out[bound] = (base, name)
     return out
+
+
+def dotted_module_path(
+    dotted: str,
+    *,
+    facts: Iterable[ImportFact],
+    names: Mapping[str, tuple[RelPath, str]],
+    resolve: Callable[[ImportFact], RelPath | None],
+    exists: Callable[[RelPath], bool],
+) -> RelPath | None:
+    """点つきのモジュールのパス ``dotted``（``pkg.helpers``。先頭はモジュール直下の import が束ねた名前）→ そのサブモジュールのファイル（BUG-0093）。
+
+    * 先頭の名前がモジュールのファイルに束ねられている（``import pkg.x`` の ``pkg``・``import a.b as ab``・``from pkg import sub``。
+      ``names`` は ``imported_name_map``）: そのファイルがパッケージ（``__init__.py(i)``）なら、そのディレクトリの下で残りの名前を
+      ``<mod>.py`` → ``<mod>/__init__.py`` → ``<mod>.pyi`` → ``<mod>/__init__.pyi`` の順に探す（``import`` と同じ）。
+    * 先頭の名前が ``import head.x`` の ``head`` で、``head`` 自身はワークスペースのファイルに解けない（``__init__.py`` の無い名前空間
+      パッケージ）: ``dotted`` を絶対 import として解く（``resolve``）。標準ライブラリの名前は解かない（``os.path`` は外部のまま）。
+
+    見つからなければ ``None``（呼び手は今までどおり外部・名前だけにする）。Python 以外は呼ばない。
+    """
+    head, _, rest = dotted.partition(".")
+    if not head or not rest:
+        return None
+    parts = rest.split(".")
+    if any(not p.isidentifier() for p in parts):
+        return None
+    bound = names.get(head)
+    if bound is not None:
+        path, original = bound
+        if original != "*":
+            return None  # 名前（クラス・関数・変数）の属性。モジュールではない
+        base, leaf = posixpath.split(str(path))
+        if leaf not in ("__init__.py", "__init__.pyi"):
+            return None  # パッケージでないモジュールはサブモジュールを持たない
+        return _first_existing(_py_candidates(base, parts), exists)
+    if head in sys.stdlib_module_names:
+        return None
+    for fact in facts:
+        if fact.kind == "import" and not fact.names and fact.module.split(".")[0] == head and not fact.reexport:
+            return resolve(replace(fact, module=dotted))
+    return None
 
 
 def wildcard_sources(

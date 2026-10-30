@@ -1,4 +1,5 @@
-"""型の分からない受け手のメソッド呼び出し（``x.name(...)``）を、名前で対象に結ぶ（BUG-0071 / BUG-0077。仕様書 §8.3、T-06 / T-07 の処理規約）。
+"""型の分からない受け手のメソッド呼び出し（``x.name(...)``）と属性の読み書き（``x.name``。BUG-0095）を、名前で対象に結ぶ
+（BUG-0071 / BUG-0077。仕様書 §8.3、T-06 / T-07 の処理規約）。
 
 索引器は、受け手の型が構文から読めない属性呼び出し（注釈が無い・``Any``・``self.x`` の型が不明・呼び出しの戻り値など）を
 ``relations`` に入れられない（先の URN が決まらない）。その位置と名前は内部表 ``_name_calls`` に残っているので、T-06 / T-07 が
@@ -7,7 +8,11 @@
 ごとに、近いところから** 選ぶ（BUG-0077）。
 
 * **候補**（``NameIndex.verdict_for``）: 呼び出し箇所と同じ言語族（Python / TS・JS）のワークスペース内の ``Method`` で、名前が
-  同じもの。同じ ``(パス, 修飾名)`` のオーバーロードは 1 つに数える。次の順に見て、最初に候補のある段で決める。
+  同じもの。同じ ``(パス, 修飾名)`` のオーバーロードは 1 つに数える。属性の読み書き（``_name_calls.use_kind`` が ``r`` / ``w`` /
+  ``rw``。BUG-0095）の候補は同名の **クラスのメンバー**（``Method``・``Field``〈クラス属性・dataclass のフィールド〉・``Property``・
+  クラスの ``Constant``）と **インスタンス属性**（``_attr_defs``。メソッドの中の ``self.x = ...`` / ``this.x = ...``）。インスタンス属性は、
+  そのクラスの線形化の基底が同名のシンボルかインスタンス属性を持てば、その基底のものと同じ属性として 1 つに数える（``x.append`` を
+  渡すのはメソッドの参照なので、メソッドも候補）。次の順に見て、最初に候補のある段で決める。
 
   1. **同じファイル**の定義（テストファイルの中のテストダブルも含む）。
   2. 呼び出し箇所を含む**テストフィクスチャ**（``workspace.languages.fixture_roots``: テストディレクトリの配下の
@@ -21,8 +26,12 @@
   分からない受け手は別のオブジェクト。``def kill(self): self.proc.kill()`` のような委譲。Lucianke 自身で 9 箇所すべてがこれだった）。
   同じファイルの定義が囲みのクラス自身のものだけなら 1 の段は飛ばす。
 * **結ぶ**: 決めた段の候補がちょうど 1 つで、名前が組み込み型のメソッド名（``syntax/builtin_names.py`` の
-  ``PYTHON_BUILTIN_METHODS`` / ``JS_BUILTIN_METHODS``。``list.append``・``dict.get``・``Array.push`` など）でないとき。その位置を
-  その候補への呼び出しとして返す（``Confidence.HEURISTIC``、json の ``match: "name"``、compact の ``conf=heuristic``）。
+  ``PYTHON_BUILTIN_METHODS`` / ``JS_BUILTIN_METHODS``。``list.append``・``dict.get``・``Array.push`` など。属性の読み書きは組み込み型の
+  属性の名前〈``name``・``args``・``length`` など〉と ``__x__`` も）でないとき。その位置をその候補への呼び出し・参照として返す
+  （``Confidence.HEURISTIC``、json の ``match: "name"``、compact の ``conf=heuristic``）。属性の読み書きは、外部の型のメンバーにも同名が
+  ある（ワークスペースの型の分かる受け手が使った ``lk://_ext/<pkg>#<Class>.name``。``node: Node`` の ``node.parent`` → ``tree_sitter``
+  の ``Node.parent``）ときも結ばない（``reason: external_name``）。型の分からない受け手は、その外部の型であることが多いため
+  （Lucianke 自身で、名前で結んだ属性の読みの上位は tree-sitter の ``Node.type``・``Node.parent`` を唯一の同名のフィールドに結んでいた）。
 * **結ばない**: 候補が 2 つ以上（同じ近さ）、または組み込み型と同名。どの候補にも足さず、対象が候補に入っているときだけ件数と
   先頭の位置を応答の ``warnings`` と ``data.unattributed_calls`` に要約する（全候補に足すと、``run``・``get`` のような名前で参照の
   一覧が推定で埋まるため）。
@@ -43,21 +52,27 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from lucianke.core.model import Kind, SymbolRecord
+from lucianke.core.model import Confidence, Kind, Position, Range, SymbolRecord
+from lucianke.core.mro import TRANSPARENT_EXTERNAL_BASES
+from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, parse
 from lucianke.index import queries
-from lucianke.index.queries import NameCallRow
-from lucianke.syntax.builtin_names import JS_BUILTIN_METHODS, PYTHON_BUILTIN_METHODS
+from lucianke.index.inherited import CLASS_KINDS, MemberResolver
+from lucianke.index.queries import CALL_USES, REF_USES, AttrDefRow, NameCallRow
+from lucianke.syntax.builtin_names import JS_BUILTIN_METHODS, PYTHON_BUILTIN_METHODS, is_builtin_attribute
 from lucianke.syntax.support import get_support
 from lucianke.workspace.languages import fixture_roots, is_test
 
 __all__ = [
     "MATCH_NAME",
+    "MEMBER_USES",
     "NameIndex",
+    "Pool",
     "TargetSites",
     "Unattributed",
     "Verdict",
     "family_of",
     "owned_text",
+    "pool_of",
     "sample_text",
     "site_key",
     "sites_json",
@@ -82,6 +97,15 @@ _LANGUAGES: dict[str, tuple[str, ...]] = {
 _BUILTIN_METHODS: dict[str, frozenset[str]] = {"python": PYTHON_BUILTIN_METHODS, "js": JS_BUILTIN_METHODS}
 
 Scope = Literal["file", "fixture", "workspace"]
+Pool = Literal["call", "ref"]  # 候補の集まり: 呼び出しはメソッド、属性の読み書きはクラスのメンバーとインスタンス属性（BUG-0095）
+MEMBER_USES: tuple[str, ...] = CALL_USES + REF_USES
+_EXTERNAL_PREFIX = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
+_REF_TARGET_KINDS = frozenset({Kind.FIELD, Kind.PROPERTY, Kind.CONSTANT})
+
+
+def pool_of(use_kind: str) -> Pool:
+    """``_name_calls.use_kind`` → 候補の集まり（``call`` はメソッド、``r`` / ``w`` / ``rw`` はメンバーとインスタンス属性）。"""
+    return "call" if use_kind == "call" else "ref"
 
 
 def _test_globs(language: str | None) -> tuple[str, ...]:
@@ -104,7 +128,45 @@ def site_key(row: NameCallRow) -> tuple[str, int, int]:
 
 
 def _label(sym: SymbolRecord) -> str:
-    return f"{sym.qualified_name} @{sym.path}:{sym.range.start.line + 1}"
+    extra = " (instance attribute)" if _is_instance_attr(sym) else ""
+    return f"{sym.qualified_name}{extra} @{sym.path}:{sym.range.start.line + 1}"
+
+
+def _is_instance_attr(sym: SymbolRecord) -> bool:
+    return sym.kind is Kind.FIELD and "instance" in sym.modifiers
+
+
+def _external_label(urn: str) -> str:
+    """``lk://_ext/tree_sitter#Node.parent`` → ``tree_sitter.Node.parent``。"""
+    return urn.removeprefix(_EXTERNAL_PREFIX).replace("#", ".", 1)
+
+
+def _attr_record(row: AttrDefRow) -> SymbolRecord | None:
+    """インスタンス属性の定義（``_attr_defs``）を候補として扱うための仮の ``SymbolRecord``（``symbols`` には無い）。"""
+    try:
+        owner = parse(row.class_urn)
+    except ValueError:
+        return None
+    sel = owner.selector
+    if not isinstance(sel, CodeSel):
+        return None
+    qualified = f"{sel.qualified}.{row.name}"
+    try:
+        urn = owner.with_selector(CodeSel(qualified))
+    except ValueError:
+        return None
+    end = Position(row.site.line, row.site.col + len(row.name))
+    return SymbolRecord(
+        urn=urn,
+        path=row.path,
+        name=row.name,
+        qualified_name=qualified,
+        kind=Kind.FIELD,
+        modifiers=("instance",),
+        range=Range(row.site, end),
+        selection=Range(row.site, end),
+        confidence=Confidence.STRUCTURAL,
+    )
 
 
 def _ident(sym: SymbolRecord) -> tuple[str, str]:
@@ -122,6 +184,12 @@ class Verdict:
     scope: Scope = "workspace"  # 決めた段: 同じファイル・呼び出し箇所を含むフィクスチャ・ワークスペース
     root: str = ""  # scope が fixture のときそのルート
     test_doubles: int = 0  # 数えなかったテストファイルの同名の定義の数（文言用）
+    pool: Pool = "call"  # 呼び出し（メソッド）か属性の読み書き（メンバーとインスタンス属性。BUG-0095）か
+    external: tuple[str, ...] = ()  # 同名のメンバーを持つ外部の型（属性の読み書きだけ。``lk://_ext/...`` の URN）
+
+    @property
+    def _noun(self) -> str:
+        return "method" if self.pool == "call" else "member"
 
     def _where(self) -> str:
         if self.scope == "file":
@@ -135,12 +203,12 @@ class Verdict:
         owner = self.owner
         assert owner is not None
         besides = f" (besides {self.test_doubles} in test files)" if self.test_doubles else ""
-        return f"{owner.qualified_name} is the only method named {self.name!r} {self._where()}{besides}"
+        return f"{owner.qualified_name} is the only {self._noun} named {self.name!r} {self._where()}{besides}"
 
     @property
     def owner(self) -> SymbolRecord | None:
         """名前で結んでよい唯一の定義。結べないなら ``None``。"""
-        return self.candidates[0] if len(self.candidates) == 1 and not self.builtin else None
+        return self.candidates[0] if len(self.candidates) == 1 and not self.builtin and not self.external else None
 
     def owned_by(self, sym: SymbolRecord) -> bool:
         owner = self.owner
@@ -152,7 +220,15 @@ class Verdict:
 
     def key(self) -> tuple[Any, ...]:
         """結ばなかった呼び出しをまとめるキー（同じ理由・同じ候補の集まり）。"""
-        return (self.name, self.family, self.reason_code(), self.scope, self.root, tuple(_ident(c) for c in self.candidates))
+        return (
+            self.pool,
+            self.name,
+            self.family,
+            self.reason_code(),
+            self.scope,
+            self.root,
+            tuple(_ident(c) for c in self.candidates),
+        )
 
     def reason(self) -> str:
         """結ばない理由（英語。warnings に入る）。"""
@@ -162,23 +238,35 @@ class Verdict:
             shown = ", ".join(_label(s) for s in self.candidates[:LABELS_MAX])
             more = f", … {n - LABELS_MAX} more" if n > LABELS_MAX else ""
             where = "" if self.scope == "workspace" else f" {self._where()}"
-            parts.append(f"{n} methods share the name{where} ({shown}{more})")
+            parts.append(f"{n} {self._noun}s share the name{where} ({shown}{more})")
         if self.builtin:
-            parts.append("built-in types also have a method of that name")
+            what = "a method" if self.pool == "call" else "an attribute or method"
+            parts.append(f"built-in types also have {what} of that name")
+        if self.external:
+            shown = ", ".join(_external_label(u) for u in self.external[:LABELS_MAX])
+            more = f", … {len(self.external) - LABELS_MAX} more" if len(self.external) > LABELS_MAX else ""
+            parts.append(f"external types used in the workspace also have a member of that name ({shown}{more})")
         return "; ".join(parts)
 
     def reason_code(self) -> str:
-        """``data.unattributed_calls[].reason``: ``ambiguous``（同名が 2 つ以上）か ``builtin_name``（組み込み型と同名）。"""
-        return "ambiguous" if len(self.candidates) > 1 else "builtin_name"
+        """``data.unattributed_calls[].reason``: ``ambiguous``（同名が 2 つ以上）か ``builtin_name``（組み込み型と同名）か
+        ``external_name``（外部の型のメンバーと同名。属性の読み書きだけ）。"""
+        if len(self.candidates) > 1:
+            return "ambiguous"
+        return "builtin_name" if self.builtin else "external_name"
 
     def reason_json(self) -> dict[str, Any]:
+        def cand(s: SymbolRecord) -> dict[str, Any]:
+            out: dict[str, Any] = {"qualified_name": s.qualified_name, "path": str(s.path), "line": s.range.start.line + 1}
+            if self.pool == "ref":  # 属性の読み書きの候補はメンバーの種別まで（インスタンス属性はシンボルではない）
+                out["kind"] = "instance_attribute" if _is_instance_attr(s) else s.kind.value
+            return out
+
         return {
-            "candidates": [
-                {"qualified_name": s.qualified_name, "path": str(s.path), "line": s.range.start.line + 1}
-                for s in self.candidates[:DATA_SAMPLE_MAX]
-            ],
+            "candidates": [cand(s) for s in self.candidates[:DATA_SAMPLE_MAX]],
             "candidates_total": len(self.candidates),
             "builtin_name": self.builtin,
+            **({"external_members": [_external_label(u) for u in self.external[:DATA_SAMPLE_MAX]]} if self.external else {}),
         }
 
 
@@ -241,17 +329,21 @@ def sample_text(rows: Sequence[NameCallRow], limit: int = SAMPLE_MAX) -> str:
 
 
 def sites_json(rows: Sequence[NameCallRow], enclosing: Any) -> list[dict[str, Any]]:
-    """``data.unattributed_calls[].sites``（先頭 ``DATA_SAMPLE_MAX`` 件）。``enclosing`` は URN → 囲みの名前。"""
-    return [
-        {
+    """``data.unattributed_calls[].sites`` / ``data.unattributed_refs[].sites``（先頭 ``DATA_SAMPLE_MAX`` 件）。``enclosing`` は URN →
+    囲みの名前。属性の読み書きの位置には ``use``（``r`` / ``w`` / ``rw``）を添える。"""
+    out: list[dict[str, Any]] = []
+    for r in rows[:DATA_SAMPLE_MAX]:
+        site: dict[str, Any] = {
             "path": str(r.path),
             "line": r.site.line + 1,
             "col": r.site.col + 1,
             "enclosing_name": enclosing(r.source_urn),
             "is_test": r.is_test,
         }
-        for r in rows[:DATA_SAMPLE_MAX]
-    ]
+        if r.use_kind != "call":
+            site["use"] = r.use_kind
+        out.append(site)
+    return out
 
 
 def _unique(syms: Iterable[SymbolRecord]) -> tuple[SymbolRecord, ...]:
@@ -266,8 +358,10 @@ class NameIndex:
 
     def __init__(self, conn: sqlite3.Connection, workspace_id: str) -> None:
         self.conn, self.ws = conn, workspace_id
-        self._defs: dict[tuple[str, str], list[tuple[SymbolRecord, bool]]] = {}
-        self._verdicts: dict[tuple[str, str, str], Verdict | None] = {}
+        self._defs: dict[tuple[str, str, str], list[tuple[SymbolRecord, bool]]] = {}
+        self._verdicts: dict[tuple[str, str, str, str, str], Verdict | None] = {}
+        self._resolver: MemberResolver | None = None
+        self._externals: dict[tuple[str, str], tuple[str, ...]] = {}
         self._languages: dict[str, str | None] = {}
         self._roots: dict[str, tuple[str, ...]] = {}
 
@@ -297,36 +391,93 @@ class NameIndex:
         path = str(sym.path)
         return is_test(path[len(root) + 1 :], _test_globs(self._language(path)))
 
-    def _defs_named(self, name: str, family: str) -> list[tuple[SymbolRecord, bool]]:
-        key = (name, family)
+    def _defs_named(self, name: str, family: str, pool: Pool = "call") -> list[tuple[SymbolRecord, bool]]:
+        key = (name, family, pool)
         if key not in self._defs:
-            self._defs[key] = queries.methods_named(self.conn, self.ws, name, _LANGUAGES[family])
+            languages = _LANGUAGES[family]
+            if pool == "call":
+                self._defs[key] = queries.methods_named(self.conn, self.ws, name, languages)
+            else:
+                members = queries.members_named(self.conn, self.ws, name, languages)
+                attrs = self._instance_attrs(queries.attr_defs_named(self.conn, self.ws, name, languages), name)
+                self._defs[key] = sorted(
+                    [*members, *attrs], key=lambda d: (str(d[0].path), d[0].range.start.line, d[0].qualified_name)
+                )
         return self._defs[key]
 
+    def _instance_attrs(self, rows: Sequence[AttrDefRow], name: str) -> list[tuple[SymbolRecord, bool]]:
+        """インスタンス属性の定義を候補にする。クラスの線形化の基底（中身の分からない外部の基底より前）が同名のシンボルか
+        インスタンス属性を持つものは、その基底のものと同じ属性なので数えない。"""
+        if not rows:
+            return []
+        if self._resolver is None:
+            self._resolver = MemberResolver(self.conn)
+        resolver = self._resolver
+        declared = {r.class_urn for r in rows}
+        out: list[tuple[SymbolRecord, bool]] = []
+        for r in rows:
+            merged = False
+            for base in (resolver.order(r.class_urn) or [r.class_urn])[1:]:
+                if base.startswith(_EXTERNAL_PREFIX):
+                    if base in TRANSPARENT_EXTERNAL_BASES:
+                        continue
+                    break
+                if resolver.kind(base) not in CLASS_KINDS:
+                    break
+                if base in declared or resolver.has_member(base, name):
+                    merged = True
+                    break
+            rec = None if merged else _attr_record(r)
+            if rec is not None:
+                out.append((rec, r.is_test))
+        return out
+
+    def _external_members(self, name: str, family: str) -> tuple[str, ...]:
+        key = (name, family)
+        if key not in self._externals:
+            self._externals[key] = tuple(
+                queries.external_members_named(self.conn, self.ws, name, _LANGUAGES[family])
+            )
+        return self._externals[key]
+
     def target_name(self, sym: SymbolRecord) -> tuple[str, str] | None:
-        """対象のメソッド ``sym`` の ``(名前, 言語族)``（``Method`` でない・関係を抽出しない言語なら ``None``）。"""
+        """対象のメソッド ``sym`` の ``(名前, 言語族)``（``Method`` でない・関係を抽出しない言語なら ``None``）。T-07 の呼び出しだけ。"""
         if sym.kind is not Kind.METHOD:
             return None
         family = self.family_of_path(str(sym.path))
         return (sym.name, family) if family is not None else None
 
+    def target_member(self, sym: SymbolRecord) -> tuple[str, str, tuple[str, ...]] | None:
+        """T-06 の対象 ``sym`` の ``(名前, 言語族, 名前で結ぶ使用種別)``。メソッドは呼び出しと読み書き（メソッドの参照）、クラスの
+        ``Field`` / ``Property`` / ``Constant`` は読み書きだけ（BUG-0095）。それ以外・関係を抽出しない言語は ``None``。"""
+        if sym.kind is Kind.METHOD:
+            uses: tuple[str, ...] = MEMBER_USES
+        elif sym.kind in _REF_TARGET_KINDS and "." in sym.qualified_name:
+            uses = REF_USES
+        else:
+            return None
+        family = self.family_of_path(str(sym.path))
+        return (sym.name, family, uses) if family is not None else None
+
     def verdict_for(self, row: NameCallRow) -> Verdict | None:
-        """呼び出し箇所 ``row`` の候補（モジュールの docstring の段の順）。候補が無ければ ``None``。"""
+        """呼び出し・参照箇所 ``row`` の候補（モジュールの docstring の段の順）。候補が無ければ ``None``。"""
         family = family_of(row.language)
         if family is None:
             return None
         site = str(row.path)
         enclosing = row.source_urn.partition("#")[2]  # 囲みの修飾名（モジュール直下なら空）
-        key = (row.name, family, site, enclosing)
+        pool = pool_of(row.use_kind)
+        key = (row.name, family, site, enclosing, pool)
         if key not in self._verdicts:
-            self._verdicts[key] = self._decide(row.name, family, site, enclosing)
+            self._verdicts[key] = self._decide(row.name, family, site, enclosing, pool)
         return self._verdicts[key]
 
-    def _decide(self, name: str, family: str, site: str, enclosing: str) -> Verdict | None:
-        found = self._defs_named(name, family)
+    def _decide(self, name: str, family: str, site: str, enclosing: str, pool: Pool = "call") -> Verdict | None:
+        found = self._defs_named(name, family, pool)
         if not found:
             return None
-        builtin = name in _BUILTIN_METHODS[family]
+        builtin = name in _BUILTIN_METHODS[family] if pool == "call" else is_builtin_attribute(name, family)
+        external = self._external_members(name, family) if pool == "ref" and not builtin else ()
 
         def own(s: SymbolRecord) -> bool:
             """呼び出しを囲むクラス自身のメソッド。``self.m()`` は抽出器が結ぶので、型の分からない受け手は別のオブジェクト
@@ -341,7 +492,7 @@ class NameIndex:
         if same and not all(own(s) for s in same):
             if len(same) == 1 and own(same[0]):
                 return None
-            return Verdict(name, family, same, builtin, scope="file")
+            return Verdict(name, family, same, builtin, scope="file", pool=pool, external=external)
         for root in reversed(chain):  # 内側の段から
             in_scope = [(s, t) for s, t, r in visible if r == root]
             if not in_scope:
@@ -351,9 +502,28 @@ class NameIndex:
                 return None  # この段にはテストダブル（か囲みのクラス自身）しか無い。外の段の同名に結ばない
             if root:
                 doubles = len(_unique(s for s, t in in_scope if self._is_test_in(s, t, root)))
-                return Verdict(name, family, production, builtin, scope="fixture", root=root, test_doubles=doubles)
+                return Verdict(
+                    name,
+                    family,
+                    production,
+                    builtin,
+                    scope="fixture",
+                    root=root,
+                    test_doubles=doubles,
+                    pool=pool,
+                    external=external,
+                )
             doubles = len({_ident(s) for s, t in found if t} - {_ident(s) for s in production})
-            return Verdict(name, family, production, builtin, scope="workspace", test_doubles=doubles)
+            return Verdict(
+                name,
+                family,
+                production,
+                builtin,
+                scope="workspace",
+                test_doubles=doubles,
+                pool=pool,
+                external=external,
+            )
         return None
 
     def for_target(self, sym: SymbolRecord, rows: Iterable[NameCallRow]) -> TargetSites:
@@ -372,8 +542,13 @@ class NameIndex:
                 out.unattributed.setdefault(v.key(), Unattributed(v)).add([r])
         return out
 
-    def sites_named(self, name: str, family: str, *, include_tests: bool = True) -> list[NameCallRow]:
-        return queries.name_calls_named(self.conn, self.ws, name, _LANGUAGES[family], include_tests=include_tests)
+    def sites_named(
+        self, name: str, family: str, *, include_tests: bool = True, uses: Sequence[str] = CALL_USES
+    ) -> list[NameCallRow]:
+        return queries.name_calls_named(
+            self.conn, self.ws, name, _LANGUAGES[family], include_tests=include_tests, uses=uses
+        )
 
     def calls_from(self, urn: str) -> list[NameCallRow]:
-        return queries.name_calls_from(self.conn, urn)
+        """``urn`` の中の型不明の呼び出し（T-07 の outgoing。属性の読み書きは入れない）。"""
+        return queries.name_calls_from(self.conn, urn, uses=CALL_USES)

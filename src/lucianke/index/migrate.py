@@ -144,6 +144,37 @@ def _migrate_7_to_8(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_8_to_9(conn: sqlite3.Connection) -> None:
+    """v9: ``_name_calls.use_kind``（型の分からない受け手の属性の読み書きも名前の一致に任せる。BUG-0095）、インスタンス属性の定義の
+    内部表 ``_attr_defs``（名前の一致の候補。BUG-0095）、モジュール直下の変数の型の内部表 ``_var_types``（import した変数の
+    ``settings.reload()`` を型のメンバーに結ぶ。BUG-0094）。
+
+    値は取り込みのときにしか作れない（v8 までの取り込みは属性の読み書きを捨て、点つきのモジュールのパスの呼び出し〈BUG-0093〉を
+    名前だけにしていた）ので、v5〜v8 と同じく関係を抽出する言語（Python / TS / JS）のファイルの ``sha256`` を空にして、次の差分走査で
+    取り込み直させる。
+    """
+    columns = {str(r[1]) for r in conn.execute("PRAGMA table_info(_name_calls)").fetchall()}
+    if "use_kind" not in columns:  # 列が既にある DB（途中まで移した・新しい schema.sql で作った）でも流せるように
+        conn.execute("ALTER TABLE _name_calls ADD COLUMN use_kind TEXT NOT NULL DEFAULT 'call'")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _attr_defs ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " class_urn TEXT NOT NULL, name TEXT NOT NULL, line INTEGER NOT NULL, col INTEGER NOT NULL)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _attr_defs_name ON _attr_defs(name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _attr_defs_file ON _attr_defs(file_id)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _var_types ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " var_urn TEXT NOT NULL PRIMARY KEY, type_urn TEXT NOT NULL)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _var_types_type ON _var_types(type_urn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _var_types_file ON _var_types(file_id)")
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('python', 'typescript', 'tsx', 'javascript', 'jsx')"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -152,6 +183,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migrate_5_to_6,
     6: _migrate_6_to_7,
     7: _migrate_7_to_8,
+    8: _migrate_8_to_9,
 }
 
 
