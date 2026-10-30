@@ -25,6 +25,7 @@ from typing import Any
 
 import compact_grammar as g
 import pytest
+from _lsp_settle import diagnostics_published
 
 from lucianke.app import build_services
 from lucianke.core.model import Confidence, RelPath
@@ -49,6 +50,7 @@ POLY = REPO / "tests" / "fixtures" / "poly"
 FIXTURE = "src/shop/unused.py"
 UNUSED_PY = "import os\nimport sys\n\n\ndef main() -> int:\n    return len(sys.argv)\n"
 UNSORTED_PY = "import sys\nimport os\n\nprint(os.name, sys.argv)\n"
+READY_WAIT_MS = 120_000  # 実機の ruff の ready の待ちの上限（条件待ち）
 
 
 def sha(data: bytes) -> str:
@@ -150,6 +152,7 @@ class Rig:
     pool: LspPool | None
     store: CodeActionStore
     svc: T13Services
+    diagnostics_wait_ms: int = 4000
 
     def path(self, rel: str) -> Path:
         return self.root / rel
@@ -168,7 +171,7 @@ class Rig:
         }
 
     async def call(self, fmt: str = "json", **args: Any) -> Any:
-        args.setdefault("diagnostics_wait_ms", 4000)
+        args.setdefault("diagnostics_wait_ms", self.diagnostics_wait_ms)
         return await self.pipeline.call_tool("apply_code_action", {"format": fmt, **args})
 
     def handle(self, role: str = "lint") -> LspHandle:
@@ -235,6 +238,8 @@ async def real(registry: ProcessRegistry, tmp_path: Path, index_writer: IndexWri
         grace_ms=300,
     )
     rig = make_rig(root, tmp_path, index_writer, pool, hub_diagnostics=True)
+    # 上限。条件待ちなので揃えば即戻る（負荷で ruff の再発行が遅れても pending にしない）
+    rig.diagnostics_wait_ms = 10_000
     yield rig
     await pool.shutdown_all(300)
     assert registry.live() == []
@@ -247,6 +252,12 @@ def candidate_id(err: dict[str, Any], needle: str) -> str:
 
 
 async def ambiguous_quickfix(rig: Rig, **kw: Any) -> dict[str, Any]:
+    # 前提（BUG-0097）: ruff がいまの内容の未使用 import（F401）を出し終えてから聞く。QuickFix の文脈の診断はハブから取り、
+    # ツールの中の待ちは 2 秒（CONTEXT_DIAGNOSTICS_WAIT_MS）。負荷でそれを超えると文脈が空で、ruff は QuickFix を出さない
+    # （E_TARGET_NOT_FOUND。負荷の下で見た赤）。製品の期限は変えず、試験が合図を待つ。
+    assert rig.pool is not None
+    assert await rig.pool.wait_ready("python", rig.ws, READY_WAIT_MS, role="lint")
+    await diagnostics_published(rig.handle(), FIXTURE, {"F401"})
     r = await rig.call(path=FIXTURE, line=1, action_kind_or_id="quickfix", **kw)
     return error_of(r, "E_TARGET_AMBIGUOUS")
 

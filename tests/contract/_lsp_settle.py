@@ -10,6 +10,7 @@
   延ばす。負荷で 1 回の問い合わせが本番の期限を超えても、試験が落ちたり、連続タイムアウトの計数（3 回で ``unavailable``）で
   LSP が止まったりしないようにする。ツールの呼び出しをこの中に入れないこと（本番の期限を試験から変えない）。
 * ``settle``: 述語（LSP に直接聞いて期待どおりの答えが揃ったか）が真になるまで、``probe_timeouts`` の中で繰り返す。
+* ``diagnostics_published``: 編集の前提として、いまの内容の版について期待の診断が出て表に入るまで待つ（BUG-0097）。
 """
 
 from __future__ import annotations
@@ -73,3 +74,36 @@ async def settle(
                 last = exc
             await asyncio.sleep(RETRY_INTERVAL_S)
     raise AssertionError(f"the LSP did not settle within {timeout_s} s: {what} (last error: {last!r})")
+
+
+async def diagnostics_published(
+    handle: LspHandle, rel: str, codes: Iterable[str], *, timeout_s: float = SETTLE_TIMEOUT_S
+) -> None:
+    """``rel`` を LSP に見せ（いまのディスクの内容）、その版について ``codes`` の診断を出し、表に書き終えるまで待つ（BUG-0097）。
+
+    編集ツール（T-13 など）の前提を試験が整える部品。編集前の診断の写しは ``diagnostics`` 表から取り（設計書 §7.7.6-1）、
+    QuickFix の文脈の診断もハブから取る。ツールの中の短い待ち（``CONTEXT_DIAGNOSTICS_WAIT_MS`` = 2 秒）に頼ると、負荷で最初の
+    解析がそれを超えたとき、写しや文脈に診断が無く答えが変わる。合図は製品と同じ ``DiagnosticsHub.wait_for``（版 ≥ いまの版、
+    かつ ``on_diagnostics`` の書き込み済み）と受信した中身。中身が足りない受信（解析の途中の発行など）なら次の受信を待つ。
+    """
+    want = set(codes)
+    path = RelPath(str(rel))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    sent_at = await features.sync_document(handle, path)
+    assert sent_at is not None, rel
+    min_version = handle.documents.version_of(path)
+    seen: list[list[str]] = []
+    while await handle.diagnostics.wait_for(
+        path, min_version=min_version, sent_at=sent_at, timeout_ms=max(deadline - loop.time(), 0) * 1000
+    ):
+        entry = handle.diagnostics.get(path)
+        assert entry is not None, rel
+        got = {str(d.get("code")) for d in entry.diagnostics}
+        if want <= got:
+            return
+        seen.append(sorted(got))
+        min_version, sent_at = None, entry.received_at + 1e-6  # 次の受信（いまの受信より後）を待つ
+    raise AssertionError(
+        f"{handle.server_name} did not publish {sorted(want)} for {rel} within {timeout_s} s (received: {seen})"
+    )
