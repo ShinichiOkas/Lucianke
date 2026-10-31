@@ -2,7 +2,8 @@
 
 アクション: ``status``（既定。副作用なし）・``set_roots``・``set_python_env``・``set_excludes``・``reindex``。
 どのアクションも、同じ「状態の表」を返す（``status`` だけが Git・言語別ファイル数・キャッシュ統計を調べる。
-``reindex`` の 100 ms 以内（事後条件 2）を守るため、他のアクションの応答は軽い項目だけ）。
+``reindex`` の 100 ms 以内（事後条件 2）を守るため、他のアクションの応答は軽い項目だけ）。Git の状態は、前に調べてから
+ルートの下が変わっていなければ覚えから返す（``_git_state``。BUG-0128）。
 
 ``ctx.services`` に求めるもの（duck typing。``tools`` は ``mcp`` を import できない。形は ``tools/_runtime.py`` の
 ``RuntimeHub`` に合わせてある）:
@@ -38,6 +39,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -315,11 +317,24 @@ def restore_settings(context: Any, workspaces: Sequence[Workspace], cache_root: 
 
 
 def _empty_cache() -> dict[str, Any]:
-    return {"languages": [], "files": 0, "symbols": 0, "relations": 0, "last_sync_at": None}
+    return {"languages": [], "files": 0, "symbols": 0, "relations": 0, "last_sync_at": None, "data_version": None}
 
 
-def _read_cache(db_path: Path) -> dict[str, Any]:
-    """言語別ファイル数とキャッシュ統計。DB が無い・読めないときは空。"""
+POOL_WAIT_S = 0.05
+"""``status`` が束の読み取りプールの空きを待つ上限。空かなければ自分で接続を開く（開いて閉じるのに 2〜3 ms 余計にかかる）。"""
+
+
+def _read_cache(db_path: Path, readers: Any = None) -> dict[str, Any]:
+    """言語別ファイル数とキャッシュ統計（と ``data_version``。Git の状態の覚えの鍵）。DB が無い・読めないときは空。
+
+    ``readers``（束の ``ReaderPool``）があれば、その接続を借りる（接続を開く・スキーマを読む・閉じるのを毎回しない。BUG-0128）。
+    """
+    if readers is not None:
+        try:
+            with readers.reader(timeout=POOL_WAIT_S) as conn:
+                return _cache_rows(conn)
+        except (sqlite3.Error, LuciankeError, RuntimeError):  # 空きが無い・閉じた・DB がまだ無い
+            pass
     empty = _empty_cache()
     if not db_path.is_file():
         return empty
@@ -328,27 +343,36 @@ def _read_cache(db_path: Path) -> dict[str, Any]:
     except sqlite3.Error:
         return empty
     try:
-        languages = [
-            {"language": lang, "tier": int(tier), "file_count": int(n)}
-            for lang, tier, n in conn.execute(
-                "SELECT language, tier, count(*) FROM files GROUP BY language, tier ORDER BY count(*) DESC, language"
-            )
-        ]
-        files = int(conn.execute("SELECT count(*) FROM files").fetchone()[0])
-        symbols = int(conn.execute("SELECT count(*) FROM symbols WHERE is_external = 0").fetchone()[0])
-        relations = int(conn.execute("SELECT count(*) FROM relations").fetchone()[0])
-        row = conn.execute("SELECT max(indexed_at) FROM workspaces").fetchone()
-        return {
-            "languages": languages,
-            "files": files,
-            "symbols": symbols,
-            "relations": relations,
-            "last_sync_at": row[0] if row else None,
-        }
+        return _cache_rows(conn)
     except sqlite3.Error:
         return empty
     finally:
         conn.close()
+
+
+def _cache_rows(conn: sqlite3.Connection) -> dict[str, Any]:
+    languages = [
+        {"language": lang, "tier": int(tier), "file_count": int(n)}
+        for lang, tier, n in conn.execute(
+            "SELECT language, tier, count(*) FROM files GROUP BY language, tier ORDER BY count(*) DESC, language"
+        )
+    ]
+    files = int(conn.execute("SELECT count(*) FROM files").fetchone()[0])
+    symbols = int(conn.execute("SELECT count(*) FROM symbols WHERE is_external = 0").fetchone()[0])
+    relations = int(conn.execute("SELECT count(*) FROM relations").fetchone()[0])
+    row = conn.execute("SELECT max(indexed_at) FROM workspaces").fetchone()
+    try:
+        version = conn.execute("SELECT data_version FROM _meta LIMIT 1").fetchone()
+    except sqlite3.Error:
+        version = None
+    return {
+        "languages": languages,
+        "files": files,
+        "symbols": symbols,
+        "relations": relations,
+        "last_sync_at": row[0] if row else None,
+        "data_version": int(version[0]) if version else None,
+    }
 
 
 def _git_info(root: Path) -> dict[str, Any] | None:
@@ -360,6 +384,81 @@ def _git_info(root: Path) -> dict[str, Any] | None:
         return None
     head = repo.head_info()
     return {"branch": head.branch, "head_sha": head.head_sha, "dirty_files": head.dirty_count}
+
+
+GIT_STATE_MAX_AGE_S = 10.0
+"""``status`` が Git の状態の覚えを使い回す上限（秒）。監視がイベントを取りこぼす場所（ネットワークドライブなど）や、
+ルートの外の設定（全体の ``.gitignore``・``core.excludesFile``）の変化でも、これより古い答えは返さない。"""
+
+
+@dataclass(slots=True)
+class _GitMemo:
+    """1 ワークスペースの Git の状態の覚え（BUG-0128）。``key`` と ``watcher`` が同じで ``GIT_STATE_MAX_AGE_S`` 以内なら使い回す。"""
+
+    watcher: Any
+    key: tuple[Any, ...]
+    at: float
+    info: dict[str, Any] | None
+
+
+def _file_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _git_memos(hub: Any) -> dict[str, _GitMemo]:
+    memos = getattr(hub, "git_state_memos", None)
+    if memos is None:
+        memos = {}
+        try:
+            hub.git_state_memos = memos
+        except AttributeError:  # slots の入れ物。毎回調べる
+            pass
+    return memos  # type: ignore[no-any-return]
+
+
+def _git_state(
+    memos: dict[str, _GitMemo], runtime: Any, ws: Workspace, data_version: int | None
+) -> dict[str, Any] | None:
+    """``_git_info`` を、前に調べてからルートの下が変わっていなければ覚えから返す（BUG-0128）。
+
+    ``dulwich`` の ``status`` は作業ツリーを歩き、設定・``.gitignore``・索引・パックを読む（F-PY で 1 回 20〜30 ms、
+    CPU が混んでいると 130〜350 ms）。``status`` は副作用の無い照会で、同じ状態なら同じ答えになる。鍵:
+
+    * 監視（``Watcher``）が届けたイベントの数。``.git/`` の中も、除外で落とすものも数える。監視が動いていない
+      （``polling``・停止後・束に監視が無い）ときは覚えを使わない。
+    * ``data_version``（このサーバー自身の編集は、監視のイベントより先に索引の版を進める）。
+    * ``.git/HEAD`` と ``.git/index`` の更新時刻と大きさ（イベントが届くまでの遅れの間の切り替え・ステージ）。
+
+    ``.git`` がディレクトリでない（リンクされた作業ツリー・サブモジュール。実体はルートの外で監視に入らない）ときは覚えない。
+    """
+    watcher = getattr(runtime, "watcher", None)
+    git_dir = ws.root / ".git"
+    if watcher is None or not getattr(watcher, "live", False) or not git_dir.is_dir():
+        return _git_info(ws.root)
+    key = (watcher.generation, data_version, _file_key(git_dir / "HEAD"), _file_key(git_dir / "index"))
+    now = time.monotonic()
+    memo = memos.get(ws.workspace_id)
+    if memo is not None and memo.watcher is watcher and memo.key == key and now - memo.at < GIT_STATE_MAX_AGE_S:
+        return dict(memo.info) if memo.info is not None else None
+    info = _git_info(ws.root)  # 鍵は調べる前に読んだもの（調べている間の変化は次の呼び出しで鍵が変わる）
+    memos[ws.workspace_id] = _GitMemo(watcher, key, now, None if info is None else dict(info))
+    return info
+
+
+def _snapshot(
+    memos: dict[str, _GitMemo], runtime: Any, ws: Workspace
+) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+    """言語別ファイル数・キャッシュ統計と Git の状態を 1 つのスレッドで調べる（スレッドの受け渡しを 1 回にする）。"""
+    db_path = getattr(runtime, "db_path", None)
+    cache = _read_cache(Path(db_path), getattr(runtime, "readers", None)) if db_path is not None else _empty_cache()
+    try:
+        return cache, _git_state(memos, runtime, ws, cache["data_version"]), None
+    except Exception as exc:  # noqa: BLE001  Git が読めなくても status は答える
+        return cache, None, f"{ws.workspace_id}: git state unavailable ({type(exc).__name__}: {exc})"
 
 
 def _lsp_daemons(pool: Any, ws: Workspace, languages: Sequence[str]) -> list[dict[str, Any]]:
@@ -524,22 +623,13 @@ async def _view(
         entry["watcher"] = _watcher_mode(hub, ws)
     cache_total = {"files": 0, "symbols": 0, "relations": 0, "last_sync_at": None}
     if detail:
-
-        async def gather(ws: Workspace) -> tuple[dict[str, Any], dict[str, Any] | None]:
-            runtime = hub.runtime(ws.workspace_id)
-            db_path = getattr(runtime, "db_path", None)
-            cache = (
-                await asyncio.to_thread(_read_cache, Path(db_path)) if db_path is not None else _empty_cache()
-            )
-            try:
-                git = await asyncio.to_thread(_git_info, ws.root)
-            except Exception as exc:  # noqa: BLE001  Git が読めなくても status は答える
-                warnings.append(f"{ws.workspace_id}: git state unavailable ({type(exc).__name__}: {exc})")
-                git = None
-            return cache, git
-
-        results = await asyncio.gather(*(gather(ws) for ws in workspaces))
-        for entry, (cache, git) in zip(entries, results, strict=True):
+        memos = _git_memos(hub)
+        results = await asyncio.gather(
+            *(asyncio.to_thread(_snapshot, memos, hub.runtime(ws.workspace_id), ws) for ws in workspaces)
+        )
+        for entry, (cache, git, git_error) in zip(entries, results, strict=True):
+            if git_error is not None:
+                warnings.append(git_error)
             entry["languages"] = cache["languages"]
             entry["git"] = git
             entry["cache"] = {k: cache[k] for k in ("files", "symbols", "relations", "last_sync_at")}

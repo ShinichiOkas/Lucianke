@@ -125,8 +125,17 @@ class Watcher:
         self._fold_names = ws.case_insensitive or os.name == "nt"  # ".git" の比較で大文字小文字を畳むか
         self._queue: asyncio.Queue[_Item] | None = None
         self._expected: dict[RelPath, tuple[str, float]] = {}
+        self.generation = 0
+        """ルートの下で届いたイベントの数（``.git/``・除外・一時名で落とすものも数える）。値が変わっていなければ、前に見てから
+        ルートの下は何も変わっていない（イベントが届くまでの遅れ〈``step``、最大 ``debounce``〉の間を除く）。T-00 の ``status`` が
+        Git の状態の覚えの鍵に使う（BUG-0128）。監視が動いていないときは増えないので、``live`` と合わせて見ること。"""
 
     # --- 公開 API ----------------------------------------------------------------------
+
+    @property
+    def live(self) -> bool:
+        """監視が動いていて（``run`` の中）、イベントが届く状態（``native``）か。"""
+        return self._queue is not None and self.mode == "native"
 
     def rebind(self, ws: Workspace) -> None:
         """設定（``exclude_globs`` など）を変えた同じワークスペースに差し替える。以降のイベントは新しい除外規則で落とす。
@@ -236,6 +245,7 @@ class Watcher:
 
     def _accept(self, _change: object, path: str) -> bool:
         """``watch_filter``。Python 側で全イベントに対して呼ばれるので、字句の判定だけにする（realpath しない）。"""
+        self.generation += 1  # 落とすイベントも数える（``.git/`` の変化も Git の状態を変える）
         root = str(self._ws.root)
         if path.startswith(root + os.sep):
             rel = path[len(root) + 1 :]
