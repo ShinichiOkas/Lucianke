@@ -40,7 +40,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import json
 import re
 import time
 from collections import OrderedDict
@@ -66,7 +68,7 @@ from lucianke.core.records import Record, ToolOutput
 from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import parse
 from lucianke.edit.plan import Plan, apply_hunks
-from lucianke.edit.transaction import EditResult, EditTransaction, PlanBuilder, PlanContext
+from lucianke.edit.transaction import WORKING_TREE, EditResult, EditTransaction, PlanBuilder, PlanContext
 from lucianke.edit.workspace_edit import new_positions, plan_from_workspace_edit
 from lucianke.engine.selector import LEVEL_TEMPLATES, WarningReason, warning_text
 from lucianke.lsp import features
@@ -423,20 +425,24 @@ _DRY_RUNS_MAX = 256
 
 @dataclass(frozen=True, slots=True)
 class _DryRun:
-    """覚えた dry_run の LSP の答え（``WorkspaceEdit``）と、そのときの索引の版・編集するファイルの内容の sha256。"""
+    """覚えた dry_run の結果と、そのときの索引の版・編集するファイルの内容の sha256・LSP が開いている文書。"""
 
     version: int
     shas: Mapping[RelPath, str]
-    we: Mapping[str, Any]
+    open_docs: tuple[str, ...]
+    result: EditResult
+    seen: _Seen
 
 
 class _DryRunMemo:
-    """``(サーバー, ハンドル, 起動の時刻, ワークスペース, ファイル, 名前の位置, 新しい名前)`` → ``_DryRun``。LRU（BUG-0128 の残り）。
+    """``(サーバー, ハンドル, 起動の時刻, ワークスペース, 引数)`` → ``_DryRun``。LRU（BUG-0128 の残り）。
 
-    同じ対象・同じ新しい名前の dry_run は、索引の版（``data_version``。どのファイルの取り込みでも進む）が同じで、編集する
-    ファイルの内容が覚えたときと同じなら、LSP は同じ ``WorkspaceEdit`` を返す。basedpyright の rename はワークスペースの参照を
-    型で確かめながら走査し、温まった同じ対象でも 30〜400 ms かかっていた。使うのは dry_run だけ（書き込む呼び出しは
-    いつも LSP に聞く）。LSP が起動し直したら（``started_at`` が変わる）前の答えは使わない。
+    同じ対象・同じ新しい名前・同じ引数の dry_run は、索引の版（``data_version``。どのファイルの取り込みでも進む）と編集する
+    ファイルの内容が覚えたときと同じで、LSP が開いている文書が答えを変えていなければ（``_docs_still_valid``。tsserver は開いた
+    別のプロジェクトのファイルも探す）、同じ結果になる。以前は呼ぶたびに LSP の rename（basedpyright はワークスペースの参照を型で確かめながら走査し、温まった同じ
+    対象でも 30〜400 ms）と、編集するファイルの書き換えた後の内容の解析（シンボル・構文の確かめ。大きなテストファイルを
+    いくつも書き換える対象で 50〜80 ms）をやり直していた。使うのは dry_run だけ（書き込む呼び出しはいつも LSP に聞く）。
+    LSP が起動し直したら（``started_at`` が変わる）前の結果は使わない。
     """
 
     def __init__(self) -> None:
@@ -464,16 +470,71 @@ class _DryRunMemo:
 DRY_RUNS = _DryRunMemo()
 
 
-def _dry_run_key(
-    handle: LspHandle, ws: Workspace, path: RelPath, pos: Position, new_name: str
-) -> tuple[str, ...] | None:
-    """覚える鍵。起動の時刻（``LspHandle.started_at``）の無いハンドル（起動前・試験の作り物）は覚えない。"""
+def _dry_run_key(handle: LspHandle, ws: Workspace, args: RenameSymbolArgs) -> tuple[str, ...] | None:
+    """覚える鍵（結果を決める引数だけ。``format`` などの出し方は含めない）。起動の時刻（``LspHandle.started_at``）の無い
+    ハンドル（起動前・試験の作り物）は覚えない。"""
     started = getattr(handle, "started_at", None)
     if not isinstance(started, str):
         return None
     server = getattr(handle, "server_name", None) or getattr(handle, "language_id", "")
-    return (str(server), str(id(handle)), started, ws.workspace_id, str(ws.root), str(path), f"{pos.line}:{pos.col}",
-            new_name)  # fmt: skip
+    what = json.dumps(
+        [
+            args.target.model_dump(mode="json"),
+            args.new_name,
+            args.allow_heuristic_mutation,
+            args.expected_file_sha256s,
+            args.scope_paths,
+        ],
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return (str(server), str(id(handle)), started, ws.workspace_id, str(ws.root), what)
+
+
+def _open_docs(handle: LspHandle) -> tuple[str, ...]:
+    documents = getattr(handle, "documents", None)
+    paths = getattr(documents, "open_paths", None)
+    return tuple(sorted(str(p) for p in paths())) if callable(paths) else ()
+
+
+def _docs_still_valid(ws: Workspace, stored: Sequence[str], current: Sequence[str], name: str) -> bool:
+    """覚えたときに LSP が開いていた文書 ``stored`` がすべて開いたままで、その後に開いた文書に ``name`` が単語として出てこないか。
+
+    tsserver は開いた文書を推定プロジェクトに入れて探すので、名前を含む文書を新しく開くと rename の答えが変わりうる。名前を含まない
+    文書・閉じていない文書は答えを変えない。読めない文書があれば ``False``。ブロックする。
+    """
+    now = set(current)
+    if not set(stored) <= now:
+        return False
+    added = now.difference(stored)
+    if not added:
+        return True
+    if not name:
+        return False
+    pattern = re.compile(rb"(?<![\w$])" + re.escape(name.encode("utf-8")) + rb"(?![\w$])")
+    for path in added:
+        try:
+            data = to_abs(ws, RelPath(path)).read_bytes()
+        except (OSError, ValueError):
+            return False
+        if pattern.search(data):
+            return False
+    return True
+
+
+def _unchanged(ws: Workspace, shas: Mapping[RelPath, str]) -> bool:
+    """``shas`` のファイルの今の内容の sha256 がすべて同じか（読めない・空なら ``False``）。ブロックする。"""
+    if not shas:
+        return False
+    for path, sha in shas.items():
+        try:
+            data = to_abs(ws, path).read_bytes()
+        except OSError:
+            return False
+        if hashlib.sha256(data).hexdigest() != sha:
+            return False
+    return True
 
 
 def _data_version(svc: ToolServices, ws: Workspace) -> int | None:
@@ -508,12 +569,7 @@ def _ensure_unmodified_since(ws: Workspace, paths: Sequence[RelPath], started_ns
 
 
 def _rename_builder(
-    ws: Workspace,
-    handle: LspHandle,
-    target: TargetRef,
-    args: RenameSymbolArgs,
-    seen: _Seen,
-    version: int | None = None,
+    ws: Workspace, handle: LspHandle, target: TargetRef, args: RenameSymbolArgs, seen: _Seen
 ) -> PlanBuilder:
     async def build(ctx: PlanContext) -> Plan:
         seen.language_id, seen.tier, seen.confidence = ctx.language_id, ctx.tier, ctx.confidence
@@ -528,36 +584,19 @@ def _rename_builder(
         if old_name == args.new_name:
             raise _invalid("new_name is the same as the current name", param="new_name", reason="same_name")
         started_ns = time.time_ns()
+        try:
+            we = await features.rename(handle, ctx.path, name_pos, args.new_name)
+        except TimeoutError:
+            raise LuciankeError(
+                ErrorCode.E_TIMEOUT,
+                "the language server did not answer rename in time",
+                details={"reason": "lsp_rename_timeout", "path": str(ctx.path)},
+            ) from None
         client = handle.client
         encoding = client.negotiated_encoding.value if client is not None else "utf-16"
-        target_urns = (str(ctx.symbol.urn),)
-        key = _dry_run_key(handle, ws, ctx.path, name_pos, args.new_name) if args.dry_run and version is not None else None
-        hit = DRY_RUNS.get(key) if key is not None else None
-        plan: Plan | None = None
-        if hit is not None and hit.version == version:
-            try:
-                plan = await plan_from_workspace_edit(
-                    ws, hit.we, encoding=encoding, documents=handle.documents, target_urns=target_urns
-                )
-            except LuciankeError:
-                plan = None  # 開いた文書の版が進んだ・ファイルが消えたなど: LSP に聞き直す
-            if plan is not None and dict(plan.resolved_shas) != dict(hit.shas):
-                plan = None  # 編集するファイルの内容が覚えたときと違う
-            if plan is None and key is not None:
-                DRY_RUNS.drop(key)
-        we: Mapping[str, Any] | None = None
-        if plan is None:
-            try:
-                we = await features.rename(handle, ctx.path, name_pos, args.new_name)
-            except TimeoutError:
-                raise LuciankeError(
-                    ErrorCode.E_TIMEOUT,
-                    "the language server did not answer rename in time",
-                    details={"reason": "lsp_rename_timeout", "path": str(ctx.path)},
-                ) from None
-            plan = await plan_from_workspace_edit(
-                ws, we, encoding=encoding, documents=handle.documents, target_urns=target_urns
-            )
+        plan = await plan_from_workspace_edit(
+            ws, we, encoding=encoding, documents=handle.documents, target_urns=(str(ctx.symbol.urn),)
+        )
         await asyncio.to_thread(_ensure_unmodified_since, ws, plan.touched_paths, started_ns)
         if not plan.hunks:
             raise LuciankeError(
@@ -586,8 +625,6 @@ def _rename_builder(
                 )
             sources[path] = data
         await asyncio.to_thread(_analyse, ws, plan, sources, seen, ctx, name_pos)
-        if key is not None and we is not None and version is not None:
-            DRY_RUNS.put(key, _DryRun(version, dict(plan.resolved_shas), we))
         return plan
 
     return build
@@ -796,10 +833,23 @@ async def handler(ctx: ToolContext, args: RenameSymbolArgs) -> ToolOutput:
             seen.warnings.clear()
             return await _run_degraded(svc, ws, args, target, seen, "structural", exc)
         raise
+    version = _data_version(svc, ws) if args.dry_run and args.revision == WORKING_TREE else None
+    key = _dry_run_key(handle, ws, args) if version is not None else None
+    hit = DRY_RUNS.get(key) if key is not None else None
+    if hit is not None:
+        if (
+            hit.version == version
+            and await asyncio.to_thread(_unchanged, ws, hit.shas)
+            and await asyncio.to_thread(
+                _docs_still_valid, ws, hit.open_docs, _open_docs(handle), hit.seen.old_name
+            )
+        ):
+            return _build_output(svc, args, hit.result, copy.deepcopy(hit.seen))
+        DRY_RUNS.drop(key)  # type: ignore[arg-type]
     tx = _transaction(svc, ws, handle)
     run: Callable[..., Any] = tx.run
     result: EditResult = await run(
-        _rename_builder(ws, handle, target, args, seen, _data_version(svc, ws)),
+        _rename_builder(ws, handle, target, args, seen),
         target=target,
         dry_run=args.dry_run,
         allow_heuristic_mutation=args.allow_heuristic_mutation,
@@ -807,6 +857,9 @@ async def handler(ctx: ToolContext, args: RenameSymbolArgs) -> ToolOutput:
         diagnostics_wait_ms=args.diagnostics_wait_ms,
         revision=args.revision,
     )
+    if key is not None and version is not None and not result.applied:
+        shas = {c.path: c.sha256_before for c in result.files_changed}
+        DRY_RUNS.put(key, _DryRun(version, shas, _open_docs(handle), result, copy.deepcopy(seen)))
     return _build_output(svc, args, result, seen)
 
 

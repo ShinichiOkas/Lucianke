@@ -1,8 +1,9 @@
-"""T-11 ``rename_symbol`` の dry_run の答えを覚える（BUG-0128 の残り。``t11_rename_symbol.DRY_RUNS``）。
+"""T-11 ``rename_symbol`` の dry_run の結果を覚える（BUG-0128 の残り。``t11_rename_symbol.DRY_RUNS``）。
 
-同じ LSP の起動・同じ対象・同じ新しい名前の dry_run は、索引の版（``data_version``）が同じで、編集するファイルの内容が覚えたときと
-同じなら、LSP に rename を聞き直さずに同じ編集を返す。書き込む呼び出し（``dry_run=false``）はいつも LSP に聞く。
-偽 LSP（``test_T11_rename.py`` の ``StubClient``）で、送った要求の数を数えて確かめる。
+同じ LSP の起動・同じ対象・同じ新しい名前（同じ引数）の dry_run は、索引の版（``data_version``）・編集するファイルの内容・LSP が
+開いている文書が覚えたときと同じなら、LSP に rename を聞き直さず、書き換えた後の内容も解析し直さずに同じ結果を返す。
+書き込む呼び出し（``dry_run=false``）はいつも LSP に聞く。偽 LSP（``test_T11_rename.py`` の ``StubClient``）で、送った要求の数を
+数えて確かめる。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from _t11_harness import (
     PAY,
     PROCESS_CHARGE,
     ROUTES,
+    TESTS,
     U,
     index_writer_fixture,  # noqa: F401  (フィクスチャ index_writer)
     snapshot,
@@ -82,6 +84,21 @@ async def test_a_new_index_version_or_changed_content_asks_the_lsp_again(stub, m
     r = await rig.rename(target, "charge_order", dry_run=True)
     assert not r.is_error, r.text
     assert _renames(rig) == 3
+    assert not (await rig.rename(target, "charge_order", dry_run=True)).is_error
+    assert _renames(rig) == 3  # 聞き直した結果を覚え直した
+
+    # 名前を含まない文書を LSP が新しく開いても答えは変わらない（別の対象の呼び出しが開いたファイルなど）
+    limits = "src/shop/services/limits.py"
+    rig.handle.documents.did_open(t11.RelPath(limits), (rig.root / limits).read_text(encoding="utf-8"), "python")
+    assert not (await rig.rename(target, "charge_order", dry_run=True)).is_error
+    assert _renames(rig) == 3
+    # 名前を含む文書を新しく開いた（ほかのツールが別のプロジェクトのファイルを開かせた）・開いていた文書を閉じたら聞き直す
+    rig.handle.documents.did_open(t11.RelPath(TESTS), (rig.root / TESTS).read_text(encoding="utf-8"), "python")
+    assert not (await rig.rename(target, "charge_order", dry_run=True)).is_error
+    assert _renames(rig) == 4
+    rig.handle.documents.did_close(t11.RelPath(limits))
+    assert not (await rig.rename(target, "charge_order", dry_run=True)).is_error
+    assert _renames(rig) == 5
 
 
 async def test_a_real_rename_always_asks_the_lsp(stub, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
