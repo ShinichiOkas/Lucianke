@@ -648,6 +648,23 @@ async def test_postcondition_3_code_action_ids_are_issued_and_resolvable(
     assert [a["id"] for d in diags_of(again) for a in d["code_actions"]] == ids
 
 
+async def test_quickfixes_are_not_asked_again_for_the_same_content(
+    indexed: tuple[Path, Path], lsp: LspEnv
+) -> None:
+    """同じ内容の同じ診断の QuickFix は問い合わせ直さない（BUG-0058）。LSP は codeAction に 2.5 秒かけて答えるので、問い合わせた
+    呼び出しは 2.5 秒以上かかり、覚えた答えを使う 2 回目はそれより速い。ID は同じ。"""
+    pool = lsp.pool(extra=("--action-delay", "2.5"))
+    await ready(pool, lsp.ws())
+    store = CodeActionStore()
+    pipe = make_pipeline(indexed, pool=pool, store=store)
+    first = await call(pipe, paths=[UNI], min_severity="hint")
+    ids = [a["id"] for d in diags_of(first) for a in d["code_actions"]]
+    assert ids and first.structured["timing_ms"] >= 2500
+    again = await call(pipe, paths=[UNI], min_severity="hint")
+    assert [a["id"] for d in diags_of(again) for a in d["code_actions"]] == ids
+    assert again.structured["timing_ms"] < 2500
+
+
 async def test_include_code_actions_false_issues_nothing(indexed: tuple[Path, Path], lsp: LspEnv) -> None:
     pool = lsp.pool()
     await ready(pool, lsp.ws())
@@ -729,7 +746,8 @@ async def test_budget_is_respected_and_pages_continue(indexed: tuple[Path, Path]
     assert "# summary:" in r.text and "# more: cursor=" in r.text
     shown = sum(1 for ln in r.text.splitlines() if ln.startswith("E "))
     assert 0 < shown < 60
-    j = await call(pipe, paths=[MANY], max_tokens=800, include_code_actions=False)  # json は封筒と data の全項目も数える（BUG-0017）
+    # json は封筒と data の全項目も数える（BUG-0017）
+    j = await call(pipe, paths=[MANY], max_tokens=800, include_code_actions=False)
     assert j.structured["budget"]["used_tokens_est"] <= 800
     assert j.structured["page"]["next_cursor"] and j.structured["page"]["total_estimate"] == 60
     assert j.structured["data"]["summary"]["by_severity"]["error"] == 60  # 切り詰め前の総数
@@ -755,7 +773,8 @@ async def test_budget_is_respected_and_pages_continue(indexed: tuple[Path, Path]
         ({"paths": [BROKEN] * 51}, "E_INVALID_ARGUMENT"),
         ({"min_severity": "fatal"}, "E_INVALID_ARGUMENT"),
         ({"paths": ["src/shop/nope.py"]}, "E_TARGET_NOT_FOUND"),
-        ({"revision": "HEAD"}, "E_REVISION_NOT_FOUND"),  # フィクスチャは Git のワーキングコピーではない（BUG-0018）
+        # フィクスチャは Git のワーキングコピーではない（BUG-0018）
+        ({"revision": "HEAD"}, "E_REVISION_NOT_FOUND"),
     ],
 )
 async def test_errors(indexed: tuple[Path, Path], args: dict[str, Any], code: str) -> None:
@@ -953,7 +972,6 @@ async def test_real_ruff_ready_with_types_lsp_unavailable(indexed: tuple[Path, P
         await registry.terminate_all(500, close=True)
 
 
-
 # ``LspPool`` の ``ready_fallback_s`` の既定（BUG-0050 の退行はこの秒数まで ruff の診断を返せない）
 _DEFAULT_READY_FALLBACK_S = inspect.signature(LspPool.__init__).parameters["ready_fallback_s"].default
 
@@ -981,7 +999,9 @@ async def test_real_ruff_answers_within_one_second_of_start_with_types_lsp_down(
         await call(pipe, paths=[LINTY], min_severity="hint")  # 起動の契機（この呼び出し自体は降格でよい）
         got: list[dict[str, Any]] = []
         r: Any = None
-        limit_s = _DEFAULT_READY_FALLBACK_S / 2  # 退行（ready_fallback_s まで待つ）なら必ず超える。負荷では揺れない
+        limit_s = (
+            _DEFAULT_READY_FALLBACK_S / 2
+        )  # 退行（ready_fallback_s まで待つ）なら必ず超える。負荷では揺れない
         while time.perf_counter() - t0 < limit_s:
             r = await call(pipe, paths=[LINTY], min_severity="hint")
             got = diags_of(r)

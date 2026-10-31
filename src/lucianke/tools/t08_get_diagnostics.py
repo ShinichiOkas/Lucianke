@@ -37,8 +37,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -86,6 +88,53 @@ PATHS_MAX = 50
 STALE_CHECK_MAX_FILES = 200
 CODE_ACTION_BUDGET_MS = 3000  # 仕様書 T-08 の E_TIMEOUT: include_code_actions の問い合わせの合計
 CODE_ACTION_CONCURRENCY = 8
+_QUICKFIX_CACHE_MAX = 4096
+
+
+class _QuickFixCache:
+    """``(サーバー, 起動, ファイル, 内容の sha256, 診断)`` → LSP が返した QuickFix（``CodeAction`` の dict の並び）。LRU（BUG-0058）。
+
+    QuickFix は文書の内容と診断だけで決まるので、同じ内容の同じ診断には問い合わせ直さない。以前は ``get_diagnostics`` の
+    呼び出しのたびに、問題のある文書の全診断について LSP に問い合わせており、内容の変わらない文書（ky の ``test/hooks.ts``）でも
+    呼び出しのたびに 0.7〜2.4 秒かかっていた。LSP が起動し直したら（``started_at`` が変わる）前の答えは使わない。
+    """
+
+    def __init__(self) -> None:
+        self._data: OrderedDict[tuple[str, ...], tuple[Mapping[str, Any], ...]] = OrderedDict()
+
+    def get(self, key: tuple[str, ...]) -> tuple[Mapping[str, Any], ...] | None:
+        value = self._data.get(key)
+        if value is not None:
+            self._data.move_to_end(key)
+        return value
+
+    def put(self, key: tuple[str, ...], actions: tuple[Mapping[str, Any], ...]) -> None:
+        self._data[key] = actions
+        self._data.move_to_end(key)
+        while len(self._data) > _QUICKFIX_CACHE_MAX:
+            self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        self._data.clear()
+
+
+QUICKFIXES = _QuickFixCache()
+
+
+def _quickfix_key(d: _Diag) -> tuple[str, ...] | None:
+    """覚える鍵。起動の時刻（``LspHandle.started_at``）の無いハンドル（起動前・試験の作り物）は覚えない。"""
+    handle = d.handle
+    started = getattr(handle, "started_at", None)
+    if handle is None or not isinstance(started, str) or d.raw is None or not d.sha256:
+        return None
+    try:
+        diag = json.dumps(d.raw, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return None
+    server = handle.server_name or handle.language_id
+    return (str(server), str(id(handle)), started, d.path, d.sha256, diag)
+
+
 CODE_ACTION_MAX_DIAGS = 100  # 1 回の呼び出しで QuickFix を問い合わせる診断の数（並びの先頭から）
 MAX_LSP_FILES = (
     LSP_OPEN_DOCS_MAX // 2
@@ -567,10 +616,17 @@ async def _attach_code_actions(diags: list[_Diag], store: Any, warnings: list[st
 
     async def one(d: _Diag) -> None:
         assert d.handle is not None and d.internal_range is not None and d.raw is not None
-        async with sem:
-            actions = await features.code_actions(
-                d.handle, RelPath(d.path), d.internal_range, only=["quickfix"], diagnostics=[d.raw]
-            )
+        key = _quickfix_key(d)
+        cached = QUICKFIXES.get(key) if key is not None else None
+        if cached is not None:
+            actions: Sequence[Any] = cached
+        else:
+            async with sem:
+                actions = await features.code_actions(
+                    d.handle, RelPath(d.path), d.internal_range, only=["quickfix"], diagnostics=[d.raw]
+                )
+            if key is not None:
+                QUICKFIXES.put(key, tuple(a for a in actions if isinstance(a, Mapping)))
         for action in actions:
             if not isinstance(action, Mapping) or not action.get("title"):
                 continue
