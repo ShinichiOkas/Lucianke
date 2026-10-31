@@ -341,6 +341,7 @@ Lucianke/
 │  ├─ engine/
 │  │  ├─ selector.py         #   EngineSelector（ADR-10）、警告文の雛形
 │  │  ├─ indexer.py          #   Indexer: 走査・解析（スレッド）・バッチ化・背景ジョブ・_settle_relations。DB への書き込みは index/ingest.py へ渡す（§7.6.2。実装で確定 2026-10-29）
+│  │  ├─ analysis_pool.py    #   走査の解析の子プロセス（spawn。解析の要るファイルが多い走査だけ。§6.1。BUG-0127）
 │  │  ├─ reresolve.py        #   後から作られた・消えたファイルを import している側の relations を解き直す（_import_probes。§7.6.2。BUG-0025）
 │  │  └─ rank_scheduler.py   #   PageRank の再計算のデバウンス（最後の更新の約 1 秒後に 1 回。§7.6.2）
 │  │
@@ -401,7 +402,7 @@ app / lifecycle ─► すべて（合成ルート）
 | `workspace/paths.py` | 相対化・正規化・実体解決・ルート配下検査。失敗は `E_INVALID_ARGUMENT` | ファイルの読み書き |
 | `syntax/symbols.py` | 構文木 → `SymbolRecord`。修飾名・種別・範囲・選択範囲・修飾子・doc 要約・`body_sha256` | DB 書き込み |
 | `index/ingest.py` | `FileFacts` を受けて 1 ファイルの差分取り込みを（呼び手が開いた）トランザクションの中で。`ingest_file` / `remove_file` / `upsert_workspace` / `upsert_exact_relations` / `replace_lsp_diagnostics`。`data_version` は `IndexWriter` が進める | 構文解析、走査 |
-| `engine/indexer.py` | ワークスペースの走査（`.gitignore` と `exclude_globs`）、1 ファイルの解析（`syntax`）→ `FileFacts`、バッチ化（`INGEST_BATCH_FILES` = 50）、背景ジョブ（T-00 `reindex`）、取り込み後の `_settle_relations`、import 元の解き直し（`reresolve.py`）、PageRank の再計算（`rank_scheduler.py`） | DB の SQL（`ingest.py` と `IndexWriter` に任せる） |
+| `engine/indexer.py` | ワークスペースの走査（`.gitignore` と `exclude_globs`）、1 ファイルの解析（`syntax`）→ `FileFacts`（走査では子プロセスにも並べる。`engine/analysis_pool.py`。§6.1）、バッチ化（`INGEST_BATCH_FILES` = 50）、背景ジョブ（T-00 `reindex`）、取り込み後の `_settle_relations`、import 元の解き直し（`reresolve.py`）、PageRank の再計算（`rank_scheduler.py`） | DB の SQL（`ingest.py` と `IndexWriter` に任せる） |
 | `lsp/pool.py` | 状態機械・再起動・バックオフ・待機解放 | 要求の意味 |
 | `lsp/features.py` | 各要求の呼び出し、結果の `SymbolRecord` / `relations` 化、PaaD への書き込み要求 | 直列化形式 |
 | `edit/transaction.py` | 8 段の順序と失敗時の不変条件 | hunk の内容 |
@@ -518,18 +519,19 @@ class LuciankeError(Exception):
 | メインスレッド / asyncio ループ | 1 | MCP の読み書き、ツールの非同期ハンドラ、LSP クライアントの I/O、監視イベントの受け取り | ブロックする処理を置かない（MUST） |
 | 読み取り用スレッドプール | 既定 8 | SQLite 読み取り、Tree-sitter 解析（`read_callback` 方式。ADR-13）、ファイル読み込み、ハッシュ計算 | `asyncio.to_thread`。Tree-sitter 解析と ast-grep の照合は GIL を握るので、プールでも**並列化しない**（直列比 0.80〜0.98 倍。S-2・S-3 で確認） |
 | `IndexWriter` スレッド | 1 | SQLite の全書き込み | ジョブキュー。1 ジョブ = 1 トランザクション |
+| 走査の解析の子プロセス（`engine/analysis_pool.py`） | 走査の間だけ。既定は論理 CPU の半分（最大 8） | 索引の走査のファイルの解析（`Indexer._analyze_sync`: 構文解析・シンボル・関係の抽出。DB に触れない） | `spawn` の `ProcessPoolExecutor`。解析の要るファイルが `POOL_MIN_FILES`（64）を超えた走査だけ起こし、走査の終わりに畳む。`LUCIANKE_INDEX_WORKERS` で数を変える（0 で使わない）。BUG-0127 |
 | 編集用の直列区間 | ワークスペースごとに 1 | `EditTransaction` の段 3〜7 | `asyncio.Lock`。待ち上限 5,000 ms |
 | 子プロセス | 言語 × ワークスペースごと | LSP | 標準入出力をパイプで非同期に読む |
 
 - CPU を使う処理（解析・ハッシュ・大きな JSON 生成）はループ上で行わない。p95 を守る鍵は「ループを空けること」である。ただし Tree-sitter の `parse(bytes)` は、スレッドで走らせても解析の全体にわたって GIL を握ってループを止める（5 MB で約 750 ms）。このため解析は常に `read_callback` 方式（16 KiB 刻み）で行い、ループの停止を最長約 20 ms に抑える（ADR-13。S-2 で確認）。
 - **前景の優先**（`core/foreground.py`、BUG-0112。実装で確定 2026-10-31）: 索引の取り込みは CPU を使う Python のコードで GIL を握る。同じプロセスのツールの呼び出しが小さな I/O（`stat`・SQLite の 1 文・Git の状態）を重ねると、I/O のたびに GIL を取り戻すのに切り替え間隔ずつ待たされ（convoy）、大きなワークスペースの初回の索引の間 `configure_workspace status` が 1〜4 秒から 2 分以上に延びていた。パイプラインはツールの呼び出しを `FOREGROUND.active()` で囲み、背景の索引（走査のタスクと、そこから `asyncio.to_thread` で起こした解析のスレッド。`background()` の印が文脈で伝わる）は区切りごと（ファイルの解析の前・解析の 16 KiB の塊ごと・抽出の繰り返しの 1 回ごと・整えのジョブの間・PageRank の反復ごと）に、呼び出しが始まってから `PRIORITY_WINDOW_S`（10 秒）の間は短く眠って譲る（解析の期限は眠った分だけ延ばす）。1 回に譲るのは `MAX_YIELD_S`（2 秒）までで、前景が続いていれば背景は `RUN_SLICE_S`（0.1 秒）進んでからまた譲る（呼ぶ側が絶え間なく呼び続けても索引は止まらない）。書き手スレッドのジョブの中では譲らない（前景の書き込みがそのジョブの後ろで待っているかもしれない）ので、背景の書き込みは短いジョブに割る。窓を過ぎた呼び出し（LSP を待つ T-06 など）では止めない。印の無い文脈（ツールが同じ抽出の関数を前景で呼ぶ）では何もしない。
-- 初回索引（数千ファイル）はプールのスレッドで解析し（GIL のため並列化はしない。S-2 で確認）、書き込みはキューで直列化する。**初回索引が重く時間がかかることは許容する**（師匠 2026-10-29。仕様書 §14.4）。索引中もツールは降格応答で答え続ける設計（ADR-6、§7.8）であり、初回の所要を縮める工夫（プロセスプール、`lucianke index` の事前実行）は M1 では必須にしない（別プロセスなら 4 本で約 4 倍に伸びる。S-2 で確認）。
+- 初回索引（数千ファイル）は、解析の要るファイルが `POOL_MIN_FILES`（64）を超えたら残りを**子プロセスに並べて解析し**（`engine/analysis_pool.py`。スレッドでは GIL のため並列化しない。S-2 で確認）、書き込みはキューで直列化する（実装で確定 2026-10-31、BUG-0127）。子は `Indexer.for_analysis(ws)`（書き手・読み手を持たない解析だけの索引器）で `_analyze_sync(rel, loaded)` を走らせ、`_Prepared`（`FileFacts`）を pickle で返す。親は読み込み（`sha256` の照合）を自分で済ませてから子に渡し、結果は**列挙の順に**受け取って 50 ファイルのバッチに積む（`file_id` の振り方・バッチの切れ目・取り込みの順は同じプロセスで解析したときと同じで、索引は行ごとに同じ）。子 1 つあたり 8 ファイルまで先に渡す。ctags の外形（Tier 4）は子が `None` を返し、親がイベントループで作る。子が落ちた（`BrokenProcessPool`）・起こせない・結果を渡せないときは、そのファイルから同じプロセスで解析する。小さな差分の走査は子を起こさない（Windows で起こすのに 1〜2 秒）。子の標準出力は `bootstrap_io` が fd 1 を stderr に重ねた後に起こすので stderr に行く（ADR-3）。exe は `__main__` の `freeze_support` が子の起動（`--multiprocessing-fork`）を受ける。理由: 4,000 ファイル級（Mnemo 4,222 ファイル）で初回の索引が 213〜350 秒かかり、呼ぶ側の時間の上限（120 秒）を超えていた。解析は単独で 125 秒、書き込みは単独で 57〜82 秒かかり、同じプロセスで重ねると書き手が SQLite の文ごとに GIL を取り戻すのを待たされて（convoy）、順に流すより遅かった（246 秒）。子に分けると親の GIL を握るのは書き手と結果の受け取りだけになる。索引中もツールは降格応答で答え続ける（ADR-6、§7.8）。
 
 ## 6.2 SQLite 接続（ADR-7）
 
 | 接続 | 開き方 | 使い手 | 備考 |
 |---|---|---|---|
-| 書き込み | 通常。`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000` | `IndexWriter` のみ | 起動時にスキーマ版を確認・移行 |
+| 書き込み | 通常。`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000`、`cache_size=-131072`（128 MiB。BUG-0127） | `IndexWriter` のみ | 起動時にスキーマ版を確認・移行 |
 | 読み取りプール | 同じファイルを `mode=ro` の URI で開き、`PRAGMA query_only=ON` を設定する（読み取り側が誤って書けない構造にする。実装で確定 2026-10-29。旧版は「通常モードで開き、アプリ側で書き込み文を発行しない」）。`busy_timeout=1000` | ツール、`EngineSelector`、`EditTransaction` の読み | プールから借りて返す。スレッド境界を越えて保持しない |
 | 公開クエリ | `file:...?mode=ro` の URI、`PRAGMA query_only=ON`、`set_authorizer`、`set_progress_handler`、行数上限 | `query_project_db` | 失敗が他接続に波及しないよう独立。1 要求 1 接続で足りる（`open_public` + 1 クエリ + `close` が p50 1.3 ms、書き手が連続コミット中でも p95 約 10 ms。S-7 で確認）。`isolation_level=None`（自動コミット）で開き、読み取りトランザクションを持ち越さない（`wal_checkpoint(TRUNCATE)` を妨げる） |
 
@@ -1093,7 +1095,7 @@ class LspHandle:   # 状態の読み取りと、機能呼び出しが使う clie
 
 | 状態 | 入る契機 | 動作 | 出る契機 |
 |---|---|---|---|
-| `standby` | 初期状態。30 分無要求（MAY） | 何もしない | 当該言語への最初の要求 → `starting` |
+| `standby` | 初期状態。30 分無要求（MAY） | 何もしない | 当該言語への最初の要求 → `starting`。索引の走査の列挙が `EAGER_LSP_MIN_FILES`（200）以上なら、型サーバーのある言語のうちファイルの最も多い 1 言語の `types` の役は列挙の直後に `starting`（`tools/_runtime.warm_type_server`。`Indexer.on_listed` が列挙を渡す。BUG-0127） |
 | `starting` | 要求 | コマンド探索 → `ProcessRegistry.spawn` → `initialize` / `initialized` を送る。要求元には降格応答（待たない） | `initialize` 成功 → `indexing`。失敗 → 再試行判定 |
 | `indexing` | 初期化直後 | `$/progress` / `window/workDoneProgress` を `progress` に反映。取れないサーバーは最初の `publishDiagnostics` 受信で `ready`（basedpyright は単一文書では `$/progress` を出さない。`ready` は「`initialize` 応答後、最初に開いた文書の実診断を受信」または「`$/progress end`」の早い方。S-4 で確認） | 進捗完了 → `ready` |
 | `ready` | 索引完了 | 要求を通す | クラッシュ / 無応答（連続 3 回のタイムアウト）→ 再試行判定。壊れ方の印（`record_broken`）→ `starting`（`reason: restarting`）。`reset` → `standby` |
@@ -1258,7 +1260,7 @@ class IndexWriter:
 ```
 
 1. 専用スレッドがキューから取り、`BEGIN IMMEDIATE` → `fn(conn)` → `bumps_version` なら `UPDATE _meta SET data_version = data_version + 1` → `COMMIT`。例外は `ROLLBACK` し、`label` 付きでログ、`Future` に例外を載せる。半更新の状態は読み手に見えない（MUST）。
-2. 接続は書き込み専用の 1 本（`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000`）。
+2. 接続は書き込み専用の 1 本（`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000`、`cache_size=-131072`）。ページキャッシュの上限（`WRITER_CACHE_KIB` = 128 MiB）は、長い URN の索引（`symbols` の `urn`・`name`、`relations` の `target_urn`）へばらばらの位置に差し込む初回の索引のため。既定の 2 MiB ではページの読み直しが続き、4,222 ファイルの書き込みが 61〜82 秒 → 38〜42 秒（上限なので、小さな DB では使った分しか取らない。実装で確定 2026-10-31、BUG-0127）。取り込み（`ingest_file`）は文の数も減らす: シンボルの INSERT と、そのシンボルを先に指していた行の `target_file_id` の UPDATE は `executemany`、関係の目標の持ち主の `file_id` と外部シンボルの行の有無は `IN (…)` でファイルごとに 1 文で引く（以前はシンボル・目標ごとに 1 文ずつ、初回の索引で約 40 万文。合わせて 25〜27 秒）。
 3. チェックポイントは、キューが空になり前回から 1,000 コミット以上たったとき `PASSIVE`、終了時に `TRUNCATE`。
 4. 起動時の差分索引では、1 トランザクションに最大 50 ファイルをまとめ、`data_version` はトランザクションごとに 1 回だけ進める。
 
@@ -1318,7 +1320,7 @@ def replace_lsp_diagnostics(conn, …)                                   # (file
 - **Tier 3**: `FormatAdapter` は既定ではシンボルを返さず `files` 行だけを作る（`confidence = lexical_fallback`）。`symbols(source, *, rel, workspace_id)` が非空を返すアダプタ（JSON / YAML / TOML / XML。最上位の節だけ。§7.4.1）はそのシンボルも入れる（持てば `structural`）。
 - 秘密ファイル・バイナリ・`MAX_FILE_BYTES` 超過・タグクエリの無い言語は、`files` 行だけ（本文は解析しない）か Tier 4 の `heuristic.outline` に回す。
 
-並列度: 解析はスレッドプール（`READER_POOL_SIZE`=8 と同じ数）で行うが、Tree-sitter の解析は GIL を握るため並列化しない（ADR-13。S-2 で確認）。書き込みはキューで直列。バースト（`WATCH_BURST_FILES` 超）と起動時は `rescan` に切り替える。
+並列度: 1 ファイルの解析（監視・先取り・編集）はスレッドプール（`READER_POOL_SIZE`=8 と同じ数）で行うが、Tree-sitter の解析は GIL を握るため並列化しない（ADR-13。S-2 で確認）。走査は解析の要るファイルが 64 を超えたら残りを子プロセスに並べる（§6.1。BUG-0127）。書き込みはキューで直列。バースト（`WATCH_BURST_FILES` 超）と起動時は `rescan` に切り替える。
 
 受入で確かめる点:
 
@@ -1948,7 +1950,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 |---|---|
 | 既定 | `config.Settings` の既定値（`core/limits.py` の定数を参照） |
 | `.lucianke.toml` | ルート直下。`settings_file.py` が読む。書かない。キー: `exclude_globs`, `python_interpreter`, `lsp.<lang>.cmd`, `test_globs`, `co_change_window`, `max_file_bytes` |
-| 環境変数 | `LUCIANKE_CACHE_DIR`, `LUCIANKE_LOG_LEVEL`, `LUCIANKE_LSP_<LANG>_CMD`, `LUCIANKE_DISABLE_LSP`, `LUCIANKE_MAX_FILE_BYTES` |
+| 環境変数 | `LUCIANKE_CACHE_DIR`, `LUCIANKE_LOG_LEVEL`, `LUCIANKE_INDEX_WORKERS`（走査の解析の子プロセスの数。`engine/analysis_pool.default_workers` が読む）, `LUCIANKE_LSP_<LANG>_CMD`, `LUCIANKE_DISABLE_LSP`, `LUCIANKE_MAX_FILE_BYTES` |
 | ツール | `configure_workspace` の設定は `workspaces` 行に保存し、次回起動でも使う |
 
 優先順位: ツール > 環境変数 > `.lucianke.toml` > 既定（仕様書 §12.7）。`Settings` は不変で、変更は `WorkspaceContext` が新しい `Settings` を作って差し替える。
@@ -2177,7 +2179,7 @@ build-backend = "hatchling.build"
 | R-3 | 更新が止まった Tree-sitter 文法が 0.26 と合わない | S-2 不合格 | 版の固定、個別再ビルド、または当該言語を `structural` 不可の Tier 4 扱いに一時格下げ | **解消**（S-2: 読めない文法は無かった。18 言語すべて読み込み・クエリ可） |
 | R-4 | LSP サーバーごとの差（位置単位、`publishDiagnostics` の `version` 無し、`callHierarchy` 未対応） | e2e で位置ずれ・診断待ちのタイムアウト | `servers.py` にサーバー別の癖を集約。`FakeLsp` の録画で回帰を固定 | **縮小**（S-4・S-5・S-11: 位置単位は 4 サーバーで実測し `LineIndex` が全件一致。`version` が無い・古い診断を返すサーバー〔tsls・vtsls〕は §7.5.5 の規則で吸収。`callHierarchy` は basedpyright・tsls・vtsls で通る。残り: rust-analyzer・gopls・clangd の単位と診断は未測定） |
 | R-5 | Windows での共有違反・改行・大文字小文字 | EP-6 / EP-9 が Windows でだけ落ちる | CI を 3 OS で回す。`writer.py` の再試行とロールバック | **縮小**（S-10: 失敗は winerror 5・32 で確実に検知でき target は無傷。310 ms の再試行で 200 ms までの保持に勝てる。3 OS の CI は継続） |
-| R-6 | GIL により初回索引が遅い | 1 万ファイルの索引に分単位 | 許容する方針（師匠 2026-10-29）。索引中も降格応答で答え続けることと、`configure_workspace status` の進捗表示を優先する。プロセスプールや `lucianke index` の事前実行は、利用者が困ったときの手段として M2 以降（別プロセス 4 本で約 4 倍に伸びる。S-2） | 継続（S-2: スレッドプールは並列化しない） |
+| R-6 | GIL により初回索引が遅い | 1 万ファイルの索引に分単位 | 索引中も降格応答で答え続けることと、`configure_workspace status` の進捗表示を優先する。走査の解析を子プロセスに並べ、書き手のページキャッシュと取り込みのまとめ書きで書き込みを縮めた（§6.1・§7.6.1。BUG-0127。4,222 ファイルで索引のジョブの完了 350 → 57〜62 秒、型サーバーの準備 371 → 62 秒）。`lucianke index` の事前実行は M2 以降 | 軽減（BUG-0127） |
 | R-7 | `dulwich` の性能 | S-8 不合格 | OD-20: M2 の履歴は (a) ＋ 履歴専用の `git` 子プロセス（決定済み） | **縮小**（S-8: M1 の用途は dulwich で合格〔1〜5 ms〕。M2 の履歴〔`log --follow`〕は F-PY 規模で `Walker` が不合格のため、OD-20 を「M1 は (a)、M2 の履歴は (a) ＋ 履歴専用の `git` 子プロセス〔読み取り専用〕」に**決定**〔師匠 2026-10-29「推奨: 読み取り専用で使うことを認る」〕。(b) pygit2 は採らない。残り: 子プロセスの経路は M2 着手時に実装し、F-PY で p95 を測る） |
 | R-8 | ライセンスの許可リスト外が依存木に紛れ込む | CI の license ジョブが赤 | L-8 の検査を必須ジョブに。extras ごとに検査 | 継続 |
 | R-9 | 仕様書と設計の乖離 | 契約テストが仕様書の番号と合わない | 事後条件 → テスト名の対応を機械的に検査（§10.2） | 継続 |

@@ -619,3 +619,65 @@ async def test_edit_transaction_before_the_first_sync_is_retryable_not_unsupport
         svc.edit_transaction(ws)
     assert excinfo2.value.code is ErrorCode.E_UNSUPPORTED
     assert excinfo2.value.details["reason"] == "index_not_open" and excinfo2.value.details["open_error"] == "OSError: disk full"
+
+
+class _WarmPool:
+    """``warm_type_server`` が使う ``LspPool`` の 2 つの口（``status`` / ``get``）だけの偽物。Python と TS に型サーバーがある。"""
+
+    def __init__(self) -> None:
+        self.started: list[tuple[str, str]] = []
+
+    def status(self, language: str, ws: Any, role: str = "types") -> Any:
+        from lucianke.core.model import LspStatus
+        from lucianke.lsp.pool import PoolStatus
+
+        known = language in ("python", "typescript")
+        return PoolStatus(LspStatus.STANDBY if known else LspStatus.NOT_APPLICABLE, None, None, None, None)
+
+    def get(self, language: str, ws: Any, *, role: str = "types", start_if_needed: bool = True) -> None:
+        self.started.append((language, role))
+
+
+def test_a_large_listing_warms_the_type_server_of_the_main_language(project: Path) -> None:
+    """BUG-0127: 列挙が ``EAGER_LSP_MIN_FILES`` 以上なら、型サーバーのある言語のうちファイルの最も多いものの型サーバーを起こす
+    （Markdown のように型サーバーの無い言語は飛ばす）。小さな列挙では起こさない（最初の要求で起こす）。"""
+    from lucianke.tools._runtime import EAGER_LSP_MIN_FILES, warm_type_server
+    from lucianke.workspace.types import Workspace
+
+    ws = Workspace(workspace_id="w", root=project.resolve())
+    md = [RelPath(f"docs/d{i}.md") for i in range(EAGER_LSP_MIN_FILES)]
+    py = [RelPath(f"src/m{i}.py") for i in range(40)]
+    ts = [RelPath(f"web/c{i}.ts") for i in range(10)]
+
+    pool = _WarmPool()
+    assert warm_type_server(pool, ws, md + py + ts) == "python"  # type: ignore[arg-type]
+    assert pool.started == [("python", "types")]
+
+    small = _WarmPool()
+    assert warm_type_server(small, ws, (py + ts)[: EAGER_LSP_MIN_FILES - 1]) is None  # type: ignore[arg-type]
+    assert small.started == []
+
+    none = _WarmPool()
+    assert warm_type_server(none, ws, md) is None  # type: ignore[arg-type]
+    assert none.started == []
+
+
+async def test_the_scan_hands_its_listing_to_the_hook(project: Path, tmp_path: Path) -> None:
+    from lucianke.engine.indexer import Indexer
+    from lucianke.index.connection import ReaderPool
+    from lucianke.index.writer import IndexWriter
+    from lucianke.workspace.types import Workspace
+
+    db = tmp_path / "db" / "paad.sqlite"
+    writer = IndexWriter(db)
+    readers = ReaderPool(db, size=1)
+    indexer = Indexer(Workspace(workspace_id="w", root=project.resolve()), writer, readers, TreeCache())
+    seen: list[list[str]] = []
+    indexer.on_listed = lambda listing: seen.append([str(p) for p in listing])
+    try:
+        await indexer.scan()
+    finally:
+        await indexer.aclose()
+        readers.close()
+        writer.close()
+    assert seen == [["pkg/a.py", "pkg/b.py"]]

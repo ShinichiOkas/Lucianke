@@ -18,6 +18,7 @@ import contextlib
 import inspect
 import logging
 import os
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ from lucianke.syntax.parsers import TreeCache
 from lucianke.tools._services import ToolServices
 from lucianke.tools.t00_configure_workspace import load_known_roots, restore_settings
 from lucianke.workspace.context import WorkspaceContext
+from lucianke.workspace.languages import detect
 from lucianke.workspace.types import Workspace
 from lucianke.workspace.watcher import Watcher
 
@@ -46,8 +48,35 @@ WATCHER_STOP_TIMEOUT_S = 2.0
 STARTUP_WAIT_S = 10.0  # roots の待ち上限（5 s）と cwd への退避（8 s）より長く
 
 
+EAGER_LSP_MIN_FILES = 200
+"""走査の列挙がこの数以上のワークスペースでは、型サーバーを最初の要求を待たずに走査と並べて起こす（``warm_type_server``）。"""
+
+
 async def _maybe_await(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
+
+
+def warm_type_server(pool: LspPool, ws: Workspace, listing: Sequence[RelPath]) -> str | None:
+    """大きなワークスペースの走査の列挙を見て、型サーバーのある言語のうちファイルの最も多いものの型サーバー（``types``）を起こす。
+
+    起こすのは投げるだけ（待たない。``standby`` でなければ何もしない）。起こした（起こそうとした）言語を返す。列挙が
+    ``EAGER_LSP_MIN_FILES`` 未満なら何もしない（従来どおり最初の要求で起こす）。BUG-0127: 4,000 ファイル級では索引が済んでから
+    最初の要求で起こすと、型サーバーの準備にさらに 20 秒前後かかり、その間の参照・呼び出し階層は ``structural`` に降格していた。
+    走査（子プロセスの解析）と型サーバー（別プロセス）は別の CPU で並ぶ。
+    """
+    if len(listing) < EAGER_LSP_MIN_FILES:
+        return None
+    counts = Counter(detect(rel, b"").language_id for rel in listing)
+    for language, _n in counts.most_common():
+        if str(pool.status(language, ws, "types").status) == LspStatus.NOT_APPLICABLE.value:
+            continue  # 型サーバーの無い言語（Markdown・JSON など）
+        pool.get(language, ws, role="types")  # standby なら起動を投げる（ready でなければ None。待たない）
+        _log.info(
+            "warming the %s type server alongside the scan (%d files listed)", language, len(listing),
+            extra={"event": "lsp_warm"},
+        )  # fmt: skip
+        return language
+    return None
 
 
 class IndexerSink:
@@ -148,6 +177,9 @@ class WorkspaceRuntime:
         writer = await asyncio.to_thread(IndexWriter, db_path)  # スレッド起動とスキーマの作成・移行
         readers = ReaderPool(db_path)
         indexer = Indexer(ws, writer, readers, trees)
+        if lsp_pool is not None:
+            pool = lsp_pool
+            indexer.on_listed = lambda listing: warm_type_server(pool, indexer.workspace, listing)
         sink = IndexerSink(ws, indexer, readers, lsp_pool)
         watcher = Watcher(ws, sink)
         _log.info(

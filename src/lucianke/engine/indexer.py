@@ -311,6 +311,8 @@ class Indexer:
         self._workers = default_workers() if analysis_workers is None else max(0, analysis_workers)
         self._pool_min_files = pool_min_files
         self.pooled_files = 0  # 最後の走査で子プロセスが解析したファイル数（観測・試験用）
+        self.on_listed: Callable[[Sequence[RelPath]], None] | None = None
+        """走査がファイルを列挙し終えたときに呼ぶ（列挙の結果を渡す。束が型サーバーを走査と並べて起こすのに使う。BUG-0127）。"""
         self._ws_ready = False
         self._ws_lock = asyncio.Lock()
         self._scan_lock = asyncio.Lock()
@@ -551,6 +553,11 @@ class Indexer:
         self.forget_pytest_imports()  # この走査で解析するファイルは、いまの pytest の設定で import を解く（BUG-0082）
         listing, report.gitignore = await asyncio.to_thread(self._walk)
         report.files_seen = len(listing)
+        if self.on_listed is not None:
+            try:
+                self.on_listed(listing)
+            except Exception:  # 付加の仕事（型サーバーを起こす）の失敗で走査を止めない
+                _log.warning("on_listed hook failed", exc_info=True)
         known = await asyncio.to_thread(self._known_files)
         for path in self._ahead:  # 先取りしたまま整えていないファイルは、この走査で取り込み直して整える（BUG-0070）
             known.pop(RelPath(path), None)
