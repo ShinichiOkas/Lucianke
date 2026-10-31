@@ -12,3 +12,6 @@ spikes/**/node_modules/
 spikes/**/.cache/
 bench/.cache/
 bench/dogfood/out/
+
+# 並行の直す役（サブエージェント）の作業ツリー。リポジトリ丸ごとの写しが並ぶので、索引・検索・配布に入れない（2026-10-31）
+.claude/worktrees/
