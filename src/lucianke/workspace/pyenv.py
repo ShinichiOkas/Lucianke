@@ -3,15 +3,20 @@
 検出順（最初に見つかったものを採る）:
 
 1. 明示指定（実行ファイル、または仮想環境ディレクトリ）。実行できなければ ``E_INVALID_ARGUMENT``。
-2. ``<root>/.venv/``（Windows は ``Scripts/python.exe``、POSIX は ``bin/python``）。``uv.lock`` が並んでいれば
-   ``manager="uv"``、``poetry.lock`` が並んでいれば ``"poetry"``、どちらも無ければ ``"venv"``。
-3. ``poetry.lock`` があるが ``.venv`` が無い: M1 では検出だけ記録する（``interpreter=None, manager="poetry"``）。
+2. ワークスペースの仮想環境（``WORKSPACE_VENV_NAMES`` の順。Windows は ``Scripts/python.exe``、POSIX は ``bin/python``）:
+   ``<root>/.venv/`` → ``<root>/venv/`` → ``<root>/env/`` → ``<root>/.env/``。``.venv`` 以外は ``pyvenv.cfg`` があるときだけ
+   （``venv`` は ``python -m venv venv``〈公式チュートリアルの既定〉の名前。``env`` は同名のソース、``.env`` は dotenv のファイルと
+   見分けるため。BUG-0111）。``manager`` は仮想環境の隣に ``uv.lock`` があれば ``"uv"``、``poetry.lock`` があれば ``"poetry"``、
+   どちらも無ければ ``"venv"``。
+3. 環境変数 ``VIRTUAL_ENV``（サーバーを起動した環境）が **ワークスペースの根の中** の仮想環境（``pyvenv.cfg`` とインタプリタがある）を
+   指すとき。根の外（Lucianke 自身の venv など）は見ない。インタプリタの無い 4. より先に見る（見つかったインタプリタを捨てない）。
+4. ``poetry.lock`` があるが仮想環境が無い: M1 では検出だけ記録する（``interpreter=None, manager="poetry"``）。
    Poetry の仮想環境の置き場（``POETRY_VIRTUALENVS_PATH`` など）は見ない。
-4. ``CONDA_PREFIX``（``manager="conda"``）。
-5. PATH 上の ``python``（無ければ ``python3``。``manager="path"``）。
+5. ``CONDA_PREFIX``（``manager="conda"``）。
+6. PATH 上の ``python``（無ければ ``python3``。``manager="path"``）。
 
 M1 では外部コマンドを実行しない。``version`` は ``pyvenv.cfg`` に書かれているときだけ入る。
-``uv`` の管理環境は M1 では ``.venv`` の探索に任せる（``uv python find`` は呼ばない）。
+``uv`` の管理環境は M1 では 2. の探索に任せる（``uv python find`` は呼ばない）。
 
 import の根（``PythonEnv.extra_paths``）: src レイアウトのワークスペースは、``tests/`` などから ``src/`` の下のパッケージを
 import 解決できない（pyright / basedpyright は ``extraPaths`` が無いと根だけを見る）。そこで次を決定的に検出して LSP の
@@ -47,10 +52,12 @@ from lucianke.workspace.types import PythonEnv
 
 __all__ = [
     "PYTEST_CONFIG_NAMES",
+    "WORKSPACE_VENV_NAMES",
     "PytestImports",
     "detect_extra_paths",
     "detect_pytest_imports",
     "detect_python_env",
+    "workspace_venv_dirs",
 ]
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -118,19 +125,77 @@ def detect_python_env(
     return dataclasses.replace(found, extra_paths=detect_extra_paths(root))
 
 
+WORKSPACE_VENV_NAMES: tuple[str, ...] = (".venv", "venv", "env", ".env")
+"""ワークスペースの根の直下で仮想環境として探す名前（この順。``.venv`` 以外は ``pyvenv.cfg`` があるときだけ。BUG-0111）。"""
+
+
+def _has_pyvenv_cfg(venv_dir: str | os.PathLike[str]) -> bool:
+    try:
+        return os.path.isfile(os.path.join(venv_dir, "pyvenv.cfg"))
+    except (OSError, ValueError):
+        return False
+
+
+def workspace_venv_dirs(root: Path | str) -> tuple[Path, ...]:
+    """``root`` の直下の仮想環境らしいディレクトリ（``WORKSPACE_VENV_NAMES`` の順）。インタプリタの有無は見ない。
+
+    ``.venv`` はディレクトリなら採る（今までどおり）。``venv`` / ``env`` / ``.env`` は ``pyvenv.cfg`` のあるディレクトリだけ。
+    LSP の起動コマンドの探索（``lsp/servers.find_command``）も同じ候補を見る（ワークスペースが固定した basedpyright・ruff）。
+    """
+    root = Path(root)
+    out: list[Path] = []
+    for name in WORKSPACE_VENV_NAMES:
+        path = root / name
+        try:
+            if path.is_dir() and (name == ".venv" or _has_pyvenv_cfg(path)):
+                out.append(path)
+        except OSError:
+            continue
+    return tuple(out)
+
+
+def _manager_beside(venv_dir: Path, root: Path) -> str:
+    """仮想環境の隣（親ディレクトリ。無ければ根）の lock ファイルから ``manager`` を決める。"""
+    for base in dict.fromkeys((venv_dir.parent, root)):
+        if (base / "uv.lock").is_file():
+            return "uv"
+        if (base / "poetry.lock").is_file():
+            return "poetry"
+    return "venv"
+
+
+def _inside(path: str, root: Path) -> Path | None:
+    """``path`` が ``root``（含む）の中なら、その絶対パス。外・解けないときは ``None``。"""
+    try:
+        target = Path(os.path.abspath(os.path.expanduser(path)))
+        base = Path(os.path.abspath(root))
+        for t, b in ((target, base), (target.resolve(), base.resolve())):
+            if os.path.normcase(os.path.commonpath([t, b])) == os.path.normcase(str(b)):
+                return t
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def _detect_interpreter(root: Path, explicit: str | None, env: Mapping[str, str]) -> PythonEnv:
     if explicit:
         return _explicit(root, explicit)
 
-    venv = os.path.join(root, ".venv")
-    if interpreter := _venv_python(venv):
-        if (root / "uv.lock").is_file():
-            manager = "uv"
-        elif (root / "poetry.lock").is_file():
-            manager = "poetry"
-        else:
-            manager = "venv"
-        return PythonEnv(interpreter=interpreter, version=_venv_version(venv), manager=manager)
+    for venv in workspace_venv_dirs(root):
+        if interpreter := _venv_python(str(venv)):
+            return PythonEnv(
+                interpreter=interpreter, version=_venv_version(str(venv)), manager=_manager_beside(venv, root)
+            )
+
+    if (
+        (active := env.get("VIRTUAL_ENV"))
+        and (venv := _inside(active, root)) is not None
+        and _has_pyvenv_cfg(venv)
+        and (interpreter := _venv_python(str(venv)))
+    ):
+        return PythonEnv(
+            interpreter=interpreter, version=_venv_version(str(venv)), manager=_manager_beside(venv, root)
+        )
 
     if (root / "poetry.lock").is_file():
         return PythonEnv(interpreter=None, manager="poetry")

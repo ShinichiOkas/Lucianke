@@ -774,7 +774,7 @@ def detect(rel: RelPath, head: bytes) -> Detected:   # Detected(language_id, tie
 
 ### 7.3.4 Python 環境の検出
 
-T-00 手順 3 の順で候補を試し、最初に実行できたものを採る: 明示指定 → `<root>/.venv/`（Windows は `Scripts/python.exe`、他は `bin/python`）→ `uv.lock` があるときの `.venv` → `poetry`（PATH にあれば `poetry env info -p`）→ `CONDA_PREFIX` → PATH 上の `python`。外部コマンドはすべて `ProcessRegistry`（ADR-12）経由、上限 3,000 ms、失敗は次の候補へ。結果 `PythonEnv(interpreter, version, manager)` は `workspaces.python_env` に保存し、Python 系 LSP の初期化（§7.5.1）に渡す。
+T-00 手順 3 の順で候補を試し、最初に実行できたものを採る: 明示指定 → `<root>/.venv/` → `<root>/venv/` → `<root>/env/` → `<root>/.env/`（Windows は `Scripts/python.exe`、他は `bin/python`。`.venv` 以外は `pyvenv.cfg` があるときだけ。`venv` は `python -m venv venv` の既定の名前、`.env` は普通 dotenv のファイルなので `pyvenv.cfg` で見分ける。BUG-0111。`manager` は隣の `uv.lock` → `uv`、`poetry.lock` → `poetry`、無ければ `venv`）→ `VIRTUAL_ENV`（根の中を指すときだけ。根の外は Lucianke 自身の venv でありうる）→ `uv.lock` があるときの `.venv` → `poetry`（PATH にあれば `poetry env info -p`）→ `CONDA_PREFIX` → PATH 上の `python`。外部コマンドはすべて `ProcessRegistry`（ADR-12）経由、上限 3,000 ms、失敗は次の候補へ。結果 `PythonEnv(interpreter, version, manager)` は `workspaces.python_env` に保存し、Python 系 LSP の初期化（§7.5.1）に渡す。
 
 ### 7.3.5 設定の優先順位
 
@@ -1039,7 +1039,7 @@ M1 の定義（Python と TypeScript / JavaScript の起動コマンド・初期
 
 **探索順と tsserver の所在**（S-4・S-5 で確認）:
 
-- サーバー: `LUCIANKE_LSP_<サーバー名>_CMD` → `LUCIANKE_LSP_<LANG>_CMD`（lint は `…_LINT_CMD`）→ `<root>/.venv/Scripts|bin/` → `<root>/node_modules/.bin/` → PATH。探索は自前で行い `shutil.which` は使わない（Windows の `which` はカレントディレクトリを先に見るので、ワークスペース直下に置かれた実行ファイルを掴みかねない。`.exe` / `.cmd` / `.bat` を探し、`create_subprocess_exec` にそのまま渡す）。呼び手が Python 環境〔`venv`〕を渡したときは、その `Scripts|bin` を `.venv` より先に見る。環境変数の値はそのまま argv になる（存在確認はしない。起動に失敗すれば `init_failed`）。TypeScript は tsls → vtsls の順。
+- サーバー: `LUCIANKE_LSP_<サーバー名>_CMD` → `LUCIANKE_LSP_<LANG>_CMD`（lint は `…_LINT_CMD`）→ ワークスペースの仮想環境（`<root>/.venv/`、`pyvenv.cfg` のある `venv/` / `env/` / `.env/`。§7.3.4 と同じ候補・`workspace_venv_dirs`）の `Scripts|bin/` → `<root>/node_modules/.bin/` → PATH。探索は自前で行い `shutil.which` は使わない（Windows の `which` はカレントディレクトリを先に見るので、ワークスペース直下に置かれた実行ファイルを掴みかねない。`.exe` / `.cmd` / `.bat` を探し、`create_subprocess_exec` にそのまま渡す）。呼び手が Python 環境〔`venv`〕を渡したときは、その `Scripts|bin` を `.venv` より先に見る。環境変数の値はそのまま argv になる（存在確認はしない。起動に失敗すれば `init_failed`）。TypeScript は tsls → vtsls の順。
 - tsserver: 明示指定 → `<root>/node_modules/typescript/lib/tsserver.js`（存在確認。TypeScript 7 には無い）→ 無ければ vtsls に切り替える。tsls へは `initializationOptions.tsserver.path`、vtsls へは `workspace/configuration` の応答（`{"vtsls": {"autoUseWorkspaceTsdk": true}}`。返さないと同梱の TypeScript を使う）で渡す。
 
 **サーバーからの要求への返答**（`on_request`。S-4・S-5 で確認）: `workspace/configuration`（basedpyright は section `python` と `basedpyright`、vtsls は section `""`、tsls は `formattingOptions`。MUST。`LspClient.set_settings` に渡した設定木から返す）、`window/workDoneProgress/create`・`client/registerCapability`・`client/unregisterCapability`（`None`）、`workspace/applyEdit`（M1 では適用しない: `{"applied": false}`。書くのは `EditTransaction` だけ。tsls の organizeImports は `only: source.removeUnusedImports.ts` で `edit` つきが返るのでそれを使い、`_typescript.organizeImports` 経由の `applyEdit` は使わない）、未知のメソッドは `-32601`。
@@ -1965,7 +1965,7 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 | 子プロセス | Windows では `CREATE_NEW_PROCESS_GROUP` で起動して Job Object（`KILL_ON_JOB_CLOSE`）に入れ、孫まで落とす。終了は（LSP は `shutdown` → `exit` のあと）`terminate` → `kill`。`CTRL_BREAK_EVENT` は GUI ホスト配下で届かないので当てにしない。POSIX では `start_new_session=True` で起動し、`killpg` の `SIGTERM` → `SIGKILL`（ADR-12） |
 | ファイル監視 | `watchfiles`（Rust 製バックエンド。Windows 対応の記述あり。S-6 で挙動確認）。利用不可ならポーリング（仕様書 §12.4 の 6） |
 | 実行ビット | POSIX のみ保持。Windows では無視 |
-| Python 環境 | `.venv/Scripts/python.exe`（Windows）と `.venv/bin/python`（POSIX）の両方を探索 |
+| Python 環境 | 仮想環境（`.venv` / `venv` / `env` / `.env`）の `Scripts/python.exe`（Windows）と `bin/python`（POSIX）を実行環境の側で探索 |
 | キャッシュ場所 | `%LOCALAPPDATA%\lucianke\cache`、`~/Library/Caches/lucianke`、`~/.cache/lucianke`（`platformdirs` は使わず自前で 3 分岐。依存を増やさない） |
 
 ## 9.6 文字コードとエンコーディング

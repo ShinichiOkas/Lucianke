@@ -1304,7 +1304,7 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 
 1. `status` は登録済みワークスペース、言語ティア別ファイル数、Python 環境、Git 状態、LSP デーモン状態、キャッシュ統計、実行中・完了済みジョブを返す。副作用を持たない（MUST）。
 2. `set_roots` は各パスを正規化して §7.2 の `workspace-id` を割り当て、ルート直下から下方向に `pyproject.toml`, `uv.lock`, `poetry.lock`, `package.json`, `Cargo.toml`, `go.mod`, `.git` を走査してサブプロジェクト境界を記録する。最初に登録したルートをアクティブにする。登録後に初回インデックスを背景ジョブとして起動し、その `job_id` を返す。
-3. Python 環境の自動検出順は `python_interpreter` 明示 > `.venv/` > `uv` の管理環境 > `poetry env` > `conda` 環境 > `PATH` 上の `python` とする。検出結果は `status` の `python_env.manager` に記録する。
+3. Python 環境の自動検出順は `python_interpreter` 明示 > ワークスペースの仮想環境（`.venv/` > `venv/` > `env/` > `.env/`。`.venv` 以外は `pyvenv.cfg` のあるディレクトリだけ） > `VIRTUAL_ENV`（ワークスペースの根の中を指すときだけ） > `uv` の管理環境 > `poetry env` > `conda` 環境 > `PATH` 上の `python` とする（`venv/` は `python -m venv venv`〈Python 公式チュートリアルの既定〉の名前で、見落とすと型の LSP が依存の無い別の Python で解析する。BUG-0111）。検出結果は `status` の `python_env.manager` に記録する。
 4. `set_python_env` は Python 系 LSP（型解決用と Lint 用）を新しい環境で再起動する。再起動は非同期で、応答には `job_id` を含める。
 5. `set_excludes` は除外規則を置換し、`files` テーブルから一致ファイルを除いたうえでシンボル再走査ジョブを起動する。
 6. `reindex` はジョブを投入して **100 ms 以内に** `job_id` を返す（MUST）。完了を待ってはならない。進捗は `status`（`job_id` 指定可）の `jobs[]` で `queued` \| `running` \| `done` \| `failed` と 0〜100 の `progress` を返す。
@@ -3111,7 +3111,7 @@ json の `data`:
 |---|---|
 | 起動 | 遅延起動（Lazy Spawn）。当該言語への最初の要求で非同期に起動し、その要求には降格応答を返す（NFR-OPS-3）。起動時に全言語を立ち上げてはならない（MUST NOT） |
 | 単位 | 言語 × ワークスペース ごとに 1 プロセス。同一ワークスペースの Python には型解決用（pyright 系）と Lint / Code Action 用（ruff 系）の 2 つを並列に持ってよい（MAY） |
-| 発見 | 実行ファイルの探索順: 環境変数 `LUCIANKE_LSP_<サーバー名>_CMD`（サーバー名単位。先）→ `LUCIANKE_LSP_<LANG>_CMD`（言語単位。lint 役は `…_LINT_CMD`）→ ワークスペースの `.venv/bin`・`node_modules/.bin` → `PATH`。見つからなければ `lsp_status: "unavailable"` とし、理由を `configure_workspace status` に出す |
+| 発見 | 実行ファイルの探索順: 環境変数 `LUCIANKE_LSP_<サーバー名>_CMD`（サーバー名単位。先）→ `LUCIANKE_LSP_<LANG>_CMD`（言語単位。lint 役は `…_LINT_CMD`）→ ワークスペースの仮想環境（T-00 処理規約 3 と同じ候補: `.venv`、`pyvenv.cfg` のある `venv` / `env` / `.env`）の `bin`・`node_modules/.bin` → `PATH`。見つからなければ `lsp_status: "unavailable"` とし、理由を `configure_workspace status` に出す |
 | 状態 | `standby`（未起動）→ `indexing`（起動済み・初期索引中。`$/progress` または `window/workDoneProgress` から進捗を取る。取れなければ最初の `publishDiagnostics` 受信まで）→ `ready` → `unavailable`（起動失敗・クラッシュ上限到達） |
 | 文書同期 | `textDocument/didOpen` は要求で初めて触れたファイルに送り、編集後は `didChange`（全文または増分）、外部変更は `workspace/didChangeWatchedFiles`。開いた文書は LRU で 200 件を上限とし、超えた分は `didClose` |
 | 要求のタイムアウト | 定義・参照・ホバー: 3,000 ms。`callHierarchy`: 5,000 ms。`codeAction`: 5,000 ms。`rename`: 10,000 ms。超過は段を 1 つ降りて応答し、`warnings[]` に記録する。超過した要求には `$/cancelRequest` を送る。ただし取り消しを受けるとその種類の要求に以後答えられなくなるサーバーの要求（basedpyright / pyright の参照・実装・`executeCommand`）には送らず、遅れて届く応答を捨てる（実装で確定 2026-10-31、BUG-0090）。 **1 問い合わせの予算つきの exact の要求**は、要求 1 つの期限ではなく 1 問い合わせの予算（`EXACT_BUDGET_S` = 10 秒）の残りまで待つ: T-07 の根の要求（根の子を求める prepare と incoming / outgoing。深いノードの要求は 5,000 ms のまま）と、T-06 の参照検索（references と、同じ答えの宣言の位置を引く definition。3,000 ms の代わり）。**連続タイムアウトの数え**（3 回で `unavailable`）に入れるのは、要求 1 つの期限以上待っても答えなかった要求だけ。予算の内に遅れて答えた要求、予算が尽きて（期限より短い残りで）打ち切った要求は数えない。予算の無い要求（T-04 の hover・T-11 の rename など）の期限切れは今までどおり数える。予算の内に答えなかったときの警告は、切れたのが予算であることとその値・次にすること（呼び直す）を書く。（実装で確定 2026-10-31、BUG-0091。理由: 冷えたサーバーが最初の問い合わせで遅いだけで LSP をセッションの間 `unavailable` にするのは、呼ぶ側の AI にとって最初の答えが数秒遅いことよりずっと悪い。） |

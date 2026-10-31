@@ -27,7 +27,8 @@ TypeScript / JavaScript（S-5）: **既定は typescript-language-server（tsls�
 ``workspace/configuration`` の応答（``vtsls.autoUseWorkspaceTsdk`` + ``typescript.tsdk``）で渡す。
 
 起動コマンドの探索順（``find_command``）: 環境変数（サーバー名 ``LUCIANKE_LSP_<NAME>_CMD`` → 言語 ``LUCIANKE_LSP_<LANG>_CMD``）→
-指定された venv の ``Scripts|bin`` → ワークスペースの ``.venv/Scripts|bin`` → ``node_modules/.bin`` →
+指定された venv の ``Scripts|bin`` → ワークスペースの仮想環境（``.venv`` / ``venv`` / ``env`` / ``.env``。``workspace_venv_dirs``）の
+``Scripts|bin`` → ``node_modules/.bin`` →
 **Lucianke 自身の Python 環境**（``host_venv``。``pip install lucianke[python]`` / ``uv sync`` が入れた basedpyright・ruff）→ ``PATH``。
 Windows は ``.exe`` / ``.cmd`` / ``.bat`` も探す。探索は ``shutil.which`` を使わず自前で行う（Windows の ``which`` は
 カレントディレクトリを先に見るため、ワークスペース直下に置かれた実行ファイルを掴まないようにする）。
@@ -45,6 +46,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+from lucianke.workspace.pyenv import workspace_venv_dirs
 
 _log = logging.getLogger("lucianke.lsp.servers")
 
@@ -434,7 +437,8 @@ def find_command(
 ) -> list[str] | None:
     """``defn`` の起動 argv を探す。見つからなければ ``None``（呼び手が ``unavailable: not_found`` にする）。
 
-    探索順: 環境変数 → ``venv``（Python 環境の根。省略可）の ``Scripts|bin`` → ``<workspace_root>/.venv/Scripts|bin`` →
+    探索順: 環境変数 → ``venv``（Python 環境の根。省略可）の ``Scripts|bin`` → ワークスペースの仮想環境
+    （``workspace/pyenv.workspace_venv_dirs``: ``.venv``、``pyvenv.cfg`` のある ``venv`` / ``env`` / ``.env`` の順。BUG-0111）の ``Scripts|bin`` →
     ``<workspace_root>/node_modules/.bin`` → ``host_venv``（Lucianke 自身の Python 環境の根。省略可。``host_venv()`` が返す）の
     ``Scripts|bin`` → ``PATH``。候補（``argv_candidates``）は先頭から順に、候補ごとに上の順で探す。
 
@@ -456,7 +460,8 @@ def find_command(
     dirs: list[Path] = []
     if venv is not None:
         dirs += _venv_bin_dirs(Path(venv))
-    dirs += _venv_bin_dirs(root / ".venv")
+    for workspace_venv in workspace_venv_dirs(root):
+        dirs += _venv_bin_dirs(workspace_venv)
     dirs.append(root / "node_modules" / ".bin")
     if host_venv is not None:
         dirs += _venv_bin_dirs(Path(host_venv))

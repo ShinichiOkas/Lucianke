@@ -397,6 +397,123 @@ def test_pyenv_defaults_to_process_environment(root: Path, monkeypatch: pytest.M
     assert _same(detect_python_env(root).interpreter, exe)
 
 
+# --- BUG-0111: venv/・env/・.env/・VIRTUAL_ENV ----------------------------------------------
+
+
+def _make_venv(venv: Path, *, windows: bool = IS_WINDOWS, cfg: bool = True, version: str = "3.12.4") -> Path:
+    """偽の仮想環境（インタプリタ + 任意で ``pyvenv.cfg``）。インタプリタのパスを返す。"""
+    exe = _touch_exe(_venv_exe(venv, windows=windows))
+    if cfg:
+        (venv / "pyvenv.cfg").write_text(f"home = /usr/bin\nversion = {version}\n", encoding="utf-8")
+    return exe
+
+
+def test_pyenv_venv_without_dot_is_detected(root: Path):
+    exe = _make_venv(root / "venv")
+    found = detect_python_env(root, None, env=NO_ENV)
+    assert _same(found.interpreter, exe)
+    assert (found.manager, found.version) == ("venv", "3.12.4")
+
+
+def test_pyenv_dot_venv_wins_over_venv(root: Path):
+    dot = _make_venv(root / ".venv", version="3.13.0")
+    _make_venv(root / "venv")
+    found = detect_python_env(root, None, env=NO_ENV)
+    assert _same(found.interpreter, dot)
+    assert found.version == "3.13.0"
+
+
+def test_pyenv_order_is_venv_then_env_then_dot_env(root: Path):
+    dot_env = _make_venv(root / ".env", version="3.10.1")
+    assert _same(detect_python_env(root, None, env=NO_ENV).interpreter, dot_env)
+    env = _make_venv(root / "env", version="3.11.2")
+    assert _same(detect_python_env(root, None, env=NO_ENV).interpreter, env)
+    venv = _make_venv(root / "venv")
+    assert _same(detect_python_env(root, None, env=NO_ENV).interpreter, venv)
+    assert [p.name for p in pyenv.workspace_venv_dirs(root)] == ["venv", "env", ".env"]
+
+
+@pytest.mark.parametrize("name", ["venv", "env", ".env"])
+def test_pyenv_named_dir_without_pyvenv_cfg_is_ignored(root: Path, name: str):
+    _make_venv(root / name, cfg=False)  # 同名のソースのディレクトリなど
+    assert detect_python_env(root, None, env=NO_ENV) == PythonEnv(interpreter=None)
+    assert pyenv.workspace_venv_dirs(root) == ()
+
+
+def test_pyenv_dotenv_file_is_ignored(root: Path):
+    (root / ".env").write_text("API_KEY=x\n", encoding="utf-8")  # dotenv のファイル
+    assert detect_python_env(root, None, env=NO_ENV) == PythonEnv(interpreter=None)
+    assert pyenv.workspace_venv_dirs(root) == ()
+
+
+def test_pyenv_venv_manager_label_follows_lock_files(root: Path):
+    _make_venv(root / "venv")
+    assert detect_python_env(root, None, env=NO_ENV).manager == "venv"
+    (root / "poetry.lock").write_text("", encoding="utf-8")
+    assert detect_python_env(root, None, env=NO_ENV).manager == "poetry"
+    (root / "uv.lock").write_text("", encoding="utf-8")
+    assert detect_python_env(root, None, env=NO_ENV).manager == "uv"
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_pyenv_venv_without_dot_follows_the_platform_layout(
+    root: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+):
+    monkeypatch.setattr(pyenv, "_IS_WINDOWS", windows)
+    exe = _make_venv(root / "venv", windows=windows)
+    assert _same(detect_python_env(root, None, env=NO_ENV).interpreter, exe)
+    exe.unlink()
+    _touch_exe(_venv_exe(root / "venv", windows=not windows))  # 逆の形の配置は見ない
+    assert detect_python_env(root, None, env=NO_ENV).interpreter is None
+
+
+def test_pyenv_virtual_env_inside_root_is_used(root: Path):
+    exe = _make_venv(root / "envs" / "py312")
+    (root / "envs" / "uv.lock").write_text("", encoding="utf-8")
+    found = detect_python_env(root, None, env={"PATH": "", "VIRTUAL_ENV": str(root / "envs" / "py312")})
+    assert _same(found.interpreter, exe)
+    assert (found.manager, found.version) == ("uv", "3.12.4")
+
+
+def test_pyenv_virtual_env_outside_root_is_ignored(root: Path, tmp_path: Path):
+    _make_venv(tmp_path / "lucianke-own-venv")
+    env = {"PATH": "", "VIRTUAL_ENV": str(tmp_path / "lucianke-own-venv")}
+    assert detect_python_env(root, None, env=env) == PythonEnv(interpreter=None)
+    # 根の名前で始まるだけの隣のディレクトリも外
+    _make_venv(tmp_path / "proj-other")
+    env["VIRTUAL_ENV"] = str(tmp_path / "proj-other")
+    assert detect_python_env(root, None, env=env) == PythonEnv(interpreter=None)
+
+
+def test_pyenv_virtual_env_needs_pyvenv_cfg_and_loses_to_workspace_venv(root: Path):
+    _make_venv(root / "custom", cfg=False)
+    env = {"PATH": "", "VIRTUAL_ENV": str(root / "custom")}
+    assert detect_python_env(root, None, env=env).interpreter is None
+    (root / "custom" / "pyvenv.cfg").write_text("version = 3.12.4\n", encoding="utf-8")
+    assert detect_python_env(root, None, env=env).interpreter is not None
+    venv = _make_venv(root / "venv")
+    assert _same(detect_python_env(root, None, env=env).interpreter, venv)
+
+
+def test_pyenv_virtual_env_wins_over_poetry_without_interpreter_and_conda(root: Path, tmp_path: Path):
+    exe = _make_venv(root / "custom")
+    (root / "poetry.lock").write_text("", encoding="utf-8")
+    conda = tmp_path / "conda"
+    _touch_exe(conda / "python.exe" if IS_WINDOWS else conda / "bin" / "python")
+    env = {"PATH": "", "VIRTUAL_ENV": str(root / "custom"), "CONDA_PREFIX": str(conda)}
+    found = detect_python_env(root, None, env=env)
+    assert _same(found.interpreter, exe)
+    assert found.manager == "poetry"
+
+
+def test_pyenv_explicit_still_wins_over_venv_without_dot(root: Path, tmp_path: Path):
+    _make_venv(root / "venv")
+    other = _make_venv(tmp_path / "elsewhere")
+    found = detect_python_env(root, str(tmp_path / "elsewhere"), env=NO_ENV)
+    assert _same(found.interpreter, other)
+    assert found.manager == "explicit"
+
+
 # =========================================================================================
 # detect_subprojects
 # =========================================================================================

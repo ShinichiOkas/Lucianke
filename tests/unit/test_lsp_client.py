@@ -905,6 +905,23 @@ def test_search_order_venv_then_node_modules_then_path(tmp_path: Path):
     assert find(venv=explicit_venv) == [str(in_explicit), "server"]
 
 
+def test_workspace_venv_without_dot_is_searched_like_dot_venv(tmp_path: Path):
+    """BUG-0111: ``venv/``（``pyvenv.cfg`` あり）が固定した ruff を PATH より先に拾う。``.venv`` があればそちらが先。"""
+    ruff = default_server("python", "lint")
+    assert ruff is not None
+    path_dir = tmp_path / "pathdir"
+    in_path = make_exe(path_dir, exe("ruff"))
+    plain = tmp_path / "venv"
+    in_plain = make_exe(venv_bin_of(plain), exe("ruff"))
+    env = {"PATH": str(path_dir)}
+    # pyvenv.cfg が無い venv/ は仮想環境とみなさない
+    assert find_command(ruff, workspace_root=tmp_path, environ=env) == [str(in_path), "server"]
+    (plain / "pyvenv.cfg").write_text("version = 3.12.4\n", encoding="utf-8")
+    assert find_command(ruff, workspace_root=tmp_path, environ=env) == [str(in_plain), "server"]
+    in_dot = make_exe(venv_bin(tmp_path), exe("ruff"))
+    assert find_command(ruff, workspace_root=tmp_path, environ=env) == [str(in_dot), "server"]
+
+
 def test_host_venv_is_searched_after_workspace_and_before_path(tmp_path: Path):
     """BUG-0037: ``.venv`` の無いワークスペースでも、Lucianke 自身の Python 環境の basedpyright を PATH 上の別の pyright より先に拾う。"""
     based, pyright = servers_for("python", "types")
