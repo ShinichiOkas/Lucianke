@@ -330,6 +330,22 @@ def is_pyright_root_config(rel: str, *, case_insensitive: bool = False) -> bool:
     return name in PYRIGHT_ROOT_CONFIGS
 
 
+_TSSERVER_CONFIG = re.compile(r"(?:ts|js)config(?:\.[^/]+)?\.json")
+
+
+def is_lsp_config(rel: str, *, case_insensitive: bool = False) -> bool:
+    """``rel`` が LSP の読む設定ファイルか: 根の ``pyrightconfig.json`` / ``pyproject.toml``（basedpyright / pyright）と、どの深さでも
+    ``tsconfig.json`` / ``jsconfig.json`` / ``tsconfig.<名前>.json``（tsserver）。
+
+    索引に載らない（``.gitignore`` の対象など）ときも、変更を ``workspace/didChangeWatchedFiles`` で LSP に届けるために使う（BUG-0135。
+    ``tools/_runtime.IndexerSink``）。
+    """
+    if is_pyright_root_config(rel, case_insensitive=case_insensitive):
+        return True
+    base = rel.replace("\\", "/").rsplit("/", 1)[-1]
+    return _TSSERVER_CONFIG.fullmatch(base.casefold() if case_insensitive else base) is not None
+
+
 def pinned_pyright_config(workspace_root: str | os.PathLike[str]) -> Path | None:
     """basedpyright / pyright に設定ファイルとして明示する、ワークスペースの根の ``pyproject.toml``。明示しないなら ``None``。
 

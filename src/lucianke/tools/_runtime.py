@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import logging
 import os
@@ -34,6 +35,7 @@ from lucianke.index.ingest import DiagnosticFact, replace_lsp_diagnostics
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.action_store import CodeActionStore
 from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool
+from lucianke.lsp.servers import PYRIGHT_ROOT_CONFIGS, is_lsp_config
 from lucianke.syntax.parsers import TreeCache
 from lucianke.tools._services import ToolServices
 from lucianke.tools.t00_configure_workspace import load_known_roots, restore_settings
@@ -85,6 +87,11 @@ class IndexerSink:
     索引に反映したら、同じ変更（作成・変更・削除）をそのワークスペースの起動中の LSP へ ``LspPool.notify_watched``
     （``workspace/didChangeWatchedFiles``）で送る。basedpyright は作業ツリーで新しく作られたファイルを、これか ``didOpen`` を受けるまで
     自分では見つけず、rename の参照に含めない（T-11 の実機の観察）。バースト（``rescan``）は前後の ``files`` の差から送る。
+
+    LSP の設定ファイル（``servers.is_lsp_config``: 根の ``pyrightconfig.json`` / ``pyproject.toml``、``tsconfig.json`` など）は、索引に
+    載らない（``.gitignore`` の対象など）ときも、内容（``sha256``）が前に知らせたものと違えば知らせる（BUG-0135。basedpyright は根の
+    設定の変更をこれで読み直す。``LspPool.notify_watched`` が解析の対象と明示の判断も読み直す）。前に知らせた内容が分からない
+    （起動の後の最初の変更）ときは知らせる。
     """
 
     def __init__(
@@ -94,6 +101,8 @@ class IndexerSink:
         self._indexer = indexer
         self._readers = readers
         self._lsp = lsp_pool
+        self._unindexed_configs: dict[RelPath, str | None] = {}
+        """索引に載らない設定ファイルの、最後に LSP へ知らせた内容の ``sha256``（消えたと知らせたら ``None``）。"""
 
     def rebind(self, ws: Workspace) -> None:
         """設定を変えた ``Workspace`` に差し替える（``known_paths_under`` と LSP への通知の宛先）。"""
@@ -102,11 +111,17 @@ class IndexerSink:
     async def changed(self, rel: RelPath) -> None:
         stats = await self._indexer.index_file(rel)
         if stats is not None:
+            self._unindexed_configs.pop(rel, None)
             await self._notify([(rel, FileChangeType.CREATED if stats.file_created else FileChangeType.CHANGED)])
+        elif self._is_config(rel):
+            await self._notify(await asyncio.to_thread(self._unindexed_config_changes, [rel]))
 
     async def removed(self, rel: RelPath) -> None:
         if await self._indexer.remove(rel):
+            self._unindexed_configs.pop(rel, None)
             await self._notify([(rel, FileChangeType.DELETED)])
+        elif self._is_config(rel):
+            await self._notify(await asyncio.to_thread(self._unindexed_config_changes, [rel]))
 
     async def rescan(self) -> None:
         _log.info("watcher burst: switching to a differential rescan")
@@ -115,7 +130,51 @@ class IndexerSink:
         await self._indexer.scan()
         if before is not None:  # 起動中の LSP がある: 走査で増えた・変わった・消えたファイルを知らせる
             after = await asyncio.to_thread(self._snapshot)
-            await self._notify(_file_changes(before, after))
+            configs = sorted({*(RelPath(n) for n in PYRIGHT_ROOT_CONFIGS), *self._unindexed_configs})
+            unindexed = await asyncio.to_thread(self._unindexed_config_changes, configs, set(after), event=False)
+            await self._notify(_file_changes(before, after) + unindexed)
+
+    def _is_config(self, rel: RelPath) -> bool:
+        return is_lsp_config(str(rel), case_insensitive=self._ws.case_insensitive)
+
+    def _unindexed_config_changes(
+        self, rels: Sequence[RelPath], indexed: set[str] | None = None, *, event: bool = True
+    ) -> list[tuple[RelPath, FileChangeType]]:
+        """索引に載らない設定ファイル ``rels`` のうち、内容が前に知らせたものと違うものの変更（ブロックする。スレッドで呼ぶ）。
+
+        索引に載っているもの（``index_file`` が何もしなかったのは内容が同じだから）は飛ばす。``indexed`` は索引のパスの集合
+        （無ければ 1 件ずつ引く）。``event`` が偽（監視のイベントではなく走査の後に見て回る）なら、前を知らないまま無いファイルは
+        知らせない（あったことを知らない）。
+        """
+        out: list[tuple[RelPath, FileChangeType]] = []
+        for rel in rels:
+            if (str(rel) in indexed) if indexed is not None else self._indexed(rel):
+                self._unindexed_configs.pop(rel, None)
+                continue
+            try:
+                sha: str | None = hashlib.sha256((self._ws.root / str(rel)).read_bytes()).hexdigest()
+            except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+                sha = None
+            except OSError:
+                continue  # 読めない（ロック中など）: 次の変更で知らせる
+            unknown = rel not in self._unindexed_configs
+            last = self._unindexed_configs.get(rel)
+            if (not unknown and last == sha) or (unknown and sha is None and not event):
+                self._unindexed_configs[rel] = sha
+                continue
+            self._unindexed_configs[rel] = sha
+            if sha is None:
+                out.append((rel, FileChangeType.DELETED))
+            else:
+                out.append((rel, FileChangeType.CREATED if not unknown and last is None else FileChangeType.CHANGED))
+        return out
+
+    def _indexed(self, rel: RelPath) -> bool:
+        with self._readers.reader() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM files WHERE workspace_id = ? AND path = ?", (self._ws.workspace_id, str(rel))
+            ).fetchone()
+        return row is not None
 
     def _snapshot(self) -> dict[str, str]:
         with self._readers.reader() as conn:

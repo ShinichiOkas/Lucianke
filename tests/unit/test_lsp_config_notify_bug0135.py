@@ -1,7 +1,8 @@
 """BUG-0135: 根の設定（``pyrightconfig.json`` / ``pyproject.toml``）の変更を、動いている basedpyright / pyright に届け、Lucianke の見る
 解析の対象（``LspHandle.analysis_scope``）と設定ファイルの明示の判断（``LspHandle.pinned_config``）を読み直す。
 
-* ``is_pyright_root_config``: 根の 2 つのファイルだけ（下のディレクトリのものはサーバーが読まない）。
+* ``is_pyright_root_config``: 根の 2 つのファイルだけ（下のディレクトリのものはサーバーが読まない）。``is_lsp_config`` は、それと
+  どの深さの ``tsconfig.json`` など（索引に載らない設定ファイルの変更も知らせる。``tests/unit/test_tools_runtime.py``）。
 * ``LspPool.notify_watched``（偽のサーバーが受けた通知と、``workspace/configuration`` に返った設定を書き残す）:
   明示の判断が変わらなければ ``didChangeWatchedFiles`` だけ（設定ファイルを含む）。変わったら設定を差し替えて
   ``didChangeConfiguration`` を送り、設定ファイルは ``didChangeWatchedFiles`` に入れない。ほかのファイルの変更では読み直さない。
@@ -25,7 +26,7 @@ import pytest
 from lucianke.core.model import RelPath
 from lucianke.core.procs import ProcessRegistry
 from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool
-from lucianke.lsp.servers import SERVERS, LspServerDef, is_pyright_root_config
+from lucianke.lsp.servers import SERVERS, LspServerDef, is_lsp_config, is_pyright_root_config
 from lucianke.workspace.types import Workspace
 
 
@@ -51,6 +52,21 @@ def test_other_files_are_not_root_config_files(rel: str) -> None:
 def test_case_is_folded_only_on_a_case_insensitive_workspace() -> None:
     assert is_pyright_root_config("PyrightConfig.json", case_insensitive=True)
     assert not is_pyright_root_config("PyrightConfig.json", case_insensitive=False)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["pyrightconfig.json", "pyproject.toml", "tsconfig.json", "web/tsconfig.json", "tsconfig.build.json",
+     "pkg/jsconfig.json", "jsconfig.test.json"],
+)  # fmt: skip
+def test_lsp_config_files_include_tsserver_configs_at_any_depth(rel: str) -> None:
+    """索引に載らない（``.gitignore`` の対象など）ときも LSP に変更を知らせる設定ファイル（``tools/_runtime.IndexerSink``）。"""
+    assert is_lsp_config(rel)
+
+
+@pytest.mark.parametrize("rel", ["pkg/pyproject.toml", "tsconfig.ts", "mytsconfig.json", "tsconfig.json.bak", "a.py"])
+def test_other_files_are_not_lsp_config_files(rel: str) -> None:
+    assert not is_lsp_config(rel)
 
 
 # --- LspPool.notify_watched -----------------------------------------------------------------------------

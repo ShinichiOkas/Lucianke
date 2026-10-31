@@ -204,7 +204,7 @@ async def test_the_handle_keeps_the_analysis_scope_the_server_loaded(
     registry: ProcessRegistry, tmp_path: Path
 ) -> None:
     """起動のときの解析の対象（``include`` / ``exclude``）を覚える（T-06・T-07 が開かせる候補を決める。起動した後の編集は、
-    監視がサーバーに届けたときに引き直す。``tests/unit/test_lsp_config_change_bug0135.py``）。"""
+    監視がサーバーに届けたときに引き直す。``tests/unit/test_lsp_config_notify_bug0135.py``）。"""
     root = Path(os.path.realpath(tmp_path / "proj"))
     root.mkdir()
     (root / "pyrightconfig.json").write_text(json.dumps({"include": ["src"]}), encoding="utf-8")

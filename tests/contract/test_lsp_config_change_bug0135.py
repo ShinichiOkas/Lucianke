@@ -9,7 +9,7 @@ basedpyright 1.40.2 は ``workspace/didChangeWatchedFiles`` で根の設定の�
 
 * 実機: ``.venv`` の basedpyright に F-POLY の複製を読ませる。見つからなければ skip。設定の変更は監視が拾ったときと同じく
   ``IndexerSink.changed`` / ``removed`` に渡す（監視の時間に依らない）。サーバーが読み直した合図は、開いている文書の診断の再発行。
-* 偽のサーバーでの送る順序・判断は ``tests/unit/test_lsp_config_change_bug0135.py``。
+* 偽のサーバーでの送る順序・判断は ``tests/unit/test_lsp_config_notify_bug0135.py``。
 """
 
 # ruff: noqa: F811  (フィクスチャ registry を引数で受ける)

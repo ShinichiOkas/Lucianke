@@ -375,6 +375,83 @@ async def test_a_burst_rescan_tells_the_lsp_the_difference(project: Path, tmp_pa
         await rt.aclose()
 
 
+async def test_the_sink_tells_the_lsp_about_config_files_the_index_ignores(project: Path, tmp_path: Path) -> None:
+    """BUG-0135: ``.gitignore`` の対象の ``pyrightconfig.json``・``tsconfig.json`` は索引に載らないが、内容が変われば LSP に知らせる
+    （basedpyright は根の設定の変更を ``didChangeWatchedFiles`` で読み直す）。索引に載らないほかのファイルは今までどおり知らせない。"""
+    from lucianke.lsp.pool import FileChangeType as K
+
+    (project / ".gitignore").write_text("pyrightconfig.json\ntsconfig.json\nlocal.py\n", encoding="utf-8")
+    pool = _RecordingPool()
+    rt = await _open_bundle(project, tmp_path, pool)
+    sink = rt.sink
+    assert sink is not None
+    config = project / "pyrightconfig.json"
+    try:
+        config.write_text('{"include": ["pkg"]}', encoding="utf-8")
+        await sink.changed(RelPath("pyrightconfig.json"))  # 起動の後の最初の変更（前を知らない）: 知らせる
+        await sink.changed(RelPath("pyrightconfig.json"))  # 同じ内容: 知らせない
+        config.write_text('{"include": ["pkg", "tests"]}', encoding="utf-8")
+        await sink.changed(RelPath("pyrightconfig.json"))
+        config.unlink()
+        await sink.removed(RelPath("pyrightconfig.json"))
+        await sink.removed(RelPath("pyrightconfig.json"))  # もう無いと知らせた
+        config.write_text("{}", encoding="utf-8")
+        await sink.changed(RelPath("pyrightconfig.json"))
+        (project / "web").mkdir()
+        (project / "web" / "tsconfig.json").write_text("{}", encoding="utf-8")
+        await sink.changed(RelPath("web/tsconfig.json"))
+        (project / "local.py").write_text("x = 1\n", encoding="utf-8")
+        await sink.changed(RelPath("local.py"))  # 設定ファイルではない: 今までどおり知らせない
+        assert pool.calls == [
+            [("pyrightconfig.json", int(K.CHANGED))],
+            [("pyrightconfig.json", int(K.CHANGED))],
+            [("pyrightconfig.json", int(K.DELETED))],
+            [("pyrightconfig.json", int(K.CREATED))],
+            [("web/tsconfig.json", int(K.CHANGED))],
+        ]
+        with rt.readers.reader() as conn:  # 索引には載らないまま
+            assert conn.execute("SELECT count(*) FROM files WHERE path LIKE '%config.json'").fetchone()[0] == 0
+    finally:
+        await rt.aclose()
+
+
+async def test_an_indexed_config_file_is_told_once_through_the_index(project: Path, tmp_path: Path) -> None:
+    from lucianke.lsp.pool import FileChangeType as K
+
+    pool = _RecordingPool()
+    rt = await _open_bundle(project, tmp_path, pool)
+    sink = rt.sink
+    assert sink is not None
+    try:
+        (project / "pyproject.toml").write_text('[tool.basedpyright]\ninclude = ["pkg"]\n', encoding="utf-8")
+        await sink.changed(RelPath("pyproject.toml"))
+        await sink.changed(RelPath("pyproject.toml"))  # 内容が同じ（索引が何もしない）: 知らせない
+        assert pool.calls == [[("pyproject.toml", int(K.CREATED))]]
+    finally:
+        await rt.aclose()
+
+
+async def test_a_burst_rescan_also_tells_an_ignored_root_config(project: Path, tmp_path: Path) -> None:
+    from lucianke.lsp.pool import FileChangeType as K
+
+    (project / ".gitignore").write_text("pyrightconfig.json\n", encoding="utf-8")
+    pool = _RecordingPool()
+    rt = await _open_bundle(project, tmp_path, pool)
+    sink = rt.sink
+    assert sink is not None
+    try:
+        await sink.rescan()  # 根の設定ファイルは無い（前も知らない）: 知らせない
+        assert pool.calls == []
+        (project / "pyrightconfig.json").write_text('{"include": ["pkg"]}', encoding="utf-8")
+        (project / "pkg" / "c.py").write_text("def gamma():\n    return 3\n", encoding="utf-8")
+        await sink.rescan()
+        assert pool.calls == [[("pkg/c.py", int(K.CREATED)), ("pyrightconfig.json", int(K.CREATED))]]
+        await sink.rescan()  # 何も変わっていない
+        assert len(pool.calls) == 1
+    finally:
+        await rt.aclose()
+
+
 async def test_a_rescan_without_a_running_lsp_does_not_snapshot_or_notify(project: Path, tmp_path: Path) -> None:
     pool = _RecordingPool(running=False)
     rt = await _open_bundle(project, tmp_path, pool)
