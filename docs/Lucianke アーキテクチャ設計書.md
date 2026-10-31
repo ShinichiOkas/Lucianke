@@ -193,7 +193,7 @@ lucianke（ホストが起動する 1 プロセス。寿命はホストのセッ
 ### ADR-8 カーソルはワークスペースの `data_version` を抱え、変われば失効
 
 - 文脈: 仕様書 §5.6「基になるデータが変わっていれば `E_CURSOR_EXPIRED`」。
-- 決定: カーソルは `{tool, args_hash, offset, data_version}` を base64url にしたもの。`data_version` は索引の書き込みトランザクションごとに増える（診断の更新では増やさない）。読み取り時に一致しなければ失効。
+- 決定: カーソルの中身は `{tool, args_hash, offset, data_version, workspace_id}`。`data_version` は索引の書き込みトランザクションごとに増える（診断の更新では増やさない）。読み取り時に一致しなければ失効。中身はサーバーのセッション限定の表（ADR-16 の軽い対応表）に持ち、応答に出すのは短い鍵（`c` + 10 進 9 桁）だけ（BUG-0115、2026-10-31。理由: 中身を base64url の JSON にして渡していた間は、カーソル 1 つが約 70 トークンで、毎ページの `# more:` 行が参照 3〜4 行ぶんの呼ぶ側の文脈を使い、件数の少ない答えは compact で分けて読めなかった）。
 - 捨てた案: 影響ファイルの集合を持つ（正確だが複雑。M1 では保守的な全体版で足りる）。
 - 帰結: 無関係なファイルの変更でもカーソルが失効しうる。仕様の範囲内（失効は常に安全側）。LSP 由来の `relations` 書き込み（§7.5.6 の `exact` への書き戻し）は `data_version` を**進めない**（`bumps_version=False`。進めると、そのツール自身が直前に返した `next_cursor` が次のページで `E_CURSOR_EXPIRED` になる。パイプラインは `data_version` をハンドラの前に引くため。書き戻しは同じ問い合わせの答えを `structural` から `exact` に置き換えるだけで、結果集合は変わらない。1d8700d。実装で確定 2026-10-29）。ファイル変更時はそのファイルを `source_file_id` とする `relations` 行を `exact` も含めて全削除し `structural` を入れ直すので、編集直後は一時的に `structural` に下がり、LSP の再取得で `exact` に戻る。
 
@@ -653,22 +653,22 @@ tools/call(name, arguments)
 
 ```
 pack(out, budget, offset):
-  avail = budget - reserved                        # reserved = 前置き（ヘッダ・head_kv・json の封筒。呼び手が数える）
+  avail(m) = budget - reserved_for(m)              # reserved_for(m) = 先頭 m 件のページの前置き（ヘッダ・降格の警告行・head_kv・json の封筒。呼び手が数える。BUG-0116）
   # 鎖「r0 の縮退版 → r0 丸ごと → r1 の縮退版 → r1 丸ごと → …」のうち、トレーラ込みで avail に収まる最も先の形（BUG-0067）
   for m in (先頭 m-1 件を丸ごと入れた本文 <= avail の最大の m から 1 まで):
-      room = avail - Σ est(r0..r[m-2]) - trailer(m)  # trailer = "# more:" 行 + 要約の行の min(全長, avail // 4)
+      room = avail(m) - Σ est(r0..r[m-2]) - trailer(m)  # trailer = "# more:" 行 + 要約の行の min(全長, avail(m) // 4)
       if est(r[m-1]) <= room: included = r0..r[m-1]; break
       small = r[m-1].shrink(room) if r[m-1].shrink else None   # 縮退版（T-02 のファイル内省略）はページの最後の 1 件
       if small: included = r0..r[m-2] + [small]; break         # 縮退版の後ろには詰めない
   rest = out.records[offset + len(included):]
   unseen = max(0, out.total_estimate - len(out.records))       # ツールが具体化していない続き（BUG-0008。下の total_estimate の意味）
-  if rest or unseen: next_cursor = CursorCodec.encode(tool, args_hash, offset + len(included), data_version)
+  if rest or unseen: next_cursor = cursor_factory(offset + len(included))   # 短い鍵（§7.2.3。表に入れるのは応答に出した分だけ）
            summary = out.summarize(rest) or default_summary(rest)   # group ごとの件数
   meta: min confidence, breakdown, mixed  ← included から集計
   return Page(included, next_cursor, summary, total_estimate=max(len(out.records), out.total_estimate))
 ```
 
-- **応答全体の予算（BUG-0014・BUG-0017。`mcp/fit.py` の `pack_and_render`）**: パッカーが詰めるのはレコードとトレーラだけで、ヘッダ・警告・降格の警告行・`head_kv`（compact）や封筒・`_resolution_meta`・`data_static`（json）は `reserved_tokens` で呼び手が渡す。パイプラインは、**レコード 0 件のページを同じレンダラで実際に描いた全文**（`used_tokens_est` と `timing_ms` は最大桁数）を数えて `reserved_tokens` にする。詰めたあと全文を数え直し、`max_tokens` を超えていれば超過分を `reserved_tokens` に足して詰め直す（`returned` の桁数など見積もりの誤差を吸収する）。最後に `used_tokens_est` を数え直しの値に置き換えて描き直す（数字は 1 文字ずつ数えるので、桁数が変わらなければ 1 回で収束する）。数え直しは `timing_ms` を最大桁数にした全文で行う（json の `timing_ms` は全文に入る。同じ入力なら呼び出しごとの処理時間にかかわらず同じ値になり、実際の全文以上の上限になる。差は最大 4 トークン）。この結果、描画後の全文の数え直し ≤ `used_tokens_est` ≤ `max_tokens`（compact は一致。json は上の差だけ上）が全応答で成り立つ。dot / mermaid は対象外（`data_static["graph"]` を丸ごと描くため。別の票）。
+- **応答全体の予算（BUG-0014・BUG-0017。`mcp/fit.py` の `pack_and_render`）**: パッカーが詰めるのはレコードとトレーラだけで、ヘッダ・警告・降格の警告行・`head_kv`（compact）や封筒・`_resolution_meta`・`data_static`（json）は `reserved_tokens` で呼び手が渡す。パイプラインは、**レコード 0 件のページを同じレンダラで実際に描いた全文**（`used_tokens_est` と `timing_ms` は最大桁数）を数えて `reserved_tokens` にする。降格の警告行・ヘッダの `conf=`・`_resolution_meta` はページに入ったレコードの精度で出るので、精度の集計が変わる位置で段に分け（ふつう 1〜2 段。最大で精度の水準の数）、段ごとに「その段の最後の形（先頭から段の終わりまで）の集計」で 0 件のページを描いて数え、前の段までの最大を取った値を `reserved_for(m)`（先頭から m 件のページの前置き）としてパッカーに渡す（BUG-0116、2026-10-31）。値は m について減らず予算に依らないので、鎖の各形が自分の件数の前置きで「収まる」を判定しても単調性は保たれる（各形の判定は予算について単調で、ページはその中で最も先の形）。理由: 以前は全レコードの集計で 1 つだけ数えたので、後ろに精度の低いレコード（COBOL のファイルなど）が 1 つでもあると、そのページに出ない注意文の分を毎ページ取り分けた（T-01 の compact `max_tokens=260` で前置き約 30 に 106、約 78 トークンが使われずに返った）。0 件のページの前置き（`reserved_tokens`）はレコード 0 件の集計（`out.engine.confidence`）で数える。詰めたあと全文を数え直し、`max_tokens` を超えていれば超過分を `reserved_tokens` に足して詰め直す（`returned` の桁数など見積もりの誤差を吸収する）。最後に `used_tokens_est` を数え直しの値に置き換えて描き直す（数字は 1 文字ずつ数えるので、桁数が変わらなければ 1 回で収束する）。数え直しは `timing_ms` を最大桁数にした全文で行う（json の `timing_ms` は全文に入る。同じ入力なら呼び出しごとの処理時間にかかわらず同じ値になり、実際の全文以上の上限になる。差は最大 4 トークン）。この結果、描画後の全文の数え直し ≤ `used_tokens_est` ≤ `max_tokens`（compact は一致。json は上の差だけ上）が全応答で成り立つ。dot / mermaid は対象外（`data_static["graph"]` を丸ごと描くため。別の票）。
 - **形式ごとの見積もり**: `Packer.pack` は `record_text(rec)`（1 レコードが描かれるときの本文）と `trailer_text(summary, cursor, remaining)`（続きがあるときに増える本文）を受ける。既定は compact（`Record.lines` + 行末の改行、`# summary:` / `# more:` の 2 行）。json は `render/json_out.py` の `record_text`（`data` の JSON + 区切りの `,`）と `trailer_text`（`next_cursor` の文字列だけ。json に要約の行は無い）。`Record.shrink` は compact の行で収める約束なので、別の形式で数えて収まらなければ、`ask`（compact の行の予算）を二分探索して json で収まる最大の縮退版を探す（最大 16 回。json の大きさは compact の行に比例しない固定分があるため、比例で縮めても収束しない）。`pack(..., form="json")` で `Record.shrink_json` があるレコード（T-02 の骨格）は、先にそれで json の予算に収まる版を求め、数え直して収まればそれを使う（版ごとに JSON を作って数える二分探索を省く。BUG-0078）。
 - **予算に対する単調性（BUG-0067、仕様書 §5.6-5）**: 上の鎖は予算に依らないので、`max_tokens` を上げても件数は減らず、どのレコードも小さくならない。以前は縮退版の後ろにも詰め（予算を上げて先頭が丸ごと入ると後ろが次ページに回った）、要約の分を丸ごと先に取り分けて 1 件も入らないときだけ省いていた（要約つきで 1 件入る予算に上げると件数が減った）。要約の取り分は avail の 1/4 まで（予算 1 トークンにつき高々 1 トークンしか増えない）で、長い要約は「…」で切る。`tests/unit/test_mcp_budget_monotone.py` が乱数で確かめる。
 - **要約は先頭の 1 件とカーソルを押し出さない（BUG-0110）**: 取り分は `min(avail // 4, max(0, avail − F))`。F は先頭のレコードの最も小さい形と `# more:` 行（要約なし）が入るのに要る本文で、予算に依らない: 縮退できなければ丸ごと + `# more:`、縮退できれば `min(丸ごと + # more:, 縮退版が返る最小の ask + 1 + 再開位置が最大のときの # more:)`（縮退版は ask に収まる最大の版を返すので、縮退版が返る最小の ask が最も小さい形。途中で切れた版は続きのカーソルが長いので、再開位置の上限で数えた `# more:` を使う）。どちらの項も予算 1 トークンにつき高々 1 トークンしか増えないので `avail − 取り分` は予算について減らず、鎖の各形の「収まる」と縮退版の大きさは単調のまま。以前は 1/4 を必ず取り分けたので、F ≤ avail < F + 要約の帯で 0 件になった（compact の既定の形式。カーソルの行は約 60〜80 トークンで、1 行約 20 トークンの参照より重い）。F は取り分が 1/4 より小さくなりうるとき（`avail − 丸ごとの F < avail // 4` で先頭が縮退できる）だけ求める: まず「1/4 を取っても最も小さい形が入るか」を縮退 1 回で見て、入らないときだけ帯の中（幅は avail の 1/4）を二分探索する。要約の分がある形を初めて数えるときに 1 度だけ求める（続きの無い 1 件だけの答えでは縮退の呼び出しを増やさない）。縮退版でページを閉じるときの要約（BUG-0067 の取り分）はこれまでどおり残る。`tests/unit/test_mcp_budget_fit.py` が本物のレンダラと `pack_and_render` を通した予算の掃引で確かめる（パッカー単体・json だけの試験では見えなかった）。
@@ -679,7 +679,7 @@ pack(out, budget, offset):
 
 ### 7.2.3 `CursorCodec`
 
-`base64url(json({"t": tool, "a": sha1(args 正規化 JSON)[:12], "o": offset, "v": data_version, "w": workspace_id}))`。復号時に `t`・`a`・`w` が一致しなければ `E_INVALID_ARGUMENT`、`v` が現在と異なれば `E_CURSOR_EXPIRED`。
+カーソルの文字列は短い鍵 `c` + 10 進 9 桁（`c482139071`。o200k で約 3 トークン。`c` は JSON で数値と取り違えないため）。中身 `CursorState{tool, args_hash = sha1(cursor・max_tokens・format を除く引数の正規化 JSON)[:12], offset, data_version, workspace_id}` は `CursorCodec` の表（メモリ・`OrderedDict`。`CURSOR_TABLE_MAX` = 4,096 件。発行と照合で新しい側へ移し、超えたら最も長く使われていないものから捨てる）に持つ。鍵は中身の SHA-256 から決める（同じ中身なら同じ鍵、プロセスをまたいでも同じ。応答が決定的）。表の別の中身とぶつかったときだけ塩を足して引き直す（最大 32 回。空間 10 億に表 4,096 件なので事実上起きない）。`peek` は表に入れずに鍵を返し（パッカーが見積もりで作るカーソル。続きの形ごと・再開位置の上限など 1 回の呼び出しで数個）、`encode` は表に入れる。パイプラインは `cursor_factory` に `peek` を渡し、描き終えて応答に出した `next_cursor` だけを `encode` で発行する（見積もりで作った分で表の上限を使わない）。照合（`decode`）: 鍵の形でなければ `E_INVALID_ARGUMENT`（`details.param: "cursor"`）、表に無ければ `E_CURSOR_EXPIRED`（`details.reason: "unknown_cursor"`。再起動・捨てた・発行していない）、`tool`・`args_hash`・`workspace_id` が一致しなければ `E_INVALID_ARGUMENT`（失効より先に見る）、`data_version` が今と違えば `E_CURSOR_EXPIRED`（`"data_changed"`）。表はセッション限定の軽い対応表（ADR-16 決定 4）で、ファイルや DB には書かない（再起動耐性は「失効して先頭から再取得できる」）。理由（BUG-0115、2026-10-31）: 以前は中身を `base64url(json(...))` にして渡していた（無署名・中身が読める）ので、カーソル 1 つが約 70 トークン（`find_references_and_implementations` で 112 文字）あり、`# more:` 行は約 82 トークンで参照 1 行（約 22）の約 3.7 行ぶんだった。件数の少ない答えは「1 件 + カーソル」が全体より大きく、全体より小さい予算では compact で 1 件も返らなかった。
 
 ### 7.2.4 レンダラ
 
@@ -1882,13 +1882,15 @@ host ─tools/call(edit_symbol_body, {target, operation, new_code, expected_file
 
 ```
 1 回目: tools/call(find_references_and_implementations, {target, max_tokens: 800})
-  Packer  → records[0:k] を詰め、残りがあるので CursorCodec.encode({t, a: sha1(args)[:12], o: k, v: data_version, w: ws})
+  Packer  → records[0:k] を詰め、残りがあるので CursorCodec.encode({tool, args_hash: sha1(args)[:12], offset: k, data_version, workspace_id})
+            （中身は表に入れ、応答には短い鍵だけ。§7.2.3）
   応答    → # more: cursor=<token> remaining≈N
 
 2 回目: tools/call(同ツール, {同じ引数, cursor: <token>})
-  pipeline → decode → t / a / w が一致しなければ E_INVALID_ARGUMENT（details.param: "cursor"）
-           → v != 現在の data_version なら E_CURSOR_EXPIRED（details.reason: "data_changed"）
-           → 一致なら ctx.cursor_offset = o
+  pipeline → decode → 表に無ければ E_CURSOR_EXPIRED（details.reason: "unknown_cursor"）
+           → tool / args_hash / workspace_id が一致しなければ E_INVALID_ARGUMENT（details.param: "cursor"）
+           → data_version が現在と違えば E_CURSOR_EXPIRED（details.reason: "data_changed"）
+           → 一致なら ctx.cursor_offset = offset
   handler  → 同じクエリを同じ順序で再実行（ORDER BY に完全なタイブレークを付ける。MUST）
   Packer   → records[o:] から詰める
 ```

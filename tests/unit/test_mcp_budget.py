@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import base64
 import dataclasses
-import json
 import random
+import re
 import time
 from collections.abc import Callable, Sequence
 
@@ -639,14 +638,69 @@ def test_cursor_roundtrip() -> None:
     )
 
 
-def test_cursor_is_base64url_without_padding_and_has_the_documented_payload() -> None:
+def test_cursor_is_a_short_key_and_the_state_stays_on_the_server() -> None:
+    """BUG-0115: カーソルは ``c`` + 10 進 9 桁の鍵（compact の ``# more:`` 行で数トークン）。中身は表に持ち、文字列には無い。"""
     token = _encode(workspace_id=None)
-    assert "=" not in token
-    assert all(c.isalnum() or c in "-_" for c in token)
-    payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
-    assert payload == {"t": "find_references", "a": CODEC.hash_args(ARGS), "o": 12, "v": 5, "w": None}
-    assert len(payload["a"]) == 12
+    assert re.fullmatch(r"c[0-9]{9}", token), token
+    assert EST.count(token) <= 10 and EST.count(f"# more: cursor={token} remaining≈34\n") <= 20
+    assert "find_references" not in token and "app" not in token
     assert _decode(token, workspace_id=None).workspace_id is None
+    # 以前の base64url(json) は 1 つ約 70 トークン（112 文字）だった
+    long_tool = CODEC.encode(tool="find_references_and_implementations", args={"target": {"urn": "lk://nm/pkg/a.py#Packer.pack"}},
+                             offset=1, data_version=12, workspace_id="nm")  # fmt: skip
+    assert len(long_tool) == 10 and EST.count(long_tool) <= 10
+
+
+def test_cursor_key_is_deterministic_and_peek_does_not_issue() -> None:
+    codec = CursorCodec()
+    kw: dict[str, object] = {"tool": "t", "args": {"x": 1}, "offset": 3, "data_version": 2, "workspace_id": "w"}
+    peeked = codec.peek(**kw)  # type: ignore[arg-type]
+    with pytest.raises(LuciankeError) as ei:  # 見積もりで作っただけのカーソルは発行していない
+        codec.decode(peeked, tool="t", args={"x": 1}, data_version=2, workspace_id="w")
+    assert ei.value.code is ErrorCode.E_CURSOR_EXPIRED
+    assert codec.encode(**kw) == peeked == CursorCodec().encode(**kw)  # type: ignore[arg-type]  # 同じ中身なら同じ鍵（プロセスをまたいでも）
+    assert codec.decode(peeked, tool="t", args={"x": 1}, data_version=2, workspace_id="w").offset == 3
+    assert codec.encode(**{**kw, "offset": 4}) != peeked  # type: ignore[arg-type]
+
+
+def test_cursor_unknown_or_evicted_key_is_expired_with_the_first_page_guidance() -> None:
+    codec = CursorCodec(capacity=3)
+    tokens = [codec.encode(tool="t", args={}, offset=o, data_version=1, workspace_id=None) for o in range(1, 5)]
+    assert len(set(tokens)) == 4
+    for unknown in (tokens[0], "c000000000"):  # 古い順に捨てた鍵・発行していない鍵（再起動の後も同じ）
+        with pytest.raises(LuciankeError) as ei:
+            codec.decode(unknown, tool="t", args={}, data_version=1, workspace_id=None)
+        assert ei.value.code is ErrorCode.E_CURSOR_EXPIRED
+        assert ei.value.details == {"reason": "unknown_cursor"}
+        assert "without cursor" in ei.value.message
+    assert [codec.decode(t, tool="t", args={}, data_version=1, workspace_id=None).offset for t in tokens[1:]] == [2, 3, 4]
+
+
+def test_cursor_table_keeps_the_recently_used_keys() -> None:
+    """表は使った順に新しくなる: 辿っている途中のカーソルは、後から発行した分に押し出されにくい。"""
+    codec = CursorCodec(capacity=2)
+    first = codec.encode(tool="t", args={}, offset=1, data_version=1, workspace_id=None)
+    second = codec.encode(tool="t", args={}, offset=2, data_version=1, workspace_id=None)
+    codec.decode(first, tool="t", args={}, data_version=1, workspace_id=None)  # first を使った
+    codec.encode(tool="t", args={}, offset=3, data_version=1, workspace_id=None)  # 最も長く使われていない second を捨てる
+    assert codec.decode(first, tool="t", args={}, data_version=1, workspace_id=None).offset == 1
+    with pytest.raises(LuciankeError) as ei:
+        codec.decode(second, tool="t", args={}, data_version=1, workspace_id=None)
+    assert ei.value.code is ErrorCode.E_CURSOR_EXPIRED
+
+
+def test_cursor_key_collision_draws_another_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """鍵が表の別の中身とぶつかったら塩を足して引き直す（別のページを指さない）。鍵の空間を 2 つに潰して確かめる。"""
+    import lucianke.mcp.budget as budget
+
+    monkeypatch.setattr(budget, "_CURSOR_SPACE", 2)
+    codec = CursorCodec()
+    a = codec.encode(tool="t", args={}, offset=1, data_version=1, workspace_id=None)
+    b = codec.encode(tool="t", args={}, offset=2, data_version=1, workspace_id=None)
+    assert {a, b} == {"c000000000", "c000000001"}
+    assert codec.peek(tool="t", args={}, offset=2, data_version=1, workspace_id=None) == b  # 同じ中身は同じ鍵のまま
+    assert codec.decode(a, tool="t", args={}, data_version=1, workspace_id=None).offset == 1
+    assert codec.decode(b, tool="t", args={}, data_version=1, workspace_id=None).offset == 2
 
 
 def test_cursor_args_hash_ignores_cursor_max_tokens_format_and_key_order() -> None:
@@ -669,13 +723,11 @@ def test_cursor_args_hash_handles_nested_and_non_ascii() -> None:
         pytest.param(lambda t: t[: len(t) // 2], id="truncated"),
         pytest.param(lambda t: t[:-1] + "!", id="bad-char"),
         pytest.param(lambda t: "", id="empty"),
-        pytest.param(lambda t: "!!!!", id="not-base64"),
-        pytest.param(lambda t: t + "====", id="excess-padding"),
+        pytest.param(lambda t: t + "0", id="too-long"),
+        pytest.param(lambda t: t.upper(), id="upper-case"),
+        pytest.param(lambda t: " " + t, id="leading-space"),
         pytest.param(lambda t: "日本語", id="non-ascii"),
-        pytest.param(lambda t: base64.urlsafe_b64encode(b"not json").decode(), id="not-json"),
-        pytest.param(lambda t: base64.urlsafe_b64encode(b"\xff\xfe").decode(), id="not-utf8"),
-        pytest.param(lambda t: base64.urlsafe_b64encode(b"[1,2]").decode(), id="json-not-object"),
-        pytest.param(lambda t: base64.urlsafe_b64encode(b'{"t":"find_references"}').decode(), id="missing-keys"),
+        pytest.param(lambda t: "eyJ0IjoiZmluZF9yZWZlcmVuY2VzIn0", id="old-base64-format"),
     ],
 )
 def test_cursor_garbage_is_invalid_argument(bad: Callable[[str], str]) -> None:
@@ -683,25 +735,7 @@ def test_cursor_garbage_is_invalid_argument(bad: Callable[[str], str]) -> None:
         _decode(bad(_encode()))
     assert ei.value.code is ErrorCode.E_INVALID_ARGUMENT
     assert ei.value.details == {"param": "cursor"}
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"t": "find_references", "a": "x", "o": -1, "v": 5, "w": "app"},
-        {"t": "find_references", "a": "x", "o": True, "v": 5, "w": "app"},
-        {"t": "find_references", "a": "x", "o": "3", "v": 5, "w": "app"},
-        {"t": "find_references", "a": "x", "o": 3, "v": "5", "w": "app"},
-        {"t": 1, "a": "x", "o": 3, "v": 5, "w": "app"},
-        {"t": "find_references", "a": "x", "o": 3, "v": 5, "w": 7},
-    ],
-)
-def test_cursor_wrong_field_types_are_invalid_argument(payload: dict) -> None:
-    token = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
-    with pytest.raises(LuciankeError) as ei:
-        _decode(token)
-    assert ei.value.code is ErrorCode.E_INVALID_ARGUMENT
-    assert ei.value.details == {"param": "cursor"}
+    assert "exactly as returned" in ei.value.message
 
 
 def test_cursor_non_string_token_is_invalid_argument() -> None:
@@ -731,6 +765,7 @@ def test_cursor_data_version_mismatch_is_expired() -> None:
     with pytest.raises(LuciankeError) as ei:
         _decode(_encode(), data_version=6)
     assert ei.value.code is ErrorCode.E_CURSOR_EXPIRED
+    assert ei.value.details == {"reason": "data_changed"}
 
 
 def test_cursor_mismatch_is_checked_before_expiry() -> None:

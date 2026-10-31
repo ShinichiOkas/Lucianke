@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from typing import Any
@@ -81,6 +82,7 @@ async def _handler(ctx: Any, a: Args) -> ToolOutput:
     return out
 
 
+@functools.cache  # サーバーと同じく 1 つのパイプライン（カーソルはその表に持つ。BUG-0115）
 def _pipeline() -> Pipeline:
     spec = ToolSpec(name="probe_tool", tid="T-XX", args_model=Args, handler=_handler, default_max_tokens=2000,
                     records_key="symbols")  # fmt: skip
@@ -215,6 +217,51 @@ async def test_paging_by_cursor_covers_all_records_and_every_page_fits(fmt, max_
         assert pages < 80
     assert seen == list(range(n))
     assert pages > 1
+
+
+# --- カーソルは短い鍵で、中身はパイプラインの表にある（BUG-0115） -----------------------------------------------
+
+
+def _fresh() -> Pipeline:
+    """新しいパイプライン（サーバーの再起動にあたる。カーソルの表は空）。"""
+    return _pipeline.__wrapped__()
+
+
+async def test_cursor_is_a_short_key_and_only_the_shown_cursor_is_issued():
+    p = _fresh()
+    r = Reply(await p.call_tool("probe_tool", {"format": "compact", "max_tokens": 400, "n": 40}), "compact")
+    cursor = r.next_cursor
+    assert cursor is not None and re.fullmatch(r"c[0-9]{9}", cursor), cursor
+    more = next(line for line in r.text.splitlines() if line.startswith("# more:"))
+    assert EST(more) <= 20, more  # 以前は約 80（カーソルが base64url の JSON で約 70）
+    # パッカーは見積もりで続きの形ごとのカーソルを作るが、表に入れるのは応答に出した 1 つだけ
+    assert len(p.cursor_codec) == 1
+    j = Reply(await p.call_tool("probe_tool", {"format": "json", "max_tokens": 1200, "n": 40}), "json")
+    assert j.next_cursor is not None and re.fullmatch(r"c[0-9]{9}", j.next_cursor)
+    assert len(p.cursor_codec) == 2
+
+
+async def test_cursor_is_bound_to_the_arguments_but_not_to_max_tokens_or_format_and_expires_on_restart():
+    p = _fresh()
+    first = Reply(await p.call_tool("probe_tool", {"format": "compact", "max_tokens": 400, "n": 40}), "compact")
+    cursor = first.next_cursor
+    assert cursor is not None
+    # max_tokens・format はページごとに変えてよい（同じ続きから）
+    again = Reply(await p.call_tool("probe_tool", {"format": "json", "max_tokens": 3000, "n": 40, "cursor": cursor}), "json")
+    assert not again.rendered.is_error and again.body is not None
+    assert again.body["data"]["symbols"][0]["name"] == f"fn_{first.returned}"
+    # 別の引数には使えない（E_INVALID_ARGUMENT・details.param）
+    other = await p.call_tool("probe_tool", {"format": "json", "max_tokens": 400, "n": 41, "cursor": cursor})
+    body = json.loads(other.text)
+    assert other.is_error and body["error"]["code"] == "E_INVALID_ARGUMENT" and body["error"]["details"]["param"] == "cursor"
+    # 再起動（表が空）の後は失効: 先頭から cursor なしで呼び直す案内
+    restarted = await _fresh().call_tool("probe_tool", {"format": "json", "max_tokens": 400, "n": 40, "cursor": cursor})
+    body = json.loads(restarted.text)
+    assert restarted.is_error and body["error"]["code"] == "E_CURSOR_EXPIRED", restarted.text
+    assert body["error"]["details"]["reason"] == "unknown_cursor" and "without cursor" in body["error"]["message"]
+    # 前の形式（base64url の JSON）の文字列は鍵の形でない
+    old = await p.call_tool("probe_tool", {"format": "compact", "n": 40, "cursor": "eyJ0IjoicHJvYmVfdG9vbCJ9"})
+    assert old.is_error and "E_INVALID_ARGUMENT" in old.text.splitlines()[0]
 
 
 # --- 失敗応答の部分結果（E_TIMEOUT）も同じ予算に入る -----------------------------------------------------------

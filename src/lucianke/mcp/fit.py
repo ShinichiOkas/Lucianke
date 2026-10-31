@@ -9,12 +9,14 @@
 この関数は次の順で「描画後の全文が ``max_tokens`` 以下」で「``used_tokens_est`` が全文の数え直しに一致」する応答を作る。
 
 1. **前置きを数える**: レコード 0 件のページで同じレンダラを実際に走らせた全文（``used_tokens_est`` と ``timing_ms`` は
-   桁数が最大の値）を数え、``reserved_tokens`` にする。降格の警告行は、残りの全レコードから集計した精度で出す
-   （入ったレコードだけの集計より警告が長いことはあっても短いことはない）。
-2. **詰める**: ``reserved_tokens`` を渡してパッカーを呼ぶ。json は ``Record.data`` の JSON で数える
+   桁数が最大の値）を数え、``reserved_tokens`` にする。降格の警告行・ヘッダの ``conf=``・json の ``_resolution_meta`` は
+   ページに入ったレコードの精度で出るので、精度の集計が変わる位置で段に分け、段ごとにその段の最後の形の集計で数えた値
+   （前の段までの最大）を、先頭から m 件のページの前置き ``reserved_for(m)`` として渡す（BUG-0116。以前は全レコードの集計で
+   1 つだけ数え、そのページに出ない注意文の分まで取り分けていた）。
+2. **詰める**: ``reserved_tokens`` ・``reserved_for`` を渡してパッカーを呼ぶ。json は ``Record.data`` の JSON で数える
    （``json_out.record_text`` / ``trailer_text``）。
 3. **全文を数え直す**: 実際に描いた全文を ``TokenEstimator`` で数える。``max_tokens`` を超えていれば（前置きの見積もりが
-   足りなかった。``returned`` の桁数など）超過分を ``reserved_tokens`` に足して 2 に戻る。
+   足りなかった。``returned`` の桁数など）超過分を前置き（``reserved_tokens`` と ``reserved_for`` の全部の形）に足して 2 に戻る。
 4. **``used_tokens_est`` を数え直しに合わせる**: ヘッダの ``~used``・json の ``budget.used_tokens_est`` の桁数は全文の数に効く
    （数字は 1 文字ずつ数える）ので、数え直した値で描き直して、値が動かなくなるまで繰り返す（桁数が変わらなければ 1 回で収まる）。
    数えるときの ``timing_ms`` は最大の桁数に固定する（実際の全文以上の上限。同じ入力なら呼び出しごとに同じ値になる）。
@@ -29,13 +31,15 @@ dot / mermaid は BUG-0053 で追加（FITTED_FORMATS）。``Packer.pack`` を�
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
 from lucianke.core.errors import LuciankeError
-from lucianke.core.records import ResolutionMeta, ToolOutput
+from lucianke.core.model import Confidence
+from lucianke.core.records import ResolutionMeta, ToolOutput, split_offset
 from lucianke.core.tokens import TokenEstimator
 from lucianke.mcp.envelope import build_meta
 from lucianke.mcp.render import json_out
@@ -131,10 +135,29 @@ def pack_and_render(
         # 収束しなければ（桁数の境目）ヘッダの値は数え直しと数トークンずれうる
         return render(shown, meta, timing=timing_ms(), max_tokens=mt), shown, recount
 
-    def fit_at(max_tokens: int, min_need: int) -> tuple[Rendered, Page, ResolutionMeta, int]:
-        """1〜4 を ``max_tokens`` で行う。``(描いた結果, ページ, メタ, 数え直した値)``。``min_need`` はパッカーへ渡す
-        （1 件も入らないときの呼び直しの目安の下限。5 で確かめた値）。"""
-        # 1. 前置き（レコード以外の全部）を、同じレンダラで 0 件のページを描いて数える
+    start, _ = split_offset(max(offset, 0))
+    rest = [out.records[i] for i in range(start, len(out.records))]
+    # 先頭から m 件のページの精度の集計（降格の注意文・ヘッダの conf=）が変わる位置。段 j は m が (ends[j-1], ends[j]] の形
+    ends: list[int] = []
+    level: Confidence | None = None
+    for m, rec in enumerate(rest, 1):
+        if rec.section is not None:  # 補足の欄は集計に数えない（``build_meta``。BUG-0107）
+            continue
+        lower = rec.confidence if level is None else min(level, rec.confidence)
+        if lower != level and m > 1:
+            ends.append(m - 1)
+        level = lower
+    ends.append(len(rest))
+
+    def preambles(max_tokens: int) -> tuple[int, list[int]]:
+        """1. 前置き（レコード以外の全部）を、同じレンダラで 0 件のページを描いて数える。``(0 件のページの前置き, 段ごとの前置き)``。
+
+        降格の注意文とヘッダの ``conf=`` はページに入ったレコードの精度で出る（``build_meta``）ので、段ごとに、その段の最後の形
+        （先頭から ``ends[j]`` 件。json の ``confidence_breakdown`` の件数も段の中で最大）の集計で描いて数え、前の段までの最大を
+        取る（件数について減らない。予算に依らないので鎖の単調性を保つ）。以前は全レコードの集計で 1 つだけ数えていたので、
+        後ろに精度の低いレコードが 1 つでもあると、そのページに出ない注意文の分（T-01 で約 76 トークン）を取り分けていた
+        （BUG-0116）。0 件のページはレコード 0 件の集計（``out.engine.confidence``）で数える。
+        """
         probe_page = Page(
             records=(),
             next_cursor=None,
@@ -145,16 +168,37 @@ def pack_and_render(
             max_tokens=max_tokens,
             truncated=False,
         )
-        reserved = est(
-            render(probe_page, build_meta(out, None), timing=_PROBE_TIMING_MS, max_tokens=max_tokens).text
-        )
+        counted: dict[str, int] = {}
+
+        def probe(records: Sequence[Any]) -> int:
+            meta = build_meta(out, dataclasses.replace(probe_page, records=tuple(records)))
+            key = repr(meta)
+            if key not in counted:
+                counted[key] = est(render(probe_page, meta, timing=_PROBE_TIMING_MS, max_tokens=max_tokens).text)
+            return counted[key]
+
+        steps: list[int] = []
+        for end in ends:
+            steps.append(max(probe(rest[:end]), steps[-1] if steps else 0))
+        return probe(()), steps
+
+    def fit_at(max_tokens: int, min_need: int) -> tuple[Rendered, Page, ResolutionMeta, int]:
+        """1〜4 を ``max_tokens`` で行う。``(描いた結果, ページ, メタ, 数え直した値)``。``min_need`` はパッカーへ渡す
+        （1 件も入らないときの呼び直しの目安の下限。5 で確かめた値）。"""
+        reserved, steps = preambles(max_tokens)
+        extra = 0  # 3 で前置きの見積もりが足りなかった分（全部の形に足す）
+
+        def reserved_for(m: int) -> int:
+            return steps[min(bisect.bisect_left(ends, m), len(steps) - 1)] + extra
+
         for _ in range(_MAX_PACK_ROUNDS):
             # 2. 詰める
             page = packer.pack(
                 out,
                 max_tokens=max_tokens,
                 offset=offset,
-                reserved_tokens=reserved,
+                reserved_tokens=reserved + extra,
+                reserved_for=reserved_for,
                 cursor_factory=cursor_factory,
                 min_need=min_need,
                 **kwargs,
@@ -164,7 +208,7 @@ def pack_and_render(
             # 3. 全文が予算に収まったか。1 件も入っていないなら、これ以上減らせない（前置きだけで超える呼び出し側の誤り）
             if recount <= max_tokens or not page.records:
                 break
-            reserved += recount - max_tokens
+            extra += recount - max_tokens
         return rendered, page, meta, recount
 
     rendered, page, meta, _ = fit_at(call.max_tokens, 0)

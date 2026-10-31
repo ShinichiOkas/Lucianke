@@ -338,3 +338,75 @@ def test_ticket_shape_compact_pages_just_below_the_whole_response() -> None:
         else:
             assert r.raise_to is not None and r.raise_to > r.max_tokens, (r.max_tokens, r.text)
     assert any(r.page.next_cursor for r in replies)  # 全体の手前でカーソルつきのページが返っている
+    # BUG-0115: カーソルが短い（``# more:`` 行は約 15 トークン）ので、「1 件 + カーソル」は全体より参照 2 行ぶん以上小さい。
+    # 以前（カーソルが base64url の JSON で約 50〜70 トークン）は全体の 5 トークン手前からしか分けて読めなかった
+    paged_from = next(r.max_tokens for r in replies if r.page.next_cursor)
+    assert paged_from <= full.recount - 40, (paged_from, full.recount)
+    assert paged_from == preamble + first, (paged_from, preamble, first)
+
+
+def test_small_answer_pages_in_compact_from_well_below_the_whole() -> None:
+    """BUG-0115: 件数の少ない答え（3〜6 件・1 件約 20 トークン）でも、compact で全体より小さい予算から分けて読める。
+    各件数で「1 件 + カーソル」のページが返り始める予算は、全体より参照 1 行ぶん以上小さい（以前は ``# more:`` 行が約 80
+    トークンで「1 件 + カーソル」が全体以上になり、全体の手前はどの予算でも 0 件だった）。辿ると全件を 1 度ずつ返す。"""
+    for n in range(3, 7):
+        lines = [f"pkg/b.py:{7 + 4 * i}:21  [call] in caller_{i}  return packer.pack([{i}])" for i in range(n)]
+        records = [Record(kind="ref", key=f"k{i}", priority=i, lines=(ln,), data={"line": ln},
+                          confidence=Confidence.STRUCTURAL, group="pkg/b.py") for i, ln in enumerate(lines)]  # fmt: skip
+        out = ToolOutput(records=records, max_confidence=Confidence.STRUCTURAL,
+                         engine=EngineChoice(engine="tree-sitter", confidence=Confidence.STRUCTURAL, lsp_status="unavailable"),
+                         page_unit="1 reference site")  # fmt: skip
+        case = Case(fmt="compact", out=out, offset=0, error=None, seed=n)
+        whole = _fit(case, 10_000).recount
+        replies = _sweep(case, range(max(10, whole - 80), whole + 1), ("small", n))
+        paged_from = next(r.max_tokens for r in replies if r.page.next_cursor)
+        assert paged_from <= whole - EST(lines[0] + "\n"), (n, paged_from, whole)
+        # その予算からカーソルを辿り切ると（呼ぶ側の AI と同じく、0 件なら警告の目安に上げて）、全件が 1 度ずつ返る
+        seen: list[str] = []
+        offset, budget = 0, paged_from
+        for _ in range(2 * n + 2):
+            r = _fit(dataclasses.replace(case, offset=offset), budget)
+            if r.raise_to is not None:
+                assert r.raise_to <= whole, (n, offset, r.text)
+                budget = r.raise_to
+                continue
+            assert r.page.records and r.recount <= budget, (n, offset, r.text)
+            seen += [rec.key for rec in r.page.records]
+            if r.page.next_cursor is None:
+                break
+            offset = CODEC.decode(r.page.next_cursor, tool=TOOL, args={"seed": n}, data_version=3, workspace_id=WS).offset
+        assert seen == [f"k{i}" for i in range(n)], (n, seen)
+
+
+def test_preamble_counts_only_the_banner_the_page_shows() -> None:
+    """BUG-0116: 後ろに精度の低いレコードがあっても、そのページに出ない降格の注意文の分は取り分けない。先頭の exact の
+    レコードだけが入るページには ``! DEGRADED`` が無く、余りは次のレコード 1 件ほどより小さい（以前は注意文の分〈約 70
+    トークン〉が毎ページ余っていた）。heuristic のレコードが入るページには注意文があり、予算内に収まる。"""
+    body = "src/app/service.py:{}:5  [call] in handler_{}  return service.process(request, retries=3)"
+    records = [Record(kind="ref", key=f"k{i}", priority=i, lines=(body.format(10 + i, i),), data={"line": body.format(10 + i, i)},
+                      confidence=Confidence.EXACT, group="src/app/service.py") for i in range(12)]  # fmt: skip
+    records.append(Record(kind="ref", key="cobol", priority=99, lines=("legacy/PAY.cbl:12:8  [call] in MAIN  CALL 'PAY'",),
+                          data={"line": "legacy/PAY.cbl:12:8"}, confidence=Confidence.HEURISTIC, group="legacy/PAY.cbl"))  # fmt: skip
+    out = ToolOutput(records=records, max_confidence=Confidence.EXACT,
+                     engine=EngineChoice(engine="pyright+tree-sitter", confidence=Confidence.EXACT, lsp_status="ready"),
+                     page_unit="1 reference site")  # fmt: skip
+    for fmt in ("compact", "json"):
+        case = Case(fmt=fmt, out=out, offset=0, error=None, seed=7)
+        whole = _fit(case, 20_000).recount
+        replies = _sweep(case, range(_preamble(case, 100), whole + 1, 5), ("banner", fmt))
+        # 次のレコードも exact のページ（次が heuristic なら、それを入れると注意文も要るので余りは大きくてよい）
+        partial = [r for r in replies if r.page.records and r.page.next_cursor and len(r.page.records) < 12]
+        assert len(partial) > 10, fmt
+        for r in partial:
+            assert "DEGRADED" not in r.text and '"is_degraded":true' not in r.text, (fmt, r.max_tokens, r.text)
+            nxt = records[len(r.page.records)]
+            unit = EST(json_out.record_text(nxt)) if fmt == "json" else EST(nxt.lines[0] + "\n")
+            # 申告（json は ``timing_ms`` を最大の桁数で数える）で見る。パッカーは部分ごとに切り上げて数えるので、全文の
+            # 数え直しは部分の和より部分の数ほど小さくなりうる（json は記号の連が部分の境目でつながるぶん、1 件 2 トークンほど）
+            left = r.max_tokens - _used(r)
+            per_part = 2 if fmt == "json" else 1
+            assert left < unit + per_part * len(r.page.records) + 6, (fmt, r.max_tokens, _used(r), unit, r.text)
+        # 全部が入る予算（パッカーは部分ごとに切り上げて数えるので、全文の数え直しより少し上）
+        last = _fit(case, whole + 20)
+        assert last.page.records[-1].key == "cobol" and last.recount <= whole + 20
+        assert ("! DEGRADED" in last.text) if fmt == "compact" else ('"is_degraded":true' in last.text), last.text

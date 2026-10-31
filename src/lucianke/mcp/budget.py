@@ -4,18 +4,20 @@
   共有するため ``core`` に置いた）。ここから同じ名前で再公開する（``TokenEstimator`` ・``TOKENS_PER_CHAR``）。
 * ``Packer``: 優先順位つきのレコード列を ``max_tokens`` の中に詰める。レコードは途中で切らない。
   ``used_tokens_est <= max_tokens`` を保証するのはここである（ADR-4 の帰結）。
-* ``CursorCodec``: ``next_cursor`` の符号化と復号（ADR-8）。署名は付けない（不透明だが改ざん防止ではない）。
+* ``CursorCodec``: ``next_cursor`` の発行と照合（ADR-8）。カーソルは短い鍵で、中身はセッションのメモリの表に持つ
+  （BUG-0115）。不透明だが改ざん防止ではない。
 * ``trailer_lines``: ``# summary:`` と ``# more:`` の組み立て。パッカーが見積もる文字列とレンダラが出す文字列を
   一致させるため、レンダラはこの関数を使うこと。
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import dataclasses
 import hashlib
 import json
+import re
+import threading
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -109,6 +111,12 @@ def _one_line(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
 # --- カーソル -------------------------------------------------------------------------------
 
 _CURSOR_EXCLUDED_ARGS: Final = frozenset({"cursor", "max_tokens", "format"})
+#: カーソルの表に持つ件数の上限（セッションのメモリ。古く使われていないものから捨てる。捨てたカーソルは ``E_CURSOR_EXPIRED``）
+CURSOR_TABLE_MAX: Final = 4096
+#: カーソルの文字列: ``c`` + 10 進 9 桁（compact の ``cursor=`` の後ろで o200k の 3 トークン。``c`` は JSON で数値と取り違えないため）
+_CURSOR_TOKEN: Final = re.compile(r"c[0-9]{9}")
+_CURSOR_SPACE: Final = 10**9
+_CURSOR_SALTS: Final = 32  # 鍵がぶつかったときに引き直す回数の上限
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -127,12 +135,28 @@ def _invalid_cursor(reason: str) -> LuciankeError:
 
 
 class CursorCodec:
-    """``next_cursor`` の符号化と復号（設計書 §7.2.3、ADR-8）。
+    """``next_cursor`` の発行と照合（設計書 §7.2.3、ADR-8・ADR-16。BUG-0115）。
 
-    ``base64url(json({"t": tool, "a": sha1(args)[:12], "o": offset, "v": data_version, "w": workspace_id}))``
-    （パディングなし）。署名は付けない。再エンコードした JSON は通る。守るのは「別の呼び出しに使い回す」誤用であり、
-    悪意ある改ざんではない。
+    カーソルの文字列は短い鍵（``c`` + 10 進 9 桁）で、中身の ``CursorState``（ツール名・``max_tokens`` ・``cursor`` ・
+    ``format`` を除いた引数のハッシュ・オフセット・``data_version`` ・ワークスペース）はこのオブジェクトの表（メモリ。
+    ``CURSOR_TABLE_MAX`` 件まで。古く使われていないものから捨てる）に持つ。鍵は中身のハッシュから決める（同じ中身なら同じ鍵。
+    プロセスをまたいでも同じ）。表の別の中身とぶつかったときだけ塩を足して引き直す。
+    以前は中身を ``base64url(json(...))`` にして渡していたので、カーソル 1 つが約 70 トークン（112 文字）あり、
+    ``# more:`` 行が参照 3〜4 行ぶんになっていた（件数の少ない答えは compact で分けて読めなかった）。表はセッション限定の
+    軽い対応表（ADR-16）で、再起動や捨てたカーソルは ``E_CURSOR_EXPIRED``（先頭から呼び直す）になる。
+
+    ``peek`` は表に入れずに鍵だけを返す（パッカーが見積もりで作るカーソル用）。``encode`` は表に入れて鍵を返す
+    （応答に出すカーソル）。どちらも同じ中身に同じ鍵を返す。
     """
+
+    def __init__(self, capacity: int = CURSOR_TABLE_MAX) -> None:
+        self.capacity = capacity
+        self._table: OrderedDict[str, CursorState] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        """表に持っている（発行して捨てていない）カーソルの数。"""
+        return len(self._table)
 
     @staticmethod
     def hash_args(args: Mapping[str, Any]) -> str:
@@ -141,12 +165,47 @@ class CursorCodec:
         text = json.dumps(norm, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
         return hashlib.sha1(text.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
+    def _state(
+        self, *, tool: str, args: Mapping[str, Any], offset: int, data_version: int, workspace_id: str | None
+    ) -> CursorState:
+        return CursorState(
+            tool=tool, args_hash=self.hash_args(args), offset=offset, data_version=data_version, workspace_id=workspace_id
+        )
+
+    def _token_of(self, state: CursorState) -> str:
+        """``state`` の鍵（呼び手がロックを持つ）。表の別の中身とぶつかれば塩を足して引き直す（``_CURSOR_SALTS`` 回まで。
+        鍵の空間 10 億に対して表は 4,096 件なので、ぶつかるのは 25 万回に 1 回ほどで、引き直しが尽きることは事実上無い。尽きたら
+        最後の候補を返し、``encode`` が持ち主を上書きする）。"""
+        token = ""
+        for salt in range(_CURSOR_SALTS):
+            text = f"{state.tool}\0{state.args_hash}\0{state.offset}\0{state.data_version}\0{state.workspace_id}\0{salt}"
+            digest = hashlib.sha256(text.encode("utf-8"), usedforsecurity=False).digest()
+            token = f"c{int.from_bytes(digest[:8], 'big') % _CURSOR_SPACE:09d}"
+            held = self._table.get(token)
+            if held is None or held == state:
+                break
+        return token
+
+    def peek(
+        self, *, tool: str, args: Mapping[str, Any], offset: int, data_version: int, workspace_id: str | None
+    ) -> str:
+        """表に入れずに鍵を返す（``encode`` と同じ鍵）。"""
+        state = self._state(tool=tool, args=args, offset=offset, data_version=data_version, workspace_id=workspace_id)
+        with self._lock:
+            return self._token_of(state)
+
     def encode(
         self, *, tool: str, args: Mapping[str, Any], offset: int, data_version: int, workspace_id: str | None
     ) -> str:
-        payload = {"t": tool, "a": self.hash_args(args), "o": offset, "v": data_version, "w": workspace_id}
-        raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        """カーソルを発行する: 表に入れて鍵を返す。表が上限を超えたら、最も長く使われていないものから捨てる。"""
+        state = self._state(tool=tool, args=args, offset=offset, data_version=data_version, workspace_id=workspace_id)
+        with self._lock:
+            token = self._token_of(state)
+            self._table[token] = state
+            self._table.move_to_end(token)
+            while len(self._table) > self.capacity:
+                self._table.popitem(last=False)
+        return token
 
     def decode(
         self,
@@ -157,37 +216,35 @@ class CursorCodec:
         data_version: int,
         workspace_id: str | None,
     ) -> CursorState:
-        """復号して検査する。
+        """表から引いて検査する。
 
-        壊れた文字列、``t`` / ``a`` / ``w`` の不一致は ``E_INVALID_ARGUMENT``（``details.param == "cursor"``）。
-        ``v`` が現在の ``data_version`` と違えば ``E_CURSOR_EXPIRED``。前者を先に検査する
-        （別ツールのカーソルが「失効」と誤診されないように）。
+        鍵の形でない文字列、``tool`` ・引数・ワークスペースの不一致は ``E_INVALID_ARGUMENT``（``details.param == "cursor"``）。
+        表に無い鍵（再起動・捨てた・発行していない）と、``data_version`` が今と違うものは ``E_CURSOR_EXPIRED``
+        （``details.reason`` が ``unknown_cursor`` / ``data_changed``）。不一致を失効より先に検査する（別ツールのカーソルが
+        「失効」と誤診されないように）。引いたカーソルは使われたものとして表の新しい側へ移す。
         """
-        try:
-            padded = token + "=" * (-len(token) % 4)
-            obj = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True).decode("utf-8"))
-        except (ValueError, TypeError, binascii.Error):  # UnicodeDecodeError と JSONDecodeError は ValueError
-            raise _invalid_cursor("malformed token") from None
-        if not isinstance(obj, dict):
-            raise _invalid_cursor("malformed token")
-        t, a, o, v, w = (obj.get(k) for k in ("t", "a", "o", "v", "w"))
-        if (
-            not isinstance(t, str)
-            or not isinstance(a, str)
-            or type(o) is not int
-            or o < 0
-            or type(v) is not int
-            or not (w is None or isinstance(w, str))
-        ):
-            raise _invalid_cursor("malformed token")
-        if t != tool or a != self.hash_args(args) or w != workspace_id:
+        if not isinstance(token, str) or not _CURSOR_TOKEN.fullmatch(token):
+            raise _invalid_cursor("malformed token (pass next_cursor exactly as returned, or call again without cursor)")
+        with self._lock:
+            state = self._table.get(token)
+            if state is not None:
+                self._table.move_to_end(token)
+        if state is None:
+            raise LuciankeError(
+                ErrorCode.E_CURSOR_EXPIRED,
+                f"the cursor is unknown or expired (this server session keeps its last {self.capacity} cursors in memory); "
+                "call again without cursor from the first page",
+                details={"reason": "unknown_cursor"},
+            )
+        if state.tool != tool or state.args_hash != self.hash_args(args) or state.workspace_id != workspace_id:
             raise _invalid_cursor("the cursor was issued for a different tool, arguments or workspace")
-        if v != data_version:
+        if state.data_version != data_version:
             raise LuciankeError(
                 ErrorCode.E_CURSOR_EXPIRED,
                 "the data changed since the cursor was issued; call again from the first page",
+                details={"reason": "data_changed"},
             )
-        return CursorState(tool=t, args_hash=a, offset=o, data_version=v, workspace_id=w)
+        return state
 
 
 # --- パッカー -------------------------------------------------------------------------------
@@ -223,7 +280,9 @@ class Packer:
     カーソルは入るのに要約の分で 0 件になる予算の帯があった（compact の既定の形式で、全体より少し小さい予算ではページが
     進められなかった）。
 
-    契約: ``reserved_tokens``（ヘッダ・``head_kv``・呼び手が出す警告の分）は呼び手が数えて渡す。
+    契約: ``reserved_tokens``（ヘッダ・``head_kv``・呼び手が出す警告の分）は呼び手が数えて渡す。前置きがページに入った
+    レコードで変わる（降格の注意文はそのページの精度で出る）ときは、先頭から ``m`` 件のページの前置きを ``reserved_for(m)``
+    で形ごとに渡す（BUG-0116。``mcp/fit.py``）。
     ``reserved_tokens`` とトレーラの最小形だけで ``max_tokens`` を超える（前置きだけで予算を使い切る小さすぎる
     ``max_tokens`` など）場合は保証できず、レコード 0 件で返す（``used_tokens_est`` は超過した実測値）。レコードが元から
     0 件でも、``warnings`` に呼び直しに要る ``max_tokens`` を名指しする（BUG-0064）。
@@ -252,11 +311,17 @@ class Packer:
         trailer_text: TrailerText | None = None,
         form: str = "compact",
         min_need: int = 0,
+        reserved_for: Callable[[int], int] | None = None,
     ) -> Page:
         """``form`` は応答の形式（``"json"`` なら縮退に ``Record.shrink_json`` を先に使う。``record_text`` は呼び手が合わせる）。
 
         1 件も入らない（前置きだけで超える）ページは、警告に呼び直しの目安の ``max_tokens`` を書き、``Page.need_max_tokens`` にも
         入れる。``min_need`` はその目安の下限（呼び手が描いた全文で確かめた値。``mcp/fit.py``。BUG-0110）。
+
+        ``reserved_for(m)`` は、ページが先頭から ``m`` 件（``m >= 1``）を持つときの前置き（``m`` について減らない・予算に依らない
+        こと）。前置きが入ったレコードで変わる（降格の注意文は入ったレコードの精度で出る）とき、呼び手が形ごとに渡す（BUG-0116）。
+        省略すれば全部の ``m`` で ``reserved_tokens``。``reserved_tokens`` は 0 件のページ（1 件も入らない・詰めるものが無い）の
+        前置き。鎖の各形は自分の件数の前置きで「収まる」を判定するので、前置きが形に依らないときと同じく予算について単調。
         """
         est = self.estimator.count
         # 形式ごとの本文の見積もり（既定は compact の行。json は ``Record.data`` の JSON。BUG-0017）
@@ -265,6 +330,15 @@ class Packer:
         records = out.records
         n = len(records)
         start, _ = split_offset(max(offset, 0))  # 上位ビットは同じレコードの再開位置（ツールが読む。``Record.resume``）
+
+        def pre(m: int) -> int:
+            """先頭から ``m`` 件（``m >= 1``）を入れたページの前置き。"""
+            return reserved_for(m) if reserved_for is not None else reserved_tokens
+
+        def avail_of(m: int) -> int:
+            """先頭から ``m`` 件を入れたページで、レコードとトレーラに使える予算。"""
+            return max_tokens - pre(m)
+
         # ``total_estimate`` が ``len(records)`` を超えるとき、ツールは先頭の ``n`` 件だけを渡し（``limit`` で打ち切った遅延列）、
         # 残り ``unseen`` 件を具体化していない。それも「続き」なので、渡された分が全部入ってもカーソルとトレーラが要る
         # （BUG-0008）。``total_estimate`` が ``len(records)`` 以下なら無視する。
@@ -274,7 +348,6 @@ class Packer:
         else:
             unseen = max(0, out.total_estimate - n)
             total = n + unseen
-        avail = max_tokens - reserved_tokens
 
         if start >= n:  # 詰めるものが無い（続きも無い）
             if reserved_tokens <= max_tokens:
@@ -299,11 +372,11 @@ class Packer:
             running = 0
             for i in range(start, n):
                 running += cost_of(i)
-                if running > avail:
+                if running > avail_of(n - start):
                     break
             else:
                 kept = tuple(records[i].with_tokens(tok[i]) for i in range(start, n))
-                return self._page(kept, reserved_tokens + running, max_tokens, total, 0, None, None, ())
+                return self._page(kept, pre(n - start) + running, max_tokens, total, 0, None, None, ())
 
         # 要約を数えない形式（json）では要約の取り分を使わない
         summary_counts = tt("x", None, 1) != tt(None, None, 1)
@@ -332,10 +405,10 @@ class Packer:
         # 先頭の 1 件を丸ごと入れて ``# more:`` 行を付けた本文（要約なし）。これが入る予算なら、少なくとも 1 件は必ず返る
         first_bare = trailer_of(1, None)[2]
         first_need = cost_of(start) + first_bare
-        share_full = max(0, avail) // SUMMARY_SHARE_DIVISOR
 
-        def first_share() -> int:
-            """要約の取り分 ``min(share_full, max(0, avail - F))``（BUG-0067・BUG-0110）。
+        def first_share(avail: int) -> int:
+            """要約の取り分 ``min(share_full, max(0, avail - F))``（BUG-0067・BUG-0110）。``avail`` はその形で使える予算
+            （前置きが形の件数で変わるとき〈BUG-0116〉は形ごとに違う）、``share_full`` は ``avail`` の 1/4。
 
             F は「先頭の 1 件の最も小さい形と ``# more:`` 行」が入るのに要る本文で、予算に依らない（丸ごとなら ``first_need``、
             縮退版なら ``最小の ask + 1 + 再開位置が最大のときの # more: 行``。縮退版は ``ask`` に収まる最大の版を返すので、縮退版が
@@ -345,6 +418,7 @@ class Packer:
             ので ``avail - 取り分`` は予算について減らず、鎖の各形の「収まる」と縮退版の大きさは予算について単調のまま。
             F は取り分が 1/4 より小さくなる範囲でだけ求める（縮退の呼び出しはふつう 1 回。帯の中でだけ二分探索する）。
             """
+            share_full = max(0, avail) // SUMMARY_SHARE_DIVISOR
             whole = min(share_full, max(0, avail - first_need))
             rec = records[start]
             if whole == share_full or rec.shrink is None:
@@ -365,16 +439,19 @@ class Packer:
                     hi = mid
             return min(share_full, max(0, avail - min(first_need, lo + 1 + bare_hi)))
 
-        shares: list[int] = []  # 要約の取り分（要約の分がある形を初めて数えるときに 1 度だけ求める。縮退の呼び出しを増やさない）
+        # 要約の取り分（使える予算ごと。要約の分がある形を初めて数えるときに 1 度だけ求める。縮退の呼び出しを増やさない。
+        # 前置きが形に依らなければ 1 つ、件数で変わるときも高々その段の数）
+        shares: dict[int, int] = {}
 
         def tail_of(m: int, resume: int | None) -> tuple[int, int, int]:
             """先頭 ``m`` 件を入れたときの ``(次のオフセット, 残り件数, トレーラ)``。トレーラは素のトレーラと要約の取り分までの分。"""
             nxt, remaining, bare, extra = trailer_of(m, resume)
             if not extra:
                 return nxt, remaining, bare
-            if not shares:
-                shares.append(first_share())
-            return nxt, remaining, bare + min(extra, shares[0])
+            avail = avail_of(m)
+            if avail not in shares:
+                shares[avail] = first_share(avail)
+            return nxt, remaining, bare + min(extra, shares[avail])
 
         def shrunk_last(m: int, room: int, tail: int) -> tuple[Record, int, int, int, int] | None:
             """``m`` 件目を縮退させて最後の 1 件にする: 残り ``room`` にトレーラ込みで入る最も大きい縮退版。
@@ -403,18 +480,19 @@ class Packer:
             return None
 
         # 2. 鎖の上で予算に収まる最も先の形を探す。先頭 m - 1 件を丸ごと入れた本文が予算を超えない最大の m から下へ見て、
-        #    最初に収まる m（丸ごと、無理なら最も大きい縮退版）を採る。本文の和は m について増えるので、それより先は収まらない
+        #    最初に収まる m（丸ごと、無理なら最も大きい縮退版）を採る。本文の和は m について増え、使える予算（前置きの残り）は
+        #    m について増えないので、それより先は収まらない
         prefix = [0]  # prefix[k] = 先頭 k 件を丸ごと入れた本文の和
         m_top = 0
         for m in range(1, n - start + 1):
-            if prefix[-1] > avail:
+            if prefix[-1] > avail_of(m):
                 break
             m_top = m
             prefix.append(prefix[-1] + cost_of(start + m - 1))
         chosen: tuple[int, Record, int, int, int, int] | None = None  # (件数, 最後の版, そのトークン数, 次のオフセット, 残り, トレーラ)
         for m in range(m_top, 0, -1):
             i = start + m - 1
-            room = avail - prefix[m - 1]
+            room = avail_of(m) - prefix[m - 1]
             nxt, remaining, tail = tail_of(m, None)
             if cost_of(i) + tail <= room:
                 chosen = (m, records[i], cost_of(i), nxt, remaining, tail)
@@ -431,17 +509,17 @@ class Packer:
             # トレーラ（要約・``# more:``）も描かれないので数えない。呼び直しの目安は、先頭の 1 件を丸ごとと ``# more:`` 行
             # （続きがあれば）が入る予算（その予算では要約の取り分は 0 なので必ず入る。以前は ``# more:`` 行を数えず、
             # 呼んだ ``max_tokens`` より小さい値を勧めることがあった。BUG-0110）
-            #    残りが全部（トレーラなしで）それより小さく入るなら、そちらが目安（カーソルの行は長い〈約 60〜80 トークン〉ので、
-            #    件数の少ない答えでは「1 件 + カーソル」より「全部」のほうが小さい）
-            body = first_need
+            #    残りが全部（トレーラなしで）それより小さく入るなら、そちらが目安（件数の少ない答えでは「1 件 + カーソル」より
+            #    「全部」のほうが小さいことがある）。前置きはそれぞれの形の件数のもの（BUG-0116）
+            need = pre(1) + first_need
             if not unseen:
-                whole = 0
+                whole = pre(n - start)
                 for i in range(start, n):
                     whole += cost_of(i)
-                    if whole >= body:
+                    if whole >= need:
                         break
-                body = min(body, whole)
-            need = max(reserved_tokens + body, min_need)
+                need = min(need, whole)
+            need = max(need, min_need)
             warning = no_fit_warning(max_tokens, cost_of(start), need)
             used = reserved_tokens + est("! " + warning + "\n")
             page = self._page((), used, max_tokens, total, n - start + unseen, None, None, (warning,))
@@ -449,7 +527,7 @@ class Packer:
 
         m, last, last_size, nxt, remaining, _ = chosen
         kept = (*(records[j].with_tokens(cost_of(j)) for j in range(start, start + m - 1)), last.with_tokens(last_size))
-        body = reserved_tokens + prefix[m - 1] + last_size
+        body = pre(m) + prefix[m - 1] + last_size
         if not remaining:  # 最後のレコードまで入った（最後の 1 件は縮退版でもよい）。トレーラは要らない
             return self._page(kept, body, max_tokens, total, 0, None, None, ())
         # 3. 続きがある。カーソル（MUST）と要約の取り分は収まっている。要約は残りに入るだけ（長ければ「…」で切って）付ける

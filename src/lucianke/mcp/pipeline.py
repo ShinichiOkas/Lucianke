@@ -235,15 +235,24 @@ class Pipeline:
             call = dataclasses.replace(call, workspace_id=out.workspace_id)  # ハンドラが確定した ID（set_roots の登録後。BUG-0019）
             state.call = call
 
+        minted: dict[str, int] = {}  # パッカーが見積もりで作ったカーソル → オフセット（表には入れない）
+
         def cursor_factory(offset: int) -> str:
-            return self.cursor_codec.encode(tool=spec.name, args=cursor_args, offset=offset,
-                                            data_version=data_version, workspace_id=workspace_id)  # fmt: skip
+            token = self.cursor_codec.peek(tool=spec.name, args=cursor_args, offset=offset,
+                                           data_version=data_version, workspace_id=workspace_id)  # fmt: skip
+            minted[token] = offset
+            return token
 
         # 詰めて描く。ヘッダ・警告・head_kv・json の封筒もトークン予算に数え、``~used`` ・``used_tokens_est`` は描いた全文の
         # 数え直しに合わせる（仕様書 §5.6-4・§5.7。``mcp/fit.py``。BUG-0014・BUG-0017）
         fitted = pack_and_render(packer=self.packer, renderer=self.renderers[fmt], fmt=fmt, out=out, call=call,
                                  offset=cursor_offset, cursor_factory=cursor_factory, warnings=tuple(warnings),
                                  records_key=spec.records_key, timing_ms=lambda: self._elapsed_ms(t0))  # fmt: skip
+        shown = minted.get(fitted.page.next_cursor) if fitted.page.next_cursor is not None else None
+        if shown is not None:
+            # 表に入れる（発行する）のは応答に出したカーソルだけ。見積もりで作った分まで入れると表の上限を無駄に使う（BUG-0115）
+            self.cursor_codec.encode(tool=spec.name, args=cursor_args, offset=shown,
+                                     data_version=data_version, workspace_id=workspace_id)  # fmt: skip
         return fitted.rendered, fitted.meta
 
     # --- 失敗経路 -----------------------------------------------------------------------

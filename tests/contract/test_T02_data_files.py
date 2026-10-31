@@ -169,8 +169,9 @@ async def test_budget_is_respected_for_data_files(pipeline: Pipeline, max_tokens
 async def test_shrink_reduces_depth_and_says_so(pipeline: Pipeline) -> None:
     full = await call(pipeline, paths=[SETTINGS], max_tokens=2000)
     small = await call(
-        pipeline, paths=ALL_DATA, max_tokens=230
-    )  # 先頭の 1 ファイルが深さ 1 に縮む最小の予算（ヘッダ・警告の約 30 トークンも予算に数える。BUG-0014）
+        pipeline, paths=ALL_DATA, max_tokens=160
+    )  # 先頭の 1 ファイルが深さ 1 に縮む予算（140〜193。ヘッダ・警告の約 30 トークンも予算に数える。BUG-0014。カーソルが
+    #    約 70 → 9 トークンになり〈BUG-0115〉、以前の 230 では丸ごと入る〈丸ごとは 194 から〉）
     assert not full.is_error and not small.is_error
     assert "[Key] max_attempts" in full.text and "truncated" not in full.text
     assert g.validate(small.text) == []

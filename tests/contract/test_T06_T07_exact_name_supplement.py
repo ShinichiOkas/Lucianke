@@ -214,9 +214,10 @@ async def test_t06_structural_compact_budget_sweep_never_returns_nothing_while_a
     各予算で 1 件以上（続きがあればカーソルつき）か、0 件なら目安が呼んだ値より大きく、目安で呼び直すと 1 件以上が返る。
     予算を上げて件数が減らない（BUG-0067）。
 
-    この答え（4 箇所・1 行約 22 トークン）では、カーソルの ``# more:`` 行（約 80 トークン）が残り 3 件より長いので、
-    「1 件 + カーソル」のページは全体より大きい。全体の手前では 0 件が正しく、目安は全体（トレーラなしの全部）になる。
-    以前は目安が ``# more:`` 行を数えず「前置き + 22」で、呼んだ値より小さかった。"""
+    この答え（4 箇所・1 行約 22 トークン）では、以前はカーソルの ``# more:`` 行（約 80 トークン）が残り 3 件より長く、
+    「1 件 + カーソル」のページが全体より大きかったので、全体の手前はどの予算でも 0 件だった（BUG-0115）。カーソルが短く
+    なった（``# more:`` 行は約 17 トークン）ので、全体より参照 2 行ぶん以上小さい予算から「1 件 + カーソル」が返る。
+    以前は目安が ``# more:`` 行を数えず「前置き + 22」で、呼んだ値より小さかった（BUG-0110）。"""
     env = await fake.start(None)
     await refs(env, "compact")  # 1 回目は lsp=indexing の注意文。以後は lsp=unavailable で落ち着く
     full = (await refs(env, "compact")).text
@@ -224,6 +225,7 @@ async def test_t06_structural_compact_budget_sweep_never_returns_nothing_while_a
     assert m and sum(1 for line in full.splitlines() if SITE.match(line)) == 4, full
     whole = int(m.group(1))
     counts: list[int] = []
+    paged_from: int | None = None
     for budget in range(whole - 120, whole + 1, 3):
         text = (await refs(env, "compact", max_tokens=budget)).text
         n = sum(1 for line in text.splitlines() if SITE.match(line))
@@ -237,9 +239,15 @@ async def test_t06_structural_compact_budget_sweep_never_returns_nothing_while_a
             used = USED.search(text.splitlines()[0])
             assert used and int(used.group(1)) <= budget, text
             assert n == 4 or MORE.search(text), (budget, text)  # 全部入らないならカーソルつき
+            if n < 4 and paged_from is None:
+                paged_from = budget
+                more = MORE.search(text)
+                assert more and re.fullmatch(r"c[0-9]{9}", more.group(1)), text  # 短い鍵（BUG-0115）
         assert not counts or n >= counts[-1], (budget, counts, n)
         counts.append(n)
     assert counts.count(0) > 0 and counts[-1] == 4  # 0 件の帯と全体の両方を通っている
+    # 全体の手前で分けて読める（以前は全体 353 の手前はどの予算でも 0 件。今は約 289 から「1 件 + カーソル」）
+    assert paged_from is not None and paged_from <= whole - 40, (paged_from, whole, counts)
 
 
 async def test_t06_exact_section_pages_with_the_budget(fake: Fake) -> None:

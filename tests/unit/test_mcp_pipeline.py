@@ -66,6 +66,9 @@ class FakeCodec:
         self.decoded: list[dict[str, Any]] = []
         self.encoded: list[dict[str, Any]] = []
 
+    def peek(self, *, tool: str, args: dict, offset: int, data_version: int, workspace_id: str | None) -> str:
+        return f"c{offset}"
+
     def encode(self, *, tool: str, args: dict, offset: int, data_version: int, workspace_id: str | None) -> str:
         self.encoded.append(dict(tool=tool, args=args, offset=offset, data_version=data_version, workspace_id=workspace_id))
         return f"c{offset}"

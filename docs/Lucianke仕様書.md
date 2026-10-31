@@ -429,7 +429,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 # get_file_skeleton ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~1180/2000tok
 === src/services/payment.py (245 lines, skeleton: 28 lines) ===
 ...
-# more: cursor=eyJvZmZzZXQiOjEyfQ remaining≈34
+# more: cursor=c482139071 remaining≈34
 ```
 
 - 1 行目はヘッダ行（MUST）。`tool` と `ok|error` に続けて `conf`（`confidence_level`）、`lsp`（`lsp_status`）、`rev`、`ws`、トークン使用量を `key=value` で並べる。
@@ -489,7 +489,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 1. サーバーは `max_tokens` を超えない範囲でレコードを **先頭から順に** 詰める。レコード（1 シンボル、1 参照箇所、1 診断など）を途中で切ってはならない（MUST）。
 2. 次のレコードが入らなくなった時点で `next_cursor` を発行し、残りを `page.total_estimate` と `# summary:` 行（ファイル別の残件数）に要約する。ツールが `limit` で打ち切った遅延列を渡し、`page.total_estimate` が渡した件数より大きいときは、渡された分が全部入っても `next_cursor` と `# more: … remaining≈N`（N は入らなかった分 + 渡されなかった分）を出す（BUG-0008、f0f328e）。
-3. `cursor` は不透明な文字列（base64url）で、同じセッション・同じ引数でのみ有効。基になるデータが変わっていれば `E_CURSOR_EXPIRED` を返す。
+3. `cursor` は不透明な短い文字列（実装は `c` + 10 進 9 桁。o200k で約 3 トークン、`# more:` 行全体で約 11 トークン）で、同じセッション・同じツール・同じ引数（`cursor`・`max_tokens`・`format` を除く）・同じワークスペースでのみ有効。中身（オフセット・データ版・引数のハッシュ）はサーバーがセッションのメモリの表に持ち、文字列は表の鍵である（表は直近に発行・使用した 4,096 件まで。古く使われていないものから捨てる）。表に無いカーソル（サーバーの再起動・捨てた・発行していない）と、基になるデータが変わったカーソルは `E_CURSOR_EXPIRED`（先頭から `cursor` なしで呼び直す）。別のツール・引数・ワークスペースのカーソルと、鍵の形でない文字列は `E_INVALID_ARGUMENT`（`details.param: "cursor"`）。理由（BUG-0115、2026-10-31）: 以前は中身を base64url の JSON にして渡していたので、カーソル 1 つが約 70 トークン（112 文字）で、`# more:` 行が参照 3〜4 行ぶんになり、件数の少ない答えは「1 件 + カーソル」が全体より大きく、compact で分けて読めなかった。応答のトークンはすべて呼ぶ側の AI の文脈から出るので、毎ページのカーソルは短いほどよい。
 4. ヘッダ・警告行・トレーラもトークン予算に含める。予算が小さすぎてレコードが 1 件も入らない場合（レコードが元から 0 件で前置きだけで予算を超える場合を含む。BUG-0064）は、レコード 0 件・`next_cursor` なし・`warnings` に理由と必要な `max_tokens` の目安を入れて成功応答とする（BUG-0015: オフセットが進まないカーソルは同じ呼び出しの繰り返しになるので出さない。`cursor` は `max_tokens` を含まない引数で結ばれているので、呼び出しに付けたカーソルは `max_tokens` を上げた呼び直しにそのまま使える）。`next_cursor` を返すページは必ず 1 件以上を含む。目安（`raise max_tokens to ~N`）は呼んだ `max_tokens` より大きく、N で同じ引数を呼び直せば警告なしに収まり 1 件以上が返る値とする（MUST。BUG-0110）。N は前置き + 先頭のレコード + `# more:` 行（カーソル）の大きさで、残りが全部トレーラなしでそれより小さく入るなら前置き + 残りの全部。サーバーは N で描いた全文を数え直して確かめる（N ではヘッダの数字の桁が増えうる）。理由: 以前は目安が `# more:` 行（カーソルは base64 で約 60〜80 トークン）を数えず、呼んだ値より小さい値を勧めていた。言われたとおりに呼び直しても同じ 0 件の応答になり、呼ぶ側の AI にページを進める手段が無かった。
 5. **予算に対する単調性**（MUST。BUG-0067）: 同じ引数・同じ位置から `max_tokens` だけを上げた応答は、小さい予算の応答より情報が減らない。返るレコードの件数は減らず、各レコードは同じか大きい版（縮退が浅い・丸ごと・切った本文が長い）で返る。このため、丸ごと入らない最初のレコードだけを縮退版（T-02 規約 8 などのツール内の省略。T-05 の途中で切った本文も同じ）にしてそのページの最後の 1 件とし、その後ろには詰めない（残りは `next_cursor` で次ページ）。`# summary:` 行の取り分はレコードに使える予算の 1/4 まで、かつ先頭のレコードの最も小さい形（縮退版。無ければ丸ごと）と `# more:` 行を押し出さない分までとし、それより長い要約は末尾を「…」で切る（ふつうの予算では丸ごと入る。要約は SHOULD なので、1 件も返らなくなるくらいなら要約を削る。BUG-0110: 1/4 を必ず取り分けていた間は、先頭の 1 件とカーソルは入るのに要約の分で 0 件になる予算の帯があり、compact の既定の形式で全体より少し小さい予算ではページが進められなかった）。理由: 主な利用者は MCP で呼ぶ AI エージェントで、予算を上げて呼び直したら前に見えていたものが消える応答は、呼び直しで情報を失わせる（以前は F-PY の T-02 json で `max_tokens` 6000 → 2 件、8000 → 1 件だった）。
 
@@ -497,7 +497,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 - 計数器は `o200k_base` 互換の近似とする（MUST）。実装は厳密なトークナイザの代わりに、ベンチマーク（第 14 章）で誤差 ±10% 以内と確認したヒューリスティック（文字種別と連の数の係数。設計書 §7.2.1。S-12 で確認: 文字数だけの係数は日本語や base64 で 10〜60% 過小になった）を用いてもよい（MAY）。
 - `budget.used_tokens_est` には応答テキスト全体（ヘッダ・トレーラ含む）の推定値を入れる。
-- `max_tokens` は応答テキスト（`content[0].text`）全体の上限で、`used_tokens_est`（compact のヘッダの `~used`・json の `budget.used_tokens_est`）は **描いた応答テキスト全体を計数器で数え直した値** と一致する（MUST。json は `timing_ms` を最大桁数で数えるので、実際の全文より最大 4 トークン上になりうる）。ヘッダ・警告行・降格の警告行・`head_kv`・トレーラ（compact）、封筒の全キー・`_resolution_meta`・`data` の静的部分・`warnings`（json）もすべて数える。
+- `max_tokens` は応答テキスト（`content[0].text`）全体の上限で、`used_tokens_est`（compact のヘッダの `~used`・json の `budget.used_tokens_est`）は **描いた応答テキスト全体を計数器で数え直した値** と一致する（MUST。json は `timing_ms` を最大桁数で数えるので、実際の全文より最大 4 トークン上になりうる）。ヘッダ・警告行・降格の警告行・`head_kv`・トレーラ（compact）、封筒の全キー・`_resolution_meta`・`data` の静的部分・`warnings`（json）もすべて数える。降格の警告行・ヘッダの `conf=`・`_resolution_meta` はそのページに入ったレコードの精度で出るので、前置きはページに出る形で数える（後ろに精度の低いレコードがあっても、そのページに出ない注意文の分を取り分けない。実装で確定 2026-10-31、BUG-0116。理由: 以前は全レコードの精度で前置きを数え、T-01 の compact `max_tokens=260` で約 30 トークンの前置きに 106 を取り分け、予算の約 3 割を使わずに先頭のファイルを縮め要約を切っていた）。
 - `format: "json"` では、レコードを `data` の JSON の大きさで数える（compact の行の大きさではない。同じ内容でも JSON は compact の数倍になるので、同じ `max_tokens` で入る件数は json のほうが少ない）。`structuredContent` は `content[0].text` と同じ内容の写しなので、別に数えない。
 
 ## 5.8 エラー分類
@@ -514,7 +514,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `E_SYNTAX_INVALID` | `new_code` / `rewrite` が対象言語として解析できない、または適用結果に構文エラーノードが生じる | コードを直す | `details.errors[] {line, message}` |
 | `E_MUTATION_BLOCKED` | 降格ファイルへの編集で、`allow_heuristic_mutation: true` があっても安全に確定できない（推定した境界が一意に決まらない、改名後の名前が対象ファイルに既出。第 10.5 節）、または Windows で対象が読み取り専用属性を持つ（`details.reason: "read_only_file"`。第 10.6 節）。許可フラグが無いだけならエラーにせず dry_run に切り替える | 範囲を `get_symbol_bodies` で確かめ、対象を絞って再実行 | `details.confidence_level`, `details.reason` |
 | `E_QUERY_REJECTED` | `query_project_db` に SELECT / WITH 以外、または禁止関数を含む文 | 文を直す | `details.reason` |
-| `E_CURSOR_EXPIRED` | `cursor` が無効または基データが更新済み | 先頭から呼び直す | |
+| `E_CURSOR_EXPIRED` | `cursor` がサーバーの表に無い（再起動・古いものから捨てた。§5.6-3）、または基データが更新済み | `cursor` なしで先頭から呼び直す | `details.reason`（`unknown_cursor` / `data_changed`） |
 | `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる。待てば直る状態: 起動の最中で索引がまだ開いていない（`details.reason: "index_opening"`。BUG-0046）、索引の走査の途中で対象のファイルをその場で索引できなかった（`"index_building"`。§5.3 規則 6、BUG-0070）、`apply_code_action` の種別 `quickfix` で LSP がいまの内容の診断をまだ出しておらず候補が確かめられない（`"diagnostics_pending"`。`details.server` / `servers`。T-13 処理規約 3、BUG-0099） | 範囲を狭める。`index_opening` / `index_building` / `diagnostics_pending` は `details.retry_after_ms` の後に同じ呼び出しを再試行する | `details.partial`、`details.reason`、`details.retry_after_ms` |
 | `E_UNSUPPORTED` | 対象ティアではその操作を提供しない（例: Tier 3 への `rename_symbol`） | | `details.tier`、`details.reason`（`invalid_data_file`: 構文が壊れたデータファイル〔T-02〕、`revision_not_supported_until_M2`、`not_in_milestone`〔`details.milestone`〕、`file_too_large`、`secret_file`、`binary_file` など） |
 | `E_INTERNAL` | 上記以外の内部エラー。スタックはログにのみ出す | | `details.log_ref` |
@@ -1398,7 +1398,7 @@ json の `data`:
 - rank: 0.92 fan_in: 17
 [Function] pub create_order(req: OrderIn) -> OrderOut @L80-120
 # summary: 38 more files (src: 30, notebooks: 3, conf: 2, tests: 3)
-# more: cursor=eyJyYW5rIjoyfQ remaining≈38
+# more: cursor=c205817364 remaining≈38
 ```
 
 json の `data`:
@@ -1789,7 +1789,7 @@ json の `data`:
 src/api/routes.py:88:20  [call] in create_order  receipt = await processor.process_charge(req)
 src/api/routes.py:131:20  [call] in retry_order  receipt = await processor.process_charge(req)
 tests/test_payment.py:44:12  [call] in test_charge_ok  r = await p.process_charge(req)
-# more: cursor=eyJzaXRlIjozfQ remaining≈2
+# more: cursor=c730215948 remaining≈2
 ```
 
 json の `data`:
@@ -2796,7 +2796,7 @@ commits:
 co_changed_hotspots:
 - tests/test_pricing.py  0.92 (11/12)  last=a1b2c3d
 - config/limits.yaml  0.58 (7/12)  last=9f8e7d6
-# more: cursor=eyJhZnRlciI6IjdkNmM1YjQifQ remaining≈9
+# more: cursor=c911470253 remaining≈9
 ```
 
 json の `data`:

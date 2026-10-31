@@ -266,6 +266,24 @@ async def test_compact_conforms_to_the_grammar_at_any_budget(pipeline: Pipeline,
         assert m and int(m.group(1)) <= int(m.group(2)) == max_tokens
 
 
+@pytest.mark.parametrize("max_tokens", [260, 300, 400])
+async def test_compact_uses_its_budget_when_a_degraded_file_is_further_down(pipeline: Pipeline, max_tokens: int) -> None:
+    """BUG-0116: 後ろに精度の低いファイル（COBOL の heuristic）があっても、そのページに出ない降格の注意文の分を取り分けない。
+    先頭の structural のファイルだけのページには ``! DEGRADED`` が無く、予算の 9 割以上を使う。以前は全ファイルの精度で
+    前置きを数え（約 30 トークンの前置きに 106）、260 で ``~179/260``（先頭のファイルはシグネチャもシンボルも削られた）、300 で
+    ``~215/300``、400 で ``~318/400`` だった。"""
+    r = await repo_map(pipeline, "compact", max_tokens=max_tokens)
+    assert g.validate(r.text) == [], r.text
+    head = r.text.splitlines()[0]
+    m = re.search(r"conf=(\w+) .* ~(\d+)/(\d+)tok$", head)
+    assert m and m.group(1) == "structural", head
+    assert "! DEGRADED" not in r.text and "# more: cursor=" in r.text, r.text
+    assert int(m.group(2)) >= 0.9 * max_tokens, (head, r.text)
+    assert int(m.group(2)) <= max_tokens
+    # 先頭のファイルはシグネチャつきのシンボルを丸ごと返す（以前の 260 では `retry @L20-24` だけ）
+    assert "[Function] pub retry(attempt: int) -> int @L20-24" in r.text, r.text
+
+
 async def test_smaller_budget_is_a_prefix_of_the_larger(pipeline: Pipeline) -> None:
     """重要なファイルが先: 小さい予算で出るファイルは、大きい予算で出るファイルの先頭と同じ。"""
     big = paths_of(await repo_map(pipeline, max_tokens=8000))
