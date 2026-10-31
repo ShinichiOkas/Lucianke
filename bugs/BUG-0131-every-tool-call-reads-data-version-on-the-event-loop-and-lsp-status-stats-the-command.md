@@ -28,9 +28,16 @@ standby のときの「次に起こす名前」のために優先順で `find_co
 
 直し:
 - `IndexWriter` は書き手スレッドが開いた直後（`ensure_schema` の後）に `_meta.data_version` を 1 回読んで覚え、`bumps_version` のジョブの
-  トランザクションの中で `+1` した値を読み、`COMMIT` が通った後（Future に結果を載せる前）にメモリの値を更新する。`data_version()` はその値を返す
-  （`ReaderPool` も錠も使わない。閉じた後は `WriterClosedError` のまま）。別プロセスの書き込みは無い前提（索引の書き手は
-  1 プロセス 1 本。書き手スレッド以外が `_meta.data_version` を書く経路は `src` に無い）。失敗（ROLLBACK）・取り消し・`bumps_version=False` は進めない。
+  トランザクションの中で `+1` した値を読み、`COMMIT` が通った後（Future に結果を載せる前）にメモリの値を更新する。自分のコミットは
+  `data_version()` からすぐ見える。失敗（ROLLBACK）・取り消し・`bumps_version=False` は進めない。
+  **別プロセスのコミット**: 同じ根を 2 つのプロセスが開くと同じ `paad.sqlite` を共有し、両方が書き手になる（プロセス間の錠は無く
+  busy_timeout だけ）ので、「書き手は 1 つ」とは言えない。B が上げた版を A がメモリだけで見ないと、A は古い答えのキャッシュを返し続けうる
+  （A の監視も同じ変更に気づくが DB の sha256 が新しく書かない）。そこで `data_version()` は、前回見に行ってから `external_check_s`
+  （既定 25 ms。`EXTERNAL_CHECK_S`）以上たっていれば、検知用の読み取り接続 1 本で `PRAGMA data_version`（接続ごと。他の接続のコミットで変わる）を
+  読み、前回の印と違うときだけ `_meta` を読み直す。ほかのスレッドが見に行っている最中は待たずに覚えた値を返す。閉じるときは検知用の
+  接続を、最後の接続を閉じる書き手より先に閉じる（-wal / -shm が消える）。他のプロセスの書き込みが見えるまでの古さの上限は 25 ms
+  （自分のコミットは 0）。呼び出しごとに見に行かないのは、GIL を放す呼び出し（sqlite・stat）はスレッドが混んでいると 1 回で ms 単位
+  待つため（下の測定）。stat（WAL の mtime・size）は PRAGMA より遅く、Windows のファイル時刻にも頼るので採らなかった。
   ツールの読み取りの中で行と同じ断面の値が要るときは、これまでどおり借りた接続で `read_data_version(conn)`。
 - `LspPool.state_of(language_id, ws, role)` を足した（`status(...).status` と同じ値。起動コマンドを探さない）。`_runtime.py` の編集用の
   `lsp_status` はこれを使う（`state_of` を持たない偽のプールは今までどおり `status`）。名前が要る `status`（T-00・T-08 など）は変えていない。
@@ -42,7 +49,9 @@ data_version  DB を読む（旧）0.0053 ms → メモリ 0.0000 ms（静かな
               その待ちも無い。錠も無いので並行する呼び出しは並ばない）
 lsp_status    status（.venv のある workspace、standby の python）0.2865 ms → state_of 0.0008 ms
 ```
-試験: 新しい `tests/unit/test_fast_path_fixed_cost_bug0131.py`（6 件: DB を読まない、DB の値と常に一致〈複数回のコミット・失敗・診断だけ・再起動〉、
-取り消しは進めない、閉じた後の例外、並行して読んでも単調、`state_of` が resolver を呼ばず `status` と同じ値）。関係する unit（index_core・
+GIL を取り合うスレッドがいるときの 1 回（同じ DB・同じプロセス。最小 / 中央値 ms）: PRAGMA data_version 静か 0.003、busy 1 本 0.79 / 3.9、
+busy 3 本 41 / 59。stat（WAL）0.006・1.9 / 7.4・31 / 42。メモリの値は 0.0000 のまま。
+試験: 新しい `tests/unit/test_fast_path_fixed_cost_bug0131.py`（10 件。初めの 6 件: DB を読まない、DB の値と常に一致〈複数回のコミット・失敗・診断だけ・再起動〉、
+取り消しは進めない、閉じた後の例外、並行して読んでも単調、`state_of` が resolver を呼ばず `status` と同じ値。足した 4 件: 同じ DB を別々に開いた 2 つの `IndexWriter` で、片方のコミットがもう片方の `data_version()` に出る〈間隔 0 で即・既定の間隔で待てば〉、間隔の間は DB を読まない、閉じたら -wal が消える）。関係する unit（index_core・
 lsp_pool・tools_runtime・leak_guard・mcp_pipeline・budget_cursor・engine_indexer・tools_index_building）・contract（T-03/T-04・T-10・T-11）・見張り 4 本が
 green、`uv run ruff check` クリーン。

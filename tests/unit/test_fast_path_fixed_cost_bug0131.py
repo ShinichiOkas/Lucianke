@@ -37,8 +37,9 @@ def db_path(tmp_path: Path) -> Path:
 
 
 def test_data_version_is_served_from_memory(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    with IndexWriter(db_path) as w:
+    with IndexWriter(db_path, external_check_s=3600.0) as w:
         w.submit(lambda c: None, bumps_version=True, label="a").result(5)
+        assert w.data_version() == 1  # 最初の 1 回は見に行く
 
         def no_read(*_a: object, **_k: object) -> int:
             raise AssertionError("data_version read the database")
@@ -125,3 +126,52 @@ def test_state_of_matches_status_without_looking_for_the_command(tmp_path: Path)
     assert pool.state_of("python", ws) is LspStatus.STANDBY
     assert pool.state_of("markdown", ws) is LspStatus.NOT_APPLICABLE
     assert pool.state_of("nosuchlang", ws) is LspStatus.NOT_APPLICABLE
+
+
+# --- 同じ DB を開く別の書き手（別プロセスの代わり）-----------------------------------------------
+
+
+def test_another_writers_commit_shows_up_in_data_version(db_path: Path) -> None:
+    with IndexWriter(db_path, external_check_s=0.0) as a, IndexWriter(db_path, external_check_s=0.0) as b:
+        assert a.data_version() == b.data_version() == 0
+        b.submit(lambda c: None, bumps_version=True, label="b1").result(5)
+        assert a.data_version() == db_version(db_path) == 1  # b の書き込みが a に見える
+        assert b.data_version() == 1
+        a.submit(lambda c: None, bumps_version=True, label="a1").result(5)
+        assert a.data_version() == 2  # 自分のコミットもすぐ見える
+        assert b.data_version() == 2
+        b.submit(lambda c: None, bumps_version=False, label="quiet").result(5)
+        assert a.data_version() == 2  # 診断だけの更新は進めない
+
+
+def test_the_other_writers_commit_is_seen_within_the_check_interval(db_path: Path) -> None:
+    import time
+
+    with IndexWriter(db_path, external_check_s=0.05) as a, IndexWriter(db_path) as b:
+        assert a.data_version() == 0
+        b.submit(lambda c: None, bumps_version=True, label="b1").result(5)
+        deadline = time.monotonic() + 5
+        while a.data_version() != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert a.data_version() == 1
+
+
+def test_calls_between_checks_do_not_touch_the_database(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with IndexWriter(db_path, external_check_s=3600.0) as w:
+        assert w.data_version() == 0  # 最初の 1 回は見に行く
+
+        def no_read(*_a: object, **_k: object) -> int:
+            raise AssertionError("data_version read the database between checks")
+
+        monkeypatch.setattr(writer_module, "read_data_version", no_read)
+        monkeypatch.setattr(writer_module, "open_reader", no_read)
+        for _ in range(100):
+            assert w.data_version() == 0
+
+
+def test_close_closes_the_probe_connection_so_the_wal_goes_away(db_path: Path) -> None:
+    w = IndexWriter(db_path, external_check_s=0.0)
+    w.submit(lambda c: None, bumps_version=True, label="a").result(5)
+    assert w.data_version() == 1
+    w.close()
+    assert not Path(str(db_path) + "-wal").exists()

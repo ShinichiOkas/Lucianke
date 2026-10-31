@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import sqlite3
 import threading
 import time
 from concurrent.futures import Future
@@ -26,11 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from lucianke.index.connection import open_writer, read_data_version
+from lucianke.index.connection import open_reader, open_writer, read_data_version
 from lucianke.index.migrate import SchemaAction, ensure_schema
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Callable
 
 _log = logging.getLogger("lucianke.index.writer")
@@ -41,6 +41,7 @@ CHECKPOINT_EVERY_COMMITS: Final = (
     1000  # 設計書 §7.6.1-3: キューが空で、前回からこの数以上コミットしたら PASSIVE
 )
 IDLE_CHECKPOINT_S: Final = 2.0  # 書き込みが途切れてこの時間たったら、未チェックポイントの分を PASSIVE で流す
+EXTERNAL_CHECK_S: Final = 0.025  # 別の接続（別プロセス）のコミットを見に行く間隔の下限。``data_version()`` の古さの上限（BUG-0131）
 START_TIMEOUT_S: Final = 60.0  # スレッド起動（接続を開き、スキーマを確認する）の待ち上限
 
 
@@ -79,7 +80,9 @@ class IndexWriter:
         sqlite3.DatabaseError: スキーマの確認・作成に失敗した。
     """
 
-    def __init__(self, path: Path | str, *, queue_max: int = WRITE_QUEUE_MAX) -> None:
+    def __init__(
+        self, path: Path | str, *, queue_max: int = WRITE_QUEUE_MAX, external_check_s: float = EXTERNAL_CHECK_S
+    ) -> None:
         self._path = Path(path)
         self._queue: queue.Queue[_Job | None] = queue.Queue(maxsize=queue_max)
         self._cond = threading.Condition()
@@ -87,9 +90,16 @@ class IndexWriter:
         self._pending = 0  # submit 済みで、まだ結果が決まっていないジョブ
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
-        # コミット済みの ``_meta.data_version``。書き手スレッドだけが（コミットの後に）進める。別プロセスは書かない前提
-        # （書き手は 1 つ。BUG-0131: 呼び出しのたびに DB を読むと、イベントループの上で約 0.8 ms・並行する呼び出しは並ぶ）
+        # コミット済みの ``_meta.data_version``（BUG-0131: 呼び出しのたびに DB を読むと、イベントループの上で約 0.8 ms・並行する呼び出しは並ぶ）。
+        # 自分のコミットは書き手スレッドがコミットの後に進める（すぐ見える）。同じ DB を開く別のプロセスのコミットは、
+        # ``data_version()`` が ``external_check_s`` 以上の間をあけて ``PRAGMA data_version``（接続ごと。他の接続のコミットで変わる）で
+        # 検知し、変わったときだけ DB から読み直す（古さの上限は ``external_check_s``）。
         self._data_version = 0
+        self._version_lock = threading.Lock()  # ``_data_version`` と検知用の接続・印の更新
+        self._external_check_s = external_check_s
+        self._probe_conn: sqlite3.Connection | None = None
+        self._probe_mark: int | None = None  # 最後に見た ``PRAGMA data_version``
+        self._probe_at = 0.0  # 最後に見に行った時刻（monotonic）
         self.schema_action: SchemaAction | None = None
         self._thread = threading.Thread(target=self._run, name="lucianke-index-writer", daemon=True)
         self._thread.start()
@@ -164,15 +174,41 @@ class IndexWriter:
         return format_edit_id(seq)
 
     def data_version(self) -> int:
-        """現在の ``_meta.data_version``（コミット済みの値。書き手がコミットした後に覚えた値を返す。DB は読まない）。
+        """現在の ``_meta.data_version``（コミット済みの値）。通常はメモリの値を返し、DB は読まない。
 
-        カーソルとキャッシュの無効化に使う。ジョブの結果（Future）が決まる前に更新するので、``result()`` の後に呼べば
-        そのジョブの分が入っている。ツールの読み取りの中で、読んだ行と同じ断面の値が要るときは、借りている接続で
+        自分の書き手のコミットは覚えた値に入っている。別の接続（同じ根を開いた別のプロセス）のコミットは、前回見に行ってから
+        ``external_check_s`` 以上たっていれば ``PRAGMA data_version`` で調べ、変わっていたときだけ ``_meta`` を読み直す
+        （呼び出しの頻度に関わらず、見に行くのは間隔に 1 回。ほかのスレッドが見に行っている最中は待たずに覚えた値）。
+        カーソルとキャッシュの無効化に使う。ツールの読み取りの中で、読んだ行と同じ断面の値が要るときは、借りている接続で
         ``connection.read_data_version(conn)`` を呼ぶこと。
         """
         if not self._accepting:
             raise WriterClosedError("index writer is closed")
+        if time.monotonic() - self._probe_at >= self._external_check_s:
+            self._refresh_from_other_connections()
         return self._data_version
+
+    def _refresh_from_other_connections(self) -> None:
+        if not self._version_lock.acquire(blocking=False):
+            return  # ほかのスレッドが見に行っている
+        try:
+            if not self._accepting:
+                return
+            self._probe_at = time.monotonic()
+            try:
+                if self._probe_conn is None:
+                    self._probe_conn = open_reader(self._path)
+                    self._probe_mark = None
+                conn = self._probe_conn
+                # 印を先に読む（この後のコミットは次の確認で見える）。印は自分のコミットでも変わる（別の接続なので）が、読み直すだけ
+                mark = int(conn.execute("PRAGMA data_version").fetchone()[0])
+                if mark != self._probe_mark:
+                    self._data_version = read_data_version(conn)
+                    self._probe_mark = mark
+            except sqlite3.Error:
+                _log.debug("data_version probe failed; keeping the remembered value", exc_info=True)
+        finally:
+            self._version_lock.release()
 
     # --- 終了 -------------------------------------------------------------------------------
 
@@ -185,6 +221,10 @@ class IndexWriter:
             self._accepting = False
             while self._pending > 0 and self._thread.is_alive():
                 self._cond.wait(0.1)
+        with self._version_lock:  # 検知用の接続は、最後の接続を閉じる書き手より先に閉じる（-wal / -shm が消えるように）
+            probe, self._probe_conn = self._probe_conn, None
+        if probe is not None:
+            probe.close()
         if first and self._thread.is_alive():
             self._queue.put(None)
         self._thread.join()
@@ -269,7 +309,8 @@ class IndexWriter:
                 committed_version = read_data_version(conn)
             conn.execute("COMMIT")
             if committed_version is not None:
-                self._data_version = committed_version  # 結果を載せる前に（待っている側が新しい値を見る）
+                with self._version_lock:  # 結果を載せる前に（待っている側が新しい値を見る）
+                    self._data_version = committed_version
         except BaseException as exc:
             self._rollback(conn, job.label)
             _log.error("write job %r failed and was rolled back", job.label, exc_info=exc)
