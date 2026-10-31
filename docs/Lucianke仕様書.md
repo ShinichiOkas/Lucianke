@@ -279,7 +279,7 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 ### 4.3.1 起動
 
 1. `stdout` を JSON-RPC 専用にし、ログを `stderr` とログファイルへ向ける（§12.1）。
-2. MCP `initialize` に応じ、`tools/list` を提供できる状態にする。
+2. MCP `initialize` に応じ、`tools/list` を提供できる状態にする。`initialize` の結果には `instructions`（英語・約 300 トークン以下）を載せる（MUST。BUG-0137）。Claude Code などはツールを遅延読み込みして名前しか見せず、サーバーの `instructions` だけを毎セッションのシステムプロンプトに入れるため、これが無いと呼ぶ側の AI は Lucianke を使おうと思わない。中身は、Read・Grep・Glob より優先する場面（Python・TypeScript・JavaScript のコードの理解と変更。それ以外のテキストや縮退・未対応のときは Read・Grep のまま）、ツールをまたぐ標準の流れ（`get_repo_map` → `get_file_skeleton` → `get_symbol_bodies` → 検索・参照・呼び出し階層 → 編集は `expected_file_sha256` と `dry_run`）、規約（`urn:` を次のツールの対象に渡す・`max_tokens` と `cursor`・compact が既定で json は形が固定・`configure_workspace` の `status`）。既定の `tools/list` に無いツール名は書かない（テストが突き合わせる）。
 3. `initialized` の後に、取れれば `roots/list` を要求し（取れなければ cwd と T-00 `set_roots`。§5.1）、マーカーファイルからワークスペースと Python 環境を検出して `workspaces` に登録する。
 4. キャッシュ（§4.5）に前回の PaaD があれば開き、ファイルの `sha256` を照合して差分だけ再索引する。無ければ Tree-sitter で全ファイルの骨格を索引する（LSP は起動しない。列挙が 200 ファイル以上のときの型サーバー 1 つを除く。下記）。走査で解析の要るファイルが 64 を超えたら、残りは子プロセスに並べて解析する（既定は論理 CPU の半分・最大 8。環境変数 `LUCIANKE_INDEX_WORKERS` で変えられ、0 で使わない。結果の索引は同じプロセスで解析したときと行ごとに同じ）（実装で確定 2026-10-31、BUG-0127。理由: 4,000 ファイル級で初回の索引が 4 分前後かかり、呼ぶ側の時間の上限〈120 秒など〉を超えていた）。
 5. ファイル監視を開始する。

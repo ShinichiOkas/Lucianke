@@ -564,7 +564,7 @@ class LuciankeError(Exception):
 
 起動順:
 
-1. `bootstrap_io`（fd 1 の退避・差し替え）→ 2. ログ → 3. 設定 → 4. キャッシュディレクトリ → 5. `IndexWriter` 起動とスキーマ移行 → 6. MCP サーバーの `initialize` 受付 → 7. （取れたら）`roots/list` → `WorkspaceContext` 登録 → 8. 差分索引ジョブ投入（背景）→ 9. 監視開始。
+1. `bootstrap_io`（fd 1 の退避・差し替え）→ 2. ログ → 3. 設定 → 4. キャッシュディレクトリ → 5. `IndexWriter` 起動とスキーマ移行 → 6. MCP サーバーの `initialize` 受付（結果に `instructions` を載せる。文面は `mcp/instructions.py` の `INSTRUCTIONS`、仕様書 §4.3.1。BUG-0137） → 7. （取れたら）`roots/list` → `WorkspaceContext` 登録 → 8. 差分索引ジョブ投入（背景）→ 9. 監視開始。
 
 LSP はここでは起動しない。
 

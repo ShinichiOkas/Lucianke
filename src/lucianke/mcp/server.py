@@ -29,6 +29,7 @@ from mcp.server import Server, ServerRequestContext
 from mcp.shared.exceptions import MCPDeprecationWarning, MCPError
 
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.mcp.instructions import INSTRUCTIONS
 from lucianke.mcp.pipeline import INTERNAL_MESSAGE, Pipeline, UnknownToolError
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.mcp.types import Rendered
@@ -174,7 +175,7 @@ def build_server(
         await roots.notify()  # 取れても取れなくても、根が決まったので合成ルートに知らせる（索引の起動。設計書 §6.5 手順 7〜8）
 
     server: Server[Any] = Server(
-        "lucianke", version=version, on_list_tools=on_list_tools, on_call_tool=on_call_tool
+        "lucianke", version=version, instructions=INSTRUCTIONS, on_list_tools=on_list_tools, on_call_tool=on_call_tool
     )
     server.add_notification_handler("notifications/initialized", types.NotificationParams, on_roots_event)
     server.add_notification_handler("notifications/roots/list_changed", types.NotificationParams, on_roots_event)

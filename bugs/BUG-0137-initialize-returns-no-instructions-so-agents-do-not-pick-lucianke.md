@@ -22,3 +22,25 @@
 
 ## 仕様書
 §6.5（起動・initialize）。師匠の宣言 2026-10-31「Lucianke の主な利用者は呼ぶ側の AI。仕様の判断は AI にとっての有用さで AI が決めてよい」。
+
+## 原因・直し方・確認（2026-11-01）
+
+### 原因
+- `build_server`（`mcp/server.py`）が公式 SDK の `Server(...)` に `instructions` を渡していなかった。SDK は `instructions` 引数を持つので、
+  渡せば `initialize` の結果にそのまま載る。
+
+### 直し方
+- `src/lucianke/mcp/instructions.py` に `INSTRUCTIONS`（英語・約 1,350 文字・約 300 トークン）を置き、`build_server` が `Server(instructions=...)` に渡す。
+  中身: Read・Grep・Glob より優先する場面（Python・TypeScript・JavaScript のコードの理解と変更。非コードのテキストや縮退・未対応は Read・Grep のまま）、
+  標準の流れ（`get_repo_map` → `get_file_skeleton` → `get_symbol_bodies` → 検索・解決・参照・呼び出し階層・診断 → 編集は `expected_file_sha256` と
+  `dry_run`）、規約（`urn:` を次のツールへ・`max_tokens` と `cursor`・compact が既定で json は形が固定・`configure_workspace` の `status`）。
+  既定の `tools/list` に無いツール（M2 以降の計画分・開発用 `ping`）は書かない。
+- 仕様書 §4.3.1 手順 2・設計書 §6.5 起動順 6 を更新（MUST）。
+
+### 確認
+- 新しい試験 `tests/e2e/test_initialize_instructions_bug0137.py`（実機の stdio。`instructions` が空でないこと、2,400 文字以下、
+  載せたツール名がすべて既定の `tools/list` に実在すること）。関係する試験（縦切り e2e・スキーマ予算・stdout 純度）と合わせて 11 件 passed、
+  `uv run ruff check` クリーン。
+- `.\build.ps1`（`-Force` なし）で exe を作り直して `~/.local/bin/lucianke.exe` に入れ、実機の JSON-RPC ハンドシェイクで
+  `initialize` の結果に `instructions` が載ることを見た。smoke PASSED。
+- コミット: 下記の 1 件（本票と同じコミット。ID は HANDOFF／git log を参照）。
