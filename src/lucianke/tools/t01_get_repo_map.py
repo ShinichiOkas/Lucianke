@@ -12,7 +12,8 @@
   次にスコア降順のファイルブロック。各ブロックは公開シンボルをスコア順に上位 N 件、行の順に入れ子で出す。
   予算が尽きたら残りは ``# summary: N more files (src: 30, …)``（ディレクトリ別）と ``# more: cursor=…``。
   1 レコードは 1 ファイルブロック（途中で切らない。入らないときは縮退版: シグネチャ → シンボルの数 の順に減らす）。
-* 公開シンボル: 修飾子に ``priv`` / ``prot`` を持たず、種別が ``rank.MINOR_KINDS``（``Field`` / ``Property`` / ``Column`` / ``Cell`` / ``Key`` / ``Tag``）でないもの。
+* 公開シンボル: 修飾子に ``priv`` / ``prot`` を持たず、祖先（親・その親…）にも ``priv`` / ``prot`` のシンボルが無く（``_DbLock`` の
+  ``hold`` や export されていない TS のクラスのメンバーは、自分が ``pub`` でも出さない。BUG-0124）、種別が ``rank.MINOR_KINDS``（``Field`` / ``Property`` / ``Column`` / ``Cell`` / ``Key`` / ``Tag``）でないもの。
   修飾子が空（ctags 由来など可視性の分からないもの）は公開として扱う（``conf: heuristic`` を付ける）。
 * ``lexical_fallback`` のファイル（秘密ファイル・バイナリ・本文を解析しないもの）はファイル名と行数だけ。内容は出さない。
 * ``include_tests=false``（既定）はテストファイルを順位にも要約にも入れない（``files.is_test``）。
@@ -139,6 +140,24 @@ def _eligible(s: SymbolRecord) -> bool:
     return "priv" not in mods and "prot" not in mods and s.kind.value not in rank.MINOR_KINDS
 
 
+def _hidden_by_ancestor(symbols: list[SymbolRecord], parents: dict[str, str | None]) -> set[str]:
+    """祖先に ``priv`` / ``prot`` のシンボルがある（モジュールの外から使う API ではない）シンボルの urn（BUG-0124）。
+
+    ``_DbLock`` の ``hold``・export されていない TS のクラスのメンバーのように、自分の修飾子は ``pub`` でも親が外に出ていない。"""
+    closed = {str(s.urn) for s in symbols if {"priv", "prot"} & set(s.modifiers)}
+    hidden: set[str] = set()
+    for s in symbols:
+        seen: set[str] = set()
+        parent = parents.get(str(s.urn))
+        while parent is not None and parent not in seen:
+            if parent in closed:
+                hidden.add(str(s.urn))
+                break
+            seen.add(parent)
+            parent = parents.get(parent)
+    return hidden
+
+
 @dataclass(frozen=True, slots=True)
 class _Shown:
     sym: SymbolRecord
@@ -154,7 +173,8 @@ def _select(
     limit: int,
 ) -> list[_Shown]:
     """公開シンボルを指標の上位 ``limit`` 件に絞り、行の順・入れ子（選んだ祖先の下）に並べる。"""
-    pool = [s for s in symbols if _eligible(s)]
+    hidden = _hidden_by_ancestor(symbols, parents)
+    pool = [s for s in symbols if _eligible(s) and str(s.urn) not in hidden]
 
     def key(s: SymbolRecord) -> tuple[float, int, str]:
         score, fan_in = ranks.get(str(s.urn), (0.0, 0))

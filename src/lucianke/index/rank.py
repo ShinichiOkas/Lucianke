@@ -66,12 +66,19 @@ SCORE_DIGITS: Final = 12
 MINOR_KINDS: Final = ("Field", "Property", "Column", "Cell", "Key", "Tag")
 """ファイルの代表に選ばない種別（クラスやテーブルの中身は親が代表になる。データ形式の最上位の節 ``Key`` / ``Tag`` は構造の地図に出さない）。"""
 
+_CLOSED_SQL: Final = "(a.modifiers_json LIKE '%\"priv\"%' OR a.modifiers_json LIKE '%\"prot\"%')"
+
 PUBLIC_SYMBOL_SQL: Final = (
     "s.is_external = 0 AND s.modifiers_json NOT LIKE '%\"priv\"%' AND s.modifiers_json NOT LIKE '%\"prot\"%'"
     " AND s.kind NOT IN (" + ", ".join(f"'{k}'" for k in MINOR_KINDS) + ")"
+    " AND (s.parent_urn IS NULL OR NOT EXISTS (WITH RECURSIVE anc(u) AS ("
+    " SELECT s.parent_urn UNION SELECT p.parent_urn FROM symbols p JOIN anc ON p.urn = anc.u"
+    " WHERE p.parent_urn IS NOT NULL)"
+    f" SELECT 1 FROM anc JOIN symbols a ON a.urn = anc.u WHERE {_CLOSED_SQL}))"
 )
 """``symbols`` のエイリアス ``s`` に対する「ファイルの代表になれる公開シンボル」の条件。
-修飾子が空（ctags 由来など可視性の分からないもの）は公開として扱う。"""
+修飾子が空（ctags 由来など可視性の分からないもの）は公開として扱う。祖先（親・その親…）に ``priv`` / ``prot`` のシンボルが
+あるもの（``_DbLock`` のメソッド・export されていない TS のクラスのメンバー）は、自分が ``pub`` でも数えない（BUG-0124）。"""
 
 
 # --- 純粋な計算 -------------------------------------------------------------------------
