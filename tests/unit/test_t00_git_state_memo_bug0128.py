@@ -1,8 +1,8 @@
 """T-00 ``status`` の Git の状態の覚え（BUG-0128）。
 
 ``dulwich`` の ``status`` は作業ツリーを歩き、設定・``.gitignore``・索引・パックを読む（F-PY で 1 回 20〜30 ms、CPU が混んでいると
-130〜350 ms）。前に調べてからルートの下が変わっていなければ（監視のイベントの数・``data_version``・``.git/HEAD``・``.git/index``
-が同じで、``GIT_STATE_MAX_AGE_S`` 以内）覚えから返す。監視が動いていない・``.git`` がディレクトリでないときは毎回調べる。
+130〜350 ms）。前に調べてからルートの下が変わっていなければ（監視の ``generation``・``.git/HEAD``・``.git/index`` が同じで、
+``GIT_STATE_MAX_AGE_S`` 以内）覚えから返す。監視が動いていない・``.git`` がディレクトリでないときは毎回調べる。
 """
 
 from __future__ import annotations
@@ -57,33 +57,38 @@ def test_an_unchanged_root_reuses_the_git_state(tmp_path: Path, monkeypatch: pyt
     count = Counting(monkeypatch)
     memos: dict[str, t00._GitMemo] = {}
     rt = fake_runtime()
-    first = t00._git_state(memos, rt, ws, 7)
+    first = t00._git_state(memos, rt, ws)
     assert first is not None and first["dirty_files"] == 1  # 未追跡の a.py
     for _ in range(5):
-        assert t00._git_state(memos, rt, ws, 7) == first
+        assert t00._git_state(memos, rt, ws) == first
     assert count.calls == 1
 
 
-def test_an_event_a_new_data_version_or_a_git_file_change_looks_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_event_or_a_git_file_change_looks_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = make_ws(tmp_path)
     count = Counting(monkeypatch)
     memos: dict[str, t00._GitMemo] = {}
     rt = fake_runtime()
-    t00._git_state(memos, rt, ws, 1)
+    t00._git_state(memos, rt, ws)
     rt.watcher.generation += 1  # 監視がイベントを届けた
-    t00._git_state(memos, rt, ws, 1)
+    t00._git_state(memos, rt, ws)
     assert count.calls == 2
-    t00._git_state(memos, rt, ws, 2)  # このサーバーの編集が索引の版を進めた
-    assert count.calls == 3
     (ws.root / "b.py").write_text("y = 2\n", encoding="utf-8")
     porcelain.add(str(ws.root), paths=[str(ws.root / "b.py")])  # イベントが届く前のステージ（.git/index が変わる）
-    after = t00._git_state(memos, rt, ws, 2)
-    assert count.calls == 4 and after is not None and after["dirty_files"] == 2
+    after = t00._git_state(memos, rt, ws)
+    assert count.calls == 3 and after is not None and after["dirty_files"] == 2
     rt2 = fake_runtime()  # 束を作り直した（別の監視）: 前の覚えは使わない
-    t00._git_state(memos, rt2, ws, 2)
-    assert count.calls == 5
+    t00._git_state(memos, rt2, ws)
+    assert count.calls == 4
+
+
+def test_own_writes_advance_the_generation_before_their_events(tmp_path: Path) -> None:
+    ws = make_ws(tmp_path)
+    watcher = Watcher(ws, NullSink())
+    g0 = watcher.generation
+    watcher.expect(RelPath("a.py"), "0" * 64)  # 編集トランザクションが書き込んだ後に呼ぶ
+    watcher.forget(RelPath("a.py"))
+    assert watcher.generation == g0 + 2
 
 
 def test_without_a_live_watcher_or_a_git_directory_it_always_looks(
@@ -93,16 +98,16 @@ def test_without_a_live_watcher_or_a_git_directory_it_always_looks(
     count = Counting(monkeypatch)
     memos: dict[str, t00._GitMemo] = {}
     for rt in (fake_runtime(live=False), SimpleNamespace(), None):
-        t00._git_state(memos, rt, ws, 1)
-        t00._git_state(memos, rt, ws, 1)
+        t00._git_state(memos, rt, ws)
+        t00._git_state(memos, rt, ws)
     assert count.calls == 6
     linked = tmp_path / "linked"
     linked.mkdir()
     (linked / ".git").write_text(f"gitdir: {ws.root / '.git'}\n", encoding="utf-8")  # リンクされた作業ツリーの形
     ws2 = Workspace(workspace_id="l", root=Path(os.path.realpath(linked)), case_insensitive=os.name == "nt")
     rt = fake_runtime()
-    t00._git_state(memos, rt, ws2, 1)
-    t00._git_state(memos, rt, ws2, 1)
+    t00._git_state(memos, rt, ws2)
+    t00._git_state(memos, rt, ws2)
     assert count.calls == 8
 
 
@@ -112,8 +117,8 @@ def test_the_memo_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(t00, "GIT_STATE_MAX_AGE_S", 0.0)
     memos: dict[str, t00._GitMemo] = {}
     rt = fake_runtime()
-    t00._git_state(memos, rt, ws, 1)
-    t00._git_state(memos, rt, ws, 1)
+    t00._git_state(memos, rt, ws)
+    t00._git_state(memos, rt, ws)
     assert count.calls == 2
 
 
@@ -151,12 +156,12 @@ async def test_a_new_file_reported_by_the_real_watcher_changes_the_dirty_count(t
         assert watcher.live
         (ws.root / "zz_probe.txt").write_bytes(b"")  # 監視が動き出したのを確かめる（イベントが届くまで待つ）
         await until(lambda: watcher.generation > 0)
-        before = t00._git_state(memos, rt, ws, 1)
+        before = t00._git_state(memos, rt, ws)
         assert before is not None
         seen = watcher.generation
         (ws.root / "new.py").write_text("z = 3\n", encoding="utf-8")
         await until(lambda: watcher.generation > seen)
-        after = t00._git_state(memos, rt, ws, 1)
+        after = t00._git_state(memos, rt, ws)
         assert after is not None and after["dirty_files"] == before["dirty_files"] + 1
         seen = watcher.generation
         (ws.root / ".git" / "zz_lucianke_probe").write_bytes(b"")  # .git/ の中のイベントも数える（索引には渡さない）

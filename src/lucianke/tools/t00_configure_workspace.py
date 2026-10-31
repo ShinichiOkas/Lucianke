@@ -317,7 +317,7 @@ def restore_settings(context: Any, workspaces: Sequence[Workspace], cache_root: 
 
 
 def _empty_cache() -> dict[str, Any]:
-    return {"languages": [], "files": 0, "symbols": 0, "relations": 0, "last_sync_at": None, "data_version": None}
+    return {"languages": [], "files": 0, "symbols": 0, "relations": 0, "last_sync_at": None}
 
 
 POOL_WAIT_S = 0.05
@@ -325,7 +325,7 @@ POOL_WAIT_S = 0.05
 
 
 def _read_cache(db_path: Path, readers: Any = None) -> dict[str, Any]:
-    """言語別ファイル数とキャッシュ統計（と ``data_version``。Git の状態の覚えの鍵）。DB が無い・読めないときは空。
+    """言語別ファイル数とキャッシュ統計。DB が無い・読めないときは空。
 
     ``readers``（束の ``ReaderPool``）があれば、その接続を借りる（接続を開く・スキーマを読む・閉じるのを毎回しない。BUG-0128）。
     """
@@ -361,17 +361,12 @@ def _cache_rows(conn: sqlite3.Connection) -> dict[str, Any]:
     symbols = int(conn.execute("SELECT count(*) FROM symbols WHERE is_external = 0").fetchone()[0])
     relations = int(conn.execute("SELECT count(*) FROM relations").fetchone()[0])
     row = conn.execute("SELECT max(indexed_at) FROM workspaces").fetchone()
-    try:
-        version = conn.execute("SELECT data_version FROM _meta LIMIT 1").fetchone()
-    except sqlite3.Error:
-        version = None
     return {
         "languages": languages,
         "files": files,
         "symbols": symbols,
         "relations": relations,
         "last_sync_at": row[0] if row else None,
-        "data_version": int(version[0]) if version else None,
     }
 
 
@@ -420,18 +415,17 @@ def _git_memos(hub: Any) -> dict[str, _GitMemo]:
     return memos  # type: ignore[no-any-return]
 
 
-def _git_state(
-    memos: dict[str, _GitMemo], runtime: Any, ws: Workspace, data_version: int | None
-) -> dict[str, Any] | None:
+def _git_state(memos: dict[str, _GitMemo], runtime: Any, ws: Workspace) -> dict[str, Any] | None:
     """``_git_info`` を、前に調べてからルートの下が変わっていなければ覚えから返す（BUG-0128）。
 
     ``dulwich`` の ``status`` は作業ツリーを歩き、設定・``.gitignore``・索引・パックを読む（F-PY で 1 回 20〜30 ms、
     CPU が混んでいると 130〜350 ms）。``status`` は副作用の無い照会で、同じ状態なら同じ答えになる。鍵:
 
-    * 監視（``Watcher``）が届けたイベントの数。``.git/`` の中も、除外で落とすものも数える。監視が動いていない
-      （``polling``・停止後・束に監視が無い）ときは覚えを使わない。
-    * ``data_version``（このサーバー自身の編集は、監視のイベントより先に索引の版を進める）。
-    * ``.git/HEAD`` と ``.git/index`` の更新時刻と大きさ（イベントが届くまでの遅れの間の切り替え・ステージ）。
+    * 監視（``Watcher.generation``）が届けたイベントの数。``.git/`` の中も、除外で落とすものも数える。このサーバー自身の
+      書き込み（編集トランザクション）は、書いた後の ``expect`` / ``forget`` でイベントより先に数える。監視が動いていない
+      （``polling``・停止後・束に監視が無い）ときは覚えを使わない。索引の版（``data_version``）は鍵に入れない（入れると、
+      初回の索引の間に進み具合を見る ``status`` のたびに Git を調べ直す。BUG-0112 の場面）。
+    * ``.git/HEAD`` と ``.git/index`` の更新時刻と大きさ（外の ``git`` の切り替え・ステージのイベントが届くまでの遅れの間）。
 
     ``.git`` がディレクトリでない（リンクされた作業ツリー・サブモジュール。実体はルートの外で監視に入らない）ときは覚えない。
     """
@@ -439,7 +433,7 @@ def _git_state(
     git_dir = ws.root / ".git"
     if watcher is None or not getattr(watcher, "live", False) or not git_dir.is_dir():
         return _git_info(ws.root)
-    key = (watcher.generation, data_version, _file_key(git_dir / "HEAD"), _file_key(git_dir / "index"))
+    key = (watcher.generation, _file_key(git_dir / "HEAD"), _file_key(git_dir / "index"))
     now = time.monotonic()
     memo = memos.get(ws.workspace_id)
     if memo is not None and memo.watcher is watcher and memo.key == key and now - memo.at < GIT_STATE_MAX_AGE_S:
@@ -456,7 +450,7 @@ def _snapshot(
     db_path = getattr(runtime, "db_path", None)
     cache = _read_cache(Path(db_path), getattr(runtime, "readers", None)) if db_path is not None else _empty_cache()
     try:
-        return cache, _git_state(memos, runtime, ws, cache["data_version"]), None
+        return cache, _git_state(memos, runtime, ws), None
     except Exception as exc:  # noqa: BLE001  Git が読めなくても status は答える
         return cache, None, f"{ws.workspace_id}: git state unavailable ({type(exc).__name__}: {exc})"
 
