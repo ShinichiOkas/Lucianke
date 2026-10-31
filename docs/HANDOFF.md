@@ -3,7 +3,7 @@
 この文書は、セッションが中断した（トークンクォータ等）ときに、**別の PC・別のエージェントが続きを拾うため**の現在地。
 作業が進んだらこの文書を更新してコミットする（履歴は git に残る）。
 
-最終更新: 2026-10-31（夜〜朝。師匠は就寝中で「おまかせ」） / 対象: `main` / このセッションで BUG-0062〜0089 を処理し、exe 配布を入れた（§2・§6）
+最終更新: 2026-10-31 15 時台 / 対象: `main` / このセッションで BUG-0062〜0123 を処理し、exe 配布・能力測定の基準（Mnemo）・競合比較（Serena）を入れた（§2・§6・§7）
 
 ---
 
@@ -11,7 +11,7 @@
 
 ```powershell
 git pull
-uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の統合で 3925 passed / 29 skipped。1 件の揺れは BUG-0089 で直した）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
+uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `cdc9257` で 4245 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
@@ -28,9 +28,9 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | 統合（`9f4ffa3`、直す役 4 つが同時に pytest を流す高負荷・37 分）で `1 failed, 3925 passed, 29 skipped`。落ちた 1 件は実時間 1 秒の試験の揺れで、BUG-0089（`84d1b16`）で直した。skip 29 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml） |
-| 索引 DB のスキーマ | **v7**（v5 `_name_calls` = BUG-0071、v6 `_member_refs` = BUG-0075、v7 `_member_refs.via_super` = BUG-0081）。古い索引は移行で Python/TS/JS を再取り込みする |
-| 配布 | exe（PyInstaller onedir）。`.uild.ps1`（§6） |
+| 全体テスト | `4245 passed, 30 skipped, 0 failed`（2026-10-31・`cdc9257` に固定した作業ツリー・16 分 43 秒）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
+| 索引 DB のスキーマ | **v15**（v5 `_name_calls`=BUG-0071、v6 `_member_refs`=BUG-0075、v7 `via_super`=BUG-0081、v8=BUG-0085、v9 `_attr_defs`・`_var_types`=BUG-0093〜0095、v10 `_reexports`=BUG-0100、v11=BUG-0104/0105、v12 `_type_aliases`=BUG-0108/0109、v13=BUG-0113/0114、v14=BUG-0117、v15=BUG-0122）。古い索引は移行で再取り込みする |
+| 配布 | exe（PyInstaller onedir）。`.\build.ps1`（§6） |
 
 ## 2. 2026-10-31 に入ったもの（要約。詳細は各票の「原因・直し方・確認」）
 
@@ -56,14 +56,25 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   - BUG-0072/0073（`8536a5f`）: 依存方向の見張り・CI と同じ引数なしの `ruff check`
 - その他: `.mcp.json` の `--directory` を「.」に（別 PC の絶対パスで MCP がつながらなかった。`cf4497c`）、exe 配布（§6）
 
+### 2026-10-31 午前〜午後に入ったもの（追記）
+
+- 師匠のコーディングエージェント（ray）からのフィードバック: 全ツールに `openWorldHint: false`（read 系が純 read になる。`998e2ea`）
+- CI は手動の起動だけ（師匠の判断「そもそもCIしなくていいよ」。`7dd9287`。検証は手元の全体テスト）
+- 大きなリポジトリ: BUG-0112（索引中も呼び出しを待たせない `core/foreground.py`・長い行の位置の変換・入れ子の作業ツリーと圧縮 JS を飛ばす。`b124359`・`d733669`・`2d2f0a9`）、BUG-0111（`venv/` を見つける）、`.claude/worktrees/` を `.gitignore`
+- 予算: BUG-0110（compact で全体より少し小さい予算だと 0 件だった）、BUG-0115/0116（カーソルを 10 文字・9 トークンに、前置きの見積もりの無駄）
+- 参照の層（構文木）: BUG-0079/0081（属性の連鎖・super）、BUG-0082（pytest の import の根）、BUG-0085・0117（型の分からない受け手・Union を確定で結ばない）、BUG-0093〜0095（モジュール関数・import した変数・属性の読み書きを黙って落とさない）、BUG-0100/0101・0104/0105（再エクスポート・TS のバレル・star）、BUG-0107（exact の答えにも名前の一致の別欄）、BUG-0108/0109・0113/0114（TS の既定の import・型の別名・型リテラルのメンバー）、BUG-0122（インスタンス属性）
+- LSP: BUG-0090（basedpyright は取り消された references の後に壊れる → 送らない・壊れたら再起動）、BUG-0091・0123（T-06/T-07 の exact は 1 問い合わせの予算・答えた分を保存・送り済みの要求を使い回す）
+- 編集: BUG-0087（索引の更新に失敗したら watcher に expect しない）、BUG-0098/0099（編集の前の診断の基準が無いときは added にしない・待ち切れは E_TIMEOUT）
+- 地図・検索: BUG-0120（地図の冒頭にパッケージの概観・地図 11.7 秒 → 1 秒）、BUG-0121（ドット無しの検索は名前で照合）
+- 試験の揺れ: BUG-0074・0076・0080・0083・0086・0089・0092・0097・0103・0106
+
 ## 3. 次にやること（優先順）
 
-1. 作業中だった票（このセッションの終わりに直す役が走っていたもの。push 済みかは `git log --oneline --grep=BUG-00xx` で見る）:
-   BUG-0080（F-PY の exact の事後条件が降格時に誤った理由で skip）・BUG-0086（F-PY T-06 事後条件 3 の揺れ）・BUG-0085（型の分からない素の名前の受け手を同じファイルの唯一の同名メソッドに確定で結ぶ誤り）・BUG-0087（索引の更新に失敗しても watcher に expect を登録して索引が古いまま）・BUG-0088（並行起動で `test_edit_transaction.py` が一斉にエラー）
-2. **BUG-0084** — データファイル（JSON など）の骨格の縮退が深さ単位で粗い（ky `package.json` で予算の 66%）。影響は小さいので後回しにした
-3. **BUG-0058**（レイテンシ）— 師匠判断（2026-10-30）で優先度を下げた。exact 経路の初回が 10 秒の予算を超えて structural に落ちることがある（BUG-0074・0080 の票にも実測）
-4. リリースのワークフロー（`.github/workflows/release.yml`）は未実行。CI（GitHub Actions）の結果もこの PC から確かめていない（`gh` が無い）
-5. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-00xx` で確認する
+1. **能力測定の基準（§7）で点数を見ながら使い勝手を上げる。** 2026-10-31 の `cdc9257` で Lucianke 15/15 合格・平均 0.993・19,441 トークン・cold 1.1s / warm 36ms（Serena 13/15・0.946、grep 7/15・0.782）。残る大きな差は**初回の索引の準備 243 秒（Serena 8 秒）**
+2. 未処理の票: BUG-0058（レイテンシ・優先度低）、BUG-0084（データファイルの骨格の縮退が粗い）、BUG-0096（ポーリング時の鮮度）、BUG-0124（非公開クラスのメソッドを地図に公開として出す）。T-20 の時間の上限（既定 300 ms・最大 5 秒）は大きなリポジトリの集計に足りない（票にしていない）
+3. リリースのワークフロー（`release.yml`）は未実行。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。ログを読むには `gh auth login` が要る
+4. 他 OS: WSL の Ubuntu は外へのネットワークがつながらない（VPN）。手元で Linux を回すには WSL の設定（例 `networkingMode=mirrored`）が要る
+5. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-0xxx` で確認する
 
 ## 4. 触るときの注意
 
@@ -97,3 +108,12 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 - リリース: `v*` のタグを push すると `.github/workflows/release.yml` が Windows でビルド・smoke・Release に zip を上げる（python.org の Python に固定して、その LICENSE.txt を同梱）
 - 確かめたこと（2026-10-31、このPC）: `build.ps1 -Zip -InstallDir <一時>` が smoke 13 項目すべて ok、zip は 394 項目・区切りは `/`・展開した exe が動く。
   動いている exe があると exit 1 で止まり、`-Force` で止めて置き換え、`-Uninstall` で消える。リリースのワークフローはまだ一度も走らせていない（初回のタグで確かめる）
+
+## 7. 能力測定の基準（Mnemo の分析）と競合比較（2026-10-31・師匠の判断）
+
+- Lucianke の能力は、実プロジェクト Mnemo（`../Mnemo`、固定 `d419cf0b`）を分析させた結果で測る（Skill `mnemo-is-the-capability-benchmark`）。
+- **置き場所**: Mnemo の中身（課題・正解・結果）は Mnemo の `bench/lucianke/`。Lucianke には汎用の実行器 `bench/capability/`（`run.py`・adapters: lucianke / serena / grep）だけ（Mnemo の中身を OSS に持ち込まない）。
+- 走らせ方: `uv run python bench/capability/run.py --tasks <Mnemo>/bench/lucianke/tasks.toml --workspace <固定の写し> --engines lucianke --date <日付> --out <Mnemo の一時作業ツリー>/bench/lucianke/results --work-dir <dir>`。
+  Mnemo の作業ツリーには他の作業の未コミットの変更があることが多いので、結果は `git -C <Mnemo> worktree add --detach <scratch> origin/main` の一時作業ツリーで commit・push する。
+- 競合: Serena 2.0.0（師匠の承認で導入。MCP・pyright）。Serena は準備が速く誤検出が無いが、型の分からない受け手を落とし、outgoing と名前変更の dry-run が無い。
+- Mnemo の `PROJECT_STRUCTURE.md` §10 に Lucianke による構造分析（規模・パッケージの依存・被参照の多いモジュール・気づいた点）を書いた。

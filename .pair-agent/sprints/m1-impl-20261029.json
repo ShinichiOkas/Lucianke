@@ -19,6 +19,11 @@
       "at": "2026-10-31T07:00:00+09:00",
       "status": "executing (継続)",
       "note": "BUG-0062〜0089 を処理（並行の直す役で票ごとに修正・push）。exe 配布（build.ps1・packaging/・release.yml）。師匠の宣言「主な利用者は AI。仕様は AI の有用さで決めてよい」を受け、dogfood で見つけた使い勝手の欠陥（導ける urn 行・初回索引中の not found・型不明の受け手の取りこぼし・継承メソッド・誤帰属・予算の単調性と利用率）を直した。索引スキーマ v7。現在地は docs/HANDOFF.md §1〜§3"
+    },
+    {
+      "at": "2026-10-31T15:30:00+09:00",
+      "status": "executing (継続)",
+      "note": "BUG-0090〜0123 を処理。師匠の宣言（主な利用者は AI）に沿って参照の層の取りこぼし・誤帰属を大きく減らし、大きなリポジトリの索引の停止（BUG-0112）を解消。能力測定の基準（Mnemo の bench、Serena と比較）で Lucianke 15/15・0.993。CI は手動起動だけに。全体テスト 4245 passed・0 failed（cdc9257）。現在地は docs/HANDOFF.md"
     }
   ]
 }
