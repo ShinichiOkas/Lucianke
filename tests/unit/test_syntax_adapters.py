@@ -557,7 +557,8 @@ def test_adapters_table() -> None:
         ADAPTERS[".json"].replace(b"{}", "jsonpath:$", b"1")
 
 
-def test_shrink_drops_depth_one_level_at_a_time() -> None:
+def test_shrink_drops_one_member_at_a_time_deepest_and_last_first() -> None:
+    """縮退は 1 件ずつ（深いもの・文書の後ろのものから）。最上位は残す（BUG-0084。以前は深さ 1 段ずつ）。"""
     src = b'{"a": {"b": {"c": {"d": 1}}}, "x": 1}\n'
     rec = json_.skeleton(
         src, OPTS, rel="x.json", sha256="0" * 64, estimate=lambda text: len(text.splitlines())
@@ -570,15 +571,26 @@ def test_shrink_drops_depth_one_level_at_a_time() -> None:
         "      [Key] d @L1",
         "[Key] x @L1",
     ]
-    small = rec.shrink(
-        5
-    )  # 見積もりは行数。深さ 3 は 6 行、深さ 2 は ヘッダ 1 + 本文 3 + truncated の注 1 = 5 行
-    assert small is not None
-    assert small.shrink is None
-    assert "  [Key] b @L1 { ...2 nodes omitted }" in small.lines
-    assert small.data["truncated_members"] == 2
-    assert small.lines[-1] == "- truncated: 2 members omitted (depth limited to 2)"
-    assert rec.shrink(1) is None  # どれだけ浅くしても入らない
+    one = rec.shrink(6)  # 見積もりは行数。ヘッダ 1 + 本文 4 + truncated の注 1 = 6 行（d だけ落とす）
+    assert one is not None
+    assert one.shrink is None
+    assert "    [Key] c @L1 { ...1 nodes omitted }" in one.lines
+    assert one.data["truncated_members"] == 1
+    assert one.lines[-1].startswith("- truncated: 1 members omitted: a.b.c 1; whole file: max_tokens>=")
+    two = rec.shrink(5)
+    assert two is not None
+    assert "  [Key] b @L1 { ...2 nodes omitted }" in two.lines
+    assert two.data["truncated_members"] == 2
+    assert two.data["truncated_by_container"] == [{"container": "a.b", "omitted": 2}]
+    assert (
+        two.lines[-1]
+        == "- truncated: 2 members omitted: a.b 2; whole file: max_tokens>=300 with this path alone"
+    )
+    top = rec.shrink(4)  # 最上位だけ（a は子孫 3 件を畳む）
+    assert top is not None
+    assert "[Key] a @L1 { ...3 nodes omitted }" in top.lines
+    assert top.data["truncated_by_container"] == [{"container": "a", "omitted": 3}]
+    assert rec.shrink(3) is None  # どれだけ落としても入らない
     flat = json_.skeleton(src, SkeletonOptions(max_depth=1), rel="x.json", sha256="0" * 64)
     assert flat.shrink is None
 

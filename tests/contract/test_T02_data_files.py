@@ -175,7 +175,10 @@ async def test_shrink_reduces_depth_and_says_so(pipeline: Pipeline) -> None:
     assert not full.is_error and not small.is_error
     assert "[Key] max_attempts" in full.text and "truncated" not in full.text
     assert g.validate(small.text) == []
-    assert "- truncated: 5 members omitted (depth limited to 1)" in small.text
+    assert (
+        "- truncated: 5 members omitted: service 2, features 3; whole file: max_tokens>=400 with this path alone"
+        in small.text
+    )
     assert (
         "[Key] features @L20-25 { ...3 nodes omitted }" in small.text
         and "[Key] max_attempts" not in small.text
@@ -184,7 +187,9 @@ async def test_shrink_reduces_depth_and_says_so(pipeline: Pipeline) -> None:
 
 
 async def test_batch_keeps_request_order_and_mixes_code_and_data(pipeline: Pipeline) -> None:
-    r = await call(pipeline, "json", paths=[SETTINGS, PAY_PY, JUNIT], max_tokens=20000)  # json は data の全項目を数える（BUG-0017）
+    r = await call(
+        pipeline, "json", paths=[SETTINGS, PAY_PY, JUNIT], max_tokens=20000
+    )  # json は data の全項目を数える（BUG-0017）
     assert [i["path"] for i in r.structured["data"]["items"]] == [SETTINGS, PAY_PY, JUNIT]
     assert r.structured["_resolution_meta"]["engine_used"] == "tree-sitter+data-adapter"
     assert r.structured["data"]["items"][1]["language"] == "python"
@@ -204,7 +209,9 @@ async def test_engine_used_by_kind_of_files(pipeline: Pipeline) -> None:
 async def test_unsupported_files_still_fail_per_item(pipeline: Pipeline) -> None:
     r = await call(pipeline, paths=[SETTINGS, "legacy/calc.cob", "conf/.env", "src/missing.json"])
     assert not r.is_error and g.validate(r.text) == []
-    assert "=== legacy/calc.cob" in r.text and "! legacy/calc.cob" not in r.text  # Tier 4 は推定の骨格（BUG-0018）
+    assert (
+        "=== legacy/calc.cob" in r.text and "! legacy/calc.cob" not in r.text
+    )  # Tier 4 は推定の骨格（BUG-0018）
     assert "! conf/.env: E_UNSUPPORTED" in r.text and "secret_file" in r.text
     assert "! src/missing.json: E_TARGET_NOT_FOUND" in r.text
     assert "SECRET_SENTINEL" not in r.text

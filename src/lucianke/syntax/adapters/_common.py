@@ -459,6 +459,50 @@ def _emit(nodes: Sequence[SkelNode], indent: int, lines: list[str]) -> list[dict
     return out
 
 
+def _bfs_rank(nodes: Sequence[SkelNode]) -> dict[int, int]:
+    """表示するノード（``id``）→「浅い順 → 文書順」の連番。親は必ず子より小さい（先頭から取れば親を含む木になる）。"""
+    rank: dict[int, int] = {}
+    level: Sequence[SkelNode] = nodes
+    while level:
+        nxt: list[SkelNode] = []
+        for n in level:
+            rank[id(n)] = len(rank)
+            nxt.extend(n.children)
+        level = nxt
+    return rank
+
+
+def _prune(
+    nodes: Sequence[SkelNode],
+    keep: int,
+    rank: dict[int, int],
+    prefix: str | None,
+    dropped: dict[str, int],
+) -> list[SkelNode]:
+    """``rank < keep`` のノードだけ残した複製（最上位は全部残る前提）。落とした子（と子孫）の数は親の ``omitted`` に足し、
+    落とした表示中のノードの数は入れ物（親の修飾名）ごとに文書順で ``dropped`` に足す。"""
+    out: list[SkelNode] = []
+    for n in nodes:
+        name = n.name if prefix is None else f"{prefix}.{n.name}"
+        gone = 0
+        kept: list[SkelNode] = []
+        for c in n.children:
+            if rank[id(c)] >= keep:
+                gone += count_nodes([c])
+                dropped[name] = dropped.get(name, 0) + _visible([c])
+            else:
+                kept.append(c)
+        out.append(
+            dataclasses.replace(n, children=_prune(kept, keep, rank, name, dropped), omitted=n.omitted + gone)
+        )
+    return out
+
+
+def _dumps(value: Any) -> str:
+    """json の応答と同じ書き方（``mcp/render/json_out._dumps``。``syntax`` は ``mcp`` を import できない）。"""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 def build_record(
     source: bytes,
     nodes: Sequence[SkelNode],
@@ -472,20 +516,55 @@ def build_record(
 ) -> Record:
     """骨格 1 ファイルぶんの ``Record``（``kind="file-block"``）。
 
-    ``data`` は T-02 の ``items[]`` の 1 項目の形（``symbols[]`` の行は 1 始まり）。``shrink`` は深さを 1 段ずつ浅くした版を返す。
+    ``data`` は T-02 の ``items[]`` の 1 項目の形（``symbols[]`` の行は 1 始まり）。``shrink`` は予算に入らないときの縮退版:
+    表示しているノードを「浅い順 → 文書順」の逆（深いもの・後ろのものから）に **1 件ずつ** 落とした段のうち、収まる最も浅いもの
+    （最上位は残す。段の鎖は予算に依らないので結果は予算に単調。BUG-0084。コードの骨格と同じ ``- truncated:`` の注を付ける）。
+    ``shrink_json`` は同じ鎖を json の大きさで選ぶ（既定の推定器のときだけ）。
     """
-    line_count = LineIndex(source).content_line_count
-    depth = max(1, opts.max_depth)
-    total = count_nodes(limit_depth(nodes, 10_000))  # 畳まない全ノード数（truncated_members の基準）
+    # 遅延 import（skeleton が adapters を使っても循環しない）
+    from lucianke.syntax.skeleton import (
+        HINT_MARGIN_TOKENS,
+        OTHERS,
+        TOP_LEVEL,
+        TRUNCATED_CONTAINERS_MAX,
+        default_estimate,
+    )
 
-    def render(d: int, *, shrunk: bool) -> Record:
-        shown = limit_depth(nodes, d)
+    est = estimate or default_estimate
+    line_count = LineIndex(source).content_line_count
+    visible = limit_depth(nodes, max(1, opts.max_depth))
+    rank = _bfs_rank(visible)
+    steps = len(rank) - len(visible)  # 1 件ずつ落とせるノードの数（最上位は残す）
+    wholes: dict[str, int] = {}  # 丸ごとの大きさ（形式ごと。取り直しの目安）
+
+    def hint(form: str) -> int:
+        if form not in wholes:
+            full = render(0, False)
+            text = _dumps(full.data) + "," if form == "json" else "\n".join(full.lines) + "\n"
+            wholes[form] = est(text)
+        return -(-(wholes[form] + HINT_MARGIN_TOKENS) // 100) * 100
+
+    def sentence(omitted: int, containers: dict[str, int], form: str) -> str:
+        items = [(TOP_LEVEL if k == "" else k, v) for k, v in containers.items()]
+        if len(items) > TRUNCATED_CONTAINERS_MAX:
+            rest = sum(c for _, c in items[TRUNCATED_CONTAINERS_MAX - 1 :])
+            items = [*items[: TRUNCATED_CONTAINERS_MAX - 1], (OTHERS, rest)]
+        where = ": " + ", ".join(f"{c} {n}" for c, n in items) if items else ""
+        again = f"whole file: max_tokens>={hint(form)} with this path alone"
+        return f"truncated: {omitted} members omitted{where}; {again}"
+
+    def render(t: int, with_json_note: bool = True) -> Record:
+        """``t`` 件落とした段（0 は丸ごと）。``with_json_note=False`` は行の大きさを見積もるとき（json の注の目安を作らない）。"""
+        dropped: dict[str, int] = {}
+        shown = visible if t == 0 else _prune(visible, len(rank) - t, rank, None, dropped)
         body = [note(n) for n in notes]
         symbols = _emit(shown, 0, body)
-        truncated = 0
-        if shrunk:
-            truncated = max(0, total - _visible(shown))
-            body.append(note(f"truncated: {truncated} members omitted (depth limited to {d})"))
+        omitted = sum(dropped.values())
+        json_note: str | None = None
+        if t:
+            body.append(note(sentence(omitted, dropped, "compact")))
+            if with_json_note:
+                json_note = sentence(omitted, dropped, "json")
         header = file_block_header(rel, lines=line_count, skeleton_lines=len(body), sha12=sha256)
         data = {
             "ok": True,
@@ -497,7 +576,11 @@ def build_record(
             "file_sha256": sha256,
             "imports": [],
             "symbols": symbols,
-            "truncated_members": truncated,
+            "truncated_members": omitted,
+            "truncated_by_container": [
+                {"container": TOP_LEVEL if k == "" else k, "omitted": v} for k, v in dropped.items()
+            ],
+            "truncated_note": json_note,
             "confidence_level": Confidence.STRUCTURAL.value,
         }
         return Record(
@@ -508,24 +591,46 @@ def build_record(
             data=data,
             confidence=Confidence.STRUCTURAL,
             group=rel,
-            shrink=shrink if (not shrunk and depth > 1) else None,
+            shrink=shrink if (t == 0 and steps > 0) else None,
+            shrink_json=shrink_json if (t == 0 and steps > 0 and estimate is None) else None,
         )
 
+    costs: dict[int, int] = {}
+    json_costs: dict[int, int] = {}
+
+    def cost(t: int) -> int:
+        if t not in costs:
+            costs[t] = est("\n".join(render(t, False).lines))
+        return costs[t]
+
+    def json_cost(t: int) -> int:
+        if t not in json_costs:
+            json_costs[t] = est(_dumps(render(t).data) + ",")
+        return json_costs[t]
+
+    def shallowest(size: Callable[[int], int], budget: int) -> int | None:
+        """``size(t) <= budget`` の最も浅い段 ``t``（二分探索。調べる位置は範囲と各位置の判定だけで決まり、判定は ``budget`` に
+        ついて単調なので、結果の段も ``budget`` について単調）。最も深い段も収まらなければ ``None``。"""
+        if size(steps) > budget:
+            return None
+        lo, hi = 1, steps  # size(hi) <= budget を保つ
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if size(mid) <= budget:
+                hi = mid
+            else:
+                lo = mid + 1
+        return hi
+
     def shrink(remaining_tokens: int) -> Record | None:
-        if estimate is None:
-            # 遅延 import（skeleton が adapters を使っても循環しない）
-            from lucianke.syntax.skeleton import default_estimate
+        t = shallowest(cost, remaining_tokens)
+        return None if t is None else render(t)
 
-            est = default_estimate
-        else:
-            est = estimate
-        for d in range(depth - 1, 0, -1):
-            rec = render(d, shrunk=True)
-            if est("\n".join(rec.lines)) <= remaining_tokens:
-                return rec
-        return None
+    def shrink_json(remaining_tokens: int) -> Record | None:
+        t = shallowest(json_cost, remaining_tokens)
+        return None if t is None else render(t)
 
-    return render(depth, shrunk=False)
+    return render(0)
 
 
 def _visible(nodes: Sequence[SkelNode]) -> int:

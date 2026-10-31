@@ -219,8 +219,16 @@ def _retag(rec: Record, confidence: Confidence, tier: Tier, language: str) -> Re
             shrunk = inner(budget)
             return None if shrunk is None else _retag(shrunk, confidence, tier, language)
 
+    inner_json = rec.shrink_json
+    shrink_json: Callable[[int], Record | None] | None = None
+    if inner_json is not None:
+
+        def shrink_json(budget: int) -> Record | None:
+            shrunk = inner_json(budget)
+            return None if shrunk is None else _retag(shrunk, confidence, tier, language)
+
     data = {**rec.data, "tier": int(tier), "language": language, "confidence_level": confidence.value}
-    return dataclasses.replace(rec, confidence=confidence, data=data, shrink=shrink)
+    return dataclasses.replace(rec, confidence=confidence, data=data, shrink=shrink, shrink_json=shrink_json)
 
 
 def _heuristic_skeleton(
