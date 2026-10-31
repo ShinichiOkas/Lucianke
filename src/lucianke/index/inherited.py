@@ -31,6 +31,13 @@
   T-06 / T-07 の名前の一致に任せる（黙って捨てない。無い URN にも結ばない）。変数のファイル・型のクラス（とその基底）のファイルを
   整えるたびに結び直す（型が分かるようになれば ``_name_calls`` の行を消して ``relations`` に、分からなくなれば逆に）。
 
+* **型の別名の受け手**（BUG-0108）: ``o: Options``（``type Options = Base & { extra: string }``）の ``o.retry`` の先は
+  ``types.ts#Options.retry``。「クラスの部分」がワークスペースの型の別名（``kind = 'Type'``）なら同じく退避し、別名の構成（内部表
+  ``_type_aliases``。抽出器が書く）から探す（``MemberResolver.lookup_alias``）: 別名そのもの・交差は書いた順に最初に持つ構成、合併は
+  持つ構成がちょうど 1 つのときだけ。別名自身の型リテラルのメンバーはシンボルがあればそれ、無ければ結ばない。中身の分からない構成が
+  あって決まらなければ名前だけ（``_name_calls``）。C3 の線形化の途中の別名（``interface Options extends KyOptions``）も構成から探す。
+  別名のファイル・構成の型のファイルを整えるたびに結び直す（再帰 CTE が ``_type_aliases`` を逆にたどる）。
+
 ``_member_refs`` はファイルの取り込み（``ingest_file``）で全置換され、ファイルの削除で CASCADE で消える。
 """
 
@@ -65,9 +72,13 @@ CLASS_KINDS: Final = frozenset(
 VAR_KINDS: Final = frozenset({Kind.VARIABLE.value, Kind.CONSTANT.value})
 """受け手になれるモジュール直下の変数の種別（型は ``_var_types``。BUG-0094）。"""
 
+ALIAS_KIND: Final = Kind.TYPE.value
+"""受け手になれる型の別名の種別（構成は ``_type_aliases``。BUG-0108）。"""
+
 _EXTERNAL_PREFIX: Final = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
 _PARKED_KINDS: Final = ("CALLS", "REFERENCES")
-_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(CLASS_KINDS))
+_RECEIVER_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(CLASS_KINDS | {ALIAS_KIND}))
+_MAX_ALIAS_DEPTH: Final = 8  # 別名の構成をたどる深さ（循環した別名は止める）
 _VAR_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(VAR_KINDS))
 
 
@@ -159,7 +170,7 @@ def _receiver_class(conn: sqlite3.Connection, owner: str) -> str:
     そのファイルが索引にある（再び公開した名前など）なら ``"name"``、それ以外（中身の分からないファイル・関数など）は ``""``。"""
     hit = conn.execute("SELECT kind FROM symbols WHERE urn = ? AND file_id IS NOT NULL", (owner,)).fetchone()
     if hit is not None:
-        return "member" if hit[0] in CLASS_KINDS or hit[0] in VAR_KINDS else ""
+        return "member" if hit[0] in CLASS_KINDS or hit[0] in VAR_KINDS or hit[0] == ALIAS_KIND else ""
     try:
         urn = parse(owner)
     except ValueError:
@@ -174,13 +185,16 @@ def _receiver_class(conn: sqlite3.Connection, owner: str) -> str:
 class _Lookup:
     """C3 の順に探した結果。``blocker`` は先に当たって探すのをやめた基底（中身の分からない外部の基底・クラスでない基底）。
 
-    ``untyped`` は受け手がモジュール直下の変数で、その型が構文から分からない（名前だけの呼び出し・参照にする。BUG-0094）。
+    ``untyped`` は受け手がモジュール直下の変数で、その型が構文から分からない（名前だけの呼び出し・参照にする。BUG-0094）。受け手が
+    型の別名で、構成からメンバーが決まらない（中身の分からない構成・合併で持つ構成が 1 つでない。BUG-0108）ときも。
+    ``inline`` はメンバーが型の別名自身の型リテラルにあり、シンボルが無い（結ぶ先が無い。別の型の同名にも結ばない。BUG-0108）。
     """
 
     found: str | None
     blocker: str | None
     order: tuple[str, ...]
     untyped: bool = False
+    inline: bool = False
 
 
 class _Resolver:
@@ -193,6 +207,8 @@ class _Resolver:
         self._orders: dict[str, list[str] | None] = {}
         self._found: dict[tuple[str, str, bool], _Lookup] = {}
         self._var_types: dict[str, str | None] = {}
+        self._aliases: dict[str, tuple[str, list[list[tuple[str, str]]]] | None] = {}
+        self._alias_found: dict[tuple[str, str], _Lookup] = {}
 
     def _kind(self, urn: str) -> str | None:
         if urn not in self._kinds:
@@ -207,6 +223,30 @@ class _Resolver:
     def is_var(self, urn: str) -> bool:
         """``urn`` がワークスペースのモジュール直下の変数・定数か（受け手の型は ``_var_types``。BUG-0094）。"""
         return not urn.startswith(_EXTERNAL_PREFIX) and self._kind(urn) in VAR_KINDS
+
+    def is_alias(self, urn: str) -> bool:
+        """``urn`` がワークスペースの型の別名か（受け手の型は ``_type_aliases`` の構成。BUG-0108）。"""
+        return not urn.startswith(_EXTERNAL_PREFIX) and self._kind(urn) == ALIAS_KIND
+
+    def alias_parts(self, urn: str) -> tuple[str, list[list[tuple[str, str]]]] | None:
+        """型の別名 ``urn`` の ``(op, 構成ごとの (kind, target_urn) の列)``。構成が書かれていなければ ``None``。"""
+        if urn not in self._aliases:
+            try:
+                rows = self._conn.execute(
+                    "SELECT op, ord, kind, target_urn FROM _type_aliases WHERE alias_urn = ? ORDER BY ord, rowid", (urn,)
+                ).fetchall()
+            except sqlite3.OperationalError as exc:  # v12 より前の DB（移行前に読んだ）。構成は分からないとする
+                if "no such" not in str(exc):
+                    raise
+                rows = []
+            if not rows:
+                self._aliases[urn] = None
+            else:
+                groups: dict[int, list[tuple[str, str]]] = {}
+                for _op, ord_, kind, target in rows:
+                    groups.setdefault(int(ord_), []).append((str(kind), str(target)))
+                self._aliases[urn] = (str(rows[0][0]), [groups[k] for k in sorted(groups)])
+        return self._aliases[urn]
 
     def var_type(self, urn: str) -> str | None:
         """変数 ``urn`` の構文から分かる型（``_var_types``）。分からなければ ``None``。"""
@@ -259,7 +299,12 @@ class _Resolver:
     def lookup(self, cls: str, name: str, *, after: bool = False) -> _Lookup:
         key = (cls, name, after)
         if key not in self._found:
-            self._found[key] = self._lookup_var(cls, name) if self.is_var(cls) else self._lookup(cls, name, after)
+            if self.is_var(cls):
+                self._found[key] = self._lookup_var(cls, name)
+            elif self.is_alias(cls):
+                self._found[key] = self.lookup_alias(cls, name)
+            else:
+                self._found[key] = self._lookup(cls, name, after)
         return self._found[key]
 
     def _lookup_var(self, var: str, name: str) -> _Lookup:
@@ -269,7 +314,77 @@ class _Resolver:
             return _Lookup(None, None, (), untyped=True)
         if tp.startswith(_EXTERNAL_PREFIX):
             return _Lookup(_external_member(tp, name), None, (tp,))
+        if self.is_alias(tp):
+            return self.lookup_alias(tp, name)
         return self._lookup(tp, name, False)
+
+    def lookup_alias(self, alias: str, name: str, depth: int = 0) -> _Lookup:
+        """受け手が型の別名 ``alias``: 構成（``_type_aliases``）からメンバー ``name`` を探す（BUG-0108）。
+
+        * ``and``（別名そのもの・交差）: 書いた順に、最初にメンバーを持つ構成のもの（ワークスペースのクラス・インターフェースは C3 の順、
+          別名はさらにその構成、別名自身の型リテラルのメンバーはシンボルがあればそれ、無ければ ``inline``）。どれにも無ければ、外部の
+          型の構成があれば最初のもののメンバー、中身の分からない構成があれば ``untyped``（名前の一致に任せる）、無ければ見つからない。
+        * ``or``（合併）: メンバーを持つ構成がちょうど 1 つで、中身の分からない構成（外部の型を含む）が無いときだけそれ。持つ構成が
+          2 つ以上・中身の分からない構成があれば ``untyped``。
+        * 構成が書かれていない（Python の別名・v12 より前の取り込み）・深すぎる・循環は ``untyped``。
+        """
+        key = (alias, name)
+        if key in self._alias_found:
+            return self._alias_found[key]
+        self._alias_found[key] = _Lookup(None, None, (alias,), untyped=True)  # 循環の見張り（たどる途中で自分に戻ったら分からない）
+        parts = self.alias_parts(alias) if depth <= _MAX_ALIAS_DEPTH else None
+        if parts is None:
+            return self._alias_found[key]
+        op, groups = parts
+        states = [self._alias_part(group, name, depth) for group in groups]
+        order = (alias,)
+        result = _Lookup(None, None, order)
+        if op == "or":
+            holders = [st for st in states if st[0] in ("found", "inline")]
+            if any(st[0] in ("unknown", "external") for st in states) or len(holders) > 1:
+                result = _Lookup(None, None, order, untyped=True)
+            elif holders:
+                state, urn = holders[0]
+                result = _Lookup(urn, None, order) if state == "found" else _Lookup(None, None, order, inline=True)
+        else:
+            hit = next((st for st in states if st[0] in ("found", "inline")), None)
+            external = next((st[1] for st in states if st[0] == "external" and st[1] is not None), None)
+            if hit is not None:
+                result = _Lookup(hit[1], None, order) if hit[0] == "found" else _Lookup(None, None, order, inline=True)
+            elif external is not None:
+                result = _Lookup(external, None, order)
+            elif any(st[0] == "unknown" for st in states):
+                result = _Lookup(None, None, order, untyped=True)
+        self._alias_found[key] = result
+        return result
+
+    def _alias_part(self, group: list[tuple[str, str]], name: str, depth: int) -> tuple[str, str | None]:
+        """別名の構成 1 つの答え: ``("found", URN)`` / ``("inline", None)``（別名自身の型リテラルのメンバー。シンボルなし）/
+        ``("external", 外部のメンバーの URN)`` / ``("unknown", None)``（中身が分からない）/ ``("absent", None)``（持たないと分かる）。"""
+        for kind, target in group:
+            if kind == "member" and target.rpartition(".")[2] == name:
+                return ("found", target) if self._kind(target) is not None else ("inline", None)
+        if any(kind == "opaque" for kind, _ in group):
+            return ("unknown", None)
+        tp = next((target for kind, target in group if kind == "type"), None)
+        if tp is None:
+            return ("absent", None)
+        if tp.startswith(_EXTERNAL_PREFIX):
+            return ("external", _external_member(tp, name))
+        kind = self._kind(tp)
+        if kind == ALIAS_KIND:
+            sub = self.lookup_alias(tp, name, depth + 1)
+        elif kind in CLASS_KINDS:
+            sub = self._lookup(tp, name, False)
+        else:
+            return ("unknown", None)  # 型でないシンボル・索引に無い型（たどれなかった再び公開した名前など）
+        if sub.found is not None:
+            return ("external", sub.found) if sub.found.startswith(_EXTERNAL_PREFIX) else ("found", sub.found)
+        if sub.inline:
+            return ("inline", None)
+        if sub.untyped or sub.blocker is not None:
+            return ("unknown", None)
+        return ("absent", None)
 
     def order(self, cls: str) -> list[str] | None:
         if cls not in self._orders:
@@ -288,6 +403,16 @@ class _Resolver:
                 if c in TRANSPARENT_EXTERNAL_BASES:
                     continue
                 return _Lookup(None, c, tuple(order))  # 中身の分からない外部の基底: 同名を定義しているかもしれない
+            if self._kind(c) == ALIAS_KIND and c != cls:
+                # 型の別名を継承したインターフェース（``interface Options extends KyOptions``）: 別名の構成から探す（BUG-0108）
+                sub = self.lookup_alias(c, name)
+                if sub.found is not None:
+                    return _Lookup(sub.found, None, tuple(order))
+                if sub.inline:
+                    return _Lookup(None, None, tuple(order), inline=True)
+                if sub.untyped:
+                    return _Lookup(None, c, tuple(order))  # 構成の中身が分からない: 同名を持つかもしれない
+                continue
             if self._kind(c) not in CLASS_KINDS:
                 return _Lookup(None, c, tuple(order))  # クラスでない基底（別名など）: 実体が分からない
             hit = self._member(c, name)
@@ -309,9 +434,10 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
     rows = conn.execute(
         "WITH RECURSIVE"
         "  seed(urn) AS (SELECT urn FROM symbols WHERE file_id IN (SELECT value FROM json_each(:ids))"
-        f"   AND kind IN ({_KIND_LIST})),"
+        f"   AND kind IN ({_RECEIVER_KIND_LIST})),"
         "  sub(urn) AS (SELECT urn FROM seed UNION"
-        "   SELECT r.source_urn FROM relations r JOIN sub ON r.target_urn = sub.urn WHERE r.relation_kind = 'INHERITS'),"
+        "   SELECT r.source_urn FROM relations r JOIN sub ON r.target_urn = sub.urn WHERE r.relation_kind = 'INHERITS'"
+        "   UNION SELECT a.alias_urn FROM _type_aliases a JOIN sub ON a.target_urn = sub.urn WHERE a.kind = 'type'),"
         "  vars(urn) AS (SELECT urn FROM symbols WHERE file_id IN (SELECT value FROM json_each(:ids))"
         f"   AND kind IN ({_VAR_KIND_LIST})"
         "   UNION SELECT var_urn FROM _var_types WHERE type_urn IN (SELECT urn FROM sub))"
@@ -328,8 +454,9 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
         new = lk.found
         site = (file_id, source, kind, line, col)
         touched = False
-        if resolver.is_var(str(cls)):
-            # 型の分からない変数の受け手は名前だけの呼び出し・参照にする（前に書いた行は位置で消して書き直す。BUG-0094）
+        if resolver.is_var(str(cls)) or resolver.is_alias(str(cls)):
+            # 型の分からない変数の受け手・構成からメンバーの決まらない型の別名の受け手（BUG-0108）は名前だけの呼び出し・参照にする
+            # （前に書いた行は位置で消して書き直す。BUG-0094）
             had = conn.execute(
                 "DELETE FROM _name_calls WHERE file_id = ? AND source_urn = ? AND name = ?"
                 " AND call_site_line = ? AND call_site_col = ?",
@@ -342,8 +469,8 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
                     (file_id, source, name, line, col, guard, use_kind or ("call" if kind == "CALLS" else "r")),
                 )
             touched = bool(had) != lk.untyped
-            if new is not None and new.startswith(_EXTERNAL_PREFIX):
-                ensure_external_symbol(conn, new, (str(kind),))
+        if new is not None and new.startswith(_EXTERNAL_PREFIX):
+            ensure_external_symbol(conn, new, (str(kind),))
         if old is not None and old != new:
             # 前の先の行（LSP が exact で書き戻した行も。先が変わったのでその位置については古い）
             conn.execute(

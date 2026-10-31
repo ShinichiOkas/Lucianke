@@ -1,7 +1,7 @@
 # reexports
 
 BUG-0100（再び公開した名前を定義元までたどる）・BUG-0101（名前空間パッケージを外部にしない）・BUG-0104（TS / JS のバレル）・
-BUG-0105（import する側の `from x import *`）のフィクスチャ
+BUG-0105（import する側の `from x import *`）・BUG-0109（TS / JS の既定の import。`web/defaults/`）・BUG-0108（TS の型の別名を注釈にした受け手。`web/aliases/`）のフィクスチャ
 （`tests/unit/test_engine_indexer_reexports.py`・`tests/contract/test_T06_T07_reexports.py`）。LSP なしの `structural` の索引。
 
 | 箇所 | 書き方 | 期待 |
@@ -32,3 +32,14 @@ BUG-0105（import する側の `from x import *`）のフィクスチャ
 | `star_use.py` `go` | `starred()`（`pkg.stars` の `__all__`）・`public()`（`pkg.loose`、`__all__` なし）・`Widget().spin()`・`ITEM.spin()`・`class Mine(Widget)` | 定義元に `structural` |
 | `star_use.py` `go` | `hidden()`（どの `__all__` にも無い）・`_private()`・`fresh()`（どの `*` の先にも無い） | 行を作らない。`nowhere.attr()` は名前だけ（`_name_calls`） |
 | `star_use.py` `go` | `dyn_fn()`（`pkg/dyn.py` の `__all__ = list(_EXPORTED)` はリテラルでない） | `pkg/dyn.py#dyn_fn` に `heuristic`（名前だけで決めた） |
+| `web/defaults/use.ts` `useDefaults` | `import main, { other } from './fn'` の `main()`・`other()`（`export default function main`） | `web/defaults/fn.ts#main`・`#other` に `structural`（BUG-0109） |
+| `web/defaults/use.ts` `useDefaults` | `import Widget from './cls'`（`export default class Widget`）の `new Widget().spin()`・`w: Widget` の `w.spin()` | `cls.ts#Widget`・`#Widget.spin`（型の使用も） |
+| `web/defaults/use.ts` `useDefaults` | `helper()`（`export default helper`）・`viaClause()`（`export { viaClause as default }`） | `ident.ts#helper`・`clause.ts#viaClause` |
+| `web/defaults/use.ts` `useDefaults` | `fwd()`・`new FwdWidget().spin()`（`barrel.ts` の `export { default } from './fn'`・`export { default as Widget } from './cls'`）・`fnMod.default()`（`import * as fnMod`） | `fn.ts#main`・`cls.ts#Widget.spin` |
+| `web/defaults/use.ts` `useDefaults` | `anon()`・`anonFwd()`（`export default (): number => 5`。バレルの転送も）・`cfg.level`（`export default { level: 1 }`） | モジュール `anon.ts`・`obj.ts`（ファイルの URN）。`level` は名前だけ（`_name_calls`） |
+| `web/defaults/use.ts` | import 文の行 | 既定の export の定義（無名ならモジュール） |
+| `web/aliases/use.ts` `readAll` | `o: Options`（`type Options = Base & { extra: string; tick(): void }`）の `o.retry`・`b: Box<number>`・`l: Loose`（`Partial<Base>`）・`c: Chain`（別名の別名）・`m: MaybeBase`（`Base \| null \| undefined`）・`d: Derived`（`interface Derived extends Options`）の `.retry` | `web/aliases/base.ts#Base.retry` に `structural`（BUG-0108） |
+| `web/aliases/use.ts` `readAll` | `e.onlyOther`（`type Either = Base \| Other`。持つのは `Other` だけ）・`g.start()`（`type EngineAlias = Engine`）・`d.own` | `base.ts#Other.onlyOther`・`base.ts#Engine.start`・`types.ts#Derived.own` |
+| `web/aliases/use.ts` `readAll` | `o.extra`・`o.tick()`（別名自身の型リテラルのメンバー。シンボルが無い） | 行も名前だけの行も作らない |
+| `web/aliases/use.ts` `readAll` | `e.shared`（合併で持つ構成が 2 つ）・`f.length` / `f.arity`（`type Fn = (x: number) => number`）・`bag.anything`（添字のシグネチャ） | 名前だけ（`_name_calls`） |
+| `web/aliases/local.ts` `same` | 同じファイルの `type Mine = Base & { tag: string }` の `m.retry` | `base.ts#Base.retry` |

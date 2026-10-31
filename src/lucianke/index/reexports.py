@@ -20,6 +20,11 @@ Python のパッケージは公開 API を ``__init__.py`` で再び公開する
   名前）を、たどった先に書き換える。``_settle_relations`` が ``_member_refs`` に退避する前に呼ぶ（``TokenEstimator().count()`` は
   ``core/tokens.py#TokenEstimator.count`` に書き換わり、継承したメンバーなら退避されて基底から結ばれる）。たどり切れなければ今までどおり
   （素の名前は捨て、メンバーは BUG-0094 の名前の一致に任せる）。
+* **既定の import**（BUG-0109）: TS / JS の ``import main from './helpers'`` の ``main`` は ``helpers.ts#default``。既定の export の束ね先
+  （``default`` → ``export default function main`` の ``main``）まで同じくたどる。たどった先が ``P#default`` のままで ``default`` の
+  シンボルも無い（無名の ``export default () => …``・既定の export が無い）なら、``INHERITS`` / ``IMPLEMENTS`` 以外の行の先をモジュール
+  ``P``（ファイルの URN）にする（``ReexportResolver.anonymous_default``。黙って捨てない）。TS の型の別名の構成の型
+  （``_type_aliases.target_urn``。BUG-0108）も ``_var_types`` と同じく書き換える。
 * **追従**（``_reexport_deps``）: たどるときに束ねた名前を引いた ``(ファイル, 名前)`` を、整えたファイルごとに覚える（見つからなかった
   ものも）。あるファイルの取り込み・削除で、そのファイルの「公開する名前」が変わった（最上位のシンボルが増えた・消えた、束ねた名前の
   先が変わった、``*`` の先・``__all__`` が変わった。``export_changes``）ら、その ``(ファイル, 名前)`` に依っていたファイル
@@ -281,6 +286,29 @@ class ReexportResolver:
                 return _with(src, name), guessed
         return None
 
+    def anonymous_default(self, target: str) -> str | None:
+        """``target`` が TS / JS のモジュールの既定の export（``P#default``）で、束ね先も ``default`` という名前のシンボルも無い（無名の
+        ``export default () => …``・``export default { … }``・既定の export が無い）なら、そのモジュール ``P`` の URN（BUG-0109）。"""
+        try:
+            urn = parse(target)
+        except ValueError:
+            return None
+        sel = urn.selector
+        if (
+            urn.is_external
+            or not isinstance(sel, CodeSel)
+            or sel.qualified != "default"
+            or sel.arity is not None
+            or sel.sighash is not None
+            or self._is_symbol(target)
+        ):
+            return None
+        file_id = self._file_id(urn.workspace_id, urn.path)
+        if file_id is None or not self._is_js(file_id):
+            return None
+        return str(Urn(urn.workspace_id, urn.path))
+
+
 def _with(urn: Urn, qualified: str) -> str:
     return str(urn.with_selector(CodeSel(qualified)))
 
@@ -324,6 +352,16 @@ def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: Reexpor
     changed = 0
     for (target,) in rows:
         new, guessed = resolver.resolve_detail(str(target), deps)
+        module = resolver.anonymous_default(new)
+        if module is not None:
+            # 無名の既定の export（BUG-0109）: シンボルが無いので、import 文の行・呼び出し・参照・型の使用はそのモジュールへ（黙って
+            # 捨てない。T-07 では `helpers.ts (module)`）。基底（INHERITS / IMPLEMENTS）はクラスでないので、今までどおり整えが消す
+            changed += conn.execute(
+                "UPDATE relations SET target_urn = ?, target_file_id = NULL WHERE source_file_id = ? AND target_urn = ?"
+                " AND relation_kind NOT IN ('INHERITS', 'IMPLEMENTS')",
+                (module, file_id, target),
+            ).rowcount
+            continue
         if new == target:
             continue
         if new.startswith(_EXTERNAL_PREFIX):
@@ -358,6 +396,21 @@ def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: Reexpor
             changed += 1
         elif own_prefix is not None and str(type_urn).startswith(own_prefix):
             conn.execute("DELETE FROM _var_types WHERE var_urn = ?", (var_urn,))
+    try:  # TS の型の別名の構成の型（``type Options = Base & {...}`` の ``Base`` がバレル・既定の import の名前。BUG-0108）
+        alias_rows = conn.execute(
+            "SELECT rowid, target_urn FROM _type_aliases WHERE file_id = ? AND kind = 'type'"
+            " AND substr(target_urn, 1, ?) <> ? AND target_urn NOT IN (SELECT urn FROM symbols)",
+            (file_id, len(_EXTERNAL_PREFIX), _EXTERNAL_PREFIX),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:  # v12 より前の DB
+        if not _missing_table(exc):
+            raise
+        alias_rows = []
+    for rowid, type_urn in alias_rows:
+        new = resolver.resolve(str(type_urn), deps)
+        if new != type_urn:
+            conn.execute("UPDATE _type_aliases SET target_urn = ? WHERE rowid = ?", (new, rowid))
+            changed += 1
     if own is not None:
         deps = {d for d in deps if d[0] != own[1]}
     if deps:

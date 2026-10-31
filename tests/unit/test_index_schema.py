@@ -34,6 +34,7 @@ ALLOWED_INTERNAL_TABLES = {
     "_var_types",  # BUG-0094
     "_reexports",  # BUG-0100
     "_reexport_deps",  # BUG-0100
+    "_type_aliases",  # BUG-0108
 }
 ALLOWED_TRIGGERS = {"symbols_ai", "symbols_ad", "symbols_au"}
 ALLOWED_INTERNAL_INDEXES = {
@@ -49,6 +50,9 @@ ALLOWED_INTERNAL_INDEXES = {
     "_var_types_file",
     "_reexports_name",
     "_reexport_deps_path",
+    "_type_aliases_alias",
+    "_type_aliases_target",
+    "_type_aliases_file",
 }
 
 

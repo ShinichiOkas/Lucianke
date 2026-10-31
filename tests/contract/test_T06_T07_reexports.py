@@ -218,3 +218,33 @@ async def test_t06_t07_importing_side_star_callers(pipeline: Pipeline) -> None:
     assert nodes.get(U("pkg/widgets.py", "Widget.spin")) == "structural"
     assert nodes.get(U("pkg/dyn.py", "dyn_fn")) == "heuristic"
     assert not any(u.startswith(U("star_use.py", "x")[:-1]) and u != U("star_use.py", "go") for u in nodes)
+
+
+async def test_t06_t07_ts_default_import_callers(pipeline: Pipeline) -> None:
+    """PC:T-06#2 PC:T-07#2 既定の export ``web/defaults/fn.ts#main`` の参照に、``import main from './fn'`` の ``main()``・バレルの
+    ``export { default } from`` 経由の ``fwd()``・``import * as fnMod`` の ``fnMod.default()`` と import 文の行が ``structural`` で出る
+    （BUG-0109）。``useDefaults`` の outgoing に既定の export の定義が並び、無名の既定の export はモジュールのノード（``anon.ts``）。"""
+    use = "web/defaults/use.ts"
+    main = sites(await refs(pipeline, {"path": "web/defaults/fn.ts", "symbol_name": "main"}))
+    for needle in ("  main();", "fwd();", "fnMod.default();"):
+        assert (use, line_of(use, needle), "call", "structural") in main, (needle, main)
+    assert (use, 1, "import", "structural") in main
+    out = await calls(pipeline, use, "useDefaults", "outgoing", depth=1)
+    urns = {n["urn"]: n["confidence_level"] for n in out.structured["data"]["nodes"]}
+    for qualified in (("fn.ts", "main"), ("cls.ts", "Widget.spin"), ("ident.ts", "helper"), ("clause.ts", "viaClause")):
+        assert urns.get(U(f"web/defaults/{qualified[0]}", qualified[1])) == "structural", (qualified, urns)
+    assert urns.get(U("web/defaults/anon.ts")) == "structural"
+    assert not any(u.endswith("#default") for u in urns)
+
+
+async def test_t06_ts_type_alias_receiver_reads(pipeline: Pipeline) -> None:
+    """PC:T-06#2 ``web/aliases/base.ts#Base.retry`` の参照に、型の別名（交差・総称・``Partial``・別名の別名・合併に ``null``・別名を
+    継承したインターフェース・同じファイルの別名）を注釈にした受け手の読みが ``structural`` で出る（BUG-0108）。合併で持つ構成が
+    2 つの ``e.shared`` は ``Base.shared`` の答えに ``structural`` では出ない（名前の一致に任せる）。"""
+    use = "web/aliases/use.ts"
+    retry = sites(await refs(pipeline, {"path": "web/aliases/base.ts", "symbol_name": "Base.retry"}))
+    for needle in ("o.retry;", "b.retry;", "m.retry", "l.retry", "c.retry;", "d.retry;"):
+        assert (use, line_of(use, needle), "r", "structural") in retry, (needle, retry)
+    assert ("web/aliases/local.ts", line_of("web/aliases/local.ts", "m.retry"), "r", "structural") in retry
+    shared = sites(await refs(pipeline, {"path": "web/aliases/base.ts", "symbol_name": "Base.shared"}))
+    assert (use, line_of(use, "e.shared"), "r", "structural") not in shared

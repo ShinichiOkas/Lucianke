@@ -1,4 +1,4 @@
--- schema_version: 11
+-- schema_version: 12
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -298,6 +298,22 @@ CREATE TABLE _reexport_deps (
   PRIMARY KEY (file_id, path, name)
 ) WITHOUT ROWID;
 CREATE INDEX _reexport_deps_path ON _reexport_deps(path, name);
+
+-- TS の型の別名（`type Options = Base & { extra: string }`）の構成（v12。BUG-0108。index/inherited.py）。受け手の型が別名のとき、
+-- 関係を整える段がメンバーを構成から探す: and（別名そのもの・交差。書いた順に最初に持つ構成）/ or（合併。持つ構成がちょうど 1 つの
+-- ときだけ）。kind: type（構成の型の URN）/ member（別名自身の型リテラルのメンバー `<別名>.<名前>`）/ opaque（中身の分からない構成。
+-- target_urn は空）。null / undefined / void / never は書かない。取り込みがファイルごとに全置換する。
+CREATE TABLE _type_aliases (
+  file_id    INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  alias_urn  TEXT NOT NULL,                  -- 別名のシンボル
+  op         TEXT NOT NULL,                  -- and / or
+  ord        INTEGER NOT NULL,               -- 構成の順（同じ型リテラルのメンバーは同じ ord）
+  kind       TEXT NOT NULL,                  -- type / member / opaque
+  target_urn TEXT NOT NULL
+);
+CREATE INDEX _type_aliases_alias ON _type_aliases(alias_urn);
+CREATE INDEX _type_aliases_target ON _type_aliases(target_urn);
+CREATE INDEX _type_aliases_file ON _type_aliases(file_id);
 
 -- 受け手のクラスに無いメンバーへの参照（`self.helper()`・`s: Sub` の `s.helper()` で helper が基底クラスにある。BUG-0075。index/inherited.py）。
 -- 関係を整える段が relations から移し、受け手のクラスの C3 線形化（INHERITS 行）で最初に見つかったメンバーを先にした relations の行を作る。

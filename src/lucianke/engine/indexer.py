@@ -68,6 +68,7 @@ from lucianke.index.ingest import (
     SuperRefFact,
     SymbolExtra,
     SyntaxErrorFact,
+    TypeAliasFact,
     VarTypeFact,
     ingest_file,
     remove_file,
@@ -229,6 +230,7 @@ class _Extracted:
     attr_defs: list[AttrDefFact]
     var_types: list[VarTypeFact]
     reexports: list[ReexportFact] = field(default_factory=list)
+    type_aliases: list[TypeAliasFact] = field(default_factory=list)
 
 
 def _now() -> str:
@@ -907,6 +909,7 @@ class Indexer:
         attr_defs: Sequence[AttrDefFact] = (),
         var_types: Sequence[VarTypeFact] = (),
         reexports: Sequence[ReexportFact] = (),
+        type_aliases: Sequence[TypeAliasFact] = (),
     ) -> FileFacts:
         support = get_support(detected.language_id)
         extra_globs = tuple(getattr(support, "test_path_globs", ()) or ())
@@ -930,6 +933,7 @@ class Indexer:
             attr_defs=tuple(attr_defs),
             var_types=tuple(var_types),
             reexports=tuple(reexports),
+            type_aliases=tuple(type_aliases),
         )
 
     def _analyze_code(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
@@ -971,6 +975,7 @@ class Indexer:
             attr_defs=extracted.attr_defs,
             var_types=extracted.var_types,
             reexports=extracted.reexports,
+            type_aliases=extracted.type_aliases,
         )
 
     def _relations(
@@ -1042,8 +1047,8 @@ class Indexer:
             try:
                 if original == "*":  # モジュールそのもの
                     return str(Urn(ws_id, str(path)))
-                if original == "default":
-                    return None
+                # ES の既定 import（``import main from './helpers'``）は ``helpers.ts#default``。整え（index/reexports.py）が既定の
+                # export の束ね先（``export default function main`` → ``helpers.ts#main``）までたどる（BUG-0109）
                 return str(Urn(ws_id, str(path), CodeSel(original)))
             except ValueError:
                 return None
@@ -1157,7 +1162,11 @@ class Indexer:
             AttrDefFact(class_urn=a.class_urn, name=a.name, line=a.line, col=a.col) for a in detailed.attr_defs
         ]
         var_types = [VarTypeFact(var_urn=v.var_urn, type_urn=v.type_urn) for v in detailed.var_types]
-        return _Extracted(rel_facts, name_calls, super_refs, attr_defs, var_types, exports)
+        type_aliases = [
+            TypeAliasFact(alias_urn=a.alias_urn, op=a.op, ord=a.ord, kind=a.kind, target_urn=a.target_urn)
+            for a in detailed.type_aliases
+        ]
+        return _Extracted(rel_facts, name_calls, super_refs, attr_defs, var_types, exports, type_aliases)
 
     def _exports(
         self,

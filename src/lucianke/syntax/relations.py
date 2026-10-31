@@ -55,7 +55,9 @@
   しない。``import nsp.tools.fmt`` の import 文の行は import したモジュールのファイルへ（BUG-0101）。
 
 * 抽出の添え物（``extract_relations_detailed``）: インスタンス属性の定義（``self.x = ...`` / ``this.x = ...``。名前の一致の候補。
-  BUG-0095）と、モジュール直下の変数の構文から分かる型（BUG-0094）。
+  BUG-0095）と、モジュール直下の変数の構文から分かる型（BUG-0094）、TS の型の別名の構成（``type Options = Base & {...}``。
+  同じファイル・別ファイルの別名を注釈にした受け手の ``o.retry`` は ``<別名>.retry`` にし、整え〈``index/inherited.py``〉が構成から
+  メンバーを決める。BUG-0108）。
 
   素の識別子は、囲みの定義を内側から外へたどった修飾名（``outer.name``）→ トップレベルの定義 → ``resolve_name`` の順。
   ローカルに束縛された名前は参照に数えない。ただし ``def`` / ``class`` の中の ``import`` が束縛した名前は、そのスコープ
@@ -90,6 +92,7 @@ __all__ = [
     "ImportKey",
     "RelationCandidate",
     "RelationExtraction",
+    "TypeAliasCandidate",
     "VarTypeCandidate",
     "extract_relations",
     "extract_relations_detailed",
@@ -173,6 +176,10 @@ _CALL_NODES = frozenset({"call", "call_expression", "new_expression"})
 _NAME_ONLY_KINDS = frozenset({"CALLS", "REFERENCES"})
 _VAR_KINDS = frozenset({Kind.VARIABLE, Kind.CONSTANT})
 _ATTRIBUTE_NODES = frozenset({"attribute", "member_expression"})
+# TS の型の別名の構成（BUG-0108）: メンバーをそのまま持ち越す標準の型（第 1 型引数の型のメンバーと同じ。Pick / Omit は一部だが、
+# 外したメンバーを読むのは型エラー）。ワークスペース・import に同名があれば素通りしない
+_TS_TRANSPARENT_GENERICS = frozenset({"Partial", "Required", "Readonly", "NonNullable", "Pick", "Omit"})
+_TS_MEMBERLESS = frozenset({"null", "undefined", "void", "never"})  # 合併に混ざってもメンバーを持たない構成
 
 
 # --- 公開型 -----------------------------------------------------------------------------
@@ -204,13 +211,33 @@ class VarTypeCandidate:
     type_urn: str
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TypeAliasCandidate:
+    """TS の型の別名（``type A = ...``）の構成 1 つ分（BUG-0108。内部表 ``_type_aliases``。``index/inherited.py`` が受け手の型として読む）。
+
+    * ``op``: ``and``（別名そのもの ``type A = B``・交差 ``B & {...}``。構成のどれかが持つメンバーは別名のメンバー）/ ``or``（合併
+      ``B | C``。メンバーを持つ構成がちょうど 1 つのときだけ結ぶ）。
+    * ``ord``: 構成の順（同じ型リテラルのメンバーは同じ ``ord``）。
+    * ``kind``: ``type``（構成する型の URN。ワークスペースのクラス・インターフェース・別名、外部の型）/ ``member``（別名自身の型リテラルの
+      メンバー ``<別名>.<名前>``。シンボルなら結び、無ければ「別名自身のメンバー」と分かる）/ ``opaque``（中身の分からない構成。
+      関数型・条件型・``string``・添字のシグネチャ・型引数など。``target_urn`` は空）。``null`` / ``undefined`` / ``void`` / ``never`` は書かない。
+    """
+
+    alias_urn: str
+    op: str
+    ord: int
+    kind: str
+    target_urn: str
+
+
 @dataclass(frozen=True, slots=True)
 class RelationExtraction:
-    """``extract_relations_detailed`` の結果: 関係の候補と、インスタンス属性の定義・モジュール直下の変数の型。"""
+    """``extract_relations_detailed`` の結果: 関係の候補と、インスタンス属性の定義・モジュール直下の変数の型・TS の型の別名の構成。"""
 
     relations: list[RelationCandidate]
     attr_defs: list[AttrDefCandidate]
     var_types: list[VarTypeCandidate]
+    type_aliases: list[TypeAliasCandidate] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -330,7 +357,7 @@ def extract_relations_detailed(
         resolve_star,
     )
     relations = ex.run()
-    return RelationExtraction(relations, ex.attr_defs(), ex.var_types())
+    return RelationExtraction(relations, ex.attr_defs(), ex.var_types(), ex.type_aliases())
 
 
 # --- 内部 -------------------------------------------------------------------------------
@@ -414,6 +441,7 @@ class _Extractor:
         self.scan = _Scan()
         self.class_bases: dict[str, list[str]] = {}  # クラスの修飾名 → 基底クラス名（同じファイルでの解決用）
         self.class_ids: dict[str, int] = {}  # クラスの修飾名 → クラスノードの id（``scan.attr_types`` を引く。BUG-0079）
+        self.alias_nodes: list[Node] = []  # TS の ``type A = ...``（走査で文書順に集める。``type_aliases`` が読む。BUG-0108）
 
     # --- 名前解決の窓口 ---
 
@@ -542,6 +570,127 @@ class _Extractor:
             if type_urn is not None:
                 out.append(VarTypeCandidate(var_urn=str(sym.urn), type_urn=type_urn))
         return out
+
+    def type_aliases(self) -> list[TypeAliasCandidate]:
+        """TS の型の別名（``type A = ...``。シンボルになったもの）の構成（BUG-0108。``run`` の後に呼ぶ）。TS / JS 以外は空。
+
+        値が名前の型（``B``・``ns.B``・``B<T>``）なら ``and`` の構成 1 つ、交差（``B & {...} & C``）は ``and``、合併（``B | C``）は ``or`` で、
+        書いた順に並べる（左に入れ子の二項を平らにする。括弧の中の同じ演算子も）。型リテラル ``{ a: T; m(): void }`` のメンバーは
+        別名自身のメンバー（``member``）。``Partial<B>`` などメンバーを持ち越す標準の型は ``B``。それ以外（関数型・条件型・``string``・
+        添字のシグネチャ・別名の型引数・合併の中の交差など）は ``opaque``。
+        """
+        if self.family != _JS:
+            return []
+        return [part for node in self.alias_nodes for part in self._alias_parts(node)]
+
+    def _alias_parts(self, decl: Node) -> list[TypeAliasCandidate]:
+        name = decl.child_by_field_name("name")
+        value = decl.child_by_field_name("value")
+        if name is None or value is None:
+            return []
+        p = self.pos(name)
+        sym = self.by_selection.get((p.line, p.col))
+        if sym is None or sym.kind is not Kind.TYPE:
+            return []
+        alias_urn = str(sym.urn)
+        params = decl.child_by_field_name("type_parameters")
+        hidden = {
+            self._text(n)
+            for tp in (params.named_children if params is not None else ())
+            if tp.type == "type_parameter" and (n := tp.child_by_field_name("name")) is not None
+        }
+        value = self._unparen(value)
+        op = "or" if value.type == "union_type" else "and"
+        parts = self._flatten(value, value.type) if value.type in ("union_type", "intersection_type") else [value]
+        out: list[TypeAliasCandidate] = []
+        for ord_, part in enumerate(parts):
+            for kind, target in self._alias_part(part, alias_urn, hidden, op):
+                out.append(TypeAliasCandidate(alias_urn=alias_urn, op=op, ord=ord_, kind=kind, target_urn=target))
+        return out
+
+    def _unparen(self, node: Node) -> Node:
+        while node.type == "parenthesized_type" and node.named_children:
+            node = node.named_children[0]
+        return node
+
+    def _flatten(self, node: Node, op_type: str) -> list[Node]:
+        """左に入れ子の ``A & B & C``（``A | B | C``）の構成を書いた順に。括弧の中の同じ演算子も平らにする。"""
+        out: list[Node] = []
+        for child in node.named_children:
+            inner = self._unparen(child)
+            if inner.type == op_type:
+                out.extend(self._flatten(inner, op_type))
+            elif child.type != "comment":
+                out.append(inner)
+        return out
+
+    def _alias_part(self, node: Node, alias_urn: str, hidden: set[str], op: str) -> list[tuple[str, str]]:
+        """構成 1 つ → ``(kind, target_urn)`` の列（空ならメンバーを持たない構成）。"""
+        node = self._unparen(node)
+        t = node.type
+        if t == "literal_type" or (t == "predefined_type" and self._text(node) in _TS_MEMBERLESS):
+            text = self._text(node)
+            return [] if text in _TS_MEMBERLESS else [("opaque", "")]
+        if t == "object_type":
+            out: list[tuple[str, str]] = []
+            for member in node.named_children:
+                if member.type in ("property_signature", "method_signature"):
+                    mname = member.child_by_field_name("name")
+                    joined = (
+                        _append_member(alias_urn, self._text(mname))
+                        if mname is not None and mname.type == "property_identifier"
+                        else None
+                    )
+                    out.append(("member", joined) if joined is not None else ("opaque", ""))
+                elif member.type == "index_signature":
+                    out.append(("opaque", ""))  # どの名前のメンバーもありうる
+            return out
+        if t == "generic_type":
+            base = node.child_by_field_name("name")
+            args = node.child_by_field_name("type_arguments")
+            if (
+                base is not None
+                and base.type == "type_identifier"
+                and self._text(base) in _TS_TRANSPARENT_GENERICS
+                and self._is_global_type(self._text(base))
+                and args is not None
+                and args.named_children
+            ):
+                inner = self._unparen(args.named_children[0])
+                if op == "and" and inner.type == "intersection_type":
+                    return [x for sub in self._flatten(inner, inner.type) for x in self._alias_part(sub, alias_urn, hidden, op)]
+                return self._alias_part(inner, alias_urn, hidden, op)
+            node, t = (base, base.type) if base is not None else (node, t)
+        if t == "type_identifier":
+            text = self._text(node)
+            urn = None if text in hidden else self._type_urn(text)
+        elif t == "nested_type_identifier":
+            module = node.child_by_field_name("module")
+            leaf = node.child_by_field_name("name")
+            ref = self._name_ref(self._text(module), []) if module is not None and module.type == "identifier" else None
+            urn = None
+            if ref is not None and leaf is not None:
+                kind, value = ref
+                if kind == "local":
+                    hit = self.by_qualified.get(f"{value}.{self._text(leaf)}")
+                    urn = str(hit.urn) if hit is not None else None
+                else:
+                    urn = _append_member(value, self._text(leaf))
+        else:
+            return [("opaque", "")]
+        return [("type", urn)] if urn is not None else [("opaque", "")]
+
+    def _type_urn(self, name: str) -> str | None:
+        """型の名前 → URN（同じファイルのクラス・インターフェース・別名・列挙、import した名前、標準のグローバル）。"""
+        local = self.by_qualified.get(name)
+        if local is not None and local.kind in _CLASS_KINDS | {Kind.TYPE}:
+            return str(local.urn)
+        urn = self.resolve(name) or self.resolve_builtin(name)
+        return urn if urn is not None and "#" in urn else None
+
+    def _is_global_type(self, name: str) -> bool:
+        """``name`` が標準のグローバルの型か（同じファイルの定義・import した同名に隠されていない）。"""
+        return name not in self.by_qualified and self.resolve(name) is None and self.resolve_builtin(name) is not None
 
     # --- 候補の収集 ---
 
@@ -1071,6 +1220,9 @@ class _Extractor:
         local = self.by_qualified.get(name)
         if local is not None and local.kind in _CLASS_KINDS | {Kind.MODULE}:
             return ("local", local.qualified_name)
+        if local is not None and local.kind is Kind.TYPE and self.family == _JS:
+            # 同じファイルの TS の型の別名: メンバーは整え（index/inherited.py）が別名の構成（_type_aliases）から決める（BUG-0108）
+            return ("urn", str(local.urn))
         urn = self.resolve(name) or self.resolve_builtin(name) or self.resolve_star(name)
         if urn is not None:
             return ("urn", urn)
@@ -1457,6 +1609,8 @@ class _Extractor:
                 name = node.child_by_field_name("name")
                 if name is not None:
                     self._record_bases(name, self._ts_interface_base_names(node))
+            elif t == "type_alias_declaration":
+                self.alias_nodes.append(node)
             elif t == "variable_declarator":
                 name = node.child_by_field_name("name")
                 if name is not None:

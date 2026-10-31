@@ -39,6 +39,7 @@ __all__ = [
     "SuperRefFact",
     "SymbolExtra",
     "SyntaxErrorFact",
+    "TypeAliasFact",
     "VarTypeFact",
     "TREE_SITTER_SOURCE",
     "SEVERITIES",
@@ -178,6 +179,20 @@ class ReexportFact:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TypeAliasFact:
+    """内部表 ``_type_aliases`` の 1 行分: TS の型の別名（``type A = B & {...}``）の構成 1 つ（BUG-0108。``index/inherited.py`` が
+    受け手の型として読む）。``op`` は ``and``（別名・交差）/ ``or``（合併）、``kind`` は ``type``（構成の型の URN）/ ``member``（別名自身の
+    型リテラルのメンバー ``<別名>.<名前>``）/ ``opaque``（中身の分からない構成。``target_urn`` は空）。``ord`` は構成の順。
+    """
+
+    alias_urn: str
+    op: str
+    ord: int
+    kind: str
+    target_urn: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SuperRefFact:
     """内部表 ``_member_refs`` の ``via_super = 1`` の 1 行分: ``super().name``（``super(C, self).name``・TS / JS の ``super.name``）の
     参照・呼び出し（BUG-0081）。``class_urn`` は ``C``（探し始めるのは ``C`` の C3 線形化の次のクラスから）。位置は 0 始まり。
@@ -248,6 +263,8 @@ class FileFacts:
     """モジュール直下の変数の型（``_var_types``。BUG-0094）。``ingest_file`` がファイルごとに全置換する。"""
     reexports: Sequence[ReexportFact] = field(default_factory=tuple)
     """Python のモジュール直下の import が束ねた名前・``*`` の先・``__all__``（``_reexports``。BUG-0100）。ファイルごとに全置換する。"""
+    type_aliases: Sequence[TypeAliasFact] = field(default_factory=tuple)
+    """TS の型の別名の構成（``_type_aliases``。BUG-0108）。``ingest_file`` がファイルごとに全置換する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,6 +875,12 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
         conn.executemany(
             "INSERT INTO _reexports (file_id, name, target_urn, kind, ord) VALUES (?, ?, ?, ?, ?)",
             [(file_id, r.name, r.target_urn, r.kind, r.ord) for r in facts.reexports],
+        )
+    conn.execute("DELETE FROM _type_aliases WHERE file_id = ?", (file_id,))
+    if facts.type_aliases:
+        conn.executemany(
+            "INSERT INTO _type_aliases (file_id, alias_urn, op, ord, kind, target_urn) VALUES (?, ?, ?, ?, ?, ?)",
+            [(file_id, a.alias_urn, a.op, a.ord, a.kind, a.target_urn) for a in facts.type_aliases],
         )
     # 再び公開した名前をたどって引いた (ファイル, 名前) は、関係と一緒に作り直す（整えが足す。index/reexports.py）
     conn.execute("DELETE FROM _reexport_deps WHERE file_id = ?", (file_id,))

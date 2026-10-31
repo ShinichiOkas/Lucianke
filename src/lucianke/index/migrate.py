@@ -214,6 +214,24 @@ def _migrate_10_to_11(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_11_to_12(conn: sqlite3.Connection) -> None:
+    """v12: TS の型の別名の構成の内部表 ``_type_aliases``（型の別名を注釈にした受け手の ``o.retry`` を構成のメンバーに結ぶ。BUG-0108）。
+    TS / JS の既定の import（``import main from './helpers'``）を既定の export の束ね先に結ぶ（BUG-0109）。
+
+    どちらも取り込みのときにしか作れない（v11 までの取り込みは既定の import の名前を解かず、別名の構成も書かなかった）ので、TS / JS の
+    ファイルの ``sha256`` を空にして、次の差分走査で取り込み直させる（Python のファイルは変わらない）。
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _type_aliases ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " alias_urn TEXT NOT NULL, op TEXT NOT NULL, ord INTEGER NOT NULL, kind TEXT NOT NULL, target_urn TEXT NOT NULL)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _type_aliases_alias ON _type_aliases(alias_urn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _type_aliases_target ON _type_aliases(target_urn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS _type_aliases_file ON _type_aliases(file_id)")
+    conn.execute("UPDATE files SET sha256 = '' WHERE language IN ('typescript', 'tsx', 'javascript', 'jsx')")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -225,6 +243,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     8: _migrate_8_to_9,
     9: _migrate_9_to_10,
     10: _migrate_10_to_11,
+    11: _migrate_11_to_12,
 }
 
 

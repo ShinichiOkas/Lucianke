@@ -55,6 +55,7 @@ INTERNAL_TABLES = {
     "_var_types",  # v9（BUG-0094）
     "_reexports",  # v10（BUG-0100）
     "_reexport_deps",  # v10（BUG-0100）
+    "_type_aliases",  # v12（BUG-0108）
 }
 
 
@@ -169,7 +170,7 @@ def test_ensure_schema_creates_public_internal_tables_and_meta(conn: sqlite3.Con
 
 
 def test_schema_version_is_read_from_schema_sql() -> None:
-    assert current_schema_version() == 11
+    assert current_schema_version() == 12
     assert migrate.parse_schema_version("-- schema_version: 7\nCREATE TABLE t (a);") == 7
     with pytest.raises(ValueError):
         migrate.parse_schema_version("CREATE TABLE t (a);")
@@ -258,7 +259,7 @@ def test_ensure_schema_migrates_v1_to_v2_keeps_data(conn: sqlite3.Connection) ->
     conn.execute("DROP TABLE _exact_marks")
     conn.execute("DROP TABLE _name_calls")
     conn.execute("DROP TABLE _member_refs")
-    for later in ("_attr_defs", "_var_types", "_reexports", "_reexport_deps"):  # v9・v10 で足した表
+    for later in ("_attr_defs", "_var_types", "_reexports", "_reexport_deps", "_type_aliases"):  # v9・v10・v12 で足した表
         conn.execute(f"DROP TABLE {later}")
     conn.execute("UPDATE _meta SET schema_version = 1")
     assert ensure_schema(conn) is SchemaAction.MIGRATED
@@ -276,7 +277,7 @@ def test_ensure_schema_migrates_v2_to_v3_keeps_data(conn: sqlite3.Connection) ->
     conn.execute("DROP TABLE _exact_marks")
     conn.execute("DROP TABLE _name_calls")
     conn.execute("DROP TABLE _member_refs")
-    for later in ("_attr_defs", "_var_types", "_reexports", "_reexport_deps"):  # v9・v10 で足した表
+    for later in ("_attr_defs", "_var_types", "_reexports", "_reexport_deps", "_type_aliases"):  # v9・v10・v12 で足した表
         conn.execute(f"DROP TABLE {later}")
     conn.execute("UPDATE _meta SET schema_version = 2")
     assert ensure_schema(conn) is SchemaAction.MIGRATED

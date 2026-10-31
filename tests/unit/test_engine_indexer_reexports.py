@@ -653,3 +653,217 @@ async def test_star_provider_edits_rebind_importers(env: Env) -> None:
     env.write("pkg/stars.py", stars.replace('__all__ = ["starred"]', '__all__ = ["starred", "hidden"]'))
     await env.indexer.index_file("pkg/stars.py")
     assert env.calls_at("star_use.py#go", S("hidden()")) == {"pkg/stars.py#hidden"}
+
+
+# --- BUG-0109: TS / JS の既定の import ------------------------------------------------------------
+
+
+def D(needle: str) -> int:  # noqa: N802 - 読みやすさのため
+    return line_of("web/defaults/use.ts", needle)
+
+
+DU = "web/defaults/use.ts#useDefaults"
+
+
+async def test_ts_default_imports_bind_to_the_default_export(env: Env) -> None:
+    """``import main from './fn'`` の ``main()`` は既定の export ``export default function main`` へ ``structural``（BUG-0109）。
+    ``export default class Widget``（構築・メソッド・型の使用・注釈つきの受け手）・``export default helper``（同じファイルの定義）・
+    ``export { viaClause as default }``・``import main, { other }``（混ぜた import）・バレルの ``export { default } from``・
+    ``export { default as Widget } from``・``import * as fnMod`` の ``fnMod.default()`` も同じ。import 文の行も定義元へ。"""
+    assert env.calls_at(DU, D("  main();")) == {"web/defaults/fn.ts#main"}
+    assert env.calls_at(DU, D("  other();")) == {"web/defaults/fn.ts#other"}
+    assert env.calls_at(DU, D("  new Widget().spin();")) == {"web/defaults/cls.ts#Widget", "web/defaults/cls.ts#Widget.spin"}
+    assert env.calls_at(DU, D("w.spin();")) == {"web/defaults/cls.ts#Widget.spin"}
+    assert env.calls_at(DU, D("helper();")) == {"web/defaults/ident.ts#helper"}
+    assert env.calls_at(DU, D("viaClause();")) == {"web/defaults/clause.ts#viaClause"}
+    assert env.calls_at(DU, D("fwd();")) == {"web/defaults/fn.ts#main"}
+    assert env.calls_at(DU, D("new FwdWidget().spin();")) == {"web/defaults/cls.ts#Widget", "web/defaults/cls.ts#Widget.spin"}
+    assert env.calls_at(DU, D("fnMod.default();")) == {"web/defaults/fn.ts#main"}
+    assert ("web/defaults/cls.ts#Widget", "TYPE_USES", D("useDefaults(w: Widget)"), "structural") in env.rels(
+        DU, ("TYPE_USES",)
+    )
+    assert env.rels("web/defaults/use.ts", ("IMPORTS",)) == {
+        ("web/defaults/fn.ts#main", "IMPORTS", 1, "structural"),
+        ("web/defaults/fn.ts#other", "IMPORTS", 1, "structural"),
+        ("web/defaults/cls.ts#Widget", "IMPORTS", 2, "structural"),
+        ("web/defaults/ident.ts#helper", "IMPORTS", 3, "structural"),
+        ("web/defaults/clause.ts#viaClause", "IMPORTS", 4, "structural"),
+        ("web/defaults/anon.ts", "IMPORTS", 5, "structural"),
+        ("web/defaults/obj.ts", "IMPORTS", 6, "structural"),
+        ("web/defaults/fn.ts#main", "IMPORTS", 7, "structural"),
+        ("web/defaults/cls.ts#Widget", "IMPORTS", 7, "structural"),
+        ("web/defaults/anon.ts", "IMPORTS", 7, "structural"),
+        ("web/defaults/fn.ts", "IMPORTS", 8, "structural"),
+    }
+    assert all(conf == "structural" for *_, conf in env.rels(DU, ("CALLS", "REFERENCES", "TYPE_USES")))
+
+
+async def test_ts_anonymous_default_import_goes_to_the_module(env: Env) -> None:
+    """無名の既定の export（``export default () => 5``・``export default { level: 1 }``）はシンボルが無いので、import 文の行・呼び出し・
+    参照はそのモジュール（ファイルの URN）へ（黙って捨てない。BUG-0109）。バレルが転送した無名の既定の export（``anonFwd()``）も
+    終わりのモジュールへ。無名のオブジェクトのメンバー ``cfg.level`` は名前だけ。``#default`` の目標はどこにも残らない。"""
+    assert env.calls_at(DU, D("  anon();")) == {"web/defaults/anon.ts"}
+    assert env.calls_at(DU, D("anonFwd();")) == {"web/defaults/anon.ts"}
+    assert ("web/defaults/obj.ts", "REFERENCES", D("return cfg.level"), "structural") in env.rels(DU)
+    assert env.name_rows(DU) == [("level", D("return cfg.level"), "r")]
+    targets = {t for t, *_ in env.rels(DU, ("CALLS", "REFERENCES", "TYPE_USES"))}
+    targets |= {t for t, *_ in env.rels("web/defaults/use.ts", ("IMPORTS",))}
+    assert not any("#default" in t for t in targets)
+
+
+async def test_ts_default_export_edits_rebind_importers(env: Env) -> None:
+    """既定の export を変えると import している側が結び直る（``_reexport_deps``・``export_changes``。BUG-0109）: ``fn.ts`` の既定の
+    export を ``other`` にすると ``main()``（とバレル経由の ``fwd()``）は ``fn.ts#other`` に、無名の ``anon.ts`` に名前をつけると
+    ``anon()`` はその関数に。戻せば戻る。"""
+    fn = env.text("web/defaults/fn.ts")
+    env.write(
+        "web/defaults/fn.ts",
+        fn.replace("export default function main()", "function main()") + "\nexport default other;\n",
+    )
+    await env.indexer.index_file("web/defaults/fn.ts")
+    assert env.calls_at(DU, D("  main();")) == {"web/defaults/fn.ts#other"}
+    assert env.calls_at(DU, D("fwd();")) == {"web/defaults/fn.ts#other"}
+    env.write("web/defaults/fn.ts", fn)
+    await env.indexer.index_file("web/defaults/fn.ts")
+    assert env.calls_at(DU, D("  main();")) == {"web/defaults/fn.ts#main"}
+    assert env.calls_at(DU, D("fwd();")) == {"web/defaults/fn.ts#main"}
+    anon = env.text("web/defaults/anon.ts")
+    env.write("web/defaults/anon.ts", "export default function anonNamed(): number {\n  return 5;\n}\n")
+    await env.indexer.index_file("web/defaults/anon.ts")
+    assert env.calls_at(DU, D("  anon();")) == {"web/defaults/anon.ts#anonNamed"}
+    assert env.calls_at(DU, D("anonFwd();")) == {"web/defaults/anon.ts#anonNamed"}
+    env.write("web/defaults/anon.ts", anon)
+    await env.indexer.index_file("web/defaults/anon.ts")
+    assert env.calls_at(DU, D("  anon();")) == {"web/defaults/anon.ts"}
+
+
+# --- BUG-0108: TS の型の別名を注釈にした受け手 ------------------------------------------------------
+
+
+def A(needle: str) -> int:  # noqa: N802 - 読みやすさのため
+    return line_of("web/aliases/use.ts", needle)
+
+
+AU = "web/aliases/use.ts#readAll"
+RETRY = "web/aliases/base.ts#Base.retry"
+
+
+def _reads_at(env: Env, source: str, line: int) -> set[str]:
+    return {t for t, k, ln, _ in env.rels(source) if k == "REFERENCES" and ln == line and "#" in t and "." in t.split("#")[1]}
+
+
+async def test_ts_type_alias_receivers_bind_through_the_alias(env: Env) -> None:
+    """型の別名を注釈にした受け手のメンバー（BUG-0108）: 交差 ``Base & {...}`` の ``o.retry`` は ``Base.retry`` へ ``structural``。
+    別名 = クラス（``g.start()``）・総称の別名（``Box<number>``）・``Partial<Base>``・別名の別名（``Chain``）・別名を継承した
+    インターフェース（``d.retry``。``d.own`` はそのインターフェース自身）・``Base | null | undefined``・合併で持つ構成が 1 つ
+    （``e.onlyOther``）・同じファイルの別名（``local.ts`` の ``Mine``）も同じ。別名自身の型リテラルのメンバー（``o.extra``・``o.tick()``）は
+    シンボルが無いので行も名前だけの行も作らない。合併で持つ構成が 2 つ（``e.shared``）・中身の分からない別名（関数型 ``Fn``・
+    添字のシグネチャ ``Bag``）は名前の一致に任せる（``_name_calls``）。"""
+    for needle in ("o.retry;", "b.retry;", "m.retry", "l.retry", "c.retry;", "d.retry;"):
+        assert _reads_at(env, AU, A(needle)) == {RETRY}, needle
+    assert _reads_at(env, AU, A("e.onlyOther")) == {"web/aliases/base.ts#Other.onlyOther"}
+    assert _reads_at(env, AU, A("d.own;")) == {"web/aliases/types.ts#Derived.own"}
+    assert env.calls_at(AU, A("g.start();")) == {"web/aliases/base.ts#Engine.start"}
+    assert _reads_at(env, "web/aliases/local.ts#same", line_of("web/aliases/local.ts", "m.retry")) == {RETRY}
+    for needle in ("o.extra.length", "e.shared", "f.length", "f.arity", "bag.anything"):
+        assert _reads_at(env, AU, A(needle)) == set(), needle
+    assert env.calls_at(AU, A("o.tick();")) == set()
+    assert env.name_rows(AU) == [
+        ("length", A("o.extra.length"), "r"),  # 受け手 o.extra（別名のメンバーの型）は分からない
+        ("shared", A("e.shared"), "r"),
+        ("length", A("f.length"), "r"),
+        ("arity", A("f.arity"), "r"),
+        ("anything", A("bag.anything"), "r"),
+    ]
+    assert not any(n in ("extra", "tick", "retry") for n, *_ in env.name_rows(AU))
+    assert all(conf == "structural" for *_, conf in env.rels(AU, ("CALLS", "REFERENCES", "TYPE_USES")))
+
+
+async def test_ts_type_alias_table_records_constituents(env: Env) -> None:
+    """``_type_aliases``: 別名・交差は ``and``、合併は ``or``（``null`` / ``undefined`` は書かない）、型リテラルのメンバーは ``member``
+    （``<別名>.<名前>``）、``Partial<Base>`` は ``Base``、総称の別名の型引数・関数型・添字のシグネチャは ``opaque``。"""
+    rows = {
+        (str(a).removeprefix(P), str(op), int(o), str(k), str(t).removeprefix(P))
+        for a, op, o, k, t in env.rows(
+            "SELECT a.alias_urn, a.op, a.ord, a.kind, a.target_urn FROM _type_aliases a JOIN files f"
+            " ON f.file_id = a.file_id WHERE f.path IN ('web/aliases/types.ts', 'web/aliases/local.ts')"
+        )
+    }
+    T, B = "web/aliases/types.ts#", "web/aliases/base.ts#"  # noqa: N806
+    assert rows == {
+        (T + "EngineAlias", "and", 0, "type", B + "Engine"),
+        (T + "Options", "and", 0, "type", B + "Base"),
+        (T + "Options", "and", 1, "member", T + "Options.extra"),
+        (T + "Options", "and", 1, "member", T + "Options.tick"),
+        (T + "Box", "and", 0, "type", B + "Base"),
+        (T + "Box", "and", 1, "member", T + "Box.value"),
+        (T + "Either", "or", 0, "type", B + "Base"),
+        (T + "Either", "or", 1, "type", B + "Other"),
+        (T + "MaybeBase", "or", 0, "type", B + "Base"),
+        (T + "Loose", "and", 0, "type", B + "Base"),
+        (T + "Fn", "and", 0, "opaque", ""),
+        (T + "Chain", "and", 0, "type", T + "Options"),
+        (T + "Bag", "and", 0, "opaque", ""),
+        ("web/aliases/local.ts#Mine", "and", 0, "type", B + "Base"),
+        ("web/aliases/local.ts#Mine", "and", 1, "member", "web/aliases/local.ts#Mine.tag"),
+    }
+
+
+async def test_ts_type_alias_edits_rebind_receivers(env: Env) -> None:
+    """別名・構成の編集で受け手が結び直る（BUG-0108）: ``Options`` を ``Other & {...}`` にすると ``o.retry``・``c.retry``（別名の別名）・
+    ``d.retry``（継承したインターフェース）の行が消え、戻すと戻る。構成の ``Base`` から ``retry`` を消すと別名の受け手の行が消え、
+    戻すと戻る（別のファイルの構成）。``Other`` から ``shared`` を消すと合併 ``e.shared`` の持つ構成が 1 つになり、名前だけの行が
+    ``Base.shared`` への ``structural`` の行に変わる。"""
+    types = env.text("web/aliases/types.ts")
+    env.write("web/aliases/types.ts", types.replace("export type Options = Base &", "export type Options = Other &"))
+    await env.indexer.index_file("web/aliases/types.ts")
+    for needle in ("o.retry;", "c.retry;", "d.retry;"):
+        assert _reads_at(env, AU, A(needle)) == set(), needle
+    assert _reads_at(env, AU, A("b.retry;")) == {RETRY}
+    env.write("web/aliases/types.ts", types)
+    await env.indexer.index_file("web/aliases/types.ts")
+    for needle in ("o.retry;", "c.retry;", "d.retry;"):
+        assert _reads_at(env, AU, A(needle)) == {RETRY}, needle
+    base = env.text("web/aliases/base.ts")
+    env.write("web/aliases/base.ts", base.replace("  retry: number;\n", ""))
+    await env.indexer.index_file("web/aliases/base.ts")
+    for needle in ("o.retry;", "b.retry;", "l.retry", "d.retry;"):
+        assert _reads_at(env, AU, A(needle)) == set(), needle
+    env.write("web/aliases/base.ts", base)
+    await env.indexer.index_file("web/aliases/base.ts")
+    for needle in ("o.retry;", "b.retry;", "l.retry", "d.retry;"):
+        assert _reads_at(env, AU, A(needle)) == {RETRY}, needle
+    env.write("web/aliases/base.ts", base.replace("  shared: number;\n", ""))
+    await env.indexer.index_file("web/aliases/base.ts")
+    assert _reads_at(env, AU, A("e.shared")) == {"web/aliases/base.ts#Base.shared"}
+    assert ("shared", A("e.shared"), "r") not in env.name_rows(AU)
+    env.write("web/aliases/base.ts", base)
+    await env.indexer.index_file("web/aliases/base.ts")
+    assert _reads_at(env, AU, A("e.shared")) == set()
+    assert ("shared", A("e.shared"), "r") in env.name_rows(AU)
+
+
+def test_migration_11_to_12_adds_type_aliases_and_reingests_ts_js_files(tmp_path: Path) -> None:
+    """v11 の DB は ``_type_aliases`` を作り（BUG-0108）、TS / JS のファイルの ``sha256`` を空にする（既定の import の名前・別名の構成は
+    取り込み直さないと作れない。BUG-0109）。Python と他の言語は取り込み直さない。"""
+    conn = open_writer(tmp_path / "paad.sqlite")
+    try:
+        ensure_schema(conn)
+        _tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS_ID, "root_path": "/ws"}))
+        files = (("a.py", "python"), ("b.ts", "typescript"), ("c.tsx", "tsx"), ("d.js", "javascript"), ("R.md", "markdown"))
+        for path, language in files:
+            _tx(conn, lambda c, p=path, lang=language: ingest_file(c, _facts(p, lang)))
+        conn.execute("DROP TABLE _type_aliases")
+        conn.execute("UPDATE _meta SET schema_version = 11")
+        assert ensure_schema(conn) is SchemaAction.MIGRATED
+        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 12
+        assert conn.execute("SELECT count(*) FROM _type_aliases").fetchone()[0] == 0
+        assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
+            "a.py": "a" * 64,
+            "b.ts": "",
+            "c.tsx": "",
+            "d.js": "",
+            "R.md": "a" * 64,
+        }
+    finally:
+        conn.close()
