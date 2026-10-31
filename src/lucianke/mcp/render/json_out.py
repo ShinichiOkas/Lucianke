@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lucianke.core.records import Record
+from lucianke.core.records import Record, json_record_text
 from lucianke.mcp.envelope import collect_warnings
 from lucianke.mcp.types import Rendered, RenderInput
 
@@ -26,7 +26,7 @@ def record_text(rec: Record) -> str:
     ``Record.data`` を描くので、compact の行で数えると実際の何分の一かに過小になる（BUG-0017）。区切りの ``,`` まで含めるのは、
     compact の行末の改行と同じ理由（レコードごとの数を足した和が、応答全体を数え直した値以上になるようにする）。
     """
-    return _dumps(dict(rec.data)) + ","
+    return json_record_text(rec)
 
 
 def trailer_text(summary: str | None, cursor: str | None, remaining: int) -> str:
@@ -42,6 +42,8 @@ def build_envelope(inp: RenderInput) -> dict[str, Any]:
       補足の欄のレコード（``Record.section``。BUG-0107）は本体の配列に入れず、``data[section]`` の配列に置く（そのページに
       その欄のレコードがあるときだけ）。失敗時は ``None``。ただし ``E_TIMEOUT`` の部分結果のように、``error`` と一緒に
       ``out`` ・``page`` が渡されたときはそれを ``data`` に入れる（仕様書 §5.8、設計書 §9.1）。
+    * 付随行（``Record.attached``。BUG-0136）は入ったレコードの分だけ ``data[キー]`` に連ねる（``data_static`` に同じキーの列が
+      あればその後ろ）。
     * ``page`` は ``{next_cursor, returned, total_estimate}``、``budget`` は ``{max_tokens, used_tokens_est, truncated}``。
       ページが無い（失敗）ときは ``returned = 0`` ・``total_estimate = 0`` ・``used_tokens_est = 0`` で埋める（MUST 項目のため）。
     """
@@ -58,6 +60,18 @@ def build_envelope(inp: RenderInput) -> dict[str, Any]:
             inp.records_key: [dict(r.data) for r in page.records if r.section is None],
             **sections,
         }
+        attached: dict[str, list[dict[str, Any]]] = {}
+        seen: dict[str, set[str]] = {}
+        for r in page.records:  # 付随行（``Record.attached``）。同一の行は最初の 1 件だけ
+            for key, rows in (r.attached or {}).items():
+                for row in rows:
+                    dumped = _dumps(row)
+                    if dumped in seen.setdefault(key, set()):
+                        continue
+                    seen[key].add(dumped)
+                    attached.setdefault(key, []).append(dict(row))
+        for key, rows in attached.items():
+            data[key] = [*data.get(key, []), *rows]
     return {
         "ok": inp.error is None,
         "tool": call.tool,

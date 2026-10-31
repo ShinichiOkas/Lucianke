@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -43,6 +44,11 @@ class Record:
             同じキーにしない）。``_resolution_meta`` の精度の集計（``envelope.build_meta``）には数えない（本体の答えの水準を補足が
             下げない。欄の各要素が自分の ``confidence_level`` を持つ）。compact の行・予算・ページネーションは本体のレコードと
             同じに扱う（並びの順に詰め、続きはカーソルで）。``None`` は本体。
+        attached: 任意。このレコードに **付随する行**（T-07 の json の ``edges``: ノードごとの呼び出しの辺。BUG-0136）。
+            ``{json のキー: 行の列}``。json は入ったレコードの付随行だけを、レコードの並びの順に ``data[キー]`` の配列へ連ねる
+            （同じ行が 2 度出ないよう、同一の行は最初の 1 件だけ）。付随行はレコードの一部として予算に数え（``json_out.record_text``）、
+            レコードが入らなければ付随行も入らない（木全体の辺を ``data_static`` に置くと、ノードを 1 件も詰める前に前置きとして
+            予算を食う）。compact の行には影響しない。
     """
 
     kind: str
@@ -57,9 +63,26 @@ class Record:
     resume: int | None = None
     shrink_json: Callable[[int], Record | None] | None = None
     section: str | None = None
+    attached: Mapping[str, tuple[Mapping[str, Any], ...]] | None = None
 
     def with_tokens(self, tokens: int) -> Record:
         return dataclasses.replace(self, tokens=tokens)
+
+
+def json_record_text(rec: Record) -> str:
+    """json で描かれるときの 1 レコードの本文（``data`` の JSON と区切りの ``,``、付随行〈``Record.attached``〉の配列）。
+
+    パッカーが json の応答を見積もる単位（``mcp/render/json_out.record_text`` が返す）。縮退版を作るツールも、同じ数え方で
+    大きさを測る（BUG-0136）。付随行は ``data[キー]`` の配列に連なるので、配列の括弧まで数えた上限。
+    """
+
+    def dumps(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    text = dumps(dict(rec.data)) + ","
+    if rec.attached:
+        text += "".join(dumps(list(rows)) for rows in rec.attached.values())
+    return text
 
 
 RESUME_SHIFT = 32  # カーソルのオフセットの上位ビット = レコード内の再開位置（``Record.resume``）。下位 32 ビット = レコードの添字

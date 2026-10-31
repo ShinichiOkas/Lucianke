@@ -51,7 +51,8 @@ from pydantic import Field
 
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Capability, Confidence, EngineChoice, FileInfo, Kind, SymbolRecord, Tier
-from lucianke.core.records import Record, ToolOutput
+from lucianke.core.records import Record, ToolOutput, json_record_text
+from lucianke.core.tokens import TokenEstimator
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME
 from lucianke.engine.selector import ENGINE_LSP_CACHE
 from lucianke.index import queries
@@ -645,29 +646,87 @@ def _node_json(n: _Node, include_guard: bool) -> dict[str, Any]:
     }
 
 
+def _node_edges(root_urn: str, n: _Node, include_guard: bool) -> list[dict[str, Any]]:
+    """ノード 1 件の呼び出しエッジ（呼び出し元 → 呼び出し先）。呼び出し箇所ごとに 1 本（``n.sites`` と同じ並び）。"""
+    parent = n.parent_urn or root_urn
+    src, dst = (n.urn, parent) if n.direction == "incoming" else (parent, n.urn)
+    return [
+        {
+            "source_urn": src,
+            "target_urn": dst,
+            "call_site_line": s.line,
+            "call_site_path": s.path,
+            "guard": s.guard if include_guard else None,
+            **({"match": s.match} if s.match else {}),
+        }
+        for s in n.sites
+    ]
+
+
 def _edges(root_urn: str, all_nodes: Sequence[_Node], include_guard: bool) -> list[dict[str, Any]]:
     """木のノードごとの呼び出しエッジ（呼び出し元 → 呼び出し先）。``both`` で同じエッジが 2 度出ないよう、箇所で重複を除く。"""
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, int]] = set()
     for n in all_nodes:
-        parent = n.parent_urn or root_urn
-        src, dst = (n.urn, parent) if n.direction == "incoming" else (parent, n.urn)
-        for s in n.sites:
-            key = (src, dst, s.path, s.line)
+        for e in _node_edges(root_urn, n, include_guard):
+            key = (e["source_urn"], e["target_urn"], e["call_site_path"], e["call_site_line"])
             if key in seen:
                 continue
             seen.add(key)
-            out.append(
-                {
-                    "source_urn": src,
-                    "target_urn": dst,
-                    "call_site_line": s.line,
-                    "call_site_path": s.path,
-                    "guard": s.guard if include_guard else None,
-                    **({"match": s.match} if s.match else {}),
-                }
-            )
+            out.append(e)
     return out
+
+
+#: ノードを丸ごと取り直す ``max_tokens`` の目安に足す前置きの分（封筒・``_resolution_meta``・``root`` の SymbolRecord・続きのカーソル。
+#: json では 500〜700 トークン。skeleton の 200 では足りず、目安どおりに呼び直しても縮められる）
+NODE_HINT_MARGIN_TOKENS = 800
+
+
+def _hint_max_tokens(whole: int) -> int:
+    """ノードを丸ごと取り直す ``max_tokens`` の目安: 丸ごとの大きさ + 前置きの分を 100 単位に切り上げる。"""
+    return -(-(whole + NODE_HINT_MARGIN_TOKENS) // 100) * 100
+
+
+def _shrinkable(rec: Record, sites: int) -> Record:
+    """json で入りきらないノードを、呼び出し箇所を先頭から縮めて入れられるようにする（BUG-0136）。
+
+    縮退の鎖は予算に依らない: 段 k = 先頭 k 箇所（``1 <= k < sites``。丸ごとは縮退ではない）。``Record.shrink_json(budget)`` は
+    json の大きさ（``json_out.record_text``）が ``budget`` 以下の最大の k を二分探索で返す。大きさは k について増えるので結果は
+    ``budget`` について単調（省いた件数の桁数で k の大きさが逆転しないよう、大きさは省く件数を最大の桁数にして数える）。
+    ``call_sites`` と、その箇所の辺（``attached["edges"]``）は同じ k で縮める（辺はいつもノードの箇所と 1 対 1）。縮めた版は
+    ``call_sites_omitted``（省いた箇所の数）と ``call_sites_note``（全部を取る ``max_tokens`` の目安）を持つ。
+    1 箇所も入らない予算では ``None``（ノードは入らず、要る ``max_tokens`` の警告になる）。compact は 1 行なので縮めない。
+    """
+    if sites < 2 or rec.attached is None:
+        return rec
+    edges = rec.attached.get("edges", ())
+    all_sites = list(rec.data["call_sites"])
+    est = TokenEstimator().count
+    need = _hint_max_tokens(est(json_record_text(rec)))
+    note = f"call_sites truncated; all {sites} sites: max_tokens>={need}"
+    width = len(str(sites))
+
+    def variant(k: int, omitted: int) -> Record:
+        data = {**rec.data, "call_sites": all_sites[:k], "call_sites_omitted": omitted, "call_sites_note": note}
+        return replace(rec, data=data, attached={**rec.attached, "edges": tuple(edges[:k])}, shrink=None, shrink_json=None)
+
+    def cost(k: int) -> int:
+        return est(json_record_text(variant(k, 10 ** (width - 1))))
+
+    def shrink_json(budget: int) -> Record | None:
+        if cost(1) > budget:
+            return None
+        lo, hi = 1, sites - 1  # cost(lo) <= budget を保つ
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if cost(mid) <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        return variant(lo, sites - lo)
+
+    # compact の行は呼び出し箇所の数に依らない 1 行で、縮める先が無い（``shrink`` は ``shrunk_last`` の前提のため置く）
+    return replace(rec, shrink=lambda _ask: None, shrink_json=shrink_json)
 
 
 def _graph(
@@ -772,6 +831,7 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
 
     records: list[Record] = []
     all_nodes: list[_Node] = []
+    as_json = args.format == "json"  # json の辺はノードのレコードに付ける（入ったノードの分だけ返る。BUG-0136）
     for direction, first_level in tree.roots.items():
         for n in _preorder(first_level):
             all_nodes.append(n)
@@ -793,25 +853,27 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
                 lines.append(L.note(f"children: {n.children_truncated} more"))
             if n.children_filled:
                 lines.append(L.note("children: from the syntax index (conf=structural; the LSP did not answer)"))
-            records.append(
-                Record(
-                    kind="tree",
-                    key=f"{direction}#{len(records)}",
-                    priority=len(records),
-                    lines=tuple(lines),
-                    data=_node_json(n, args.include_guard_conditions),
-                    confidence=n.confidence,
-                    group=n.site.path,
-                )
+            rec = Record(
+                kind="tree",
+                key=f"{direction}#{len(records)}",
+                priority=len(records),
+                lines=tuple(lines),
+                data=_node_json(n, args.include_guard_conditions),
+                confidence=n.confidence,
+                group=n.site.path,
+                attached={"edges": tuple(_node_edges(root_urn, n, args.include_guard_conditions))} if as_json else None,
             )
+            records.append(_shrinkable(rec, len(n.sites)) if as_json else rec)
         if direction == "incoming" and tree.name_matched:  # exact の木の補足の欄は incoming の木の直後（BUG-0107）
             records += _name_matched_records(L, tree, len(records), args.include_guard_conditions)
 
-    edges = _edges(root_urn, all_nodes, args.include_guard_conditions)
+    edges = [] if as_json else _edges(root_urn, all_nodes, args.include_guard_conditions)
     data: dict[str, Any] = {
         "root": tree.root.to_json(),  # 仕様書 §6.2 の SymbolRecord そのまま（null・空のキーも出す。BUG-0066）
         "direction": args.direction,
         "depth": args.depth,
+        # json の辺は入ったノードのレコードに付く（``Record.attached``。木全体をここに置くと前置きが予算を食う。BUG-0136）。
+        # 0 件でもキーは出す
         "edges": edges,
     }
     if tree.unattributed:

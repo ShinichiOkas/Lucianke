@@ -1892,8 +1892,8 @@ json の `data`:
 |---|---|---|
 | `root` | SymbolRecord | |
 | `direction`, `depth` | string, integer | |
-| `nodes[]` | object[] | `urn`, `name`, `path`, `call_site_line`, `depth`, `parent_urn`, `when`, `is_test`, `is_external`, `cycle`, `children_truncated`, `confidence_level`。すべての呼び出し箇所を名前だけで結んだノード（処理規約 9）にだけ `match: "name"`。`call_sites[]` の各要素も同じ条件で `match`。`exact` の木で子を LSP から取れず構文木で補ったノード（処理規約 2）にだけ `children_confidence_level: "structural"` |
-| `edges[]` | object[] | `source_urn`, `target_urn`, `call_site_line`, `guard`（dot / mermaid の元）。名前だけで結んだ辺にだけ `match: "name"` |
+| `nodes[]` | object[] | `urn`, `name`, `path`, `call_site_line`, `depth`, `parent_urn`, `when`, `is_test`, `is_external`, `cycle`, `children_truncated`, `confidence_level`。すべての呼び出し箇所を名前だけで結んだノード（処理規約 9）にだけ `match: "name"`。`call_sites[]` の各要素も同じ条件で `match`。`exact` の木で子を LSP から取れず構文木で補ったノード（処理規約 2）にだけ `children_confidence_level: "structural"`。1 ノードの呼び出し箇所が多く json で予算に入りきらないときは、ノードを落とさず `call_sites[]`（と対応する `edges[]`）を先頭から縮め、省いた数 `call_sites_omitted` と全部取る `max_tokens` の目安を書いた `call_sites_note`（`... all N sites: max_tokens>=M`）を付ける（縮めたノードにだけ。予算に対して単調。BUG-0136） |
+| `edges[]` | object[] | `source_urn`, `target_urn`, `call_site_line`, `guard`（dot / mermaid の元）。名前だけで結んだ辺にだけ `match: "name"`。json では **そのページに入ったノードの呼び出し箇所の分だけ**（呼び出し箇所ごとに 1 本。端点はそのページのノードか `root` か前のページのノード。BUG-0136）。入りきらないノードの呼び出し箇所を縮めたときは、縮めた後の箇所の分だけ |
 | `unattributed_calls[]` | object[] | 処理規約 9 で結ばなかった型不明の呼び出し（あるときだけ）。T-06 の同名の欄と同じ形に `direction` を足したもの |
 | `name_matched[]` | object[] | `exact` の木の補足の欄（処理規約 9。あるときだけ・そのページに含まれる分）。根の incoming で LSP の答えに無いが名前で根に結べる呼び出しの呼び出し元。`nodes[]` と同じ形で `depth: 1`、`confidence_level: heuristic`、`match: "name"`（BUG-0107） |
 | `name_matched_truncated` | integer | `name_matched[]` のうち `max_children` で省いた呼び出し元の数（あるときだけ） |

@@ -485,6 +485,11 @@ class Record:
                               # 任意。答えの本体の外の補足の欄の名前（T-06 / T-07 の exact の答えの name_matched。BUG-0107）。
                               # json は data[records_key] ではなく data[section] に置き、_resolution_meta の精度の集計に数えない。
                               # compact の行・予算・ページネーションは本体と同じ（並びの順に詰める）
+    attached: Mapping[str, tuple[Mapping, ...]] | None = None
+                              # 任意。このレコードに付随する行（T-07 の json の edges: ノードごとの辺。BUG-0136）。
+                              # json は入ったレコードの付随行だけを data[キー] に連ねる（同一の行は最初の 1 件だけ）。
+                              # 付随行もレコードの大きさに数える（core.records.json_record_text）。木全体の辺を data_static に
+                              # 置くと、ノードを 1 件も詰める前に前置きとして予算を食い、ノード 0 件・予算超過になる
 
 @dataclass(frozen=True)
 class ToolOutput:
