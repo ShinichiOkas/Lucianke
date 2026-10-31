@@ -47,6 +47,7 @@ from lucianke.core.model import (
     Confidence,
     EngineChoice,
     FileInfo,
+    Kind,
     LspStatus,
     Position,
     Range,
@@ -848,6 +849,32 @@ class _Job:
     prime: PrimeSet | None
     item: features.CallItem | None = None
     """親の答えにあった、このノードの項目（あれば ``prepareCallHierarchy`` を送らずに使う）。"""
+    ask_at: tuple[RelPath, Position] | None = None
+    """``prepareCallHierarchy`` を送る位置（``None`` はノード自身の名前の位置）。Python の ``__init__`` / ``__new__`` の incoming は
+    クラスの名前の位置（``_constructor_owner``）。"""
+
+
+_CONSTRUCTORS = frozenset({"__init__", "__new__"})
+_CLASS_KINDS = frozenset({Kind.CLASS, Kind.INTERFACE, Kind.STRUCT, Kind.TRAIT, Kind.ENUM})
+
+
+def _constructor_owner(conn: Any, ws_id: str, sym: Any) -> tuple[RelPath, Position] | None:
+    """Python の ``__init__`` / ``__new__`` なら、その持ち主のクラスの名前の位置。それ以外・クラスが見つからなければ ``None``。
+
+    basedpyright の incomingCalls は名前で呼び出しを探すので、``__init__`` の項目に聞くと ``LimitTable()`` のようなコンストラクタの
+    呼び出しを 1 つも返さない（明示の ``__init__(...)`` の呼び出ししか無い）。索引には構文木の ``CALLS`` があるので、0 件の答えを
+    「LSP が解析中」と取り違えて降格し、``lsp_status: indexing`` と報告していた（BUG-0129）。クラスの項目に聞くと、
+    コンストラクタの呼び出し元が返る。
+    """
+    if getattr(sym, "name", None) not in _CONSTRUCTORS or not str(sym.path).endswith((".py", ".pyi")):
+        return None
+    owner_q = str(sym.qualified_name).rpartition(".")[0]
+    if not owner_q:
+        return None
+    for cand in queries.symbols_by_qualified_suffix(conn, ws_id, str(sym.path), owner_q):
+        if cand.qualified_name == owner_q and cand.kind in _CLASS_KINDS and cand.path is not None:
+            return RelPath(str(cand.path)), (cand.selection or cand.range).start
+    return None
 
 
 @dataclass(slots=True)
@@ -1290,7 +1317,9 @@ class CallEdgeSource:
             if self.cut is None:
                 self.cut = ExactCut("down", time.monotonic() - self.started, reason=reason)
         prime = self._prime_set(sym) if direction == "incoming" else None
-        return _Job(key, sym, depth, prime, self._item_for(urn, sym))
+        ask_at = _constructor_owner(self.conn, self.ws.workspace_id, sym) if direction == "incoming" else None
+        item = None if ask_at is not None else self._item_for(urn, sym)
+        return _Job(key, sym, depth, prime, item, ask_at)
 
     def _item_for(self, urn: str, sym: Any) -> features.CallItem | None:
         """親の答えにあった ``urn`` の項目。索引のシンボルと同じファイル・同じ名前の位置のときだけ使う（違えば聞き直す）。"""
@@ -1725,13 +1754,11 @@ class CallEdgeSource:
             self._sent.add(job.key)
             item = job.item
             if item is None:
-                start = (sym.selection or sym.range).start
-                items = await features.prepare_call_hierarchy(
-                    handle, sym.path, start, **self._root_limits(job)
-                )
+                path, start = job.ask_at or (sym.path, (sym.selection or sym.range).start)
+                items = await features.prepare_call_hierarchy(handle, path, start, **self._root_limits(job))
                 item = next(
-                    (i for i in items if i.rel == sym.path and i.selection_range.start == start),
-                    next((i for i in items if i.rel == sym.path), None),
+                    (i for i in items if i.rel == path and i.selection_range.start == start),
+                    next((i for i in items if i.rel == path), None),
                 )
             spans["prepare"], t = time.monotonic() - t, time.monotonic()
             if item is None:

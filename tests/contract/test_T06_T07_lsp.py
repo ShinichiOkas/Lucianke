@@ -229,7 +229,8 @@ async def warm_up(pool: LspPool, ws: Workspace) -> None:
 async def real(registry: ProcessRegistry, tmp_path: Path):
     _lsp_exact.MEMO.clear()
     root = tmp_path / "poly"
-    shutil.copytree(POLY, root, ignore=shutil.ignore_patterns("__pycache__"))
+    # F-POLY の pyrightconfig.json（リポジトリの中で親の設定を採らないためのもの。BUG-0129）は複製しない: 複製はリポジトリの外
+    shutil.copytree(POLY, root, ignore=shutil.ignore_patterns("__pycache__", "pyrightconfig.json"))
     # tests/ から `shop`（src/ の下）を import 解決できるのは、検出した import の根（`src`）が LSP の extraPaths に渡るから
     # （pyrightconfig.json は置かない。20d）。本番と同じ検出を通す
     ws = Workspace(
@@ -407,6 +408,21 @@ async def test_t07_incoming_is_exact_from_lsp_then_from_paad(real: Env) -> None:
     assert meta2["confidence_level"] == "exact" and meta2["is_degraded"] is False, meta2
     assert meta2["engine_used"] == "lsp-cache+tree-sitter", meta2
     assert shape(r2) == shape(r1)
+
+
+@needs_basedpyright
+async def test_t07_incoming_of_a_constructor_lists_the_callers_of_the_class(real: Env) -> None:
+    """``__init__`` の incoming は、クラスの呼び出し（``LimitTable()``）の呼び元を exact で返す（BUG-0129）。basedpyright の
+    incomingCalls は名前で探すので ``__init__`` の項目に聞くと 0 件で、以前は索引の呼び出しと食い違って「LSP が解析中」に降格していた。"""
+    target = {"urn": urn("src/shop/services/limits.py", "LimitTable.__init__")}
+    r = await real.calls(target, "incoming", depth=1)
+    assert not r.is_error, r.text
+    meta = r.structured["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["is_degraded"] is False, meta
+    assert meta["lsp_status"] == "ready" and "basedpyright" in meta["engine_used"], meta
+    nodes = r.structured["data"]["nodes"]
+    # routes.py の呼び出しはモジュール直下（囲みの関数が無い）なので、exact の木のノードにはならない（他のノードと同じ扱い）
+    assert [(n["name"], n["call_site_path"]) for n in nodes] == [("test_charge_ok", TESTS)], nodes
 
 
 @needs_basedpyright
