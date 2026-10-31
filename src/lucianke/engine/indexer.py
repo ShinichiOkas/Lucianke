@@ -75,7 +75,7 @@ from lucianke.index.ingest import (
 )
 from lucianke.index.writer import IndexWriter
 from lucianke.syntax import heuristic, relations
-from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
+from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE, PYTHON_BUILTINS
 from lucianke.syntax.imports import (
     NAMESPACE_PACKAGE,
     ImportFact,
@@ -83,7 +83,10 @@ from lucianke.syntax.imports import (
     external_name_map,
     extract_imports,
     imported_name_map,
+    js_local_exports,
+    js_module_exports,
     make_resolver,
+    module_all_dynamic,
     module_all_names,
     namespace_name_map,
     wildcard_sources,
@@ -111,6 +114,7 @@ INGEST_BATCH_FILES: Final = 50  # 設計書 §7.6.1 項 4: 起動時の差分索
 _CHUNK: Final = 1024 * 1024
 _HEAD_BYTES: Final = 8 * 1024
 _SYNTAX_ERROR_MESSAGE: Final = "syntax error"
+_JS_LANGUAGES: Final = frozenset({"typescript", "tsx", "javascript", "jsx"})  # バレルの公開する名前を書く言語（BUG-0104）
 
 JobState = Literal["queued", "running", "done", "failed"]
 
@@ -995,6 +999,7 @@ class Indexer:
         module_facts: list[ImportFact] = []
         resolver: Callable[[ImportFact], RelPath | None] | None = None
         exports: list[ReexportFact] = []
+        star_sources: list[RelPath] = []  # Python の ``from x import *`` のワークスペースの先（BUG-0105）
         # def / class の中の import 文（開始位置ごと）
         nested: dict[relations.ImportKey, list[ImportFact]] = {}
         try:
@@ -1021,7 +1026,10 @@ class Indexer:
             external = external_name_map(module_facts, language_id=lang, internal=name_map)
             if lang == "python":
                 namespaces = namespace_name_map(module_facts, resolver, internal=name_map)
-                exports = self._exports(parsed, module_facts, resolver, name_map, external)
+                star_sources = wildcard_sources(module_facts, resolver)
+                exports = self._exports(parsed, star_sources, name_map, external)
+            elif lang in _JS_LANGUAGES:
+                exports = self._js_exports(parsed, module_facts, resolver, name_map, external, records, rel)
         except Exception:
             _log.warning("import resolution failed for %s", rel, exc_info=True)
             name_map = {}
@@ -1042,6 +1050,18 @@ class Indexer:
 
         def resolve_name(name: str) -> str | None:
             return urn_of(name_map, external, name)
+
+        def resolve_star(name: str) -> str | None:
+            """``from x import *`` を持つ Python のファイルで、どこでも決まらなかった名前 → ``<このファイル>#name``（BUG-0105）。
+            整え（``index/reexports.py``）が ``*`` の先が公開する定義に書き換える。組み込み名・``__x__`` は引かない。"""
+            if not star_sources or not name.isidentifier() or name in PYTHON_BUILTINS:
+                return None
+            if name.startswith("__") and name.endswith("__"):
+                return None
+            try:
+                return str(Urn(ws_id, str(rel), CodeSel(name)))
+            except ValueError:
+                return None
 
         def resolve_dotted(dotted: str) -> str | None:
             if resolver is None:
@@ -1089,6 +1109,7 @@ class Indexer:
             builtins_package=BUILTINS_PACKAGE if lang == "python" else GLOBALS_PACKAGE,
             resolve_import=resolve_import,
             resolve_dotted=resolve_dotted,
+            resolve_star=resolve_star if star_sources else None,
         )
         candidates = detailed.relations
         rel_facts = [
@@ -1141,13 +1162,13 @@ class Indexer:
     def _exports(
         self,
         parsed: object,
-        module_facts: list[ImportFact],
-        resolver: Callable[[ImportFact], RelPath | None],
+        star_sources: Sequence[RelPath],
         name_map: dict[str, tuple[RelPath, str]],
         external: dict[str, str],
     ) -> list[ReexportFact]:
         """Python のモジュール直下の import が束ねた名前（他のファイルが ``from この import name`` で使える）・``from x import *`` の
-        ワークスペースの先・``__all__`` の名前（BUG-0100。内部表 ``_reexports``）。束ねた先は ``urn_of`` と同じ URN（モジュールは ``#`` なし）。"""
+        ワークスペースの先・``__all__`` の名前（BUG-0100。内部表 ``_reexports``）。束ねた先は ``urn_of`` と同じ URN（モジュールは ``#`` なし）。
+        ``__all__`` がリテラルでなければ ``dynamic_all`` の印（公開する名前が決まらない。BUG-0105）。"""
         ws_id = self._ws.workspace_id
         out: list[ReexportFact] = []
         for name, (path, original) in name_map.items():
@@ -1160,7 +1181,7 @@ class Indexer:
             out.append(ReexportFact(name=name, target_urn=str(urn), kind="import", ord=len(out)))
         for name, urn_text in external.items():
             out.append(ReexportFact(name=name, target_urn=urn_text, kind="import", ord=len(out)))
-        for source in wildcard_sources(module_facts, resolver):
+        for source in star_sources:
             try:
                 urn_text = str(Urn(ws_id, str(source)))
             except ValueError:
@@ -1168,7 +1189,39 @@ class Indexer:
             out.append(ReexportFact(name="*", target_urn=urn_text, kind="star", ord=len(out)))
         for name in module_all_names(parsed) or ():  # type: ignore[arg-type]
             out.append(ReexportFact(name=name, target_urn="", kind="all", ord=len(out)))
+        if module_all_dynamic(parsed):  # type: ignore[arg-type]
+            out.append(ReexportFact(name="*", target_urn="", kind="dynamic_all", ord=len(out)))
         return out
+
+    def _js_exports(
+        self,
+        parsed: object,
+        module_facts: list[ImportFact],
+        resolver: Callable[[ImportFact], RelPath | None],
+        name_map: dict[str, tuple[RelPath, str]],
+        external: dict[str, str],
+        records: Sequence[SymbolRecord],
+        rel: RelPath,
+    ) -> list[ReexportFact]:
+        """TS / JS のモジュールが公開する名前（BUG-0104。内部表 ``_reexports``。``syntax/imports.js_module_exports``）: 別の定義を
+        公開する名前の束ね先（``import``。``export { a as b } from``・``export * as ns from``・import した名前の ``export { a }``・
+        既定の export）、``export * from`` のワークスペースの先（``star``）、公開する名前（``export``。既定の export は入れない）。"""
+        top_level = {r.qualified_name for r in records if "." not in r.qualified_name}
+        return [
+            ReexportFact(name=name, target_urn=target, kind=kind, ord=i)
+            for i, (kind, name, target) in enumerate(
+                js_module_exports(
+                    module_facts,
+                    resolver,
+                    js_local_exports(parsed),  # type: ignore[arg-type]
+                    workspace_id=self._ws.workspace_id,
+                    rel=rel,
+                    names=name_map,
+                    external=external,
+                    top_level=top_level,
+                )
+            )
+        ]
 
     def _exists(self, rel: RelPath) -> bool:
         return (self._ws.root / str(rel)).is_file() and not is_excluded(self._ws, rel)

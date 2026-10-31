@@ -1,4 +1,4 @@
--- schema_version: 10
+-- schema_version: 11
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -276,12 +276,15 @@ CREATE INDEX _var_types_file ON _var_types(file_id);
 -- Python のモジュール直下の import が束ねた名前（BUG-0100。index/reexports.py）。`from pkg import flush` の `pkg/__init__.py#flush`
 -- （import はシンボルにならない）を、関係を整える段が束ねた先（`from .helpers import flush` の `pkg/helpers.py#flush`）までたどる。
 -- kind: import（name → target_urn。モジュールは `#` なし、外部は lk://_ext/...）/ star（`from x import *` の x。name は '*'）/
--- all（`__all__` の名前。target_urn は空）。取り込みがファイルごとに全置換する。
+-- all（`__all__` の名前。target_urn は空）/ dynamic_all（`__all__` がリテラルでない印。name は '*'。BUG-0105）。
+-- TS / JS のモジュールが公開する名前も書く（v11。BUG-0104）: import（`export { a as b } from` などの別の定義を公開する名前）/
+-- star（`export * from` のワークスペースの先）/ export（公開する名前。既定の export は入れない。target_urn は空）。
+-- 取り込みがファイルごとに全置換する。
 CREATE TABLE _reexports (
   file_id    INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
   target_urn TEXT NOT NULL,
-  kind       TEXT NOT NULL,                  -- import / star / all
+  kind       TEXT NOT NULL,                  -- import / star / all / dynamic_all / export
   ord        INTEGER NOT NULL                -- 書いた順（同じ名前は後のものが勝つ）
 );
 CREATE INDEX _reexports_name ON _reexports(file_id, name);

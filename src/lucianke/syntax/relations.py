@@ -46,7 +46,9 @@
   import した名前（``from conf import settings``）の ``settings.reload()`` は ``conf.py#settings.reload`` になる。``settings`` が変数なら、
   索引の整え（``index/inherited.py``）が定義元の変数の型（``var_types``。``settings = Settings()``・``settings: Settings = ...``）の
   メンバーに結ぶか、型が分からなければ名前だけの呼び出し・参照にする（BUG-0094）。``from pkg import flush`` の ``pkg/__init__.py#flush``
-  のような再び公開した名前は、整え（``index/reexports.py``）が定義元までたどる（BUG-0100）。
+  のような再び公開した名前は、整え（``index/reexports.py``）が定義元までたどる（BUG-0100。TS / JS のバレル ``export { f } from`` も。
+  BUG-0104）。``from helpers import *`` を持つ Python のファイルで、同じファイル・import 表・組み込み名のどれでも決まらなかった名前は
+  ``<このファイル>#name``（``resolve_star``）にし、整えが ``*`` の先が公開する定義に書き換える（BUG-0105）。
 
   名前空間パッケージ（``__init__.py`` の無いワークスペースのディレクトリ）を束ねた名前とそのディレクトリ（``import nsp.tools.fmt`` の
   ``nsp``・``nsp.tools``）は、``resolve_dotted`` が ``NAMESPACE_PACKAGE`` と答える。その読みは参照を作らず、外部にもせず、名前だけにも
@@ -265,6 +267,7 @@ def extract_relations(
     builtins_package: str | None = None,
     resolve_import: Callable[[ImportKey, str], str | None] | None = None,
     resolve_dotted: Callable[[str], str | None] | None = None,
+    resolve_star: Callable[[str], str | None] | None = None,
 ) -> list[RelationCandidate]:
     """構文木から ``structural`` の関係の候補を作る。文書順（行、列）。構文エラーがあっても拾えた分を返す。
 
@@ -275,6 +278,9 @@ def extract_relations(
     （``(import 文の開始位置, 名前) → URN``）。``None`` なら ``resolve_name`` で引く（名前表がスコープを区別しないときの代用）。
     ``resolve_dotted`` は点つきのモジュールのパス（``pkg.helpers``。先頭の名前はモジュール直下の import が束ねたもの）→ その
     サブモジュールのファイルの URN（ワークスペースに在るときだけ。BUG-0093）。``None`` なら点つきのパスをモジュールとして引かない。
+    ``resolve_star`` は、素の名前（と受け手・型に使う名前）が同じファイル・import 表・組み込み名のどれでも決まらなかったときの最後の
+    引き先（Python の ``from x import *`` を持つファイルで ``<このファイル>#name``。整え〈``index/reexports.py``〉が ``*`` の先が公開する
+    定義に書き換える。BUG-0105）。``None`` なら引かない。
     """
     return extract_relations_detailed(
         parsed,
@@ -287,6 +293,7 @@ def extract_relations(
         builtins_package=builtins_package,
         resolve_import=resolve_import,
         resolve_dotted=resolve_dotted,
+        resolve_star=resolve_star,
     ).relations
 
 
@@ -302,6 +309,7 @@ def extract_relations_detailed(
     builtins_package: str | None = None,
     resolve_import: Callable[[ImportKey, str], str | None] | None = None,
     resolve_dotted: Callable[[str], str | None] | None = None,
+    resolve_star: Callable[[str], str | None] | None = None,
 ) -> RelationExtraction:
     """``extract_relations`` と同じ候補に、インスタンス属性の定義（BUG-0095）とモジュール直下の変数の型（BUG-0094）を添える。"""
     family = _FAMILIES.get(language_id)
@@ -319,6 +327,7 @@ def extract_relations_detailed(
         builtins_package,
         resolve_import,
         resolve_dotted,
+        resolve_star,
     )
     relations = ex.run()
     return RelationExtraction(relations, ex.attr_defs(), ex.var_types())
@@ -371,9 +380,11 @@ class _Extractor:
         builtins_package: str | None = None,
         resolve_import: Callable[[ImportKey, str], str | None] | None = None,
         resolve_dotted: Callable[[str], str | None] | None = None,
+        resolve_star: Callable[[str], str | None] | None = None,
     ) -> None:
         self.parsed = parsed
         self._resolve_dotted_raw = resolve_dotted
+        self._resolve_star_raw = resolve_star
         self._dotted_cache: dict[str, str | None] = {}
         self.language_id = language_id
         self.family = family
@@ -427,6 +438,12 @@ class _Extractor:
         if ck not in self._import_cache:
             self._import_cache[ck] = self._resolve_import_raw(key, name)
         return self._import_cache[ck]
+
+    def resolve_star(self, name: str) -> str | None:
+        """``from x import *`` が持ち込んだかもしれない名前の仮の URN（``<このファイル>#name``。BUG-0105）。"""
+        if self._resolve_star_raw is None:
+            return None
+        return self._resolve_star_raw(name)
 
     def resolve_builtin(self, name: str) -> str | None:
         """言語の組み込み名なら ``lk://_ext/<builtins_package>#<name>``。"""
@@ -779,7 +796,7 @@ class _Extractor:
             return False, str(top.urn)
         if self._namespace_name(name):
             return False, None  # 名前空間パッケージ（ワークスペースのディレクトリ）そのもの: 参照でも外部でもない（BUG-0101）
-        return False, self.resolve(name) or self.resolve_builtin(name)
+        return False, self.resolve(name) or self.resolve_builtin(name) or self.resolve_star(name)
 
     def _is_local(self, name: str, node: Node) -> bool:
         return self._binding(name, node)[0] == "local"
@@ -1054,7 +1071,7 @@ class _Extractor:
         local = self.by_qualified.get(name)
         if local is not None and local.kind in _CLASS_KINDS | {Kind.MODULE}:
             return ("local", local.qualified_name)
-        urn = self.resolve(name) or self.resolve_builtin(name)
+        urn = self.resolve(name) or self.resolve_builtin(name) or self.resolve_star(name)
         if urn is not None:
             return ("urn", urn)
         return None

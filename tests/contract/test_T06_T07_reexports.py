@@ -2,7 +2,8 @@
 
 フィクスチャ ``tests/fixtures/reexports``（README に各箇所の意図）を ``Indexer`` で取り込んだ実索引（LSP なしの ``structural``）で確かめる。
 パッケージの ``__init__.py`` が再び公開した関数・クラスを、そのパッケージから import して使う呼び出し元は、定義元のシンボルの参照・
-呼び出し階層に ``structural`` で出る（パッケージの公開 API の呼び出し元が 0 件に見えない）。
+呼び出し階層に ``structural`` で出る（パッケージの公開 API の呼び出し元が 0 件に見えない）。TS / JS のバレル（``index.ts`` の
+``export ... from``。BUG-0104）と、import する側の ``from x import *``（BUG-0105）も同じ。
 """
 
 from __future__ import annotations
@@ -165,3 +166,55 @@ async def test_t06_t07_namespace_package_has_no_external_package_references(pipe
     urns = {n["urn"] for n in out.structured["data"]["nodes"]}
     assert U("nsp/tools/fmt.py", "render") in urns
     assert not any(u == "lk://_ext/nsp" or u.startswith("lk://_ext/nsp#tools") for u in urns)
+
+
+async def test_t06_t07_ts_barrel_callers_are_structural(pipeline: Pipeline) -> None:
+    """PC:T-06#2 PC:T-07#2 ``web/lib/helpers.ts#flush`` の参照に、バレル ``web/lib/index.ts``（``export { flush } from './helpers'``・
+    別名 ``fl``・名前空間 import ``lib.flush()``）を経由した ``web/use.ts`` の呼び出しが ``structural`` で出る（BUG-0104）。
+    ``deepGo`` は ``export * as deep``・2 段の ``export *``・ディレクトリの ``index.ts`` の 3 つの書き方。``run`` の outgoing に定義元が並び、
+    バレルの無い先・循環・既定の export・export していない関数は出ない。"""
+    flush = await refs(pipeline, {"path": "web/lib/helpers.ts", "symbol_name": "flush"})
+    got = sites(flush)
+    for needle in ("  flush();", "fl();", "lib.flush();"):
+        assert ("web/use.ts", line_of("web/use.ts", needle), "call", "structural") in got, (needle, got)
+    assert not any(x["confidence_level"] == "heuristic" for x in flush.structured["data"]["references"])
+    deep = sites(await refs(pipeline, {"path": "web/lib/deep/impl.ts", "symbol_name": "deepGo"}))
+    for needle in ("deep.deepGo();", "  deepGo();", "viaDir();"):
+        assert ("web/use.ts", line_of("web/use.ts", needle), "call", "structural") in deep, (needle, deep)
+    incoming = await calls(pipeline, "web/lib/math.ts", "add", "incoming", depth=1)
+    assert (U("web/use.ts", "run"), "structural") in {
+        (n["urn"], n["confidence_level"]) for n in incoming.structured["data"]["nodes"]
+    }
+    out = await calls(pipeline, "web/use.ts", "run", "outgoing", depth=1)
+    urns = {n["urn"] for n in out.structured["data"]["nodes"]}
+    assert {
+        U("web/lib/helpers.ts", "flush"),
+        U("web/lib/helpers.ts", "main"),
+        U("web/lib/math.ts", "add"),
+        U("web/lib/math.ts", "Calc.run"),
+        U("web/lib/deep/impl.ts", "deepGo"),
+        U("web/lib/local.ts", "own"),
+    } <= urns
+    assert not any(
+        "web/lib/index.ts#" in u or "cyc_" in u or u.endswith(("#mathDefault", "#secret", "#loop")) for u in urns
+    )
+
+
+async def test_t06_t07_importing_side_star_callers(pipeline: Pipeline) -> None:
+    """PC:T-06#2 PC:T-07#2 import する側の ``from pkg import *``・``from pkg.loose import *`` が持ち込んだ ``flush``・``public`` の
+    呼び出しは定義元の参照に ``structural`` で出る。``__all__`` がリテラルでない ``pkg/dyn.py`` の ``dyn_fn`` は ``heuristic``（名前だけで
+    決めた）。公開しない ``hidden`` は出ない（BUG-0105）。"""
+    flush = sites(await refs(pipeline, {"path": "pkg/helpers.py", "symbol_name": "flush"}))
+    assert ("star_use.py", line_of("star_use.py", "    flush()"), "call", "structural") in flush
+    assert ("star_use.py", line_of("star_use.py", "return flush"), "r", "structural") in flush
+    public = sites(await refs(pipeline, {"path": "pkg/loose.py", "symbol_name": "public"}))
+    assert ("star_use.py", line_of("star_use.py", "public()"), "call", "structural") in public
+    dyn = sites(await refs(pipeline, {"path": "pkg/dyn.py", "symbol_name": "dyn_fn"}))
+    assert dyn == {("star_use.py", line_of("star_use.py", "dyn_fn()"), "call", "heuristic")}
+    hidden = sites(await refs(pipeline, {"path": "pkg/stars.py", "symbol_name": "hidden"}))
+    assert not any(path == "star_use.py" for path, *_ in hidden)
+    out = await calls(pipeline, "star_use.py", "go", "outgoing", depth=1)
+    nodes = {n["urn"]: n["confidence_level"] for n in out.structured["data"]["nodes"]}
+    assert nodes.get(U("pkg/widgets.py", "Widget.spin")) == "structural"
+    assert nodes.get(U("pkg/dyn.py", "dyn_fn")) == "heuristic"
+    assert not any(u.startswith(U("star_use.py", "x")[:-1]) and u != U("star_use.py", "go") for u in nodes)

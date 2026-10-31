@@ -169,7 +169,7 @@ def test_ensure_schema_creates_public_internal_tables_and_meta(conn: sqlite3.Con
 
 
 def test_schema_version_is_read_from_schema_sql() -> None:
-    assert current_schema_version() == 10
+    assert current_schema_version() == 11
     assert migrate.parse_schema_version("-- schema_version: 7\nCREATE TABLE t (a);") == 7
     with pytest.raises(ValueError):
         migrate.parse_schema_version("CREATE TABLE t (a);")

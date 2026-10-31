@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final
 
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
@@ -37,6 +38,7 @@ from lucianke.index.ingest import ReexportFact, ensure_external_symbol
 
 __all__ = [
     "ALL_NAMES",
+    "JS_LANGUAGES",
     "MAX_HOPS",
     "ReexportResolver",
     "dependents",
@@ -49,6 +51,9 @@ MAX_HOPS: Final = 5
 
 ALL_NAMES: Final = "*"
 """``export_changes`` の答えで「どの名前も変わりうる」（``*`` の先・``__all__`` の有無が変わった・ファイルが消えた）。"""
+
+JS_LANGUAGES: Final = frozenset({"typescript", "tsx", "javascript", "jsx"})
+"""``files.language`` のうち、``export *`` を TS / JS の規則で読む言語（BUG-0104）。"""
 
 _EXTERNAL_PREFIX: Final = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
 _STAR_DEPTH: Final = 3  # ``*`` の先がさらに ``*`` で公開しているかを見る深さ
@@ -66,9 +71,13 @@ class ReexportResolver:
         self._conn = conn
         self._symbols: dict[str, bool] = {}
         self._files: dict[tuple[str, str], int | None] = {}
+        self._languages: dict[int, str] = {}
         self._bindings: dict[tuple[int, str], str | None] = {}
         self._stars: dict[int, list[str]] = {}
         self._all: dict[int, frozenset[str] | None] = {}
+        self._exported: dict[int, frozenset[str]] = {}
+        self._dynamic: dict[int, bool] = {}
+        self._guess = False
 
     # --- 索引の読み（覚えて使い回す） ---
 
@@ -84,10 +93,39 @@ class ReexportResolver:
         key = (workspace_id, path)
         if key not in self._files:
             row = self._conn.execute(
-                "SELECT file_id FROM files WHERE workspace_id = ? AND path = ?", (workspace_id, path)
+                "SELECT file_id, language FROM files WHERE workspace_id = ? AND path = ?", (workspace_id, path)
             ).fetchone()
             self._files[key] = None if row is None else int(row[0])
+            if row is not None:
+                self._languages[int(row[0])] = str(row[1])
         return self._files[key]
+
+    def _is_js(self, file_id: int) -> bool:
+        """TS / JS のファイルか（``export *`` の規則: 公開する名前〈``export``〉だけ。``_`` の規則も ``__all__`` も無い。BUG-0104）。"""
+        return self._languages.get(file_id) in JS_LANGUAGES
+
+    def _names_of_kind(self, file_id: int, kind: str) -> list[str]:
+        try:
+            rows = self._conn.execute(
+                "SELECT name FROM _reexports WHERE file_id = ? AND kind = ?", (file_id, kind)
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if not _missing_table(exc):
+                raise
+            rows = []
+        return [str(r[0]) for r in rows]
+
+    def _exported_names(self, file_id: int) -> frozenset[str]:
+        """TS / JS のファイルが公開する名前（``kind = 'export'``。BUG-0104）。"""
+        if file_id not in self._exported:
+            self._exported[file_id] = frozenset(self._names_of_kind(file_id, "export"))
+        return self._exported[file_id]
+
+    def _all_dynamic(self, file_id: int) -> bool:
+        """Python のファイルの ``__all__`` がリテラルでない（公開する名前が決まらない。``kind = 'dynamic_all'``。BUG-0105）。"""
+        if file_id not in self._dynamic:
+            self._dynamic[file_id] = bool(self._names_of_kind(file_id, "dynamic_all"))
+        return self._dynamic[file_id]
 
     def _binding(self, file_id: int, name: str) -> str | None:
         key = (file_id, name)
@@ -138,19 +176,25 @@ class ReexportResolver:
 
         ``deps`` には、束ねた名前を引いた ``(ファイルのパス, 名前)`` を足す（見つからなかったものも。追従に使う）。
         """
+        return self.resolve_detail(target, deps)[0]
+
+    def resolve_detail(self, target: str, deps: set[tuple[str, str]] | None = None) -> tuple[str, bool]:
+        """``(resolve の答え, 名前だけで決めたか)``。後者は、連鎖のどこかで ``__all__`` がリテラルでない ``*`` の先を公開名の規則で
+        選んだ（その名前を本当に公開しているかは構文から決まらない。BUG-0105）とき ``True``。呼び手は ``heuristic`` にする。"""
+        self._guess = False
         cur = target
         seen = {target}
         for hop in range(MAX_HOPS + 1):
             step = self._step(cur, deps, first=hop == 0)
             if step is None:
-                return cur
+                return cur, self._guess and cur != target
             if step in seen:
-                return target  # 循環: 結ばない（元の目標のまま。整えが今までどおり扱う）
+                return target, False  # 循環: 結ばない（元の目標のまま。整えが今までどおり扱う）
             seen.add(step)
             cur = step
             if cur.startswith(_EXTERNAL_PREFIX):
-                return cur
-        return target  # 段の上限
+                return cur, self._guess
+        return target, False  # 段の上限
 
     def _step(self, cur: str, deps: set[tuple[str, str]] | None, *, first: bool) -> str | None:
         """1 段: ``cur``（``P#A.rest``）の ``A`` を ``P`` が束ねた先に置き換えた URN。置き換えられなければ ``None``。
@@ -181,15 +225,24 @@ class ReexportResolver:
             deps.add((urn.path, head))
         bound = self._binding(file_id, head)
         if bound is None:
-            bound = self._from_star(urn.workspace_id, file_id, head, deps, 0)
+            found = self._from_star(urn.workspace_id, file_id, head, deps, 0)
+            if found is not None:
+                bound, guessed = found
+                self._guess = self._guess or guessed
         if bound is None:
             return None
         return _compose(bound, rest)
 
     def _from_star(
         self, workspace_id: str, file_id: int, name: str, deps: set[tuple[str, str]] | None, depth: int
-    ) -> str | None:
-        """``file_id`` の ``from x import *`` のうち ``name`` を公開しているもの（後ろのものが勝つ）の ``x#name``。"""
+    ) -> tuple[str, bool] | None:
+        """``file_id`` の ``from x import *`` / ``export * from 'x'`` のうち ``name`` を公開しているもの（後ろのものが勝つ）の
+        ``(x#name, 名前だけで決めたか)``。
+
+        Python: ``x`` の ``__all__`` があれば載っている名前、無ければ ``_`` で始まらず ``x`` が定義している・束ねている・さらに ``*`` で
+        公開している名前。``__all__`` がリテラルでなければ同じ公開名の規則で選び、名前だけで決めた印をつける（BUG-0105）。
+        TS / JS: ``x`` が公開する名前（``export``）か、``x`` がさらに ``export *`` で公開している名前。既定の export は公開しない（BUG-0104）。
+        """
         if depth > _STAR_DEPTH:
             return None
         for source in reversed(self._star_sources(file_id)):
@@ -202,19 +255,31 @@ class ReexportResolver:
                 continue
             if deps is not None:
                 deps.add((src.path, name))
-            listed = self._all_names(src_id)
-            if listed is not None:
-                provides = name in listed
+            deeper: tuple[str, bool] | None = None
+            if self._is_js(src_id):
+                if name == "default":
+                    continue
+                provides = name in self._exported_names(src_id)
+                if not provides:
+                    deeper = self._from_star(workspace_id, src_id, name, deps, depth + 1)
+                    provides = deeper is not None
+                guessed = deeper is not None and deeper[1]
             else:
-                provides = not name.startswith("_") and (
-                    self._is_symbol(_with(src, name))
-                    or self._binding(src_id, name) is not None
-                    or self._from_star(workspace_id, src_id, name, deps, depth + 1) is not None
-                )
+                listed = self._all_names(src_id)
+                if listed is not None:
+                    provides, guessed = name in listed, False
+                else:
+                    if name.startswith("_"):
+                        provides = False
+                    elif self._is_symbol(_with(src, name)) or self._binding(src_id, name) is not None:
+                        provides = True
+                    else:
+                        deeper = self._from_star(workspace_id, src_id, name, deps, depth + 1)
+                        provides = deeper is not None
+                    guessed = provides and (self._all_dynamic(src_id) or (deeper is not None and deeper[1]))
             if provides:
-                return _with(src, name)
+                return _with(src, name), guessed
         return None
-
 
 def _with(urn: Urn, qualified: str) -> str:
     return str(urn.with_selector(CodeSel(qualified)))
@@ -241,8 +306,16 @@ def _compose(bound: str, rest: str) -> str | None:
 
 def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: ReexportResolver) -> int:
     """``file_id`` の ``relations`` の ``symbols`` に無いワークスペースの目標と ``_var_types`` の型を、再び公開した名前の連鎖の先に
-    書き換える（書き換えた行数）。引いた ``(ファイル, 名前)`` を ``_reexport_deps`` に足す。"""
+    書き換える（書き換えた行数）。引いた ``(ファイル, 名前)`` を ``_reexport_deps`` に足す（自分のファイルは足さない: 自分の編集では
+    いつも取り込み直す）。
+
+    ``__all__`` がリテラルでない ``*`` の先を公開名の規則で選んだ行は ``heuristic`` にする（名前だけで決めた。BUG-0105）。
+    ``from x import *`` を持つ Python のファイルの仮の目標（``<このファイル>#Name``。``syntax/relations.resolve_star``）で、どの ``*`` の先も
+    公開していなかった変数の型は消す（型が分からないのと同じ。素の名前の行は整えが消し、メンバーの行は名前だけになる。BUG-0105）。
+    """
     deps: set[tuple[str, str]] = set()
+    own = conn.execute("SELECT workspace_id, path FROM files WHERE file_id = ?", (file_id,)).fetchone()
+    own_prefix = f"{SCHEME}{own[0]}/{own[1]}#" if own is not None else None
     rows = conn.execute(
         "SELECT DISTINCT target_urn FROM relations WHERE source_file_id = ? AND instr(target_urn, '#') > 0"
         " AND substr(target_urn, 1, ?) <> ? AND target_urn NOT IN (SELECT urn FROM symbols)",
@@ -250,7 +323,7 @@ def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: Reexpor
     ).fetchall()
     changed = 0
     for (target,) in rows:
-        new = resolver.resolve(str(target), deps)
+        new, guessed = resolver.resolve_detail(str(target), deps)
         if new == target:
             continue
         if new.startswith(_EXTERNAL_PREFIX):
@@ -264,7 +337,8 @@ def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: Reexpor
             ensure_external_symbol(conn, new, kinds)
         changed += conn.execute(
             "UPDATE relations SET target_urn = ?, target_file_id = (SELECT file_id FROM symbols WHERE urn = ?)"
-            " WHERE source_file_id = ? AND target_urn = ?",
+            + (", confidence_level = 'heuristic'" if guessed else "")
+            + " WHERE source_file_id = ? AND target_urn = ?",
             (new, new, file_id, target),
         ).rowcount
     try:
@@ -282,6 +356,10 @@ def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: Reexpor
         if new != type_urn:
             conn.execute("UPDATE _var_types SET type_urn = ? WHERE var_urn = ?", (new, var_urn))
             changed += 1
+        elif own_prefix is not None and str(type_urn).startswith(own_prefix):
+            conn.execute("DELETE FROM _var_types WHERE var_urn = ?", (var_urn,))
+    if own is not None:
+        deps = {d for d in deps if d[0] != own[1]}
     if deps:
         try:
             conn.executemany(
@@ -294,12 +372,25 @@ def redirect_reexports(conn: sqlite3.Connection, file_id: int, resolver: Reexpor
     return changed
 
 
-def _effective(rows: Iterable[tuple[str, str, str, int]]) -> tuple[dict[str, str], tuple[str, ...], frozenset[str] | None]:
-    """``(kind, name, target_urn, ord)`` の行 → （名前 → 勝つ束ね先, ``*`` の先の並び, ``__all__``）。"""
+@dataclass(frozen=True, slots=True)
+class _Exports:
+    """``_reexports`` の 1 ファイル分の読み（``export_changes`` が前後を比べる）。"""
+
+    binds: dict[str, str]  # 名前 → 勝つ束ね先
+    stars: tuple[str, ...]  # ``*`` の先の並び
+    listed: frozenset[str] | None  # ``__all__``（無ければ ``None``）
+    exported: frozenset[str]  # TS / JS の公開する名前（BUG-0104）
+    dynamic: bool  # ``__all__`` がリテラルでない（BUG-0105）
+
+
+def _effective(rows: Iterable[tuple[str, str, str, int]]) -> _Exports:
+    """``(kind, name, target_urn, ord)`` の行 → ``_Exports``。"""
     binds: dict[str, tuple[int, str]] = {}
     stars: list[tuple[int, str]] = []
     listed: set[str] = set()
+    exported: set[str] = set()
     has_all = False
+    dynamic = False
     for kind, name, target, ord_ in rows:
         if kind == "import":
             if name not in binds or binds[name][0] <= ord_:
@@ -309,10 +400,16 @@ def _effective(rows: Iterable[tuple[str, str, str, int]]) -> tuple[dict[str, str
         elif kind == "all":
             has_all = True
             listed.add(name)
-    return (
+        elif kind == "export":
+            exported.add(name)
+        elif kind == "dynamic_all":
+            dynamic = True
+    return _Exports(
         {n: t for n, (_, t) in binds.items()},
         tuple(t for _, t in sorted(stars)),
         frozenset(listed) if has_all else None,
+        frozenset(exported),
+        dynamic,
     )
 
 
@@ -327,7 +424,7 @@ def export_changes(
     （連鎖が無かったそのパスで止まった依存を引く。ふつうは 1 件も無い）。
 
     変わったと数えるもの: 最上位のシンボルの増減、束ねた名前の先（同じ名前が複数あれば後のもの）の違い、``*`` の先の並び・``__all__`` の
-    有無の違い（``ALL_NAMES``）、``__all__`` の名前の増減。
+    有無・``__all__`` がリテラルかどうかの違い（``ALL_NAMES``）、``__all__`` の名前の増減、TS / JS の公開する名前の増減（BUG-0104）。
     """
     if file_id is None:
         return frozenset({ALL_NAMES})
@@ -348,13 +445,14 @@ def export_changes(
         if not _missing_table(exc):
             raise
         return frozenset({ALL_NAMES})
-    old_binds, old_stars, old_all = _effective(old_rows)
-    new_binds, new_stars, new_all = _effective((r.kind, r.name, r.target_urn, r.ord) for r in reexports)
-    changed.update(n for n in old_binds.keys() | new_binds.keys() if old_binds.get(n) != new_binds.get(n))
-    if old_stars != new_stars or (old_all is None) != (new_all is None):
+    old = _effective(old_rows)
+    new = _effective((r.kind, r.name, r.target_urn, r.ord) for r in reexports)
+    changed.update(n for n in old.binds.keys() | new.binds.keys() if old.binds.get(n) != new.binds.get(n))
+    changed.update(old.exported ^ new.exported)
+    if old.stars != new.stars or (old.listed is None) != (new.listed is None) or old.dynamic != new.dynamic:
         changed.add(ALL_NAMES)
-    elif old_all is not None and new_all is not None:
-        changed.update(old_all ^ new_all)
+    elif old.listed is not None and new.listed is not None:
+        changed.update(old.listed ^ new.listed)
     return frozenset(changed)
 
 

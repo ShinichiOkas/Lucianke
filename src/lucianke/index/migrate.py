@@ -197,6 +197,23 @@ def _migrate_9_to_10(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE files SET sha256 = '' WHERE language = 'python'")
 
 
+def _migrate_10_to_11(conn: sqlite3.Connection) -> None:
+    """v11: ``_reexports`` に TS / JS のモジュールが公開する名前（``import``・``star``・``export``。バレル ``index.ts`` の
+    ``export { flush } from './helpers'`` を経由した呼び出しを定義元に結ぶ。BUG-0104）と、Python のリテラルでない ``__all__`` の印
+    （``dynamic_all``。BUG-0105）を書く。Python の import する側の ``from helpers import *`` が持ち込んだ名前の仮の目標
+    （``<このファイル>#name``。BUG-0105）も取り込みのときに作る。
+
+    どれも取り込みのときにしか作れないので、TS / JS のファイル・``from x import *`` を持つ Python のファイル・``__all__`` を書くが
+    リテラルの名前が無い Python のファイルの ``sha256`` を空にして、次の差分走査で取り込み直させる（ほかの Python のファイルは変わらない）。
+    """
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('typescript', 'tsx', 'javascript', 'jsx')"
+        " OR file_id IN (SELECT file_id FROM _reexports WHERE kind = 'star')"
+        " OR (language = 'python' AND file_id IN (SELECT file_id FROM symbols WHERE qualified_name = '__all__')"
+        " AND file_id NOT IN (SELECT file_id FROM _reexports WHERE kind = 'all'))"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -207,6 +224,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migrate_7_to_8,
     8: _migrate_8_to_9,
     9: _migrate_9_to_10,
+    10: _migrate_10_to_11,
 }
 
 

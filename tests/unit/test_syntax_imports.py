@@ -22,7 +22,10 @@ from lucianke.syntax.imports import (
     dotted_module_path,
     extract_imports,
     imported_name_map,
+    js_local_exports,
+    js_module_exports,
     make_resolver,
+    module_all_dynamic,
     module_all_names,
     namespace_name_map,
     resolve_module,
@@ -492,6 +495,143 @@ def test_empty_source_has_no_imports(language_id: str) -> None:
 )
 def test_module_all_names_reads_literal_all(source: str, expected: tuple[str, ...] | None) -> None:
     assert module_all_names(_parsed("python", source)) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "dynamic"),
+    [
+        ('__all__ = ["a", "b"]\n', False),
+        ("x = 1\n", False),
+        ('def f():\n    __all__ = names\n', False),
+        ('__all__ = ["a"] + base.__all__\n', True),
+        ('__all__ = ["a"]\n__all__ += names\n', True),
+        ("__all__ = list(_EXPORTED)\n", True),
+        ("__all__ = [n for n in dir() if not n.startswith('_')]\n", True),
+    ],
+)
+def test_module_all_dynamic_tells_non_literal_all(source: str, dynamic: bool) -> None:
+    """リテラルでない ``__all__``（公開する名前が構文から決まらない。BUG-0105）。``__all__`` が無い・リテラルだけなら ``False``。"""
+    assert module_all_dynamic(_parsed("python", source)) is dynamic
+
+
+# --- TS / JS: モジュールが公開する名前（BUG-0104） ------------------------------------------------
+
+
+@pytest.mark.parametrize("language_id", ["typescript", "tsx", "javascript"])
+def test_js_local_exports_reads_declarations_clauses_and_default(language_id: str) -> None:
+    """``from`` の無い export: 宣言の export（関数・クラス・複数の宣言子・``declare``）、``export { a, b as c }``、既定の export の
+    ローカルの名前。``export ... from`` と分割代入のパターンは入れない。"""
+    ts_only = (
+        "export interface I {}\nexport type T = number;\nexport enum E { A }\nexport namespace N {}\n"
+        "export declare function dd(): void;\nexport abstract class D {}\n"
+        if language_id != "javascript"
+        else ""
+    )
+    source = (
+        "import { imp } from './m';\n"
+        "function local() {}\n"
+        "export function f() {}\n"
+        "export async function af() {}\n"
+        "export function* gf() {}\n"
+        "export const k = 1, m = 2;\n"
+        "export let { p } = obj;\n"
+        "export var vv = 1;\n"
+        "export class C {}\n"
+        + ts_only
+        + "export { local, imp as renamed };\n"
+        "export { x } from './other';\n"
+        "export * from './star';\n"
+        "export default function g() {}\n"
+    )
+    got = js_local_exports(_parsed(language_id, source))
+    declared = ["f", "af", "gf", "k", "m", "vv", "C"]
+    if language_id != "javascript":
+        declared += ["I", "T", "E", "N", "dd", "D"]
+    assert list(got.declared) == declared
+    assert got.clauses == (("local", "local"), ("imp", "renamed"))
+    assert got.default_local == "g"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("export default h;\n", "h"),
+        ("export default class G {}\n", "G"),
+        ("export { x as default };\n", "x"),
+        ("export default function () {}\n", None),
+        ("export default { a: 1 };\n", None),
+    ],
+)
+def test_js_local_exports_default_local(source: str, expected: str | None) -> None:
+    assert js_local_exports(_parsed("typescript", source)).default_local == expected
+
+
+def test_js_module_exports_rows() -> None:
+    """``_reexports`` の行（``import``: 別の定義を公開する名前の束ね先、``star``: ``export *`` のワークスペースの先、``export``: 公開する
+    名前〈既定の export は入れない〉）。外部の指定子の名前は ``lk://_ext/<pkg>``、外部の ``export *`` は書かない。"""
+    source = (
+        "import { add } from './math';\n"
+        "import * as nsImp from './math';\n"
+        "import d from './math';\n"
+        "import { useState } from 'react';\n"
+        "export { flush, flush as fl, default as mainFn } from './helpers';\n"
+        "export * from './math';\n"
+        "export * as deep from './deep';\n"
+        "export * from 'lodash';\n"
+        "export { Thing } from '@scope/pkg/sub';\n"
+        "export * as R from 'react';\n"
+        "export { missing } from './nowhere';\n"
+        "function own() {}\n"
+        "export function decl() {}\n"
+        "export { add as plus, nsImp, d as dd, useState, own, own as ownAlias };\n"
+        "export default own;\n"
+    )
+    files = ("web/helpers.ts", "web/math.ts", "web/deep/index.ts", "web/barrel.ts")
+    resolver = make_resolver(from_rel=RelPath("web/barrel.ts"), language_id="typescript", exists=_exists(*files))
+    facts = _facts("typescript", source)
+    names = imported_name_map(facts, resolver)
+    from lucianke.syntax.imports import external_name_map
+
+    external = external_name_map(facts, language_id="typescript", internal=names)
+    rows = js_module_exports(
+        facts,
+        resolver,
+        js_local_exports(_parsed("typescript", source)),
+        workspace_id="w",
+        rel=RelPath("web/barrel.ts"),
+        names=names,
+        external=external,
+        top_level={"own", "decl"},
+    )
+    assert rows == [
+        ("import", "flush", "lk://w/web/helpers.ts#flush"),
+        ("export", "flush", ""),
+        ("import", "fl", "lk://w/web/helpers.ts#flush"),
+        ("export", "fl", ""),
+        ("import", "mainFn", "lk://w/web/helpers.ts#default"),
+        ("export", "mainFn", ""),
+        ("star", "*", "lk://w/web/math.ts"),
+        ("import", "deep", "lk://w/web/deep/index.ts"),
+        ("export", "deep", ""),
+        ("import", "Thing", "lk://_ext/@scope/pkg#Thing"),
+        ("export", "Thing", ""),
+        ("import", "R", "lk://_ext/react"),
+        ("export", "R", ""),
+        ("export", "missing", ""),
+        ("export", "decl", ""),
+        ("import", "plus", "lk://w/web/math.ts#add"),
+        ("export", "plus", ""),
+        ("import", "nsImp", "lk://w/web/math.ts"),
+        ("export", "nsImp", ""),
+        ("import", "dd", "lk://w/web/math.ts#default"),
+        ("export", "dd", ""),
+        ("import", "useState", "lk://_ext/react#useState"),
+        ("export", "useState", ""),
+        ("export", "own", ""),
+        ("import", "ownAlias", "lk://w/web/barrel.ts#own"),
+        ("export", "ownAlias", ""),
+        ("import", "default", "lk://w/web/barrel.ts#own"),
+    ]
 
 
 def test_namespace_packages_are_told_apart_from_files_and_externals() -> None:

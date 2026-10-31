@@ -18,7 +18,9 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
   モジュールのパス（``import nsp.tools.fmt`` の ``nsp``・``import nsp.tools as nt``・``from nsp import tools``。BUG-0101）。
   ``dotted_module_path`` は、そのディレクトリそのものを ``NAMESPACE_PACKAGE``（参照でも外部でもない）と答える。
 * ``module_all_names``: Python のモジュール直下の ``__all__``（文字列のリテラルだけで書かれたもの）。``from x import *`` が
-  再び公開する名前を決める（BUG-0100）。
+  再び公開する名前を決める（BUG-0100）。``module_all_dynamic`` はリテラルでない ``__all__``（公開する名前が決まらない。BUG-0105）。
+* ``js_local_exports``: TS / JS のモジュール直下の ``from`` の無い export（宣言の export・``export { a as b }``・既定の export の
+  ローカルの名前）。バレル（``index.ts``）が公開する名前を決める（BUG-0104）。
 
 ``ImportFact.names`` の約束（``(name, alias)`` の列。``alias`` は無ければ ``None``）:
 
@@ -45,7 +47,7 @@ from typing import Final, Literal
 from tree_sitter import Node, Query, QueryCursor
 
 from lucianke.core.model import Position, Range, RelPath
-from lucianke.core.urn import Urn
+from lucianke.core.urn import CodeSel, Urn
 from lucianke.syntax.support import get_support
 from lucianke.syntax.types import ParsedFile
 from lucianke.workspace.languages import fixture_roots, is_test
@@ -59,12 +61,16 @@ __all__ = [
     "ImportKind",
     "ImportResolver",
     "ImportRoot",
+    "JsLocalExports",
     "dotted_module_path",
     "external_name_map",
     "extract_imports",
     "imported_name_map",
+    "js_local_exports",
+    "js_module_exports",
     "js_require_bindings",
     "make_resolver",
+    "module_all_dynamic",
     "module_all_names",
     "namespace_name_map",
     "python_import_roots",
@@ -945,8 +951,21 @@ def module_all_names(parsed: ParsedFile) -> tuple[str, ...] | None:
 
     読む文: ``__all__ = [...]`` / ``(...)``（注釈つきも）、``__all__ += [...]``、``__all__.extend([...])``、``__all__.append("x")``。
     どれも文字列のリテラルだけで書かれていればその名前、``__all__`` が無い・リテラルでない部分がある（``__all__ = base.__all__ + [...]``）
-    なら ``None``（呼び手は公開名〈``_`` で始まらない名前〉の規則に倒す）。
+    なら ``None``（呼び手は公開名〈``_`` で始まらない名前〉の規則に倒す。どちらかは ``module_all_dynamic`` が見分ける）。
     """
+    return _module_all(parsed)[1]
+
+
+def module_all_dynamic(parsed: ParsedFile) -> bool:
+    """Python のモジュール直下に ``__all__`` を書く文があり、文字列のリテラルだけでは書かれていない（``__all__ = base.__all__ + [...]``・
+    内包表記など）か。``from x import *`` が公開する名前の集合が構文から決まらない（BUG-0105。``index/reexports.py`` は、公開名の規則で
+    見つけた名前を ``heuristic`` で結ぶ）。"""
+    seen, names = _module_all(parsed)
+    return seen and names is None
+
+
+def _module_all(parsed: ParsedFile) -> tuple[bool, tuple[str, ...] | None]:
+    """``(__all__ を書く文があるか, リテラルだけならその名前・それ以外は None)``。"""
     src = parsed.source
     names: list[str] = []
     seen = False
@@ -983,13 +1002,181 @@ def module_all_names(parsed: ParsedFile) -> tuple[str, ...] | None:
         if mode == "append" and isinstance(literal, str):
             literal = [literal]
         if mode == "bad" or not isinstance(literal, (list, tuple)) or not all(isinstance(x, str) for x in literal):
-            return None
+            return True, None
         if mode == "set":
             names = []
         for x in literal:
             if x not in names:
                 names.append(x)
-    return tuple(names) if seen else None
+    return seen, (tuple(names) if seen else None)
+
+
+@dataclass(frozen=True, slots=True)
+class JsLocalExports:
+    """TS / JS のモジュール直下の、``from`` の無い export（BUG-0104。``export ... from`` は ``ImportFact.reexport``）。
+
+    * ``declared``: 宣言につけた export が公開する名前（``export function f``・``export const a = 1, b = 2``・``export class C``・
+      ``export interface I``・``export type T``・``export enum E``・``export namespace N``・``export declare ...``）。``export default`` は入れない。
+    * ``clauses``: ``export { a, b as c }`` の ``(ローカルの名前, 公開する名前)``（``("a", "a")``・``("b", "c")``）。
+    * ``default_local``: 既定の export が束ねるローカルの名前（``export default function g``・``export default class G``・
+      ``export default h``・``export { x as default }``）。無名・式なら ``None``。
+    """
+
+    declared: tuple[str, ...] = ()
+    clauses: tuple[tuple[str, str], ...] = ()
+    default_local: str | None = None
+
+
+_JS_NAMED_DECLARATIONS = frozenset(
+    {
+        "function_declaration",
+        "generator_function_declaration",
+        "function_signature",
+        "class_declaration",
+        "abstract_class_declaration",
+        "interface_declaration",
+        "type_alias_declaration",
+        "enum_declaration",
+        "internal_module",
+        "module",
+    }
+)
+
+
+def _js_declared_names(decl: Node, src: bytes) -> list[str]:
+    """宣言 ``decl`` が束ねる名前（分割代入のパターンは数えない）。"""
+    if decl.type == "ambient_declaration":
+        return [n for c in decl.named_children for n in _js_declared_names(c, src)]
+    if decl.type in _JS_NAMED_DECLARATIONS:
+        name = decl.child_by_field_name("name")
+        return [_text(name, src)] if name is not None and name.type in ("identifier", "type_identifier") else []
+    if decl.type in ("lexical_declaration", "variable_declaration"):
+        out: list[str] = []
+        for d in decl.named_children:
+            if d.type != "variable_declarator":
+                continue
+            name = d.child_by_field_name("name")
+            if name is not None and name.type == "identifier":
+                out.append(_text(name, src))
+        return out
+    return []
+
+
+def js_local_exports(parsed: ParsedFile) -> JsLocalExports:
+    """TS / JS のモジュール直下の ``from`` の無い export（``JsLocalExports``。BUG-0104 のバレルの公開する名前）。"""
+    src = parsed.source
+    declared: list[str] = []
+    clauses: list[tuple[str, str]] = []
+    default_local: str | None = None
+    for stmt in parsed.tree.root_node.named_children:
+        if stmt.type != "export_statement" or stmt.child_by_field_name("source") is not None:
+            continue
+        is_default = any(c.type == "default" for c in stmt.children)
+        decl = stmt.child_by_field_name("declaration")
+        if is_default:
+            value = stmt.child_by_field_name("value")
+            if decl is not None:
+                names = _js_declared_names(decl, src)
+                default_local = names[0] if names else None
+            elif value is not None and value.type == "identifier":
+                default_local = _text(value, src)
+            continue
+        if decl is not None:
+            declared.extend(n for n in _js_declared_names(decl, src) if n and n not in declared)
+            continue
+        for child in stmt.children:
+            if child.type != "export_clause":
+                continue
+            for spec in child.children:
+                if spec.type != "export_specifier":
+                    continue
+                name, alias = _specifier(spec, src)
+                if not name:
+                    continue
+                exported = alias or name
+                if exported == "default":
+                    default_local = name
+                else:
+                    clauses.append((name, exported))
+    return JsLocalExports(tuple(declared), tuple(clauses), default_local)
+
+
+def js_module_exports(
+    facts: Iterable[ImportFact],
+    resolve: Callable[[ImportFact], RelPath | None],
+    local: JsLocalExports,
+    *,
+    workspace_id: str,
+    rel: RelPath,
+    names: Mapping[str, tuple[RelPath, str]],
+    external: Mapping[str, str],
+    top_level: Collection[str],
+) -> list[tuple[str, str, str]]:
+    """TS / JS のモジュールが公開する名前 → ``(kind, name, target_urn)`` の列（BUG-0104。内部表 ``_reexports`` の行）。
+
+    * ``import``（``name`` を ``target_urn`` に束ねて公開する。別の定義を公開する名前だけ）: ``export { a as b } from './m'`` → ``b`` →
+      ``m#a``、``export * as ns from './m'`` → ``ns`` → モジュール ``m``（``#`` なし）、import した名前の ``export { a }``（``import { a }
+      from './m'`` → ``m#a``、``import * as ns`` → ``m``、``import d from './m'`` → ``m#default``）、同じファイルの定義の別名
+      ``export { f as g }`` → ``g`` → ``<このファイル>#f``、既定の export（``export default function g``・``export default h``・
+      ``export { x as default }``）→ ``default`` → そのローカルの名前の先。外部の指定子は ``lk://_ext/<pkg>#a``。
+    * ``star``（``name`` は ``*``）: ``export * from './m'`` のワークスペースの先 ``m``。外部の ``export *`` は名前を列挙できないので書かない。
+    * ``export``（``target_urn`` は空）: 公開する名前（宣言の export・``export { … }``・``export … from`` の名前）。既定の export は入れない
+      （``export *`` は既定の export を公開しない）。
+    """
+    out: list[tuple[str, str, str]] = []
+
+    def ws_urn(path: RelPath, qualified: str | None = None) -> str | None:
+        try:
+            return str(Urn(workspace_id, str(path), CodeSel(qualified) if qualified else None))
+        except ValueError:
+            return None
+
+    def bind(name: str, target: str | None) -> None:
+        if target:
+            out.append(("import", name, target))
+
+    def export(name: str) -> None:
+        if name and name != "default":
+            out.append(("export", name, ""))
+
+    for fact in facts:
+        if not fact.reexport:
+            continue
+        base = resolve(fact)
+        package = None if base is not None or fact.is_relative else _js_package(fact.module)
+        for name, alias in fact.names:
+            if name == "*" and alias is None:
+                if base is not None and (urn := ws_urn(base)) is not None:
+                    out.append(("star", "*", urn))
+                continue
+            bound = alias or name
+            if name == "*":  # ``export * as ns from``
+                target = ws_urn(base) if base is not None else (_external_urn(package) if package else None)
+            elif base is not None:
+                target = ws_urn(base, name)
+            else:
+                target = _external_urn(package, name) if package else None
+            bind(bound, target)
+            export(bound)
+
+    def local_target(name: str) -> str | None:
+        hit = names.get(name)
+        if hit is not None:
+            path, original = hit
+            return ws_urn(path) if original == "*" else ws_urn(path, original)
+        if name in external:
+            return external[name]
+        return ws_urn(rel, name) if name in top_level else None
+
+    for name in local.declared:
+        export(name)
+    for name, exported in local.clauses:
+        if name != exported or name not in top_level:
+            bind(exported, local_target(name))
+        export(exported)
+    if local.default_local:
+        bind("default", local_target(local.default_local))
+    return out
 
 
 def _literal(node: Node | None, src: bytes) -> object:

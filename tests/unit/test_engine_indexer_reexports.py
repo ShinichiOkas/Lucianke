@@ -8,6 +8,10 @@
   再公開・循環・再び公開したクラスのメンバー・基底・変数の型も同じ。
 * 連鎖の途中のファイルを編集すると、import している側が結び直る（先を変える・消す・足す）。
 * 名前空間パッケージ（``__init__.py`` の無いディレクトリ）の ``nsp``・``nsp.tools`` の読みは参照を作らず、外部 ``lk://_ext/nsp`` にしない。
+* TS / JS のバレル（``web/lib/index.ts`` の ``export { flush } from './helpers'``・``export *``・``export * as ns``・別名・ディレクトリの
+  ``index.ts``）を経由した呼び出し・参照・型の使用は定義元へ ``structural``（BUG-0104）。バレルの編集で import している側が結び直る。
+* import する側の ``from x import *``（``star_use.py``）が持ち込んだ名前は ``*`` の先が公開する定義へ。``__all__`` がリテラルでない先は
+  ``heuristic``（BUG-0105）。``*`` の先の編集で結び直る。
 """
 
 from __future__ import annotations
@@ -15,13 +19,14 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from lucianke.core.model import Confidence, RelPath, Tier
+from lucianke.core.urn import CodeSel
 from lucianke.engine.indexer import Indexer
 from lucianke.index.connection import ReaderPool, open_writer
 from lucianke.index.ingest import FileFacts, ingest_file, upsert_workspace
@@ -339,7 +344,8 @@ def _facts(path: str, language: str) -> FileFacts:
 
 def test_migration_9_to_10_adds_the_tables_and_reingests_python_files(tmp_path: Path) -> None:
     """v9 の DB は ``_reexports``・``_reexport_deps`` を作り、Python のファイルの ``sha256`` を空にする（束ねた名前は取り込み直さないと
-    作れない。名前空間パッケージの読みも取り込み直しで外部でなくなる）。TS / JS・他の言語は取り込み直さない。"""
+    作れない。名前空間パッケージの読みも取り込み直しで外部でなくなる）。他の言語は取り込み直さない（TS / JS は続く v11 の移行が
+    取り込み直させる。BUG-0104）。"""
     conn = open_writer(tmp_path / "paad.sqlite")
     try:
         ensure_schema(conn)
@@ -355,8 +361,295 @@ def test_migration_9_to_10_adds_the_tables_and_reingests_python_files(tmp_path: 
         assert conn.execute("SELECT count(*) FROM _reexport_deps").fetchone()[0] == 0
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
             "a.py": "",
-            "b.ts": "a" * 64,
+            "b.ts": "",  # v11（BUG-0104）
             "R.md": "a" * 64,
         }
     finally:
         conn.close()
+
+
+def test_migration_10_to_11_reingests_ts_js_and_python_star_or_dynamic_all_files(tmp_path: Path) -> None:
+    """v10 の DB は、TS / JS のファイル（バレルの公開する名前。BUG-0104）・``from x import *`` を持つ Python のファイル（import する側の
+    ``*`` の仮の目標。BUG-0105）・``__all__`` を書くがリテラルの名前の無い Python のファイル（``dynamic_all`` の印）の ``sha256`` を空に
+    する。ほかの Python のファイル（リテラルの ``__all__``・``__all__`` も ``*`` も無い）と他の言語は取り込み直さない。"""
+    from lucianke.core.model import Kind, SymbolRecord
+    from lucianke.core.urn import Urn
+
+    conn = open_writer(tmp_path / "paad.sqlite")
+    try:
+        ensure_schema(conn)
+        _tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS_ID, "root_path": "/ws"}))
+        files = (
+            ("plain.py", "python"),
+            ("star.py", "python"),
+            ("dyn.py", "python"),
+            ("listed.py", "python"),
+            ("b.ts", "typescript"),
+            ("c.tsx", "tsx"),
+            ("d.js", "javascript"),
+            ("R.md", "markdown"),
+        )
+        for path, language in files:
+            _tx(conn, lambda c, p=path, lang=language: ingest_file(c, _facts(p, lang)))
+
+        def all_symbol(path: str) -> SymbolRecord:
+            return SymbolRecord(
+                urn=Urn(WS_ID, path, CodeSel("__all__")),
+                path=RelPath(path),
+                name="__all__",
+                qualified_name="__all__",
+                kind=Kind.VARIABLE,
+                range=_line_range(),
+                confidence=Confidence.STRUCTURAL,
+            )
+
+        for path in ("dyn.py", "listed.py"):
+            facts = _facts(path, "python")
+            _tx(conn, lambda c, f=facts, p=path: ingest_file(c, replace(f, symbols=(all_symbol(p),))))
+        fid = dict(conn.execute("SELECT path, file_id FROM files").fetchall())
+        conn.execute(
+            "INSERT INTO _reexports (file_id, name, target_urn, kind, ord) VALUES (?, '*', ?, 'star', 0)",
+            (fid["star.py"], P + "plain.py"),
+        )
+        conn.execute(
+            "INSERT INTO _reexports (file_id, name, target_urn, kind, ord) VALUES (?, 'x', '', 'all', 0)",
+            (fid["listed.py"],),
+        )
+        conn.execute("UPDATE _meta SET schema_version = 10")
+        assert ensure_schema(conn) is SchemaAction.MIGRATED
+        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 11
+        assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
+            "plain.py": "a" * 64,
+            "star.py": "",
+            "dyn.py": "",
+            "listed.py": "a" * 64,
+            "b.ts": "",
+            "c.tsx": "",
+            "d.js": "",
+            "R.md": "a" * 64,
+        }
+    finally:
+        conn.close()
+
+
+def _line_range() -> Any:
+    from lucianke.core.model import Position, Range
+
+    return Range(Position(0, 0), Position(0, 10))
+
+
+# --- BUG-0104: TS / JS のバレル --------------------------------------------------------------------
+
+
+def W(needle: str) -> int:  # noqa: N802 - 読みやすさのため
+    return line_of("web/use.ts", needle)
+
+
+async def test_ts_barrel_calls_bind_to_the_defining_functions(env: Env) -> None:
+    """``import { flush } from './lib'``（``web/lib/index.ts`` の ``export { flush } from './helpers'``）の ``flush()`` は定義元
+    ``web/lib/helpers.ts#flush`` への ``structural`` の呼び出し。別名（``export { flush as fl }``）・``export * from './math'``・
+    ``export * as deep`` の ``deep.deepGo()``・2 段（``index.ts`` → ``deep/index.ts`` の ``export *`` → ``deep/impl.ts``）・ディレクトリの
+    ``index.ts``（``from './lib/deep'``）・名前空間 import ``lib.flush()``・クラスの構築とメソッド・3 段（``export * from './local'`` →
+    ``local.ts`` の ``export { add as plus }``〈import した名前〉→ ``math.ts``）・同じファイルの定義の別名・既定の export の明示の再公開も同じ。"""
+    run = "web/use.ts#run"
+    assert env.calls_at(run, W("  flush();")) == {"web/lib/helpers.ts#flush"}
+    assert env.calls_at(run, W("fl();")) == {"web/lib/helpers.ts#flush"}
+    assert env.calls_at(run, W("add(1, 2);")) == {"web/lib/math.ts#add"}
+    assert env.calls_at(run, W("deep.deepGo();")) == {"web/lib/deep/impl.ts#deepGo"}
+    assert env.calls_at(run, W("  deepGo();")) == {"web/lib/deep/impl.ts#deepGo"}
+    assert env.calls_at(run, W("viaDir();")) == {"web/lib/deep/impl.ts#deepGo"}
+    assert env.calls_at(run, W("new Calc().run();")) == {"web/lib/math.ts#Calc", "web/lib/math.ts#Calc.run"}
+    assert env.calls_at(run, W("lib.flush();")) == {"web/lib/helpers.ts#flush"}
+    assert env.calls_at(run, W("plus(1, 2);")) == {"web/lib/math.ts#add"}
+    assert env.calls_at(run, W("ownAlias();")) == {"web/lib/local.ts#own"}
+    assert env.calls_at(run, W("mainFn();")) == {"web/lib/helpers.ts#main"}
+    assert all(conf == "structural" for *_, conf in env.rels(run, ("CALLS", "REFERENCES", "TYPE_USES")))
+    assert ("web/lib/math.ts#Options", "TYPE_USES", W("run(o: Options)"), "structural") in env.rels(run, ("TYPE_USES",))
+    assert env.name_rows(run) == []
+    imports = env.rels("web/use.ts", ("IMPORTS",))
+    assert {
+        ("web/lib/helpers.ts#flush", "IMPORTS", 1, "structural"),
+        ("web/lib/math.ts#add", "IMPORTS", 1, "structural"),
+        ("web/lib/deep/impl.ts#deepGo", "IMPORTS", 1, "structural"),
+        ("web/lib/math.ts#Options", "IMPORTS", 2, "structural"),
+        ("web/lib/deep/impl.ts#deepGo", "IMPORTS", 4, "structural"),
+    } <= imports
+    assert not any(t.startswith(("web/lib/index.ts#", "web/lib/local.ts#plus")) for t, *_ in env.rels("web/use.ts", ("IMPORTS",)))
+
+
+async def test_ts_barrel_star_skips_default_unexported_and_cycles(env: Env) -> None:
+    """``export *`` は既定の export（``mathDefault``）と export していない関数（``secret``）を公開しない。``cyc_a.ts`` と ``cyc_b.ts`` が
+    互いに ``loop`` を再公開する循環は止まる。どれも行を作らない（無い先に結ばない）。"""
+    run = "web/use.ts#run"
+    for needle in ("mathDefault();", "secret();", "loop();"):
+        assert env.calls_at(run, W(needle)) == set(), needle
+    targets = {t for t, *_ in env.rels("web/use.ts", ("IMPORTS", "CALLS", "REFERENCES"))} | {t for t, *_ in env.rels(run)}
+    assert not any(t.endswith(("#mathDefault", "#secret", "#loop")) or "cyc_" in t for t in targets)
+
+
+async def test_ts_reexports_table_records_module_exports(env: Env) -> None:
+    """``_reexports`` の TS の行: 別の定義を公開する名前の束ね先（``import``）・``export *`` の先（``star``）・公開する名前（``export``。
+    既定の export は入れない）。既定の export は ``default`` をそのローカルの定義に束ねる。"""
+
+    def of(path: str) -> set[tuple[str, str, str]]:
+        return {
+            (str(k), str(n), str(t).removeprefix(P))
+            for k, n, t in env.rows(
+                "SELECT r.kind, r.name, r.target_urn FROM _reexports r JOIN files f ON f.file_id = r.file_id WHERE f.path = ?",
+                path,
+            )
+        }
+
+    assert of("web/lib/index.ts") == {
+        ("import", "flush", "web/lib/helpers.ts#flush"),
+        ("import", "fl", "web/lib/helpers.ts#flush"),
+        ("import", "mainFn", "web/lib/helpers.ts#default"),
+        ("star", "*", "web/lib/math.ts"),
+        ("import", "deep", "web/lib/deep/index.ts"),
+        ("import", "deepGo", "web/lib/deep/index.ts#deepGo"),
+        ("import", "loop", "web/lib/cyc_a.ts#loop"),
+        ("star", "*", "web/lib/local.ts"),
+        *{("export", n, "") for n in ("flush", "fl", "mainFn", "deep", "deepGo", "loop")},
+    }
+    assert of("web/lib/local.ts") == {
+        ("import", "plus", "web/lib/math.ts#add"),
+        ("import", "ownAlias", "web/lib/local.ts#own"),
+        ("export", "plus", ""),
+        ("export", "ownAlias", ""),
+    }
+    assert of("web/lib/helpers.ts") == {("export", "flush", ""), ("import", "default", "web/lib/helpers.ts#main")}
+    assert of("web/lib/math.ts") == {
+        *{("export", n, "") for n in ("add", "Options", "Calc")},
+        ("import", "default", "web/lib/math.ts#mathDefault"),
+    }
+
+
+async def test_ts_retargeting_a_barrel_export_rebinds_importers(env: Env) -> None:
+    """バレルの ``export { flush } from './helpers'`` を ``'./helpers2'`` に変えると ``flush()`` は ``helpers2.ts#flush`` に結び直る
+    （別名 ``fl`` は変わらない）。戻せば戻る。"""
+    original = env.text("web/lib/index.ts")
+    env.write("web/lib/index.ts", original.replace("export { flush } from './helpers';", "export { flush } from './helpers2';"))
+    await env.indexer.index_file("web/lib/index.ts")
+    assert env.calls_at("web/use.ts#run", W("  flush();")) == {"web/lib/helpers2.ts#flush"}
+    assert env.calls_at("web/use.ts#run", W("lib.flush();")) == {"web/lib/helpers2.ts#flush"}
+    assert env.calls_at("web/use.ts#run", W("fl();")) == {"web/lib/helpers.ts#flush"}
+    env.write("web/lib/index.ts", original)
+    await env.indexer.index_file("web/lib/index.ts")
+    assert env.calls_at("web/use.ts#run", W("  flush();")) == {"web/lib/helpers.ts#flush"}
+
+
+async def test_ts_removing_and_restoring_export_star(env: Env) -> None:
+    """バレルから ``export * from './math'`` を消すと ``add()``・``new Calc()`` の行は消え（``plus()`` は ``local.ts`` が ``math.ts`` を
+    直接 import しているので残る）、戻すと結び直る。"""
+    original = env.text("web/lib/index.ts")
+    env.write("web/lib/index.ts", original.replace("export * from './math';\n", ""))
+    await env.indexer.index_file("web/lib/index.ts")
+    assert env.calls_at("web/use.ts#run", W("add(1, 2);")) == set()
+    assert env.calls_at("web/use.ts#run", W("new Calc().run();")) == set()
+    assert env.calls_at("web/use.ts#run", W("plus(1, 2);")) == {"web/lib/math.ts#add"}
+    env.write("web/lib/index.ts", original)
+    await env.indexer.index_file("web/lib/index.ts")
+    assert env.calls_at("web/use.ts#run", W("add(1, 2);")) == {"web/lib/math.ts#add"}
+    assert env.calls_at("web/use.ts#run", W("new Calc().run();")) == {"web/lib/math.ts#Calc", "web/lib/math.ts#Calc.run"}
+
+
+async def test_ts_unexporting_and_deleting_at_the_end_of_the_chain(env: Env) -> None:
+    """連鎖の終わりの ``math.ts`` で ``add`` の ``export`` を外すと（シンボルは残る）``export *`` は公開しなくなり行が消える。
+    ``deep/impl.ts`` から ``deepGo`` を消すと 3 つの書き方の行が消え、戻せば結び直る（``use.ts`` を直接 import していなくても）。"""
+    math = env.text("web/lib/math.ts")
+    env.write("web/lib/math.ts", math.replace("export function add(", "function add("))
+    await env.indexer.index_file("web/lib/math.ts")
+    assert env.calls_at("web/use.ts#run", W("add(1, 2);")) == set()
+    env.write("web/lib/math.ts", math)
+    await env.indexer.index_file("web/lib/math.ts")
+    assert env.calls_at("web/use.ts#run", W("add(1, 2);")) == {"web/lib/math.ts#add"}
+    impl = env.text("web/lib/deep/impl.ts")
+    env.write("web/lib/deep/impl.ts", "export function other(): number {\n  return 1;\n}\n")
+    await env.indexer.index_file("web/lib/deep/impl.ts")
+    for needle in ("deep.deepGo();", "  deepGo();", "viaDir();"):
+        assert env.calls_at("web/use.ts#run", W(needle)) == set(), needle
+    env.write("web/lib/deep/impl.ts", impl)
+    await env.indexer.index_file("web/lib/deep/impl.ts")
+    for needle in ("deep.deepGo();", "  deepGo();", "viaDir();"):
+        assert env.calls_at("web/use.ts#run", W(needle)) == {"web/lib/deep/impl.ts#deepGo"}, needle
+
+
+async def test_ts_body_only_barrel_edit_does_not_reingest_importers(env: Env) -> None:
+    """公開する名前が変わらない編集（コメント・関数の本体）では、バレルをたどった側を取り込み直さない。"""
+    before = env.indexer.reingested_importers
+    env.write("web/lib/index.ts", env.text("web/lib/index.ts") + "// comment\n")
+    await env.indexer.index_file("web/lib/index.ts")
+    env.write("web/lib/helpers.ts", env.text("web/lib/helpers.ts").replace("return 0;", "return 10;"))
+    await env.indexer.index_file("web/lib/helpers.ts")
+    assert env.indexer.reingested_importers == before
+    assert env.calls_at("web/use.ts#run", W("  flush();")) == {"web/lib/helpers.ts#flush"}
+
+
+# --- BUG-0105: import する側の from x import * ------------------------------------------------------
+
+
+def S(needle: str) -> int:  # noqa: N802 - 読みやすさのため
+    return line_of("star_use.py", needle)
+
+
+async def test_importing_side_star_binds_the_provided_names(env: Env) -> None:
+    """``star_use.py`` の ``from pkg import *``（リテラルの ``__all__``。``flush`` は ``pkg/__init__.py`` がさらに再び公開する）・
+    ``from pkg.stars import *``（``__all__``）・``from pkg.loose import *``（``__all__`` なし）・``from pkg.widgets import *`` が持ち込んだ
+    名前の呼び出し・読み・構築・メソッド・変数の型・基底は定義元へ ``structural``。組み込み名は今までどおり。"""
+    go = "star_use.py#go"
+    assert env.calls_at(go, S("    flush()")) == {"pkg/helpers.py#flush"}
+    assert env.calls_at(go, S("deep_go()")) == {"pkg/sub/impl.py#deep_go"}
+    assert env.calls_at(go, S("starred()")) == {"pkg/stars.py#starred"}
+    assert env.calls_at(go, S("public()")) == {"pkg/loose.py#public"}
+    assert env.calls_at(go, S("Widget().spin()")) == {"pkg/widgets.py#Widget", "pkg/widgets.py#Widget.spin"}
+    assert env.calls_at(go, S("ITEM.spin()")) == {"pkg/widgets.py#Widget.spin"}
+    assert env.calls_at(go, S('TokenEstimator().count("z")')) == {"pkg/est.py#TokenEstimator", "pkg/est.py#TokenEstimator.count"}
+    assert env.calls_at(go, S('len("x")')) == {"lk://_ext/builtins#len"}
+    assert ("pkg/helpers.py#flush", "REFERENCES", S("return flush"), "structural") in env.rels(go)
+    assert env.calls_at("star_use.py", S("ITEM = Widget()")) == {"pkg/widgets.py#Widget"}
+    assert env.rels("star_use.py#Mine", ("INHERITS",)) == {("pkg/widgets.py#Widget", "INHERITS", S("class Mine"), "structural")}
+    assert env.rows("SELECT type_urn FROM _var_types WHERE var_urn = ?", P + "star_use.py#ITEM") == [
+        (P + "pkg/widgets.py#Widget",)
+    ]
+    assert all(conf == "structural" for t, _, ln, conf in env.rels(go) if ln != S("dyn_fn()"))
+
+
+async def test_importing_side_star_does_not_bind_names_no_source_provides(env: Env) -> None:
+    """``hidden``（``pkg/stars.py`` の ``__all__`` に無く、``pkg`` の ``__all__`` にも無い）・``_private``・どの ``*`` の先にも無い
+    ``fresh`` は行を作らない（仮の目標 ``star_use.py#…`` も残さない）。型の分からない受け手 ``nowhere.attr()`` は今までどおり名前だけ。"""
+    go = "star_use.py#go"
+    for needle in ("hidden()", "_private()", "fresh()"):
+        assert env.calls_at(go, S(needle)) == set(), needle
+    assert not any(
+        t.startswith("star_use.py#") and t not in ("star_use.py#ITEM", "star_use.py#go", "star_use.py#Mine")
+        for t, *_ in env.rels("star_use.py", ("IMPORTS", "CALLS", "REFERENCES", "INHERITS", "TYPE_USES")) | env.rels(go)
+    )
+    assert env.name_rows(go) == [("attr", S("nowhere.attr()"), "call")]
+
+
+async def test_dynamic_all_star_source_binds_by_name_as_heuristic(env: Env) -> None:
+    """``pkg/dyn.py`` の ``__all__ = list(_EXPORTED)``（リテラルでない）: 公開する名前が決まらないので、公開名の規則で見つけた ``dyn_fn``
+    を ``heuristic`` で結ぶ（名前だけで決めた。``_reexports`` に ``dynamic_all`` の印）。リテラルにすると ``structural`` になる。"""
+    assert env.rels("star_use.py#go") >= {("pkg/dyn.py#dyn_fn", "CALLS", S("dyn_fn()"), "heuristic")}
+    assert env.rows(
+        "SELECT r.kind, r.name FROM _reexports r JOIN files f ON f.file_id = r.file_id WHERE f.path = 'pkg/dyn.py'"
+    ) == [("dynamic_all", "*")]
+    env.write("pkg/dyn.py", env.text("pkg/dyn.py").replace("__all__ = list(_EXPORTED)", '__all__ = ["dyn_fn"]'))
+    await env.indexer.index_file("pkg/dyn.py")
+    assert ("pkg/dyn.py#dyn_fn", "CALLS", S("dyn_fn()"), "structural") in env.rels("star_use.py#go")
+
+
+async def test_star_provider_edits_rebind_importers(env: Env) -> None:
+    """``*`` の先の編集で import する側が結び直る: ``pkg/loose.py`` に ``fresh`` を足すと ``fresh()`` が結ばれ、消すと消える。
+    ``pkg/stars.py`` の ``__all__`` に ``hidden`` を足すと ``hidden()`` が結ばれる。"""
+    loose = env.text("pkg/loose.py")
+    env.write("pkg/loose.py", loose + "\n\ndef fresh():\n    return 9\n")
+    await env.indexer.index_file("pkg/loose.py")
+    assert env.calls_at("star_use.py#go", S("fresh()")) == {"pkg/loose.py#fresh"}
+    env.write("pkg/loose.py", loose)
+    await env.indexer.index_file("pkg/loose.py")
+    assert env.calls_at("star_use.py#go", S("fresh()")) == set()
+    stars = env.text("pkg/stars.py")
+    env.write("pkg/stars.py", stars.replace('__all__ = ["starred"]', '__all__ = ["starred", "hidden"]'))
+    await env.indexer.index_file("pkg/stars.py")
+    assert env.calls_at("star_use.py#go", S("hidden()")) == {"pkg/stars.py#hidden"}
