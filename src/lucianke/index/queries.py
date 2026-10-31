@@ -49,6 +49,7 @@ __all__ = [
     "files_by_paths",
     "files_fingerprint",
     "files_in_scope",
+    "attr_defs_in_file",
     "attr_defs_named",
     "external_members_named",
     "members_named",
@@ -813,6 +814,30 @@ def attr_defs_named(
             is_test=bool(is_test),
         )
         for cls, n, path, line, col, is_test in rows
+    ]
+
+
+def attr_defs_in_file(conn: sqlite3.Connection, workspace_id: str, path: str) -> list[AttrDefRow]:
+    """ファイル ``path`` のインスタンス属性の定義（T-06 の対象。BUG-0122）。（行、列）順。v9 より前の DB は空。"""
+    try:
+        rows = conn.execute(
+            "SELECT a.class_urn, a.name, f.path, a.line, a.col, f.is_test FROM _attr_defs a"
+            " JOIN files f ON f.file_id = a.file_id WHERE f.workspace_id = ? AND f.path = ? ORDER BY a.line, a.col",
+            (workspace_id, path),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+    return [
+        AttrDefRow(
+            class_urn=str(cls),
+            name=str(n),
+            path=RelPath(p),
+            site=Position(int(line) - 1, max(int(col) - 1, 0)),
+            is_test=bool(is_test),
+        )
+        for cls, n, p, line, col, is_test in rows
     ]
 
 

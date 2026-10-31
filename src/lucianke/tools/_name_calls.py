@@ -70,7 +70,9 @@ __all__ = [
     "TargetSites",
     "Unattributed",
     "Verdict",
+    "attr_record",
     "family_of",
+    "is_instance_attr",
     "owned_text",
     "pool_of",
     "sample_text",
@@ -128,11 +130,12 @@ def site_key(row: NameCallRow) -> tuple[str, int, int]:
 
 
 def _label(sym: SymbolRecord) -> str:
-    extra = " (instance attribute)" if _is_instance_attr(sym) else ""
+    extra = " (instance attribute)" if is_instance_attr(sym) else ""
     return f"{sym.qualified_name}{extra} @{sym.path}:{sym.range.start.line + 1}"
 
 
-def _is_instance_attr(sym: SymbolRecord) -> bool:
+def is_instance_attr(sym: SymbolRecord) -> bool:
+    """インスタンス属性の仮の ``SymbolRecord``（``attr_record``）か。"""
     return sym.kind is Kind.FIELD and "instance" in sym.modifiers
 
 
@@ -141,8 +144,9 @@ def _external_label(urn: str) -> str:
     return urn.removeprefix(_EXTERNAL_PREFIX).replace("#", ".", 1)
 
 
-def _attr_record(row: AttrDefRow) -> SymbolRecord | None:
-    """インスタンス属性の定義（``_attr_defs``）を候補として扱うための仮の ``SymbolRecord``（``symbols`` には無い）。"""
+def attr_record(row: AttrDefRow) -> SymbolRecord | None:
+    """インスタンス属性の定義（``_attr_defs``）を候補・T-06 の対象（BUG-0122）として扱うための仮の ``SymbolRecord``（``symbols`` には
+    無い。``Field``・``modifiers = ("instance",)``・URN は ``<クラス>.<名前>``）。"""
     try:
         owner = parse(row.class_urn)
     except ValueError:
@@ -259,7 +263,7 @@ class Verdict:
         def cand(s: SymbolRecord) -> dict[str, Any]:
             out: dict[str, Any] = {"qualified_name": s.qualified_name, "path": str(s.path), "line": s.range.start.line + 1}
             if self.pool == "ref":  # 属性の読み書きの候補はメンバーの種別まで（インスタンス属性はシンボルではない）
-                out["kind"] = "instance_attribute" if _is_instance_attr(s) else s.kind.value
+                out["kind"] = "instance_attribute" if is_instance_attr(s) else s.kind.value
             return out
 
         return {
@@ -427,7 +431,7 @@ class NameIndex:
                 if base in declared or resolver.has_member(base, name):
                     merged = True
                     break
-            rec = None if merged else _attr_record(r)
+            rec = None if merged else attr_record(r)
             if rec is not None:
                 out.append((rec, r.is_test))
         return out

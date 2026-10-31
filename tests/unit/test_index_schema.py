@@ -34,7 +34,7 @@ ALLOWED_INTERNAL_TABLES = {
     "_var_types",  # BUG-0094
     "_reexports",  # BUG-0100
     "_reexport_deps",  # BUG-0100
-    "_type_aliases",  # BUG-0108（v13 から型注釈つきのメンバーの型の構成も。BUG-0113。v14 は表を変えない。BUG-0117）
+    "_type_aliases",  # BUG-0108（v13 から型注釈つきのメンバーの型の構成も。BUG-0113。v14・v15 は表を変えない。BUG-0117・BUG-0122）
 }
 ALLOWED_TRIGGERS = {"symbols_ai", "symbols_ad", "symbols_au"}
 ALLOWED_INTERNAL_INDEXES = {

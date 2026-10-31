@@ -253,6 +253,18 @@ def _migrate_13_to_14(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE files SET sha256 = '' WHERE language = 'python'")
 
 
+def _migrate_14_to_15(conn: sqlite3.Connection) -> None:
+    """v15: 型の分かる受け手のインスタンス属性の読み書き（``a: Src`` の ``a.skipped``、``self.skipped``）を、``self.skipped = 0`` を代入した
+    クラスのインスタンス属性（``_attr_defs`` の行。URN は ``<クラス>.skipped``）に ``structural`` で結ぶ（BUG-0122。表は変えない）。
+
+    同じファイルのクラスの受け手は抽出器が整えに回すようになったので（取り込みのときにしか直せない）、Python / TS / JS のファイルの
+    ``sha256`` を空にして、次の差分走査で取り込み直させる。
+    """
+    conn.execute(
+        "UPDATE files SET sha256 = '' WHERE language IN ('python', 'typescript', 'tsx', 'javascript', 'jsx')"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -267,6 +279,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _migrate_11_to_12,
     12: _migrate_12_to_13,
     13: _migrate_13_to_14,
+    14: _migrate_14_to_15,
 }
 
 

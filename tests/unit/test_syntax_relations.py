@@ -274,9 +274,10 @@ def test_self_method_call_and_guard_text(payment):
 
 
 def test_self_member_missing_in_the_class_is_not_filled_with_another_class(payment):
-    # ``self.currency = "JPY"``: ``PaymentProcessor`` に ``currency`` の定義は無い（``PaymentRequest.currency`` は別のクラス）
+    # ``self.currency = "JPY"``: ``PaymentProcessor`` に ``currency`` のシンボルは無い（``PaymentRequest.currency`` は別のクラス）。
+    # 自分のインスタンス属性として求め、整えが ``_attr_defs`` から結ぶ（BUG-0122）
     r = _one(payment, kind="REFERENCES", name="currency", source="#PaymentProcessor.__init__")
-    assert r.target_urn is None
+    assert r.target_urn == f"{PAYMENT}#PaymentProcessor.currency"
     assert r.use_kind == "w"
 
 

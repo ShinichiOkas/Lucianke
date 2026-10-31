@@ -6,6 +6,10 @@ T-06 処理規約 9、T-07 処理規約 11）。
 ``_member_refs`` に結べないまま残る（``index/inherited.blocked_member_refs``）。対象のクラスがその基底の後ろにあれば、その呼び出しは
 対象に届くかもしれないので、``structural`` の T-06 / T-07 は件数・理由・先頭の位置を ``warnings`` と ``data.unattributed_calls`` に書く
 （受け手の型は構文から分かっているので、名前の一致〔BUG-0071〕の「型不明・曖昧」には回さない）。
+
+受け手の型が対象のクラスの基底で、その線形化のどこにも同名のメンバー・インスタンス属性が無い参照（``b: Base`` の ``b.skipped`` で
+``skipped`` は派生クラスの ``self.skipped = 0``。``reason = base_receiver``。BUG-0122）も同じく書く。実体が対象のクラスのインスタンスなら
+対象に届くが、構文からは分からない（黙って捨てない）。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ DATA_SAMPLE_MAX = 20  # data.unattributed_calls[].sites に並べる位置の数
 _REASON_TEXT = {
     "external_base": "an external base whose members are unknown",
     "unknown_base": "a base that is not a known class (an alias or an unresolved name)",
+    "base_receiver": "the receiver is typed as a base class that has no member or instance attribute of that name",
 }
 
 
@@ -79,13 +84,22 @@ def blocked_notes(
     for reason in sorted(groups):
         group = groups[reason]
         what = "call site(s)" if all(r.relation_kind == "CALLS" for r in group) else "site(s)"
-        via = sorted({f"{_short(r.class_urn)} -> {_short(r.blocker)}" for r in group})
-        shown = ", ".join(via[:3]) + (f", … {len(via) - 3} more" if len(via) > 3 else "")
-        notes.warnings.append(
-            f"{len(group)} {what} of .{sym.name} (super() or an inherited member) may reach {sym.qualified_name} but are"
-            f" not attributed: {_REASON_TEXT.get(reason, reason)} comes first in the receiver class's MRO and may define"
-            f" {sym.name!r} ({shown}); e.g. {_sample(group)} (data.unattributed_calls)"
-        )
+        if reason == "base_receiver":
+            bases = sorted({_short(r.class_urn) for r in group})
+            shown = ", ".join(bases[:3]) + (f", … {len(bases) - 3} more" if len(bases) > 3 else "")
+            notes.warnings.append(
+                f"{len(group)} {what} of .{sym.name} may reach {sym.qualified_name} but are not attributed: the receiver is"
+                f" typed as a base class ({shown}) that has no member or instance attribute {sym.name!r}, so only an"
+                f" instance of a subclass can have it; e.g. {_sample(group)} (data.unattributed_calls)"
+            )
+        else:
+            via = sorted({f"{_short(r.class_urn)} -> {_short(r.blocker)}" for r in group})
+            shown = ", ".join(via[:3]) + (f", … {len(via) - 3} more" if len(via) > 3 else "")
+            notes.warnings.append(
+                f"{len(group)} {what} of .{sym.name} (super() or an inherited member) may reach {sym.qualified_name} but"
+                f" are not attributed: {_REASON_TEXT.get(reason, reason)} comes first in the receiver class's MRO and may"
+                f" define {sym.name!r} ({shown}); e.g. {_sample(group)} (data.unattributed_calls)"
+            )
         notes.unattributed.append(
             {
                 "name": sym.name,

@@ -109,9 +109,10 @@ async def test_first_scan_relations_calls(env: Env) -> None:
     sources = {r[0] for r in rows}
     assert any(s.endswith("#create_order") for s in sources), rows
     assert all(r[3] == "structural" for r in rows)
-    # 目標のシンボルが symbols に実在する（宙に浮いた行が残らない）
+    # 目標のシンボルが symbols に実在するか、インスタンス属性（``_attr_defs``。BUG-0122）である（宙に浮いた行が残らない）
     dangling = env.rows(
         "SELECT COUNT(*) FROM relations WHERE instr(target_urn, '#') > 0 AND target_urn NOT IN (SELECT urn FROM symbols)"
+        " AND target_urn NOT IN (SELECT class_urn || '.' || name FROM _attr_defs)"
     )
     assert dangling == [(0,)]
     # target_file_id が埋まる

@@ -188,7 +188,7 @@ async def test_module_variable_types_and_cross_file_aliases(env: Env) -> None:
 
 def test_migration_13_to_14_reingests_python_files(tmp_path: Path) -> None:
     """v13 の DB は表を変えず、Python のファイルの ``sha256`` を空にする（受け手の注釈の読み方は取り込み直さないと直らない）。
-    TS / JS と他の言語は取り込み直さない。"""
+    他の言語は取り込み直さない（続く v15 が TS / JS も取り込み直す。BUG-0122）。"""
     conn = open_writer(tmp_path / "paad.sqlite")
 
     def tx(fn: Any) -> None:
@@ -224,8 +224,8 @@ def test_migration_13_to_14_reingests_python_files(tmp_path: Path) -> None:
         assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 14
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
             "a.py": "",
-            "b.ts": "a" * 64,
-            "d.js": "a" * 64,
+            "b.ts": "",
+            "d.js": "",
             "R.md": "a" * 64,
         }
     finally:

@@ -107,8 +107,29 @@ def _not_found(message: str, **details: Any) -> LuciankeError:
     return LuciankeError(ErrorCode.E_TARGET_NOT_FOUND, message, details=details)
 
 
-def resolve_target(conn: sqlite3.Connection, ws: Workspace, ref: TargetRefArg) -> SymbolRecord:
-    """``urn`` > ``line`` > ``symbol_name`` の順（§5.3 規則 4）。解決できなければ ``LuciankeError``。"""
+def _instance_attr(
+    conn: sqlite3.Connection, ws_id: str, path: str, qualified: str | None = None, name: str | None = None
+) -> list[SymbolRecord]:
+    """ファイル ``path`` のインスタンス属性（``self.x = ...``。シンボルではない）のうち、修飾名が ``qualified``、または名前が ``name`` の
+    もの（T-06 の対象。BUG-0122）。仮の ``SymbolRecord``（``Field``・``modifiers = ("instance",)``）で返す。"""
+    from lucianke.tools._name_calls import attr_record  # 循環 import を避けるため遅延
+
+    out: list[SymbolRecord] = []
+    for row in queries.attr_defs_in_file(conn, ws_id, path):
+        rec = attr_record(row)
+        if rec is not None and (rec.qualified_name == qualified or (name is not None and rec.name == name)):
+            out.append(rec)
+    return out
+
+
+def resolve_target(
+    conn: sqlite3.Connection, ws: Workspace, ref: TargetRefArg, *, instance_attrs: bool = False
+) -> SymbolRecord:
+    """``urn`` > ``line`` > ``symbol_name`` の順（§5.3 規則 4）。解決できなければ ``LuciankeError``。
+
+    ``instance_attrs`` なら、シンボルが見つからない ``urn`` / ``symbol_name`` をインスタンス属性（``_attr_defs``。``Src.skipped``）にも
+    当てる（T-06 の対象。BUG-0122）。
+    """
     ws_id = ws.workspace_id
     if ref.urn is not None:
         try:
@@ -134,6 +155,10 @@ def resolve_target(conn: sqlite3.Connection, ws: Workspace, ref: TargetRefArg) -
             return found[0]
         if len(found) > 1:
             raise _ambiguous(ref.urn, found)
+        if instance_attrs:
+            attrs = _instance_attr(conn, ws_id, urn.path, qualified)
+            if len(attrs) == 1:
+                return attrs[0]
         raise _not_found(f"no symbol with urn {ref.urn}", urn=ref.urn)
     if ref.path is None:
         raise LuciankeError(
@@ -163,6 +188,10 @@ def resolve_target(conn: sqlite3.Connection, ws: Workspace, ref: TargetRefArg) -
         if len(exact) == 1:
             return exact[0]
         found = exact or found
+        if not found and instance_attrs:
+            found = _instance_attr(conn, ws_id, str(rel), ref.symbol_name)
+            if not found and "." not in ref.symbol_name:
+                found = _instance_attr(conn, ws_id, str(rel), name=ref.symbol_name)
         if not found:
             raise _not_found(
                 f"symbol {ref.symbol_name!r} not found in {rel}", path=str(rel), symbol_name=ref.symbol_name

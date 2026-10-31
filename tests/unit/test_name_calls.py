@@ -96,9 +96,11 @@ def test_untyped_receivers_are_name_only(source: str) -> None:
 
 
 def test_known_receiver_without_the_member_is_not_name_only() -> None:
-    """受け手の型が分かっている（同じファイルのクラス・import したクラス）なら、名前で結ぶ候補にしない。"""
+    """受け手の型が分かっている（同じファイルのクラス・import したクラス）なら、名前で結ぶ候補にしない。同じファイルのクラスに無い
+    メンバーは、そのクラスのメンバーとして求めて整えに任せる（インスタンス属性に結ぶか、結べないまま残す。別のクラスの同名にしない。
+    BUG-0122）。"""
     local = _call(_candidates("class R:\n    pass\n\ndef f():\n    r = R()\n    return r.pack()\n"), "pack")
-    assert (local.target_urn, local.name_only) == (None, False)
+    assert local.target_urn is not None and local.target_urn.endswith("#R.pack") and local.name_only is False
     imported = _call(
         _candidates("from app.engine import Runner\n\ndef f(r: Runner):\n    return r.pack()\n"), "pack"
     )

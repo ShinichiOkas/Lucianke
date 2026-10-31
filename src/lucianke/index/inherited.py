@@ -47,6 +47,13 @@
   メンバー（``limit: number``・メソッド）・決まらない道は名前だけ（``_name_calls``。名前は道の最後）。メンバー・その型のファイルの
   整えで結び直す（再帰 CTE が ``_type_aliases`` を逆にたどり、型の変わったメンバーの持ち主〈``parent_urn``〉も足す）。
 
+* **インスタンス属性**（BUG-0122）: ``a: Src`` の ``a.skipped``（``Src.__init__`` の ``self.skipped = 0``）のように、線形化のどこにも
+  メンバー（シンボル）が無い名前は、先に当たって探すのをやめた基底より前のクラスのうち最初にその名前のインスタンス属性（``_attr_defs``）を
+  持ち、基底のものにまとまらない（``merged``。名前の一致の候補と同じ規則）クラスの ``<クラス>.skipped`` に結ぶ（``structural``。
+  シンボルではない先の ``relations`` の行。``super()`` は結ばない）。同じファイルのクラスの受け手も抽出器がここに回す。どれも無ければ
+  結べないまま残し、受け手の型が対象のクラスの基底なら ``blocked_member_refs`` が ``base_receiver`` で返す（T-06 が理由つきで書く）。
+  インスタンス属性が消えたら（クラスのファイルの取り込み・削除）それを指す行も消す（``ingest.py``）。
+
 ``_member_refs`` はファイルの取り込み（``ingest_file``）で全置換され、ファイルの削除で CASCADE で消える。
 """
 
@@ -61,7 +68,7 @@ from typing import Final
 from lucianke.core.model import Kind
 from lucianke.core.mro import TRANSPARENT_EXTERNAL_BASES, c3_linearize
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, parse
-from lucianke.index.ingest import ensure_external_symbol
+from lucianke.index.ingest import attr_urn, ensure_external_symbol
 
 __all__ = [
     "CLASS_KINDS",
@@ -118,6 +125,8 @@ def _split_member(target: str) -> tuple[str, str] | None:
         return None
 
 
+
+
 def _external_member(type_urn: str, name: str) -> str | None:
     """外部の型 ``lk://_ext/threading#Lock`` のメンバー ``lk://_ext/threading#Lock.acquire``。"""
     try:
@@ -145,7 +154,11 @@ def park_member_refs(conn: sqlite3.Connection, file_id: int) -> int:
         "SELECT relation_id, source_urn, target_urn, relation_kind, call_site_line, call_site_col, use_kind,"
         " guard_condition, confidence_level FROM relations"
         f" WHERE source_file_id = ? AND relation_kind IN ({marks}) AND instr(target_urn, '#') > 0"
-        " AND target_urn NOT IN (SELECT urn FROM symbols)",
+        " AND target_urn NOT IN (SELECT urn FROM symbols)"
+        # 結んだインスタンス属性（シンボルでない先。BUG-0122）の行は、退避行から作ったもの。もう一度退避しない（結び直しが作り直す）
+        " AND NOT EXISTS (SELECT 1 FROM _member_refs m WHERE m.file_id = relations.source_file_id"
+        "  AND m.call_site_line = relations.call_site_line AND m.call_site_col = relations.call_site_col"
+        "  AND m.resolved_urn = relations.target_urn)",
         (file_id, *_PARKED_KINDS),
     ).fetchall()
     # 目標のクラスの部分 → ("member"〈退避〉/ "name"〈名前だけ〉/ ""〈触らない〉, 受け手, 受け手からメンバーまでの途中の名前)
@@ -266,6 +279,7 @@ class _Resolver:
         self._var_types: dict[str, str | None] = {}
         self._aliases: dict[str, tuple[str, list[list[tuple[str, str]]]] | None] = {}
         self._alias_found: dict[tuple[str, str], _Lookup] = {}
+        self._attrs: dict[tuple[str, str], bool] = {}
 
     def _kind(self, urn: str) -> str | None:
         if urn not in self._kinds:
@@ -517,15 +531,48 @@ class _Resolver:
     def has_member(self, cls: str, name: str) -> bool:
         return not cls.startswith(_EXTERNAL_PREFIX) and self._member(cls, name) is not None
 
+    def declares(self, cls: str, name: str) -> bool:
+        """``cls`` のメソッドの中に ``self.name = ...`` / ``this.name = ...`` がある（インスタンス属性。``_attr_defs``。BUG-0122）。"""
+        key = (cls, name)
+        if key not in self._attrs:
+            try:
+                row = self._conn.execute(
+                    "SELECT 1 FROM _attr_defs WHERE name = ? AND class_urn = ? LIMIT 1", (name, cls)
+                ).fetchone()
+            except sqlite3.OperationalError as exc:  # v9 より前の DB（移行前に読んだ）。インスタンス属性は無いとする
+                if "no such" not in str(exc):
+                    raise
+                row = None
+            self._attrs[key] = row is not None
+        return self._attrs[key]
+
+    def merged(self, cls: str, name: str) -> bool:
+        """``cls`` のインスタンス属性 ``name`` が、線形化の基底（中身の分からない外部の基底・クラスでない基底より前）の同名のシンボルか
+        インスタンス属性と同じ属性か（基底のものに 1 つにまとめる。名前の一致の候補と同じ規則。``tools/_name_calls``。BUG-0095）。"""
+        for base in (self.order(cls) or [cls])[1:]:
+            if base.startswith(_EXTERNAL_PREFIX):
+                if base in TRANSPARENT_EXTERNAL_BASES:
+                    continue
+                return False
+            if self._kind(base) not in CLASS_KINDS:
+                return False
+            if self.declares(base, name) or self._member(base, name) is not None:
+                return True
+        return False
+
     def _lookup(self, cls: str, name: str, after: bool) -> _Lookup:
         order = self.order(cls)
         if order is None:
             return _Lookup(None, None, ())  # 循環・矛盾した並び
+        # メンバー（シンボル）が線形化のどこにも無ければ、インスタンス属性（``self.name = ...``）に結ぶ（BUG-0122）: 先に当たって探すのを
+        # やめた基底より前のクラスのうち、最初に ``name`` を持ち、基底のものにまとまらないもの。``super()`` はクラスの属性しか引かない
+        attr: str | None = None
         for c in order[1:] if after else order:
             if c.startswith(_EXTERNAL_PREFIX):
                 if c in TRANSPARENT_EXTERNAL_BASES:
                     continue
-                return _Lookup(None, c, tuple(order))  # 中身の分からない外部の基底: 同名を定義しているかもしれない
+                # 中身の分からない外部の基底: 同名を定義しているかもしれない（自分のメソッドで代入したインスタンス属性はその前に結ぶ）
+                return _Lookup(attr, None if attr else c, tuple(order))
             if self._kind(c) == ALIAS_KIND and c != cls:
                 # 型の別名を継承したインターフェース（``interface Options extends KyOptions``）: 別名の構成から探す（BUG-0108）
                 sub = self.lookup_alias(c, name)
@@ -534,14 +581,16 @@ class _Resolver:
                 if sub.inline:
                     return _Lookup(None, None, tuple(order), inline=True)
                 if sub.untyped:
-                    return _Lookup(None, c, tuple(order))  # 構成の中身が分からない: 同名を持つかもしれない
+                    return _Lookup(attr, None if attr else c, tuple(order))  # 構成の中身が分からない: 同名を持つかもしれない
                 continue
             if self._kind(c) not in CLASS_KINDS:
-                return _Lookup(None, c, tuple(order))  # クラスでない基底（別名など）: 実体が分からない
+                return _Lookup(attr, None if attr else c, tuple(order))  # クラスでない基底（別名など）: 実体が分からない
             hit = self._member(c, name)
             if hit is not None:
                 return _Lookup(hit, None, tuple(order))
-        return _Lookup(None, None, tuple(order))
+            if attr is None and not after and self.declares(c, name) and not self.merged(c, name):
+                attr = attr_urn(c, name)
+        return _Lookup(attr, None, tuple(order))
 
 
 MemberResolver = _Resolver
@@ -631,8 +680,10 @@ class BlockedRef:
 
     source_urn: str
     class_urn: str  # 受け手のクラス（super() なら super を書いたクラス）
-    blocker: str  # 線形化で対象のクラスより先に当たって探すのをやめた基底
-    reason: str  # ``external_base``（中身の分からない外部の基底）| ``unknown_base``（クラスでない基底）
+    blocker: str  # 線形化で対象のクラスより先に当たって探すのをやめた基底（``base_receiver`` は受け手の型のクラス）
+    # ``external_base``（中身の分からない外部の基底）| ``unknown_base``（クラスでない基底）| ``base_receiver``（受け手の型が対象の
+    # クラスの基底で、名前を持たない。BUG-0122）
+    reason: str
     via_super: bool
     relation_kind: str
     use_kind: str | None
@@ -646,7 +697,9 @@ def blocked_member_refs(conn: sqlite3.Connection, workspace_id: str, target_urn:
     """対象のメンバー ``target_urn``（``path#Cls.name``）に届くかもしれないのに結ばなかった参照（BUG-0081）。
 
     ``_member_refs`` の結べなかった行（``resolved_urn IS NULL``）のうち、名前が同じで、受け手のクラスの線形化で ``Cls`` が
-    探すのをやめた基底（外部・クラスでない）の後ろにあり、その間に同名を持つワークスペースのクラスが無いもの。並びは（パス、行、列）。
+    探すのをやめた基底（外部・クラスでない）の後ろにあり、その間に同名を持つワークスペースのクラスが無いもの。受け手の型が ``Cls`` の
+    （真の）基底で、その線形化のどこにも同名のメンバー・インスタンス属性が無いもの（``reason = base_receiver``。BUG-0122）も。
+    並びは（パス、行、列）。
     """
     split = _split_member(target_urn)
     if split is None:
@@ -668,17 +721,32 @@ def blocked_member_refs(conn: sqlite3.Connection, workspace_id: str, target_urn:
     out: list[BlockedRef] = []
     for source, cls, via_super, kind, use_kind, line, col, path, is_test in rows:
         lk = resolver.lookup(str(cls), name, after=bool(via_super))
-        if lk.blocker is None or owner not in lk.order:
-            continue
-        start, end = lk.order.index(lk.blocker) + 1, lk.order.index(owner)
-        if end < start or any(resolver.has_member(c, name) for c in lk.order[start:end]):
-            continue
+        if lk.blocker is None:
+            # 受け手の型が対象のクラスの基底で、その線形化のどこにも ``name`` が無い（メンバーもインスタンス属性も）: 実体が対象のクラスの
+            # インスタンスなら対象に届く（``b: Base`` の ``b.skipped`` で ``skipped`` は派生クラス ``Src`` の ``self.skipped = 0``。BUG-0122）
+            if (
+                lk.found is not None
+                or lk.untyped
+                or lk.inline
+                or via_super
+                or str(cls) not in (resolver.order(owner) or [owner])[1:]
+            ):
+                continue
+            blocker, reason = str(cls), "base_receiver"
+        else:
+            if owner not in lk.order:
+                continue
+            start, end = lk.order.index(lk.blocker) + 1, lk.order.index(owner)
+            if end < start or any(resolver.has_member(c, name) for c in lk.order[start:end]):
+                continue
+            blocker = lk.blocker
+            reason = "external_base" if lk.blocker.startswith(_EXTERNAL_PREFIX) else "unknown_base"
         out.append(
             BlockedRef(
                 source_urn=str(source),
                 class_urn=str(cls),
-                blocker=lk.blocker,
-                reason="external_base" if lk.blocker.startswith(_EXTERNAL_PREFIX) else "unknown_base",
+                blocker=blocker,
+                reason=reason,
                 via_super=bool(via_super),
                 relation_kind=str(kind),
                 use_kind=None if use_kind is None else str(use_kind),

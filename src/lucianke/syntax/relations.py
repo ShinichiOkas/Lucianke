@@ -1405,15 +1405,24 @@ class _Extractor:
             return None
         if any(k == "other" for k, _ in order):
             return self._requested_member(value, name)
+        attr = self._has_instance_attr(value, name)
         for k, v in order[1:]:
             if k == "ext":
                 if v in TRANSPARENT_EXTERNAL_BASES:
                     continue
-                return None
+                # 中身の分からない外部の基底より前のクラスが自分のメソッドで代入したインスタンス属性なら整えが結ぶ（BUG-0122）
+                return self._requested_member(value, name) if attr else None
             hit = self.by_qualified.get(f"{v}.{name}")
             if hit is not None:
                 return str(hit.urn)
-        return None
+            attr = attr or self._has_instance_attr(v, name)
+        # メンバーが無い: インスタンス属性（``self.name = ...``）は整えが ``_attr_defs`` から結び、どれでもなければ結べないまま
+        # ``_member_refs`` に残す（受け手の型の基底を対象にした T-06 が理由つきで書く。黙って捨てない。BUG-0122）
+        return self._requested_member(value, name)
+
+    def _has_instance_attr(self, class_qualified: str, name: str) -> bool:
+        cid = self.class_ids.get(class_qualified)
+        return cid is not None and name in self.scan.instance_attrs.get(cid, {})
 
     def _local_bases(self, entry: tuple[str, str]) -> list[tuple[str, str]]:
         """``_member_of`` の C3 に渡す直接の基底: ``("local", 修飾名)`` / ``("ext", 外部 URN)`` / ``("other", 綴り)``（別ファイルの

@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 from lucianke.core.model import Confidence, Kind, RelPath, SymbolRecord, Tier
-from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, Urn, parse
+from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
 
 __all__ = [
     "AttrDefFact",
@@ -43,6 +43,7 @@ __all__ = [
     "VarTypeFact",
     "TREE_SITTER_SOURCE",
     "SEVERITIES",
+    "attr_urn",
     "ensure_external_symbol",
     "ingest_file",
     "remove_file",
@@ -858,12 +859,16 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
                 for c in facts.name_calls
             ],
         )
+    old_attrs = _attr_urns(conn, file_id)
     conn.execute("DELETE FROM _attr_defs WHERE file_id = ?", (file_id,))
     if facts.attr_defs:
         conn.executemany(
             "INSERT INTO _attr_defs (file_id, class_urn, name, line, col) VALUES (?, ?, ?, ?, ?)",
             [(file_id, a.class_urn, a.name, a.line + 1, a.col + 1) for a in facts.attr_defs],
         )
+    # 消えたインスタンス属性を指す他のファイルの行（整えが結んだもの。BUG-0122）も、消えたシンボルと同じく消す
+    for urn in old_attrs - {attr_urn(a.class_urn, a.name) for a in facts.attr_defs}:
+        conn.execute("DELETE FROM relations WHERE target_urn = ?", (urn,))
     conn.execute("DELETE FROM _var_types WHERE file_id = ?", (file_id,))
     if facts.var_types:
         conn.executemany(
@@ -915,8 +920,32 @@ def remove_file(conn: sqlite3.Connection, workspace_id: str, path: str) -> bool:
     urns = [r[0] for r in conn.execute("SELECT urn FROM symbols WHERE file_id = ?", (file_id,))]
     for urn in urns:
         conn.execute("DELETE FROM relations WHERE target_urn = ? OR source_urn = ?", (urn, urn))
+    for urn in _attr_urns(conn, file_id):  # このファイルのインスタンス属性に結んだ行（BUG-0122）
+        conn.execute("DELETE FROM relations WHERE target_urn = ?", (urn,))
     conn.execute("DELETE FROM files WHERE file_id = ?", (file_id,))
     return True
+
+
+def attr_urn(class_urn: str, name: str) -> str:
+    """インスタンス属性の URN ``<クラス>.<名前>``（``_attr_defs`` の行。シンボルではない。BUG-0122）。"""
+    try:
+        owner = parse(class_urn)
+        sel = owner.selector
+        if isinstance(sel, CodeSel):
+            return str(owner.with_selector(CodeSel(f"{sel.qualified}.{name}")))
+    except ValueError:
+        pass
+    return f"{class_urn}.{name}"
+
+
+def _attr_urns(conn: sqlite3.Connection, file_id: int) -> set[str]:
+    try:
+        rows = conn.execute("SELECT class_urn, name FROM _attr_defs WHERE file_id = ?", (file_id,)).fetchall()
+    except sqlite3.OperationalError as exc:  # v9 より前の DB
+        if "no such table" not in str(exc):
+            raise
+        return set()
+    return {attr_urn(str(c), str(n)) for c, n in rows}
 
 
 # --- _hover_cache -----------------------------------------------------------------------

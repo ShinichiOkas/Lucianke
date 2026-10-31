@@ -55,7 +55,7 @@ INTERNAL_TABLES = {
     "_var_types",  # v9（BUG-0094）
     "_reexports",  # v10（BUG-0100）
     "_reexport_deps",  # v10（BUG-0100）
-    "_type_aliases",  # v12（BUG-0108）。v13 は表を変えない（メンバーの型の構成も書く。BUG-0113）。v14 も表を変えない（BUG-0117）
+    "_type_aliases",  # v12（BUG-0108）。v13 は表を変えない（メンバーの型の構成も書く。BUG-0113）。v14・v15 も表を変えない（BUG-0117・BUG-0122）
 }
 
 
@@ -170,7 +170,7 @@ def test_ensure_schema_creates_public_internal_tables_and_meta(conn: sqlite3.Con
 
 
 def test_schema_version_is_read_from_schema_sql() -> None:
-    assert current_schema_version() == 14
+    assert current_schema_version() == 15
     assert migrate.parse_schema_version("-- schema_version: 7\nCREATE TABLE t (a);") == 7
     with pytest.raises(ValueError):
         migrate.parse_schema_version("CREATE TABLE t (a);")

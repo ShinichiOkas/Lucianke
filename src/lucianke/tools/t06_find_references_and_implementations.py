@@ -360,6 +360,10 @@ def _collect_refs(
             is_test=is_test,
             confidence=row.confidence,
         )
+    if not args.include_declaration and nc.is_instance_attr(sym):
+        # インスタンス属性の宣言（最初の ``self.x = ...``）は書き込みの参照の行でもある。宣言を含めないなら外す（BUG-0122）
+        sel = sym.selection or sym.range
+        best.pop((str(sym.path), sel.start.line + 1, sel.start.col + 1), None)
     if args.include_declaration:
         sel = sym.selection or sym.range
         path = str(sym.path)
@@ -575,7 +579,7 @@ def _load_refs(urn: str) -> Any:
 
 def _pre(db_path: Any, ws: Workspace, args: FindReferencesArgs) -> _Pre:
     with reader(db_path) as conn:
-        sym = resolve_target(conn, ws, args.target)
+        sym = resolve_target(conn, ws, args.target, instance_attrs=True)  # インスタンス属性も対象（BUG-0122）
         info = queries.file_by_path(conn, ws.workspace_id, str(sym.path))
         token = queries.files_fingerprint(conn, ws.workspace_id)
         cached = (
