@@ -308,6 +308,8 @@ class _LspResult:
     diags: list[_Diag] = field(default_factory=list)
     pending: bool = False
     error: str | None = None
+    not_waited: bool = False
+    """同じ内容の前の呼び出しで上限まで待っても診断が届かなかったので、今回は待たなかった（BUG-0058）。"""
 
 
 async def _collect_one(
@@ -330,9 +332,11 @@ async def _collect_one(
     hub = handle.diagnostics
     spans = {"sync": time.monotonic() - t}
     t = time.monotonic()
-    ok = await hub.wait_for(
-        rel, min_version=version, sent_at=sent_at if sent_at is not None else 0.0, timeout_ms=wait_ms
-    )
+    since = sent_at if sent_at is not None else 0.0
+    # 内容が変わらないまま、前の呼び出しで上限まで待っても届かなかった文書は待ち直さない（LSP が問題の無い文書の診断を
+    # 出さないことがある。以前は呼び出しのたびに上限〈既定 2 秒〉まで待っていた。BUG-0058）
+    not_waited = hub.gave_up(rel, min_version=version, sent_at=since)
+    ok = await hub.wait_for(rel, min_version=version, sent_at=since, timeout_ms=0 if not_waited else wait_ms)
     spans["wait"] = time.monotonic() - t
     # BUG-0058: 診断待ちの内訳（閾値ガード付き）
     log_slow_spans(
@@ -341,7 +345,7 @@ async def _collect_one(
         n=len(getattr(hub.get(rel), "diagnostics", ()) or ()),
     )  # fmt: skip
     entry = hub.get(rel)
-    result = _LspResult(pending=not ok)
+    result = _LspResult(pending=not ok, not_waited=not ok and not_waited)
     if entry is None:
         return result
     client = handle.client
@@ -821,6 +825,7 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
     )
     all_diags: list[_Diag] = []
     pending_files: set[str] = set()
+    not_waited: set[str] = set()
     failed_lsp: dict[str, str] = {}
     for (r, _h), res in zip(jobs, results, strict=True):
         if isinstance(res, BaseException):
@@ -831,7 +836,9 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
         if res.error:
             failed_lsp[r.file.path] = res.error
             continue
-        if res.pending:
+        if res.not_waited:
+            not_waited.add(r.file.path)
+        elif res.pending:
             pending_files.add(r.file.path)
         all_diags.extend(res.diags)
     warnings.extend(failed_lsp.values())
@@ -840,6 +847,14 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
         warnings.append(
             f"No fresh diagnostics arrived within {wait_ms} ms for {len(pending_files)} file(s) ({shown}); "
             "the LSP's last known diagnostics are shown (call again to refresh)"
+        )
+    not_waited -= pending_files
+    if not_waited:
+        shown = ", ".join(sorted(not_waited)[:3]) + (" ..." if len(not_waited) > 3 else "")
+        warnings.append(
+            f"The LSP has sent no diagnostics for {len(not_waited)} unchanged file(s) ({shown}) although an earlier "
+            f"call waited {wait_ms} ms; not waited again (it may not report files without problems). "
+            "The LSP's last known diagnostics are shown"
         )
 
     # 3. 構文木の診断（索引の行。ディスクが索引より新しいファイルは取り直す）。範囲を絞った呼び出しでは、行が無いファイルも

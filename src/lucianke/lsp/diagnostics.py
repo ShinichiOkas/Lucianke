@@ -93,6 +93,8 @@ class DiagnosticsHub:
         """最後の受信の書き込みが失敗したファイル（次の受信で解く）。"""
         self._closed = False
         self._gen = 0
+        self._gave_up: dict[RelPath, tuple[int | None, float]] = {}
+        """``wait_for`` が時間切れで返ったファイル → そのときの ``(min_version, sent_at)``（同じ内容の待ちを繰り返さないため）。"""
         self.publish_count = 0
         """受信した ``publishDiagnostics`` の通数（ルート外の URI も含む）。"""
         self.last_received_at: float | None = None
@@ -200,14 +202,26 @@ class DiagnosticsHub:
     def paths(self) -> list[RelPath]:
         return list(self._entries)
 
+    def gave_up(self, path: RelPath, *, min_version: int | None, sent_at: float) -> bool:
+        """``path`` の同じ内容（``min_version`` と ``sent_at`` が同じ）の待ちが、前に時間切れで終わっていて、その後も揃っていないか。
+
+        basedpyright は問題の無い文書の診断を出さないことがある（F-POLY の receipt.py。BUG-0058）。内容が変わっていないのに
+        同じ待ちを繰り返すと、呼び出しのたびに上限まで待つ。呼び手はこれが真なら待たずに「未着」として答えてよい。
+        """
+        return self._gave_up.get(path) == (min_version, sent_at) and not self._satisfied(
+            path, min_version, sent_at, 1
+        )
+
     def forget(self, path: RelPath) -> None:
         """``path`` の保持を捨てる（``didClose`` のあと）。"""
+        self._gave_up.pop(path, None)
         self._entries.pop(path, None)
         self._receipts.pop(path, None)
         self._seq.pop(path, None)
         self._write_failed.discard(path)
 
     def clear(self) -> None:
+        self._gave_up.clear()
         self._entries.clear()
         self._receipts.clear()
         self._seq.clear()
@@ -323,6 +337,8 @@ class DiagnosticsHub:
                 if aborted():
                     return False
                 if loop.time() >= deadline and not self._satisfied(path, min_version, sent_at, min_publishes):
+                    if timeout_ms > 0:
+                        self._gave_up[path] = (min_version, sent_at)
                     return False
         if settle_s <= 0:
             return True
