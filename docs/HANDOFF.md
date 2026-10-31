@@ -92,7 +92,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 1. **能力測定の基準（§7）で点数を見ながら使い勝手を上げる。** 2026-10-31 の `8b39591` で Lucianke 15/15 合格・平均 0.993・19,068 トークン・cold 624 ms / warm 24 ms・**準備 62.4 秒**（`cdc9257` は 243 秒。Serena 13/15・0.946・準備 8.3 秒、grep 7/15・0.782）
 2. M1-3（応答時間。OD-23 (b) の冷・温の判定）: F-POLY・F-PY は全部合格（`d3c676e`）、F-TS の T-06 の冷も BUG-0134 の背景の先開きで合格（`076e3d9`・536・849 ms）。ready の直後の数秒は tsserver の検査の一巡とぶつかると冷えた要求が 0.5〜0.9 秒になりうる（負荷の回で 1 秒に近づく。票に記録）。受入の機材（48 論理 CPU）で通しの計測を 1 回流すとよい。この PC には node が無く、TS の LSP は bun 経由（`LUCIANKE_LSP_TYPESCRIPT_LANGUAGE_SERVER_CMD="bun --bun <dir>/node_modules/typescript-language-server/lib/cli.mjs --stdio"`。TS の LSP を使う試験もこれで走る）
 3. M2 に持ち越し（票に記録）: Tier 3 の編集で TOML/JSON を書くときは、編集トランザクションからも `notify_watched` を送る（監視のこだまとして捨てられるため。BUG-0135）。tsserver の tsconfig の追従は bun / Windows でしか見ていない（node / Linux・macOS・ネットワークドライブは未確認。効かなければ tsconfig の刻みを見て TS の LSP を起動し直す案が票にある）
-4. β版 `v0.1.0-beta.1` を出した（§6）。β版の間は実際に使って見つけたことを票にして直し、Mnemo のベンチで点数を見張る。正式な `v0.1.0` は師匠の判断で。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。Actions の結果は公開 API（`api.github.com/repos/ShinichiOkas/Lucianke/actions/runs`）で読める。ログの本文は `gh auth login` が要る
+4. β版 `v0.1.0-beta.1` を出した（§6）。β版の間は実際に使って見つけたことを票にして直し、Mnemo のベンチで点数を見張る。正式な `v0.1.0` は師匠の判断で。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。Actions の結果は公開 API（`api.github.com/repos/ShinichiOkas/Lucianke/actions/runs`）で読める。ログの本文・リリースの操作は gh（管理者権限の要らない公式の zip 版を `AGENT_INSTALL_DIR` に置き、`gh auth login`。2026-10-31 にこの PC で済ませた）。試しの `v0.0.1-rc1` は消した
 4. 他 OS: WSL の Ubuntu は外へのネットワークがつながらない（VPN）。手元で Linux を回すには WSL の設定（例 `networkingMode=mirrored`）が要る
 5. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-0xxx` で確認する
 
