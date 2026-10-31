@@ -481,6 +481,23 @@ class WiredServices(ToolServices):
         rt = self.runtime(ws.workspace_id)
         return "skipped" if rt is None else await rt.indexer.ingest_ahead(rel)
 
+    def watcher_mode(self, workspace_id: str | None = None) -> str | None:
+        """そのワークスペースの監視の状態（``native`` / ``polling``）。束が無ければ ``None``（BUG-0096）。"""
+        rt = self.runtime(workspace_id)
+        return None if rt is None else rt.watcher.mode
+
+    async def revalidate(self, ws: Workspace, rel: str) -> str:
+        """監視が ``polling`` のとき、``rel`` を今のディスクの状態で索引に合わせる（遅延検証。仕様書 §12.4 の 6、BUG-0096）。
+
+        ``Watcher.drain([rel])`` が、``sha256`` が索引と同じなら何もせず、違えば取り込み直し、消えていれば消す。監視が動いているとき
+        （``native``）や束が無いときは何もしない（``"skipped"``）。戻りは ``"checked"`` / ``"skipped"``。
+        """
+        rt = self.runtime(ws.workspace_id)
+        if rt is None or rt.watcher.mode != "polling":
+            return "skipped"
+        await rt.watcher.drain([RelPath(rel)])
+        return "checked"
+
     @property
     def db_path(self) -> Path | None:
         rt = self.runtime()

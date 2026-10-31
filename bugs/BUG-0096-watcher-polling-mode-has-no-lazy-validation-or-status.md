@@ -20,3 +20,34 @@
   T-00 の `status` からもそれが分からない。
 - BUG-0087 の直し（索引への取り込みが失敗したファイルは `expect` せず、こだまを監視の通常の道で取り込み直させる）も、こだまが
   届かない `polling` では効かない。
+
+## 原因・直し方・確認（2026-10-31）
+
+**原因**: 設計書 §7.3.6 の 6・仕様書 §12.4 の 6 は書いてあったが、`Watcher` が `mode = "polling"` を立てるだけで、`mode` を読む所が
+どこにも無かった（`src/` の `.mode` の当たりは監視自身とログの 1 行だけ）。要求時の遅延検証も、T-00 の `watcher` の表示も未実装。
+`Watcher.drain(paths)` は `polling`（走っていない）のとき `paths` を呼び手の文脈で sink に同期する作りで、部品は揃っていたが、
+呼び手（解決の前・`EditTransaction` 段 3）が呼んでいなかった（段 3 は `drain()` を `paths` なしで呼ぶので、`polling` では何もしなかった）。
+
+**直し方**（仕様と実装の都合: `resolve_target` は同期で読み取り接続の中にあり、取り込み直し（async）をそこでは呼べない。
+呼ぶ側の AI にとって同じ効き目になる、ハンドラが解決の前に呼ぶ入口に置いた。設計書 §7.1.3 の 5 をそれに合わせて直した）:
+
+- `WiredServices.watcher_mode(workspace_id)` と `revalidate(ws, rel)`（`polling` のときだけ `Watcher.drain([rel])`。`sha256` が同じなら何もせず、
+  違えば取り込み直し、消えていれば索引から消す。LSP への `didChangeWatchedFiles` も同じ道）。
+- `tools/_building.py` の `ensure_indexed`（`ensure_target_indexed` / `ensure_targets_indexed` の本体。T-04・T-06・T-07・T-08 が解決の前に
+  呼んでいる）の先頭で `revalidate`。失敗しても応答は止めず古い索引で答える。
+- パイプラインが、`polling` の間は索引を読むツール（`reads_index`）の `warnings[]` に `file watching unavailable (polling): the target file is
+  checked against the disk on each call, but other files may be stale until the next reindex` を 1 つ付ける（対象以外の参照元などは
+  照合しないので、古いことがあると AI が分かるように）。
+- `EditTransaction` 段 3: `watcher.mode == "polling"` のときだけ `watcher.drain(paths)`（`native` は従来どおり `drain()`）。
+- T-00 `status`: compact の `watcher: native|polling` の行と、`data.workspaces[].watcher`。
+- 仕様書 §12.4 の 6・T-00 の出力の表と例、設計書 §7.1.3 の 5・§7.3.6 の 6 を書いた。
+
+**確認**: 新しい `tests/unit/test_tools_polling_watcher.py`（4 件。結線は本番と同じ。`awatch` を `OSError` にして `polling` に落とす）:
+書き換えたファイルの新しい関数が、イベントなしで次の T-04・T-07・T-06 に見える／消したファイルは `E_TARGET_NOT_FOUND`／`polling` の
+status と警告／`native` の status と警告なし。`tests/unit/test_edit_transaction.py` に 2 件（`polling` で `drain` が対象のパスつき、`native` はパスなし。
+前者は修正前に赤）。関係する試験・見張り（監視・索引の途中・T-00・パイプライン・schema_budget・import_graph・launch_guard・stdout_purity・leak_guard）
+172 件が通り、`uv run ruff check` はクリーン。
+
+**残り**: `polling` では対象以外のファイル（T-06 の参照元・T-07 の呼び出し元など）は照合しない（警告で知らせるまで。次の `reindex` か差分索引で揃う）。
+ネットワークドライブでの実測は環境が無く未検証のまま。BUG-0087 の `forget` の直しは、`polling` ではこだまが来ないので元から効かないが害も無い
+（期待は `WATCH_EXPECT_TTL_S` で失効し、`drain([rel])` は期待が一致する間は取り込み直さない = 索引が最新のときだけ）。

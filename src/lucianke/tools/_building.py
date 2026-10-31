@@ -88,10 +88,45 @@ def ref_path(ws: Workspace, ref: Any) -> str | None:
         return None
 
 
-async def ensure_indexed(ctx: ToolContext, ws: Workspace, path: str | None) -> None:
-    """走査の途中で ``path`` がまだ索引に無ければ、先に取り込む。先取りできなければ ``building_error``。"""
+def polling_of(services: object, workspace_id: str | None) -> bool:
+    """そのワークスペースの監視が使えず ``polling``（要求時の遅延検証）か（BUG-0096）。分からなければ ``False``。"""
+    fn = getattr(services, "watcher_mode", None)
+    if fn is None:
+        return False
+    try:
+        return bool(fn(workspace_id) == "polling")
+    except Exception:  # noqa: BLE001  付加情報。取れなくても応答は返す
+        return False
+
+
+POLLING_WARNING = (
+    "file watching unavailable (polling): the target file is checked against the disk on each call, "
+    "but other files may be stale until the next reindex"
+)
+
+
+async def revalidate(ctx: ToolContext, ws: Workspace, path: str | None) -> None:
+    """監視が ``polling`` なら、対象のファイルを今のディスクの状態に索引を合わせる（遅延検証。仕様書 §12.4 の 6、BUG-0096）。
+
+    失敗しても応答は止めない（古い索引で答える。警告は ``POLLING_WARNING`` が出ている）。
+    """
     if path is None or path in ("", "."):
         return
+    fn = getattr(ctx.services, "revalidate", None)
+    if fn is None or not polling_of(ctx.services, ws.workspace_id):
+        return
+    try:
+        await fn(ws, path)
+    except Exception:  # noqa: BLE001
+        ctx.log.warning("could not revalidate %s against the disk", path, exc_info=True)
+
+
+async def ensure_indexed(ctx: ToolContext, ws: Workspace, path: str | None) -> None:
+    """対象のファイルを答える前の用意。監視が ``polling`` ならディスクと照合して取り込み直す（``revalidate``）。走査の途中で
+    ``path`` がまだ索引に無ければ、先に取り込む。先取りできなければ ``building_error``。"""
+    if path is None or path in ("", "."):
+        return
+    await revalidate(ctx, ws, path)
     progress = building_of(ctx.services, ws.workspace_id)
     ahead = getattr(ctx.services, "ingest_ahead", None)
     if progress is None or ahead is None:

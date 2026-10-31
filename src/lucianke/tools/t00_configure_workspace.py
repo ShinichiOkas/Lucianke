@@ -475,6 +475,18 @@ def _jobs_text(jobs: Sequence[dict[str, Any]]) -> str:
     )
 
 
+def _watcher_mode(hub: Any, ws: Workspace) -> str | None:
+    """ファイル監視の状態（``native`` / ``polling``。要求時の遅延検証に落ちているときは ``polling``）。束が無ければ ``None``。"""
+    return getattr(getattr(hub.runtime(ws.workspace_id), "watcher", None), "mode", None)
+
+
+def _watcher_text(workspaces: Sequence[Workspace], entries: Sequence[dict[str, Any]]) -> str:
+    modes = {e["watcher"] for e in entries if e["watcher"] is not None}
+    if len(modes) <= 1:
+        return next(iter(modes), "-")
+    return " ".join(f"{ws.workspace_id}={e['watcher'] or '-'}" for ws, e in zip(workspaces, entries, strict=True))
+
+
 def _entry(ws: Workspace, active_id: str | None) -> dict[str, Any]:
     env = ws.python_env
     return {
@@ -508,6 +520,8 @@ async def _view(
         active_id = None
 
     entries = [_entry(ws, active_id) for ws in workspaces]
+    for ws, entry in zip(workspaces, entries, strict=True):
+        entry["watcher"] = _watcher_mode(hub, ws)
     cache_total = {"files": 0, "symbols": 0, "relations": 0, "last_sync_at": None}
     if detail:
 
@@ -583,6 +597,7 @@ async def _view(
     head: list[tuple[str, str]] = [
         ("workspaces", f"{len(workspaces)} (active: {active_id or '-'})"),
         ("lsp", _lsp_text(daemons)),
+        ("watcher", _watcher_text(workspaces, entries)),
     ]
     if detail:
         head.append(

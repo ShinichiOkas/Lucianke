@@ -74,9 +74,13 @@ class FakeWatcher:
     expected: list[tuple[str, str]] = field(default_factory=list)
     forgotten: list[str] = field(default_factory=list)
     on_drain: Any = None
+    mode: str = "native"
+    drained_paths: list[list[str]] = field(default_factory=list)
 
-    async def drain(self) -> None:
+    async def drain(self, paths: Any = None) -> None:
         self.drained += 1
+        if paths is not None:
+            self.drained_paths.append([str(p) for p in paths])
         if self.on_drain is not None:
             self.on_drain()
 
@@ -394,6 +398,18 @@ async def test_ep4_event_delivered_late_is_caught_by_the_drain_recheck(rig: Rig)
     assert exc.value.code is ErrorCode.E_PRECONDITION_FAILED
     assert rig.watcher.drained == 1
     assert read(rig, PAYMENT) == EXTERNAL
+
+
+async def test_ep4_polling_watcher_drains_the_target_paths_for_lazy_validation(rig: Rig):
+    # 監視が使えない環境（polling）では、イベントが来ないので対象のパスを今のディスクの状態に合わせてから検証する（BUG-0096）
+    rig.watcher.mode = "polling"
+    await replace_validate(rig)
+    assert rig.watcher.drained_paths == [[str(PAYMENT)]]
+
+
+async def test_ep4_native_watcher_drains_without_paths(rig: Rig):
+    await replace_validate(rig)
+    assert rig.watcher.drained == 1 and rig.watcher.drained_paths == []
 
 
 # --- EP-5: 構文 ---------------------------------------------------------------------------------

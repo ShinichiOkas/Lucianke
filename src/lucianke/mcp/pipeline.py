@@ -35,7 +35,7 @@ from lucianke.mcp.render import graph as graph_render
 from lucianke.mcp.render import json_out as json_render
 from lucianke.mcp.types import CallInfo, Rendered, RenderInput
 from lucianke.tools._base import GRAPH_FORMATS, WORKING_TREE, Services, ToolContext, ToolSpec
-from lucianke.tools._building import building_of, building_warning
+from lucianke.tools._building import POLLING_WARNING, building_of, building_warning, polling_of
 
 Renderer = Callable[[RenderInput], Rendered]
 
@@ -232,6 +232,8 @@ class Pipeline:
         out = await spec.handler(ctx, args)
         if building is not None:
             warnings.append(building_warning(building_of(self.services, workspace_id) or building))
+        if spec.reads_index and polling_of(self.services, workspace_id):
+            warnings.append(POLLING_WARNING)  # 監視が使えない環境（BUG-0096）: 対象以外のファイルは古いことがある
         warnings.extend(out.warnings)  # ハンドラの警告（§5.4.4 の失敗件数など）はパイプラインの警告の後ろへ
         if out.workspace_id is not None and out.workspace_id != call.workspace_id:
             call = dataclasses.replace(call, workspace_id=out.workspace_id)  # ハンドラが確定した ID（set_roots の登録後。BUG-0019）

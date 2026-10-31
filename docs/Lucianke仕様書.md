@@ -1321,6 +1321,7 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 | id | root | langs | python | branch | dirty |
 | app | S:/work/app | python(T1):42 toml(T3):2 ipynb(T2):3 | .venv/Scripts/python.exe 3.12 (manager: uv) | main | 3 |
 - lsp: pyright=ready ruff=ready vtsls=standby
+- watcher: native
 - cache: files=47 symbols=14230 relations=48910 synced=2026-10-29T11:20:03+09:00
 - jobs: (none)
 ```
@@ -1330,7 +1331,7 @@ json の `data`:
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `active_workspace_id` | string | アクティブなワークスペース |
-| `workspaces[]` | object[] | `workspace_id`, `root_path`, `languages[] {language, tier, file_count}`, `python_env {interpreter, version, manager}`, `git {branch, head_sha, dirty_files}`, `exclude_globs[]`, `default_base_ref`, `sub_projects[] {path, marker}` |
+| `workspaces[]` | object[] | `workspace_id`, `root_path`, `watcher`（`native` / `polling`。§12.4 の 6）, `languages[] {language, tier, file_count}`, `python_env {interpreter, version, manager}`, `git {branch, head_sha, dirty_files}`, `exclude_globs[]`, `default_base_ref`, `sub_projects[] {path, marker}` |
 | `lsp_daemons[]` | object[] | `language`, `server`, `status`（§5.5 の `lsp_status`）, `progress`, `pid`, `started_at` |
 | `cache` | object | `files`, `symbols`, `relations`, `last_sync_at` |
 | `jobs[]` | object[] | `job_id`, `kind`, `state`, `progress`, `phase`, `started_at`, `finished_at`, `error`。`phase` は走っている索引のジョブの、全ファイルを取り込んだ後の段（`settling relations 12/170`・`re-resolving importers`・`ranking symbols`。それ以外は `null`。compact の `jobs:` 行は `job_0001 reindex running 97% (settling relations 12/170)`。BUG-0112） |
@@ -3142,7 +3143,7 @@ json の `data`:
 3. 単一ファイルの変更は、検知から PaaD 反映と LSP 通知まで 500 ms 以内（NFR-PERF-3）。
 4. 1 回のバーストで 500 ファイル以上が変わった場合（ブランチ切り替えなど）は、個別処理をやめて差分索引（起動時と同じ手順）に切り替える。1 回の配信は 500 に届かないことがあるため、大きい配信が続くあいだは 0.3 秒静まるまで合算して数える（S-6 で確認）。
 5. 既定 5 MB を超えるファイルは構文木を作らず、Tier 3 ならストリーミング骨格、それ以外は `files` 行のみ（`confidence_level: "lexical_fallback"`）とする。上限は設定で変えられる。圧縮済み・束ねた生成物の JS / TS（名前が `*.min.js` / `*.min.mjs` / `*.min.cjs`、または 32 KB 以上で 1 行の平均が 300 バイト以上）も構文木を作らず `files` 行のみとする（1〜2 文字の名前のシンボル・関係を数千作り、1 本の取り込みに数十秒かかるため。BUG-0119）。
-6. 監視が利用できない環境（ネットワークドライブなど。Windows のネットワークドライブは未検証。`force_polling` は取りこぼすので使わない）では、要求時に対象ファイルの `sha256` を照合する遅延検証に切り替え、`configure_workspace status` に `watcher: "polling"` と表示する。
+6. 監視が利用できない環境（ネットワークドライブなど。Windows のネットワークドライブは未検証。`force_polling` は取りこぼすので使わない）では、要求時に対象ファイルの `sha256` を照合する遅延検証に切り替え、`configure_workspace status` に `watcher: "polling"` と表示する（監視が動いていれば `native`）。照合するのは要求の対象のファイル（T-04・T-06・T-07・T-08 の `target`、編集ツールの書き込み先）で、対象以外のファイルは次の差分索引まで古いことがある。呼ぶ側の AI が分かるよう、`polling` の間は索引を読むツールの `warnings[]` に `file watching unavailable (polling): ...` を 1 つ付ける（SHOULD。BUG-0096）。
 
 ## 12.5 終了処理
 

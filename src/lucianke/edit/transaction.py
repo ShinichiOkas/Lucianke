@@ -132,9 +132,10 @@ class IndexerLike(Protocol):
 
 
 class WatcherLike(Protocol):
-    """``workspace.watcher.Watcher`` の一部。"""
+    """``workspace.watcher.Watcher`` の一部。``mode`` は持たない偽物もある（``getattr`` で読む）。``drain`` は ``polling`` のときだけ
+    ``paths`` つきで呼ぶ（遅延検証。BUG-0096）。"""
 
-    def drain(self) -> Awaitable[None] | None: ...
+    def drain(self, paths: Any = None) -> Awaitable[None] | None: ...
 
     def expect(self, rel: RelPath, sha256_after: str) -> None: ...
 
@@ -742,7 +743,12 @@ class EditTransaction:
             if actual is None or not actual.startswith(prefix):
                 raise _precondition_failed(path, prefix, actual)
         if self._watcher is not None:
-            await _maybe_await(self._watcher.drain())
+            if getattr(self._watcher, "mode", None) == "polling":
+                # 監視が使えない環境（BUG-0096。仕様書 §12.4 の 6）: イベントは来ないので、対象のファイルを今のディスクの状態で
+                # 索引に取り込み直してから前提を検証する（遅延検証。``Watcher.drain(paths)`` が呼び手の文脈で行う）
+                await _maybe_await(self._watcher.drain(paths))
+            else:
+                await _maybe_await(self._watcher.drain())
             now = await read_all()
         sources: dict[RelPath, bytes] = {}
         for path in paths:
