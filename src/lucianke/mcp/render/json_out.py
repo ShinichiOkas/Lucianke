@@ -39,8 +39,9 @@ def build_envelope(inp: RenderInput) -> dict[str, Any]:
     """§5.4.1 のエンベロープ（dict）を作る。
 
     * ``data`` は ``out.data_static`` に ``inp.records_key`` をキーとして ``[r.data for r in page.records]`` を加えたもの。
-      失敗時は ``None``。ただし ``E_TIMEOUT`` の部分結果のように、``error`` と一緒に ``out`` ・``page`` が渡されたときは
-      それを ``data`` に入れる（仕様書 §5.8、設計書 §9.1）。
+      補足の欄のレコード（``Record.section``。BUG-0107）は本体の配列に入れず、``data[section]`` の配列に置く（そのページに
+      その欄のレコードがあるときだけ）。失敗時は ``None``。ただし ``E_TIMEOUT`` の部分結果のように、``error`` と一緒に
+      ``out`` ・``page`` が渡されたときはそれを ``data`` に入れる（仕様書 §5.8、設計書 §9.1）。
     * ``page`` は ``{next_cursor, returned, total_estimate}``、``budget`` は ``{max_tokens, used_tokens_est, truncated}``。
       ページが無い（失敗）ときは ``returned = 0`` ・``total_estimate = 0`` ・``used_tokens_est = 0`` で埋める（MUST 項目のため）。
     """
@@ -48,7 +49,15 @@ def build_envelope(inp: RenderInput) -> dict[str, Any]:
     page = inp.page
     data: dict[str, Any] | None = None
     if inp.out is not None and page is not None:
-        data = {**inp.out.data_static, inp.records_key: [dict(r.data) for r in page.records]}
+        sections: dict[str, list[dict[str, Any]]] = {}
+        for r in page.records:
+            if r.section is not None:
+                sections.setdefault(r.section, []).append(dict(r.data))
+        data = {
+            **inp.out.data_static,
+            inp.records_key: [dict(r.data) for r in page.records if r.section is None],
+            **sections,
+        }
     return {
         "ok": inp.error is None,
         "tool": call.tool,

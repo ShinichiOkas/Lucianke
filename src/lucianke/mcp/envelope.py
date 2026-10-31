@@ -38,7 +38,8 @@ def build_meta(
 
     * ``out`` が ``None``（失敗応答）のときは ``exact`` ・``n/a`` で作る（失敗応答にも付ける: §5.4.1）。
     * 水準・内訳・``mixed`` ・``is_degraded`` は ``page.records``（予算内に詰めたレコード）から
-      ``aggregate_confidence`` で集計する。``page`` が無いときは ``out.records`` 全体を使う。
+      ``aggregate_confidence`` で集計する。``page`` が無いときは ``out.records`` 全体を使う。補足の欄のレコード
+      （``Record.section``。BUG-0107）は数えない。
       レコードが 0 件のときは ``out.engine.confidence`` を水準とする（0 件でも降格を表すため）。
     * ``tier`` ・``detected_language`` を省略すると ``out.tier`` ・``out.detected_language`` を使う
       （``out`` も無ければ ``Tier.T1`` ・``"n/a"``）。
@@ -56,7 +57,8 @@ def build_meta(
             engine_used="n/a",
             lsp_status=LspStatus.NOT_APPLICABLE.value,
         )
-    records = page.records if page is not None else out.records
+    # 補足の欄（``Record.section``。BUG-0107）は答えの本体ではないので数えない（各要素が自分の confidence_level を持つ）
+    records = [r for r in (page.records if page is not None else out.records) if r.section is None]
     level, breakdown, mixed, degraded = aggregate_confidence(
         records, out.max_confidence, empty_level=out.engine.confidence
     )

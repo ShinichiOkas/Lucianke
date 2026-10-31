@@ -480,6 +480,10 @@ class Record:
     shrink_json: Callable[[int], "Record | None"] | None = None
                               # 任意。shrink と同じ鎖で、json で描いた大きさ（data の JSON + 区切りの ,）が予算以下の最も
                               # 浅い版。パッカーは json のときこれを先に試し、数え直して収まれば使う（BUG-0078）
+    section: str | None = None
+                              # 任意。答えの本体の外の補足の欄の名前（T-06 / T-07 の exact の答えの name_matched。BUG-0107）。
+                              # json は data[records_key] ではなく data[section] に置き、_resolution_meta の精度の集計に数えない。
+                              # compact の行・予算・ページネーションは本体と同じ（並びの順に詰める）
 
 @dataclass(frozen=True)
 class ToolOutput:

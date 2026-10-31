@@ -38,6 +38,11 @@ class Record:
         shrink_json: 任意。``shrink`` と同じ縮退の鎖で、json で描いたときの大きさ（``data`` を詰めた JSON と区切りの ``,``。
             ``mcp/render/json_out.record_text``）が ``ask`` トークン以下の最も浅い版。パッカーは json で数えるときこれを先に試し、
             実際に数えて収まればそのまま使う（``shrink`` の ``ask`` を二分探索して版ごとに JSON を作って数えなくて済む。BUG-0078）。
+        section: 任意。答えの本体の外の **補足の欄** の名前（T-06 / T-07 の ``exact`` の答えに添える ``name_matched``。BUG-0107）。
+            json はこのレコードの ``data`` を ``records_key`` の配列ではなく ``data[section]`` の配列に置く（``data_static`` と
+            同じキーにしない）。``_resolution_meta`` の精度の集計（``envelope.build_meta``）には数えない（本体の答えの水準を補足が
+            下げない。欄の各要素が自分の ``confidence_level`` を持つ）。compact の行・予算・ページネーションは本体のレコードと
+            同じに扱う（並びの順に詰め、続きはカーソルで）。``None`` は本体。
     """
 
     kind: str
@@ -51,6 +56,7 @@ class Record:
     shrink: Callable[[int], Record | None] | None = None
     resume: int | None = None
     shrink_json: Callable[[int], Record | None] | None = None
+    section: str | None = None
 
     def with_tokens(self, tokens: int) -> Record:
         return dataclasses.replace(self, tokens=tokens)

@@ -457,6 +457,33 @@ def test_json_failure_keeps_every_key():
     assert env["warnings"] == []
 
 
+def test_section_records_go_to_their_own_key_and_are_not_aggregated():
+    """``Record.section``（補足の欄。BUG-0107）: json は ``data[section]`` に置き、本体の配列に入れない。精度の集計に数えない。
+    compact は並びの順に行を出す。そのページに欄のレコードが無ければキーも無い。"""
+    import dataclasses
+
+    side = dataclasses.replace(_record(1, Confidence.HEURISTIC), section="name_matched")
+    recs = [_record(0), side]
+    out = _out(recs, static={"totals": {"sites": 1}})
+    page = _page(recs)
+    meta = build_meta(out, page)
+    assert (meta.confidence_level, meta.mixed, meta.is_degraded) == (Confidence.EXACT, False, False)
+    assert meta.confidence_breakdown == {Confidence.EXACT: 1}
+    env = json.loads(json_out.render(RenderInput(call=_call(format="json"), meta=meta, out=out, page=page,
+                                                 records_key="references")).text)
+    assert env["data"]["references"] == [{"path": "src/m0.py", "line": 1}]
+    assert env["data"]["name_matched"] == [{"path": "src/m1.py", "line": 2}]
+    assert env["page"]["returned"] == 2
+    text = c.render(RenderInput(call=_call(), meta=meta, out=out, page=page)).text
+    assert text.index("src/m0.py:1:5") < text.index("src/m1.py:2:5")
+    only_main = _page([_record(0)])
+    env2 = json.loads(json_out.render(RenderInput(call=_call(format="json"), meta=build_meta(out, only_main), out=out,
+                                                  page=only_main, records_key="references")).text)
+    assert "name_matched" not in env2["data"]
+    only_side = _page([side])  # 本体が 0 件のページ: 水準はエンジンの水準（exact）
+    assert build_meta(out, only_side).confidence_level is Confidence.EXACT
+
+
 def test_json_error_with_partial_result_keeps_data():
     recs = [_record(0)]
     out = _out(recs, static={"totals": {"sites": 1}})

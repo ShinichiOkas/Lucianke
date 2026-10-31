@@ -19,8 +19,11 @@ LSP が ``ready`` でない・時間切れ・失敗なら ``structural``（今�
   呼び出し箇所ごとに近い段（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース。テストダブルは同じファイルからだけ）の
   同名のメソッドが対象 1 つだけ（組み込み型と同名でない）なら、``structural`` の答えにその位置を ``use=call`` ・
   ``conf=heuristic`` ・json の ``match: "name"`` で足す。同じ段に同名が複数・組み込み型と同名なら足さず、件数と先頭の位置を
-  ``warnings`` と ``data.unattributed_calls`` に書く。``exact`` の答えには足さない（結べるのに LSP の答えに無い位置の件数と先頭を
-  ``warnings`` に書く）。
+  ``warnings`` と ``data.unattributed_calls`` に書く。``exact`` の答えの ``references`` には足さず、結べるのに LSP の答えに無い位置
+  （``Any`` の受け手は LSP も型を決められない）を **補足の欄** に並べる（BUG-0107）: compact は本体の後ろに
+  ``- not in exact answer (matched by name; receiver type unknown to the LSP): N sites`` の見出しと ``conf=heuristic`` の行、
+  json は ``data.name_matched``（``references`` と同じ形。``Record.section`` なので予算・ページネーションは本体と同じ、精度の
+  集計には数えない）。見出しの ``references:`` に ``+ N by name, not confirmed by the LSP``、``totals.name_matched``。
 * 型の分からない受け手の属性の読み書き（``mon.count += 1``・``x.count``。BUG-0095、``_name_calls`` の ``use_kind`` が ``r`` / ``w`` /
   ``rw``）: 対象がクラスの ``Field`` / ``Property`` / ``Constant`` か ``Method``（メソッドの参照）なら、同じ段の規則で同名のメンバーと
   インスタンス属性（``self.x = ...``）が対象 1 つだけ（組み込み型の属性・メソッドとも、型の分かる受け手が使った外部の型の
@@ -165,6 +168,8 @@ class _Found:
     hierarchy_applicable: bool = False
     warnings: list[str] = field(default_factory=list)
     by_name: int = 0  # 名前だけで結んで足した参照の数
+    # exact の答えに無い、名前で結べる位置（補足の欄 ``data.name_matched``。references には混ぜない。BUG-0107）
+    name_matched: list[_Ref] = field(default_factory=list)
     unattributed: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_calls
     unattributed_refs: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_refs（属性の読み書き。BUG-0095）
 
@@ -377,6 +382,25 @@ def _collect_refs(
     return [best[k] for k in sorted(best)]
 
 
+def _name_ref(r: queries.NameCallRow, args: FindReferencesArgs, source: SourceLines) -> _Ref:
+    """名前で結んだ型不明の呼び出し・属性の読み書きの 1 箇所（``conf=heuristic``・``match: "name"``）。"""
+    key = nc.site_key(r)
+    ename = enclosing_name_of(r.source_urn)
+    return _Ref(
+        path=key[0],
+        line=key[1],
+        col=key[2],
+        use=use_of(r.use_kind, "CALLS" if r.use_kind == "call" else "REFERENCES"),
+        source_urn=r.source_urn,
+        enclosing_urn=r.source_urn if ename is not None else None,
+        enclosing_name=ename,
+        snippet=source.text(key[0], r.site.line) if args.context_snippet else "",
+        is_test=r.is_test,
+        confidence=Confidence.HEURISTIC,
+        match=nc.MATCH_NAME,
+    )
+
+
 def _name_refs(
     conn: sqlite3.Connection,
     ws: Workspace,
@@ -391,7 +415,8 @@ def _name_refs(
     （BUG-0071 / BUG-0077。``_name_calls`` の docstring）。
 
     判定は箇所ごと（同じファイル → 箇所を含むテストフィクスチャ → ワークスペース）。対象より近い同名の定義がある箇所は
-    足しも書きもしない。呼び出しは ``data.unattributed_calls``、属性の読み書きは ``data.unattributed_refs`` に書く。
+    足しも書きもしない。結べないものは、呼び出しは ``data.unattributed_calls``、属性の読み書きは ``data.unattributed_refs`` に書く。
+    ``exact`` の答え（``exact=True``）では ``found.refs`` に足さず、結べる位置を ``found.name_matched``（補足の欄）に置く（BUG-0107）。
     """
     names = nc.NameIndex(conn, ws.workspace_id)
     target = names.target_member(sym)
@@ -415,43 +440,25 @@ def _name_refs(
     owned_calls = [(r, v) for r, v in sites.owned if r.use_kind == "call"]
     owned_refs = [(r, v) for r, v in sites.owned if r.use_kind != "call"]
     if exact:
-        # 結べない（同名が同じ近さに複数）なら LSP の答えが正。足しも書きもしない
-        for owned, what, sink in (
-            (owned_calls, f"call site(s) of .{name}()", found.unattributed),
-            (owned_refs, f"reference(s) of .{name}", found.unattributed_refs),
+        # references は LSP の答えのまま。結べる（その箇所の候補が対象 1 つだけ）のに LSP の答えに無い位置は、別の欄
+        # （data.name_matched・compact の「not in exact answer」の後ろ）に印つきで並べる（BUG-0107。件数だけだと位置が
+        # 見えず、構文木の答えより情報が減っていた）。結べない（同名が同じ近さに複数）なら LSP の答えが正。足しも書きもしない
+        for owned, what in (
+            (owned_calls, f"call site(s) of .{name}()"),
+            (owned_refs, f"read/write reference(s) of .{name}"),
         ):
-            rows = [r for r, _ in owned]
-            if not rows:
+            if not owned:
                 continue
-            key = "data.unattributed_calls" if sink is found.unattributed else "data.unattributed_refs"
-            verb = "call" if sink is found.unattributed else "use"
             found.warnings.append(
-                f"{len(rows)} {what} whose receiver type is unknown to the syntax tree are not in this"
-                f" exact answer (the LSP could not type the receiver, e.g. Any); {nc.owned_text(owned)}, so they"
-                f" may {verb} it: {nc.sample_text(rows)} ({key})"
+                f"{len(owned)} {what} are not in this exact answer because the LSP could not type the receiver"
+                f" (e.g. Any); {nc.owned_text(owned)}, so they are listed after the exact references under"
+                f" 'not in exact answer', marked conf=heuristic (data.name_matched)"
             )
-            u = nc.Unattributed(owned[0][1])
-            u.add(rows)
-            sink.append(u.to_json(enclosing_name_of, "not_in_exact_answer"))
-        return
-    for r, _v in sites.owned:
-        key = nc.site_key(r)
-        ename = enclosing_name_of(r.source_urn)
-        found.refs.append(
-            _Ref(
-                path=key[0],
-                line=key[1],
-                col=key[2],
-                use=use_of(r.use_kind, "CALLS" if r.use_kind == "call" else "REFERENCES"),
-                source_urn=r.source_urn,
-                enclosing_urn=r.source_urn if ename is not None else None,
-                enclosing_name=ename,
-                snippet=source.text(key[0], r.site.line) if args.context_snippet else "",
-                is_test=r.is_test,
-                confidence=Confidence.HEURISTIC,
-                match=nc.MATCH_NAME,
-            )
+        found.name_matched = sorted(
+            (_name_ref(r, args, source) for r, _ in sites.owned), key=lambda x: (x.path, x.line, x.col)
         )
+        return
+    found.refs += [_name_ref(r, args, source) for r, _ in sites.owned]
     if sites.owned:
         found.refs.sort(key=lambda x: (x.path, x.line, x.col))
         found.by_name = len(sites.owned)
@@ -636,7 +643,32 @@ def _sym_list(symbols: list[SymbolRecord], total: int) -> str:
     return f"{total}: {shown}" + (f", … {more} more (format=json lists up to {LIST_MAX})" if more > 0 else "")
 
 
-def _ref_record(L: Any, r: _Ref, priority: int, target_urn: str, show_snippet: bool) -> Record:
+NAME_MATCHED_SECTION = "name_matched"  # exact の答えの補足の欄（json の data のキー。BUG-0107）
+
+
+def name_matched_header(n: int) -> str:
+    """compact の補足の欄の見出し（``note``）。欄の最初のレコードの先頭の行。"""
+    return f"not in exact answer (matched by name; receiver type unknown to the LSP): {n} sites"
+
+
+def _name_matched_records(L: Any, found: _Found, start: int, target_urn: str, show_snippet: bool) -> list[Record]:
+    """``found.name_matched`` のレコード（本体の後ろ。``Record.section`` で json の ``data.name_matched`` に置く）。
+
+    見出しは欄の最初のレコードの行に含める（ページの末尾に見出しだけが残らない）。続きのページでは見出しは出ないが、
+    各行の ``conf=heuristic`` と見出しの kv 行（``references: … + N by name``）で本体と区別できる。
+    """
+    out: list[Record] = []
+    for i, r in enumerate(found.name_matched):
+        rec = _ref_record(L, r, start + i, target_urn, show_snippet, section=NAME_MATCHED_SECTION)
+        if i == 0:
+            rec = replace(rec, lines=(L.note(name_matched_header(len(found.name_matched))), *rec.lines))
+        out.append(rec)
+    return out
+
+
+def _ref_record(
+    L: Any, r: _Ref, priority: int, target_urn: str, show_snippet: bool, *, section: str | None = None
+) -> Record:
     snippet = r.snippet if show_snippet else ""
     suffix = "  conf=lexical_fallback" if r.lexical else ("  conf=heuristic" if r.match else "")
     if suffix and snippet:  # 末尾の印を足しても 200 文字に収める（規約 6）
@@ -669,6 +701,7 @@ def _ref_record(L: Any, r: _Ref, priority: int, target_urn: str, show_snippet: b
         },
         confidence=r.confidence,
         group=r.path,
+        section=section,
     )
 
 
@@ -678,7 +711,7 @@ def _graph(found: _Found, ws_id: str) -> dict[str, Any]:
         target_urn: {"id": target_urn, "label": found.target.qualified_name, "path": str(found.target.path)}
     }
     edges: list[dict[str, Any]] = []
-    for r in found.refs:
+    for r in [*found.refs, *found.name_matched]:  # 補足の欄も印（conf=heuristic）つきで描く（BUG-0107）
         src = r.enclosing_urn or file_urn(ws_id, r.path)
         if src not in nodes:
             nodes[src] = {"id": src, "label": r.enclosing_name or r.path, "path": r.path}
@@ -822,11 +855,14 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
 
     target_urn = str(found.target.urn)
     records = [_ref_record(L, r, i, target_urn, args.context_snippet) for i, r in enumerate(found.refs)]
+    records += _name_matched_records(L, found, len(records), target_urn, args.context_snippet)
     files = {r.path for r in found.refs}
     tests = sum(1 for r in found.refs if r.is_test)
     totals = {"files": len(files), "sites": len(found.refs), "tests": tests}
     if found.by_name:
         totals["by_name"] = found.by_name
+    if found.name_matched:
+        totals["name_matched"] = len(found.name_matched)
 
     head: list[tuple[str, str]] = [("target", f"[{found.target.kind.value}] {target_urn}")]
     if args.query_type in ("implementations", "all"):
@@ -851,7 +887,11 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
             head.append(("type_hierarchy", "(n/a)"))
     if args.query_type in ("references", "all"):
         by_name = f"; by name: {found.by_name}" if found.by_name else ""
-        head.append(("references", f"{totals['files']} files, {totals['sites']} sites (tests: {tests}{by_name})"))
+        text = f"{totals['files']} files, {totals['sites']} sites (tests: {tests}{by_name})"
+        if found.name_matched:  # exact の答えの外の補足（BUG-0107）。「0 sites」だけに見せない
+            nm_tests = sum(1 for r in found.name_matched if r.is_test)
+            text += f" + {len(found.name_matched)} by name, not confirmed by the LSP (tests: {nm_tests})"
+        head.append(("references", text))
 
     hierarchy_note = (
         [HIERARCHY_NOTE]

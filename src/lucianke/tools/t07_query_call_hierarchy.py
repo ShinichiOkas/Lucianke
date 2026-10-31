@@ -29,7 +29,10 @@
   型不明の呼び出しを呼び出し元として足す。outgoing はノードの中の型不明の呼び出しを、結べる先のメソッドへの呼び出しとして足す。
   どちらも ``conf=heuristic``・json の ``match: "name"``。結べない（同じ段に同名が複数・組み込み型と同名）ものは件数と
   先頭の位置を ``warnings`` と ``data.unattributed_calls`` に書く（outgoing は組み込み型と同名のものを数えない）。``exact`` の木には
-  足さず、根の incoming で結べるのに LSP の答えに無い位置の件数と先頭を ``warnings`` に書くだけにする。
+  混ぜず、根の incoming で結べるのに LSP の答えに無い呼び出しの呼び出し元を **補足の欄** に並べる（BUG-0107）: compact は
+  incoming の木の直後に ``- not in exact tree (matched by name; receiver type unknown to the LSP): N callers, M sites`` の見出しと
+  ``<- caller @path:line  conf=heuristic`` の行（深さ 1 だけ。``max_children`` まで）、json は ``data.name_matched``（``nodes`` と
+  同じ形。``Record.section`` なので予算・ページネーションは木と同じ、精度の集計には数えない）。
 
 ``ctx.services`` に求めるもの（duck typing）: ``db_path``、``workspace(workspace_id)``、``lines``（compact の行の関数）。
 ``exact`` 経路には ``lsp_pool`` と書き手（``runtime().writer``）、``trees`` も使う。詳細は ``_lsp_exact`` の docstring。
@@ -156,6 +159,10 @@ class _Tree:
     capped: bool = False
     warnings: list[str] = field(default_factory=list)  # 名前で結んだ・結ばなかった呼び出しの説明（BUG-0071）
     unattributed: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_calls
+    # exact の木の根の incoming に無い、名前で結べる呼び出し元（補足の欄 ``data.name_matched``。木には混ぜない。BUG-0107）
+    name_matched: list[_Node] = field(default_factory=list)
+    name_matched_truncated: int = 0  # 補足の欄のうち max_children で省いた呼び出し元の数
+    name_matched_sites: int = 0  # 補足の欄の呼び出し箇所の数（省いた呼び出し元の分も含む）
 
 
 class _Symbols:
@@ -480,7 +487,7 @@ def _work(
             if "incoming" in directions:
                 _blocked_notes(conn, ws.workspace_id, sym, tree, args.include_tests)
         elif "incoming" in directions and sym.kind is Kind.METHOD:
-            _exact_name_note(names, sym, tree, args.include_tests)
+            _exact_name_supplement(syms, names, sym, tree, args)
         return tree, source
 
 
@@ -510,26 +517,90 @@ def _blocked_notes(conn: sqlite3.Connection, ws_id: str, sym: SymbolRecord, tree
     tree.unattributed += [{"direction": "incoming", **u} for u in notes.unattributed]
 
 
-def _exact_name_note(names: nc.NameIndex, sym: SymbolRecord, tree: _Tree, include_tests: bool) -> None:
-    """exact の木には足さない。根の incoming で、名前で結べるのに LSP の答えに無い呼び出しの件数と先頭を書く（BUG-0071）。"""
+def _exact_name_supplement(
+    syms: _Symbols, names: nc.NameIndex, sym: SymbolRecord, tree: _Tree, args: QueryCallHierarchyArgs
+) -> None:
+    """exact の木には混ぜない。根の incoming で、名前で結べる（その箇所の候補が根 1 つだけ）のに LSP の答えに無い呼び出しの
+    呼び出し元を、補足の欄 ``tree.name_matched``（深さ 1 のノード。``conf=heuristic``・``match: "name"``）に置く（BUG-0071 /
+    BUG-0107。件数だけだと位置が見えず、構文木の木より情報が減っていた）。呼び出し元の先（深さ 2 以降）は辿らない。"""
     target = names.target_name(sym)
     if target is None:
         return
     known = {(s.path, s.line) for n in tree.roots.get("incoming", []) for s in n.sites}
     sites = names.for_target(
-        sym, (r for r in names.sites_named(*target, include_tests=include_tests) if nc.site_key(r)[:2] not in known)
+        sym,
+        (r for r in names.sites_named(*target, include_tests=args.include_tests) if nc.site_key(r)[:2] not in known),
     )
-    rows = sites.owned_rows
-    if not rows:
+    if not sites.owned:
         return
+    grouped: dict[str, dict[tuple[str, int, int], _Site]] = {}
+    for r in sites.owned_rows:
+        key, site = _name_site(r)
+        grouped.setdefault(r.source_urn, {}).setdefault(key, site)
+    nodes: list[_Node] = []
+    for caller, by_key in grouped.items():
+        node = _make_node(
+            syms, caller, sorted(by_key.values(), key=lambda x: (x.path, x.line)), "incoming", 1, str(sym.urn)
+        )
+        if args.include_tests or not node.is_test:
+            nodes.append(node)
+    if not nodes:
+        return
+    nodes.sort(key=lambda n: (n.site.path, n.site.line, n.name))
+    tree.name_matched = nodes[: args.max_children]
+    tree.name_matched_truncated = len(nodes) - len(tree.name_matched)
+    tree.name_matched_sites = n_sites = sum(len(n.sites) for n in nodes)
     tree.warnings.append(
-        f"incoming: {len(rows)} call site(s) of .{target[0]}() whose receiver type is unknown to the syntax tree"
-        f" are not in this exact tree (the LSP could not type the receiver, e.g. Any); {nc.owned_text(sites.owned)},"
-        f" so they may call it: {nc.sample_text(rows)} (data.unattributed_calls)"
+        f"incoming: {n_sites} call site(s) of .{target[0]}() are not in this exact tree because the LSP could not"
+        f" type the receiver (e.g. Any); {nc.owned_text(sites.owned)}, so their callers are listed after the incoming"
+        f" tree under 'not in exact tree', marked conf=heuristic (data.name_matched)"
     )
-    group = nc.Unattributed(sites.owned[0][1])
-    group.add(rows)
-    tree.unattributed.append({"direction": "incoming", **group.to_json(enclosing_name_of, "not_in_exact_answer")})
+
+
+NAME_MATCHED_SECTION = "name_matched"  # exact の木の補足の欄（json の data のキー。BUG-0107）
+
+
+def name_matched_header(tree: _Tree) -> str:
+    """compact の補足の欄の見出し（``note``）。欄の最初のレコードの先頭の行。"""
+    callers = len(tree.name_matched) + tree.name_matched_truncated
+    shown = f"; first {len(tree.name_matched)} callers shown (max_children)" if tree.name_matched_truncated else ""
+    return (
+        f"not in exact tree (matched by name; receiver type unknown to the LSP): {callers} callers,"
+        f" {tree.name_matched_sites} sites{shown}"
+    )
+
+
+def _name_matched_records(L: Any, tree: _Tree, start: int, include_guard: bool) -> list[Record]:
+    """``tree.name_matched`` のレコード（incoming の木の後ろ。``Record.section`` で json の ``data.name_matched`` に置く）。
+    見出しは欄の最初のレコードの行に含める（ページの末尾に見出しだけが残らない）。"""
+    out: list[Record] = []
+    for i, n in enumerate(tree.name_matched):
+        lines = [
+            L.tree_line(
+                _ARROW["incoming"],
+                n.name,
+                n.site.path,
+                n.site.line,
+                indent=0,
+                when=n.site.guard if include_guard else None,
+                conf=n.confidence,
+            )
+        ]
+        if i == 0:
+            lines.insert(0, L.note(name_matched_header(tree)))
+        out.append(
+            Record(
+                kind="tree",
+                key=f"{NAME_MATCHED_SECTION}#{i}",
+                priority=start + i,
+                lines=tuple(lines),
+                data=_node_json(n, include_guard),
+                confidence=n.confidence,
+                group=n.site.path,
+                section=NAME_MATCHED_SECTION,
+            )
+        )
+    return out
 
 
 # --- 出力 ---------------------------------------------------------------------------------------
@@ -599,12 +670,19 @@ def _edges(root_urn: str, all_nodes: Sequence[_Node], include_guard: bool) -> li
     return out
 
 
-def _graph(root: SymbolRecord, all_nodes: Sequence[_Node], edges: list[dict[str, Any]]) -> dict[str, Any]:
+def _graph(
+    root: SymbolRecord,
+    all_nodes: Sequence[_Node],
+    edges: list[dict[str, Any]],
+    heuristic: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """``heuristic`` は exact の木の補足の欄の辺（``conf=heuristic`` で描く。BUG-0107）。"""
     nodes: dict[str, dict[str, Any]] = {
         str(root.urn): {"id": str(root.urn), "label": root.qualified_name, "path": str(root.path)}
     }
     for n in all_nodes:
         nodes.setdefault(n.urn, {"id": n.urn, "label": n.name, "path": n.def_path})
+    marked = [(e, None) for e in edges] + [(e, Confidence.HEURISTIC.value) for e in heuristic]
     return {
         "nodes": list(nodes.values()),
         "edges": [
@@ -614,8 +692,9 @@ def _graph(root: SymbolRecord, all_nodes: Sequence[_Node], edges: list[dict[str,
                 "label": "CALLS",
                 "count": 1,
                 "attrs": {"guard": e["guard"]} if e["guard"] else {},
+                **({"conf": conf} if conf else {}),
             }
-            for e in edges
+            for e, conf in marked
         ],
     }
 
@@ -725,6 +804,8 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
                     group=n.site.path,
                 )
             )
+        if direction == "incoming" and tree.name_matched:  # exact の木の補足の欄は incoming の木の直後（BUG-0107）
+            records += _name_matched_records(L, tree, len(records), args.include_guard_conditions)
 
     edges = _edges(root_urn, all_nodes, args.include_guard_conditions)
     data: dict[str, Any] = {
@@ -735,8 +816,12 @@ async def handler(ctx: ToolContext, args: QueryCallHierarchyArgs) -> ToolOutput:
     }
     if tree.unattributed:
         data["unattributed_calls"] = tree.unattributed
+    if tree.name_matched_truncated:
+        data["name_matched_truncated"] = tree.name_matched_truncated
     if args.format in ("dot", "mermaid"):
-        data["graph"] = _graph(tree.root, all_nodes, edges)
+        # 補足の欄も印（conf=heuristic）つきで描く。木の edges[] には混ぜない（BUG-0107）
+        extra = _edges(root_urn, tree.name_matched, args.include_guard_conditions)
+        data["graph"] = _graph(tree.root, [*all_nodes, *tree.name_matched], edges, heuristic=extra)
     head = [("root", f"[{tree.root.kind.value}] {root_urn} direction={args.direction} depth={args.depth}")]
     if tree.root_truncated:
         head.append(("children", "; ".join(f"{d} {n} more" for d, n in tree.root_truncated.items())))

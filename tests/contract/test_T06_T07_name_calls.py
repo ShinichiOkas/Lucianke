@@ -256,26 +256,56 @@ async def test_t06_filters_apply_to_name_matches(pipeline: Pipeline) -> None:
     assert [(x["path"], x["match"]) for x in scoped.structured["data"]["references"]] == [(TESTS, "name")]
 
 
-def test_t06_exact_answers_get_a_note_not_records(db: Path, services: _Services) -> None:
-    """exact の答えには足さない。結べるのに LSP の答えに無い位置の件数と先頭を warnings と data に書く。"""
+def _exact_name_refs(db: Path, services: _Services, qualified: str, **args: Any) -> t06._Found:
     conn = open_reader(db)
     try:
         ws = services.workspace()
         sym = next(
             s
-            for s in t06.queries.symbols_by_qualified_suffix(conn, WS, ENGINE, "Packer.pack")
-            if s.qualified_name == "Packer.pack"
+            for s in t06.queries.symbols_by_qualified_suffix(conn, WS, ENGINE, qualified)
+            if s.qualified_name == qualified
         )
-        args = t06.FindReferencesArgs(target={"urn": str(sym.urn)})  # type: ignore[arg-type]
+        parsed = t06.FindReferencesArgs(target={"urn": str(sym.urn)}, **args)  # type: ignore[arg-type]
         found = t06._Found(target=sym, language="python", tier=t06.Tier.T1)
-        t06._name_refs(conn, ws, sym, args, SourceLines(ws), found, exact=True)
+        t06._name_refs(conn, ws, sym, parsed, SourceLines(ws), found, exact=True)
     finally:
         conn.close()
-    assert found.refs == [] and found.by_name == 0
-    [u] = found.unattributed
-    assert (u["name"], u["total"], u["reason"]) == ("pack", 5, "not_in_exact_answer")
+    return found
+
+
+def test_t06_exact_answers_list_name_matches_in_a_separate_section(db: Path, services: _Services) -> None:
+    """exact の references には足さない。結べるのに LSP の答えに無い位置は補足の欄（name_matched）に印つきで並べる（BUG-0107）。"""
+    found = _exact_name_refs(db, services, "Packer.pack")
+    assert found.refs == [] and found.by_name == 0 and found.unattributed == []
+    got = [(r.path, r.line, r.use, r.enclosing_name, r.confidence, r.match, r.is_test) for r in found.name_matched]
+    heur = t06.Confidence.HEURISTIC
+    assert got == [
+        (SERVICE, line_of(SERVICE, "return packer.pack(items)"), "call", "render", heur, "name", False),
+        (SERVICE, line_of(SERVICE, "out = packer.pack(items)"), "call", "render_untyped", heur, "name", False),
+        (SERVICE, line_of(SERVICE, 'self.inner.pack(["z"])'), "call", "Holder.flush", heur, "name", False),
+        (SERVICE, line_of(SERVICE, 'make().pack(["y"])'), "call", "from_factory", heur, "name", False),
+        (TESTS, line_of(TESTS, 'packer.pack(["b"])'), "call", "test_pack", heur, "name", True),
+    ]
+    assert all(r.snippet for r in found.name_matched)
     [w] = found.warnings
-    assert "5 call site(s) of .pack() whose receiver type is unknown to the syntax tree are not in this exact answer" in w
+    assert "5 call site(s) of .pack() are not in this exact answer because the LSP could not type the receiver" in w
+    assert "listed after the exact references under 'not in exact answer'" in w and "(data.name_matched)" in w
+
+
+def test_t06_exact_name_matches_respect_filters(db: Path, services: _Services) -> None:
+    """include_tests・scope_paths・use_kinds は補足の欄にも効く。"""
+    no_tests = _exact_name_refs(db, services, "Packer.pack", include_tests=False)
+    assert [r.enclosing_name for r in no_tests.name_matched] == ["render", "render_untyped", "Holder.flush", "from_factory"]
+    assert not any(r.is_test for r in no_tests.name_matched)
+    scoped = _exact_name_refs(db, services, "Packer.pack", scope_paths=["tests"])
+    assert [(r.path, r.match) for r in scoped.name_matched] == [(TESTS, "name")]
+    assert _exact_name_refs(db, services, "Packer.pack", use_kinds=["r"]).name_matched == []
+
+
+def test_t06_exact_ambiguous_name_gets_no_section(db: Path, services: _Services) -> None:
+    """同名が 2 つ（``run``）なら LSP の答えが正。補足の欄にも warnings にも足さない（今までどおり）。"""
+    found = _exact_name_refs(db, services, "Runner.run")
+    assert found.name_matched == [] and found.warnings == [] and found.unattributed == []
 
 
 # --- T-07 -----------------------------------------------------------------------------------------
@@ -325,7 +355,7 @@ async def test_t07_outgoing_attributes_unique_names_and_reports_shared_ones(pipe
     assert U(ENGINE, "Packer.pack") not in {n["urn"] for n in typed.structured["data"]["nodes"]}
 
 
-def test_t07_exact_tree_gets_a_note_not_nodes(db: Path) -> None:
+def _exact_tree_supplement(db: Path, **args: Any) -> t07._Tree:
     conn = open_reader(db)
     try:
         sym = next(
@@ -335,11 +365,39 @@ def test_t07_exact_tree_gets_a_note_not_nodes(db: Path) -> None:
         )
         tree = t07._Tree(root=sym, language="python", tier=t07.Tier.T1)
         tree.roots["incoming"] = []
-        t07._exact_name_note(nc.NameIndex(conn, WS), sym, tree, include_tests=False)
+        names = nc.NameIndex(conn, WS)
+        parsed = t07.QueryCallHierarchyArgs(target={"urn": str(sym.urn)}, direction="incoming", **args)  # type: ignore[arg-type]
+        t07._exact_name_supplement(t07._Symbols(conn, WS, names=names), names, sym, tree, parsed)
     finally:
         conn.close()
-    assert tree.roots["incoming"] == []
-    [u] = tree.unattributed
-    assert (u["direction"], u["total"], u["reason"]) == ("incoming", 4, "not_in_exact_answer")
+    return tree
+
+
+def test_t07_exact_tree_lists_name_matched_callers_in_a_separate_section(db: Path) -> None:
+    """exact の木には混ぜない。根の incoming で結べるのに LSP の答えに無い呼び出しの呼び出し元を補足の欄に並べる（BUG-0107）。"""
+    tree = _exact_tree_supplement(db)
+    assert tree.roots["incoming"] == [] and tree.unattributed == []
+    got = [(n.name, n.site.path, n.site.line, n.depth, n.confidence, n.match) for n in tree.name_matched]
+    heur = t07.Confidence.HEURISTIC
+    assert got == [
+        ("render", SERVICE, line_of(SERVICE, "return packer.pack(items)"), 1, heur, "name"),
+        ("render_untyped", SERVICE, line_of(SERVICE, "out = packer.pack(items)"), 1, heur, "name"),
+        ("Holder.flush", SERVICE, line_of(SERVICE, 'self.inner.pack(["z"])'), 1, heur, "name"),
+        ("from_factory", SERVICE, line_of(SERVICE, 'make().pack(["y"])'), 1, heur, "name"),
+        ("test_pack", TESTS, line_of(TESTS, 'packer.pack(["b"])'), 1, heur, "name"),
+    ]
     [w] = tree.warnings
-    assert w.startswith("incoming: 4 call site(s) of .pack() whose receiver type is unknown to the syntax tree")
+    assert w.startswith("incoming: 5 call site(s) of .pack() are not in this exact tree because the LSP could not")
+    assert "(data.name_matched)" in w
+    assert t07.name_matched_header(tree) == (
+        "not in exact tree (matched by name; receiver type unknown to the LSP): 5 callers, 5 sites"
+    )
+
+
+def test_t07_exact_tree_supplement_respects_include_tests_and_max_children(db: Path) -> None:
+    no_tests = _exact_tree_supplement(db, include_tests=False)
+    assert [n.name for n in no_tests.name_matched] == ["render", "render_untyped", "Holder.flush", "from_factory"]
+    capped = _exact_tree_supplement(db, max_children=2)
+    assert [n.name for n in capped.name_matched] == ["render", "render_untyped"]
+    assert capped.name_matched_truncated == 3
+    assert t07.name_matched_header(capped).endswith("5 callers, 5 sites; first 2 callers shown (max_children)")
