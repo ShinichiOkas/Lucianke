@@ -938,6 +938,54 @@ class _Level:
     filled: int = 0  # LSP に聞けず、構文木（relations）で補った
 
 
+_SYMBOL_KIND_FILE = 1
+_SYMBOL_KIND_MODULE = 2
+
+
+def _is_module_item(item: features.CallItem) -> bool:
+    """呼び元の項目がファイル（モジュール）そのものか（囲みの関数の無い、モジュール直下の呼び出し）。
+
+    tsserver は名前の無い関数（``test('x', async t => { f() })`` のコールバック）の中の呼び出しの呼び元を、ソースファイルの項目
+    （``SymbolKind.File``。選択範囲はファイルの先頭）で返し、basedpyright はモジュール直下の呼び出しをモジュールの項目
+    （``SymbolKind.Module``・先頭）で返す。ファイルの先頭の位置で索引を引くと、先頭の行の定義を呼び元と取り違える。
+    TS の ``namespace`` も ``Module`` だが、選択範囲は名前の位置なので先頭にはならない（``namespace`` のキーワードがある）。
+    """
+    if item.kind == _SYMBOL_KIND_FILE:
+        return True
+    start = item.selection_range.start
+    return item.kind == _SYMBOL_KIND_MODULE and start.line == 0 and start.col == 0
+
+
+_FILE_START = Range(Position(0, 0), Position(0, 0))
+
+
+def _reference_call_edges(
+    edges: Sequence[features.CallEdge],
+    locs: Sequence[features.RefLocation],
+    infos: dict[str, dict[tuple[int, int], SiteInfo]],
+) -> list[features.CallEdge]:
+    """``references`` の箇所のうち、構文木で呼び出し（``CALLS``）と分かり、``edges`` に無いものの辺（ファイルごとに 1 本）。
+
+    呼び元の項目はファイルの項目の形にする（``_is_module_item``）。``_build`` が箇所ごとに索引の囲み（``SiteInfo.source_urn``。
+    T-06 と同じ）に結ぶ。
+    """
+    seen = {(str(e.from_rel), r.start.line, r.start.col) for e in edges if e.from_rel is not None for r in e.from_ranges}
+    extra: dict[RelPath, list[Range]] = {}
+    for loc in locs:
+        key = (str(loc.rel), loc.range.start.line, loc.range.start.col)
+        info = infos.get(key[0], {}).get(key[1:])
+        if info is None or info.relation_kind != "CALLS" or key in seen:
+            continue
+        seen.add(key)
+        extra.setdefault(loc.rel, []).append(loc.range)
+    return [
+        features.CallEdge(
+            features.CallItem("", rel, _FILE_START, _FILE_START, kind=_SYMBOL_KIND_FILE), rel, tuple(ranges)
+        )
+        for rel, ranges in extra.items()
+    ]
+
+
 def _external_urn(item: features.CallItem) -> str:
     """ワークスペース外の呼び先（標準ライブラリ・site-packages）の URN。ファイルのパスからパッケージ名を推定する（最善努力）。"""
     uri = item.external_uri or ""
@@ -1029,6 +1077,7 @@ class CallEdgeSource:
         """exact 経路で足す警告（LSP に開かせるファイルの上限など）。呼び手は exact で答えたときだけ出す。"""
         self._rows: dict[tuple[str, str], list[queries.ReferenceRow]] = {}
         self._test: dict[str, bool] = {}
+        self._known: dict[str, bool] = {}
         self._settle_tasks: dict[str, asyncio.Future[bool]] = {}
         self._memo_ok: dict[tuple[str, str], bool] = {}
         """``(urn, direction)`` → LSP が解析を済ませた後に聞いた答えか（目印を置いてよいか）。"""
@@ -1333,9 +1382,19 @@ class CallEdgeSource:
 
     def _is_test(self, path: str, conn: Any = None) -> bool:
         if path not in self._test:
-            info = queries.file_by_path(self.conn if conn is None else conn, self.ws.workspace_id, path)
-            self._test[path] = bool(info and info.is_test)
+            self._file_of(path, conn)
         return self._test[path]
+
+    def _is_known(self, path: str, conn: Any = None) -> bool:
+        """``path`` が索引にあるファイルか（呼び元をファイルの URN に結んでよいか）。"""
+        if path not in self._known:
+            self._file_of(path, conn)
+        return self._known[path]
+
+    def _file_of(self, path: str, conn: Any) -> None:
+        info = queries.file_by_path(self.conn if conn is None else conn, self.ws.workspace_id, path)
+        self._known[path] = info is not None
+        self._test[path] = bool(info and info.is_test)
 
     def _plan(self, key: tuple[str, str], depth: int, level: _Level, *, required: bool) -> _Job | None:
         """PaaD の exact 行・シンボルの無いノードはここで行を入れて ``None``。LSP に聞くノードは ``_Job``。"""
@@ -1468,17 +1527,26 @@ class CallEdgeSource:
             if home is None or not edge.from_ranges:
                 continue
             other = edge.item
+            by_site = False  # 呼び元を呼び出し箇所ごとに索引の囲みで決める（モジュール直下の呼び出し。BUG-0133）
             if not incoming and other.rel is None:
                 other_urn: str | None = _external_urn(other)
+            elif incoming and _is_module_item(other):
+                other_urn = None
             else:
                 other_urn = self._urn_at(other.rel, other.selection_range.start, conn)
-            if other_urn is None:
+            if other_urn is None and incoming and other.rel is not None and self._is_known(str(home), conn):
+                by_site = True
+            elif other_urn is None:
                 self.skipped += 1
                 continue
-            if other.rel is not None and items is not None:
+            elif other.rel is not None and items is not None:
                 items.setdefault(other_urn, other)  # 子のノードを聞くときに prepare を省く
             for rng in edge.from_ranges:
                 info = infos.get(str(home), {}).get((rng.start.line, rng.start.col))
+                if by_site:
+                    # 呼び元の項目が索引のシンボルに当たらない（ファイルそのもの・索引に無い入れ子）: 構文木の索引・T-06 と同じく
+                    # その箇所の囲みの定義、無ければファイルの URN（T-07 の ``(module)`` のノード）に結ぶ
+                    other_urn = info.source_urn if info is not None else str(Urn(self.ws.workspace_id, str(home)))
                 if incoming:
                     made = features.to_exact_relations(
                         urn,
@@ -1815,19 +1883,34 @@ class CallEdgeSource:
                     next((i for i in items if i.rel == path), None),
                 )
             spans["prepare"], t = time.monotonic() - t, time.monotonic()
-            if item is None:
+            if item is None and prime is None:
                 raise LuciankeError(
                     ErrorCode.E_LSP_UNAVAILABLE,
                     f"the LSP has no call hierarchy item for {sym.qualified_name}",
                     details={"reason": "lsp_error"},
                 )
-            call = features.incoming_calls if direction == "incoming" else features.outgoing_calls
-            edges = await call(handle, item, **self._root_limits(job))
+            edges: list[features.CallEdge] = []
+            if item is not None:
+                call = features.incoming_calls if direction == "incoming" else features.outgoing_calls
+                edges = await call(handle, item, **self._root_limits(job))
             spans["calls"], t = time.monotonic() - t, time.monotonic()
-        rels = sorted({str(e.from_rel) for e in edges if e.from_rel is not None})
+            locs: list[features.RefLocation] = []
+            if prime is not None:
+                # tsserver の callHierarchy は対象のファイルの既定のプロジェクト（tsconfig の include）の中しか探さない
+                # （``provideCallHierarchyIncomingCalls`` は ``getFileAndProject`` の 1 つのプロジェクト）。開いた test/ などの別の
+                # プロジェクトの呼び出しは references（プロジェクトをまたぐ）で集め、構文木で呼び出しと分かる箇所を足す（BUG-0133）。
+                # 呼び出し階層の項目が無いノード（関数でない値を持つ変数など）も、references の呼び出し箇所だけで答える
+                pos = (sym.selection or sym.range).start
+                locs = await features.references(
+                    handle, sym.path, pos, include_declaration=True, **self._root_limits(job)
+                )
+                spans["references"], t = time.monotonic() - t, time.monotonic()
+        rels = sorted({str(e.from_rel) for e in edges if e.from_rel is not None} | {str(loc.rel) for loc in locs})
         # 呼び出し箇所の構文木はスレッドで、ファイルごとに並行（LSP の要求の枠の外。次のノードの要求と重なる）
         loaded = await asyncio.gather(*(self.sites.of(rel) for rel in rels))
         infos = dict(zip(rels, loaded, strict=True))
+        if locs:
+            edges = [*edges, *_reference_call_edges(edges, locs, infos)]
         spans["sites"] = time.monotonic() - t
         log_slow_spans(f"call hierarchy {direction}", str(sym.qualified_name), spans, depth=job.depth)
         return edges, infos

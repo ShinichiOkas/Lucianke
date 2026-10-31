@@ -421,8 +421,13 @@ async def test_t07_incoming_of_a_constructor_lists_the_callers_of_the_class(real
     assert meta["confidence_level"] == "exact" and meta["is_degraded"] is False, meta
     assert meta["lsp_status"] == "ready" and "basedpyright" in meta["engine_used"], meta
     nodes = r.structured["data"]["nodes"]
-    # routes.py の呼び出しはモジュール直下（囲みの関数が無い）なので、exact の木のノードにはならない（他のノードと同じ扱い）
-    assert [(n["name"], n["call_site_path"]) for n in nodes] == [("test_charge_ok", TESTS)], nodes
+    # routes.py の呼び出しはモジュール直下（囲みの関数が無い）: 構文木の木と同じくファイルの (module) のノード（BUG-0133。
+    # basedpyright はモジュールの項目〈SymbolKind.Module・先頭〉で返し、以前は「索引に無い呼び元」として捨てていた）
+    assert sorted((n["name"], n["call_site_path"]) for n in nodes) == [
+        ("src/shop/api/routes.py (module)", "src/shop/api/routes.py"),
+        ("test_charge_ok", TESTS),
+    ], nodes
+    assert {n["confidence_level"] for n in nodes} == {"exact"}
 
 
 @needs_basedpyright
