@@ -3,7 +3,7 @@
 この文書は、セッションが中断した（トークンクォータ等）ときに、**別の PC・別のエージェントが続きを拾うため**の現在地。
 作業が進んだらこの文書を更新してコミットする（履歴は git に残る）。
 
-最終更新: 2026-10-31 15 時台 / 対象: `main` / このセッションで BUG-0062〜0123 を処理し、exe 配布・能力測定の基準（Mnemo）・競合比較（Serena）を入れた（§2・§6・§7）
+最終更新: 2026-10-31 19 時台 / 対象: `main` / このセッションで BUG-0062〜0135 を処理し、exe 配布・能力測定の基準（Mnemo）・競合比較（Serena）・試しのリリース（`v0.0.1-rc1`）を入れた（§2・§6・§7）
 
 ---
 
@@ -11,7 +11,7 @@
 
 ```powershell
 git pull
-uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `cdc9257` で 4245 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
+uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `13535ff` で 4402 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
@@ -28,7 +28,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `4245 passed, 30 skipped, 0 failed`（2026-10-31・`cdc9257` に固定した作業ツリー・16 分 43 秒）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
+| 全体テスト | `4402 passed, 30 skipped, 0 failed`（2026-10-31・`13535ff` に固定した作業ツリー・15 分 31 秒。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
 | 索引 DB のスキーマ | **v15**（v5 `_name_calls`=BUG-0071、v6 `_member_refs`=BUG-0075、v7 `via_super`=BUG-0081、v8=BUG-0085、v9 `_attr_defs`・`_var_types`=BUG-0093〜0095、v10 `_reexports`=BUG-0100、v11=BUG-0104/0105、v12 `_type_aliases`=BUG-0108/0109、v13=BUG-0113/0114、v14=BUG-0117、v15=BUG-0122）。古い索引は移行で再取り込みする |
 | 配布 | exe（PyInstaller onedir）。`.\build.ps1`（§6） |
 
@@ -56,6 +56,23 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   - BUG-0072/0073（`8536a5f`）: 依存方向の見張り・CI と同じ引数なしの `ruff check`
 - その他: `.mcp.json` の `--directory` を「.」に（別 PC の絶対パスで MCP がつながらなかった。`cf4497c`）、exe 配布（§6）
 
+### 2026-10-31 夕方に入ったもの（追記。BUG-0124〜0135）
+
+- 速さ
+  - BUG-0127（`e90ec54`・`ef5eb80`・`417ce34`）: 初回の索引の解析を spawn の子プロセスに並べる（`engine/analysis_pool.py`。`LUCIANKE_INDEX_WORKERS`、既定は論理 CPU の半分・最大 8・64 ファイル超の走査だけ）・書き手のページキャッシュ 128 MiB・取り込みの文をまとめ書き・200 ファイル以上なら型サーバーを走査と並べて起こす。Mnemo の準備 243 秒 → 62 秒（§7）。exe でも動く（`tools/smoke_exe.py` の 6 段目で確かめる。`8753573`）
+  - BUG-0058（`7e66c64`〜`0965fec`）: T-06/T-07 は対象ごとに最初の診断を待たない・T-08 は届かない診断と同じ QuickFix を待たない。**仕様書 OD-23 を決定 (b)**（`3c015c9`。T-06・T-07・T-08 は冷 p95 < 1 秒〈深さ 2 以上の T-07 は < 2 秒〉と温 p95 < 50 ms に分けて判定。冷えた LSP の exact を 50 ms に入れるのは全部を先に計算するしかなく、ベンチの数字を作るだけになるため。`bench/run_latency.py` も冷・温で判定）
+  - BUG-0128（`7925923`〜`4eb054b`）: T-19 の表ごとのスレッドをやめる・T-00 の Git の状態を覚える・T-01 は要る列だけ読む・tags.scm を 1 度だけ読む・T-11/T-10 の解析の覚え。BUG-0131（`90b20b4`・`48c4547`）: data_version はメモリの値（25 ms ごとに `PRAGMA data_version` で他プロセスの書き込みを検知）・編集の lsp_status は起動コマンドを探さない
+  - BUG-0125（`b42429a`）: T-20 の `timeout_ms` は既定を索引の大きさで決める（1 MB あたり 60 ms・300 ms〜10 秒）・上限 30 秒・公開接続のページキャッシュ 64 MiB・打ち切りに `suggested_timeout_ms` などの手がかり。実物の Mnemo（250 MB）で集計 56〜225 ms
+- LSP の正しさ
+  - BUG-0132（`50b917d`・`776b4fe`・`5c09fc0`）: ワークスペースの根に pyright の設定が無いと basedpyright が親の設定を採ってワークスペースを外していた → 根の `pyproject.toml` を `configFilePath` で明示。利用者の `include` の外のファイルは聞く前に開かせる（`lsp/pyright_scope.py`）。BUG-0129（`3f5a14b`・`c51f7bb`）: F-POLY に `pyrightconfig.json`・`__init__` の incoming はクラスの項目に聞く
+  - BUG-0135（`3f8eba2`・`23c63a8`・`3ac4488`）: 根の設定の変更で解析の対象と明示を読み直し、変われば `didChangeConfiguration`。`.gitignore` の対象の設定ファイルも LSP に知らせる
+  - BUG-0133（`ee7586d`・`d45d42d`）: T-07 の exact でモジュール直下の呼び元を捨てない・TS の incoming は references で別のプロジェクト（test/）の呼び出しを足す。BUG-0134（`d45d42d`）: T-06 は references を待つ間に分類を進める
+- 出力・その他
+  - BUG-0124（`c0cd165`）: 地図は祖先が非公開のメンバーを公開に数えない。BUG-0084（`d6c9c89`・`b1304d7`）: データファイルの骨格の縮退を 1 件ずつに（予算の 99% を使う）。BUG-0096（`31051ba`）: 監視が polling のとき要求の対象を sha256 で照合し、T-00 に `watcher` を出す
+  - BUG-0126: `.mcp.json` の失敗は別 PC の絶対パスだった頃のもの（`cf4497c` で直っていた）。README に「clone 直後は先に `uv sync`」（`23def4a`）
+  - BUG-0130: `ruff format` は使わない（親の指示の誤り）。見張り `tests/invariants/test_unique_test_module_names.py`（試験ファイルの名前の重なりで全体の収集が落ちる。`31232d9`）
+  - リリース: `release.yml` は `v<版>-<接尾辞>` のタグを prerelease にする（`896c3a8`）。**`v0.0.1-rc1` で走らせて成功**（§6）
+
 ### 2026-10-31 午前〜午後に入ったもの（追記）
 
 - 師匠のコーディングエージェント（ray）からのフィードバック: 全ツールに `openWorldHint: false`（read 系が純 read になる。`998e2ea`）
@@ -70,9 +87,10 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 
 ## 3. 次にやること（優先順）
 
-1. **能力測定の基準（§7）で点数を見ながら使い勝手を上げる。** 2026-10-31 の `cdc9257` で Lucianke 15/15 合格・平均 0.993・19,441 トークン・cold 1.1s / warm 36ms（Serena 13/15・0.946、grep 7/15・0.782）。残る大きな差は**初回の索引の準備 243 秒（Serena 8 秒）**
-2. 未処理の票: BUG-0058（レイテンシ・優先度低）、BUG-0084（データファイルの骨格の縮退が粗い）、BUG-0096（ポーリング時の鮮度）、BUG-0124（非公開クラスのメソッドを地図に公開として出す）。T-20 の時間の上限（既定 300 ms・最大 5 秒）は大きなリポジトリの集計に足りない（票にしていない）
-3. リリースのワークフロー（`release.yml`）は未実行。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。ログを読むには `gh auth login` が要る
+1. **能力測定の基準（§7）で点数を見ながら使い勝手を上げる。** 2026-10-31 の `8b39591` で Lucianke 15/15 合格・平均 0.993・19,068 トークン・cold 624 ms / warm 24 ms・**準備 62.4 秒**（`cdc9257` は 243 秒。Serena 13/15・0.946・準備 8.3 秒、grep 7/15・0.782）
+2. M1-3（応答時間。OD-23 (b) の冷・温の判定）: F-POLY は全部合格。F-TS の T-06 の冷は tsserver の references そのものが残り（node でも同程度）、BUG-0134 の票に計測がある。この PC には node が無く、TS の LSP はベンチで bun 経由
+3. 票の「残ったこと」: BUG-0135（`extends` の先の設定の変更は読み直さない・TS の tsconfig の変更は実機で未確認・M2 の Tier 3 の編集で TOML/JSON を書くときは編集から `notify_watched` が要る）、BUG-0131（T-00・T-08 の `status` は名前のために毎回 `find_command`）
+4. 正式なリリース `v0.0.1` は師匠の判断で（試しの `v0.0.1-rc1` は成功・§6）。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。Actions の結果は公開 API（`api.github.com/repos/ShinichiOkas/Lucianke/actions/runs`）で読める。ログの本文は `gh auth login` が要る
 4. 他 OS: WSL の Ubuntu は外へのネットワークがつながらない（VPN）。手元で Linux を回すには WSL の設定（例 `networkingMode=mirrored`）が要る
 5. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-0xxx` で確認する
 
@@ -107,7 +125,10 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 - exe では `sys.executable` が Python ではない。`doctor` の自己診断は隠しサブコマンド `_doctor-selftest`（本体は `bootstrap_io.run_stdout_selftest`）で exe 自身を起動する
 - リリース: `v*` のタグを push すると `.github/workflows/release.yml` が Windows でビルド・smoke・Release に zip を上げる（python.org の Python に固定して、その LICENSE.txt を同梱）
 - 確かめたこと（2026-10-31、このPC）: `build.ps1 -Zip -InstallDir <一時>` が smoke 13 項目すべて ok、zip は 394 項目・区切りは `/`・展開した exe が動く。
-  動いている exe があると exit 1 で止まり、`-Force` で止めて置き換え、`-Uninstall` で消える。リリースのワークフローはまだ一度も走らせていない（初回のタグで確かめる）
+  動いている exe があると exit 1 で止まり、`-Force` で止めて置き換え、`-Uninstall` で消える。
+- **試しのリリース（2026-10-31、師匠の承認）**: `v0.0.1-rc1`（`896c3a8`）で `release.yml` が全段成功（1 分 40 秒）。Release（prerelease）に
+  `lucianke-0.0.1-windows-x64.zip`（30.9 MB）と `.sha256`。落とした zip の sha256 一致・展開した exe で `smoke_exe.py` が PASSED（子プロセスの段を含む）。
+  タグが `v<__version__>` なら正式な Release、`v<__version__>-<接尾辞>` なら prerelease
 
 ## 7. 能力測定の基準（Mnemo の分析）と競合比較（2026-10-31・師匠の判断）
 
@@ -117,3 +138,4 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   Mnemo の作業ツリーには他の作業の未コミットの変更があることが多いので、結果は `git -C <Mnemo> worktree add --detach <scratch> origin/main` の一時作業ツリーで commit・push する。
 - 競合: Serena 2.0.0（師匠の承認で導入。MCP・pyright）。Serena は準備が速く誤検出が無いが、型の分からない受け手を落とし、outgoing と名前変更の dry-run が無い。
 - Mnemo の `PROJECT_STRUCTURE.md` §10 に Lucianke による構造分析（規模・パッケージの依存・被参照の多いモジュール・気づいた点）を書いた。
+- 結果: 1 回目 `bench/lucianke/results/2026-10-31.md`（Lucianke `cdc9257`・Serena・grep）、2 回目 `2026-10-31b.md`（Lucianke `8b39591` だけ。BUG-0124〜0132 の後。15/15・0.993・準備 62.4 秒）。
