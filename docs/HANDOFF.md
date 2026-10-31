@@ -11,7 +11,7 @@
 
 ```powershell
 git pull
-uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `4932bc8` で 4407 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
+uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `076e3d9` で 4469 passed / 35 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
@@ -28,7 +28,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `4407 passed, 30 skipped, 0 failed`（2026-10-31・`4932bc8` に固定した作業ツリー・13 分 4 秒。`d3c676e`・`13535ff` も 0 failed。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
+| 全体テスト | `4469 passed, 35 skipped, 0 failed`（2026-10-31・`076e3d9` に固定した作業ツリー・14 分 26 秒。skip 35 件のうち 5 件は TS の LSP を使う新しい試験〈TS の LSP の無い環境で skip〉。`4932bc8`・`d3c676e`・`13535ff` も 0 failed。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
 | 索引 DB のスキーマ | **v15**（v5 `_name_calls`=BUG-0071、v6 `_member_refs`=BUG-0075、v7 `via_super`=BUG-0081、v8=BUG-0085、v9 `_attr_defs`・`_var_types`=BUG-0093〜0095、v10 `_reexports`=BUG-0100、v11=BUG-0104/0105、v12 `_type_aliases`=BUG-0108/0109、v13=BUG-0113/0114、v14=BUG-0117、v15=BUG-0122）。古い索引は移行で再取り込みする |
 | 配布 | exe（PyInstaller onedir）。`.\build.ps1`（§6） |
 
@@ -65,8 +65,9 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   - BUG-0125（`b42429a`）: T-20 の `timeout_ms` は既定を索引の大きさで決める（1 MB あたり 60 ms・300 ms〜10 秒）・上限 30 秒・公開接続のページキャッシュ 64 MiB・打ち切りに `suggested_timeout_ms` などの手がかり。実物の Mnemo（250 MB）で集計 56〜225 ms
 - LSP の正しさ
   - BUG-0132（`50b917d`・`776b4fe`・`5c09fc0`）: ワークスペースの根に pyright の設定が無いと basedpyright が親の設定を採ってワークスペースを外していた → 根の `pyproject.toml` を `configFilePath` で明示。利用者の `include` の外のファイルは聞く前に開かせる（`lsp/pyright_scope.py`）。BUG-0129（`3f5a14b`・`c51f7bb`）: F-POLY に `pyrightconfig.json`・`__init__` の incoming はクラスの項目に聞く
-  - BUG-0135（`3f8eba2`・`23c63a8`・`3ac4488`）: 根の設定の変更で解析の対象と明示を読み直し、変われば `didChangeConfiguration`。`.gitignore` の対象の設定ファイルも LSP に知らせる
-  - BUG-0133（`ee7586d`・`d45d42d`）: T-07 の exact でモジュール直下の呼び元を捨てない・TS の incoming は references で別のプロジェクト（test/）の呼び出しを足す。BUG-0134（`d45d42d`）: T-06 は references を待つ間に分類を進める
+  - BUG-0135（`3f8eba2`・`23c63a8`・`3ac4488`・`eefb6a8`・`c539302`）: 根の設定の変更で解析の対象と明示を読み直し、変われば `didChangeConfiguration`。`.gitignore` の対象の設定ファイルも LSP に知らせる。`extends` の先（根の外も）の変更も読み直す。TS の `tsconfig.json` の変更は tsserver が自分で 1 秒以内に従うことを実機（bun の tsls）で確認
+  - BUG-0131 の残り（`3a8a535`）: `LspPool.status` の次に起こすサーバーの名前を覚える（venv・`node_modules` の作り直し・reindex で捨てる。status 1 回 0.3〜1.7 → 0.007 ms）
+  - BUG-0133（`ee7586d`・`d45d42d`）: T-07 の exact でモジュール直下の呼び元を捨てない・TS の incoming は references で別のプロジェクト（test/）の呼び出しを足す。BUG-0134（`d45d42d`・`d08aea4`・`076e3d9`）: T-06 は references を待つ間に分類を進める。型解決のサーバーの initialize の直後に、prime の対象になりうるファイル（ky は 98 件。上限 200 の内）を背景でまとめて先に開き、tsserver の組み直しを呼び出しの外で 1 回に（`tools/_lsp_preopen.py`。呼び出しを待たせない・答えは変えない）。F-TS の T-06 の冷 p95 1638・2533 → 536・849 ms、ready まで 18 → 8 秒。「先開きの診断がそろうまで ready にしない」案は採らない（遅い時間を計測の外へ動かすだけで、その間 AI は構文木の答えになる）
 - 出力・その他
   - BUG-0136（`4932bc8`）: T-07 の json の辺をノードのレコードに付けて予算に数える（辺が前置きで予算を食い、ノード 0 件・予算超過だった）。箇所の多いノードは落とさず call_sites を縮めて注に丸ごとの `max_tokens`
   - BUG-0124（`c0cd165`）: 地図は祖先が非公開のメンバーを公開に数えない。BUG-0084（`d6c9c89`・`b1304d7`）: データファイルの骨格の縮退を 1 件ずつに（予算の 99% を使う）。BUG-0096（`31051ba`）: 監視が polling のとき要求の対象を sha256 で照合し、T-00 に `watcher` を出す
@@ -89,8 +90,8 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 ## 3. 次にやること（優先順）
 
 1. **能力測定の基準（§7）で点数を見ながら使い勝手を上げる。** 2026-10-31 の `8b39591` で Lucianke 15/15 合格・平均 0.993・19,068 トークン・cold 624 ms / warm 24 ms・**準備 62.4 秒**（`cdc9257` は 243 秒。Serena 13/15・0.946・準備 8.3 秒、grep 7/15・0.782）
-2. M1-3（応答時間。OD-23 (b) の冷・温の判定）: F-POLY は全部合格、F-PY も合格（`d3c676e`）。F-TS は T-06 の冷だけ不合格（14 件中 1 件、tsserver が開かせたファイルでプロジェクトを組み直す回の references そのもの 1.1〜2.5 秒。node 22 でも同程度。BUG-0134）。受入の機材の値で判断する。この PC には node が無く、TS の LSP はベンチで bun 経由
-3. 票の「残ったこと」: BUG-0135（`extends` の先の設定の変更は読み直さない・TS の tsconfig の変更は実機で未確認・M2 の Tier 3 の編集で TOML/JSON を書くときは編集から `notify_watched` が要る）、BUG-0131（T-00・T-08 の `status` は名前のために毎回 `find_command`）
+2. M1-3（応答時間。OD-23 (b) の冷・温の判定）: F-POLY・F-PY は全部合格（`d3c676e`）、F-TS の T-06 の冷も BUG-0134 の背景の先開きで合格（`076e3d9`・536・849 ms）。ready の直後の数秒は tsserver の検査の一巡とぶつかると冷えた要求が 0.5〜0.9 秒になりうる（負荷の回で 1 秒に近づく。票に記録）。受入の機材（48 論理 CPU）で通しの計測を 1 回流すとよい。この PC には node が無く、TS の LSP は bun 経由（`LUCIANKE_LSP_TYPESCRIPT_LANGUAGE_SERVER_CMD="bun --bun <dir>/node_modules/typescript-language-server/lib/cli.mjs --stdio"`。TS の LSP を使う試験もこれで走る）
+3. M2 に持ち越し（票に記録）: Tier 3 の編集で TOML/JSON を書くときは、編集トランザクションからも `notify_watched` を送る（監視のこだまとして捨てられるため。BUG-0135）。tsserver の tsconfig の追従は bun / Windows でしか見ていない（node / Linux・macOS・ネットワークドライブは未確認。効かなければ tsconfig の刻みを見て TS の LSP を起動し直す案が票にある）
 4. 正式なリリース `v0.0.1` は師匠の判断で（試しの `v0.0.1-rc1` は成功・§6）。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。Actions の結果は公開 API（`api.github.com/repos/ShinichiOkas/Lucianke/actions/runs`）で読める。ログの本文は `gh auth login` が要る
 4. 他 OS: WSL の Ubuntu は外へのネットワークがつながらない（VPN）。手元で Linux を回すには WSL の設定（例 `networkingMode=mirrored`）が要る
 5. 票に状態欄は無い。処理済みかは `git log --oneline --grep=BUG-0xxx` で確認する
