@@ -15,7 +15,7 @@ Tier 1 のファイルからシード固定でランダムに選んだ対象で 
 ``confidence_level == "exact"`` だけの集計と、降格応答の集計も別に出す。測定中の ``stdout`` 純度と子プロセスは常に監視し、
 違反があればその実行（フィクスチャ）全体を不合格にする（§14.2）。
 
-LSP の ``exact`` 経路のツール（T-06・T-07・T-08。``Plan.cold_ms``）は、母集団を **冷**（そのツールがこの実行で初めて聞いた対象。
+LSP の ``exact`` 経路のツール（T-06・T-07・T-08・T-11 の dry_run。``Plan.cold_ms``）は、母集団を **冷**（そのツールがこの実行で初めて聞いた対象。
 探り・準備の呼び出しも「聞いた」に数える）と **温**（2 回目以降）に分け、冷は p95 < 1 秒（深さ 2 の T-07 は < 2 秒）、温は
 p95 < 50 ms で判定し、両方とも合格で合格（仕様書 §14.4・§17 OD-23 (b)）。結果 JSON のツールごとの ``cold`` / ``warm`` に両方を載せ、
 生の記録には ``first`` を付ける。
@@ -276,7 +276,7 @@ class Plan:
     path: str  # "fast" | "verification"
     args: ArgsFn
     cold_ms: int | None = None
-    """LSP の exact 経路のツール（T-06・T-07・T-08。仕様書 §14.4・OD-23 (b)）: その実行で初めての対象の呼び出し（冷）はこの値で、
+    """LSP の exact 経路のツール（T-06・T-07・T-08・T-11 の dry_run。仕様書 §14.4・OD-23 (b)）: その実行で初めての対象の呼び出し（冷）はこの値で、
     2 回目以降（温）は ``THRESHOLD_MS[path]`` で判定する。``None`` は全呼び出しを ``THRESHOLD_MS[path]`` で判定する。"""
 
 
@@ -291,7 +291,7 @@ PLANS: tuple[Plan, ...] = (
     Plan("query_call_hierarchy", "fast", _a_calls, cold_ms=COLD_LSP_DEEP_MS),  # _a_calls は depth 2
     Plan("get_diagnostics", "fast", _a_diag, cold_ms=COLD_LSP_MS),
     Plan("edit_symbol_body", "fast", _a_edit_body),  # T-10 (BUG-0059)
-    Plan("rename_symbol", "fast", _a_rename),  # T-11 (BUG-0059)
+    Plan("rename_symbol", "fast", _a_rename, cold_ms=COLD_LSP_MS),  # T-11 (BUG-0059)。dry_run の LSP の rename（OD-23 (b)）
     Plan("apply_code_action", "fast", _a_code_action),  # T-13 (BUG-0059)
     Plan("get_project_db_schema", "fast", _a_schema),
     Plan("query_project_db", "fast", _a_sql),

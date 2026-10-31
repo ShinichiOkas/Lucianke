@@ -30,14 +30,18 @@ def rec(target: str, ms: float, *, ok: bool = True, degraded: bool = False) -> d
 
 
 def test_only_the_lsp_exact_tools_are_split_with_their_cold_thresholds() -> None:
+    """T-06・T-07・T-08・T-11（dry_run の rename）だけを冷・温に分ける。T-11 の台本は dry_run で呼ぶ。"""
     split = {p.tool: p.cold_ms for p in rl.PLANS if p.cold_ms is not None}
     assert split == {
         "find_references_and_implementations": 1000,
         "query_call_hierarchy": 2000,  # 台本は depth 2
         "get_diagnostics": 1000,
+        "rename_symbol": 1000,  # T-11 の dry_run（OD-23 (b) に 2026-10-31 に足した）
     }
     args, _ = rl._a_calls(random.Random(0), rl.Pool(["a.py"], [rl.Sym("a.py", "f", "f", "function")]))
     assert args["depth"] == 2
+    renamed, _ = rl._a_rename(random.Random(0), rl.Pool(["a.py"], [rl.Sym("a.py", "f", "f", "function")]))
+    assert renamed["dry_run"] is True
 
 
 def test_mark_first_counts_probe_and_prime_targets_as_asked() -> None:
