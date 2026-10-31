@@ -301,12 +301,18 @@ def repo_map_files(
 
 
 def file_symbol_ranks(conn: sqlite3.Connection, workspace_id: str, path: str) -> dict[str, tuple[float, int]]:
-    """ファイルのシンボルの ``{urn: (score, fan_in)}``（``_symbol_rank`` に無いものは含まない）。"""
+    """ファイルのシンボルの ``{urn: (score, fan_in)}``（``_symbol_rank`` に無いものは含まない）。
+
+    ファイル → そのシンボル → ``_symbol_rank`` の順に引く（``CROSS JOIN`` で順序を固定）。以前は SQLite が ``_symbol_rank`` を
+    総なめにしてから結んでいて、1 回 0.15〜0.2 秒、T-01 はこれを表示するファイルごとに呼ぶので 4,221 ファイルの索引で
+    ``max_tokens=5000`` の地図の 11.7 秒のうち 9.8 秒を使っていた（BUG-0120）。
+    """
     try:
         rows = conn.execute(
-            "SELECT r.urn, r.score, r.fan_in FROM _symbol_rank r JOIN symbols s ON s.urn = r.urn"
-            " JOIN files f ON f.file_id = s.file_id WHERE r.workspace_id = ? AND f.path = ?",
-            (workspace_id, path),
+            "SELECT r.urn, r.score, r.fan_in FROM files f CROSS JOIN symbols s ON s.file_id = f.file_id"
+            " CROSS JOIN _symbol_rank r ON r.urn = s.urn"
+            " WHERE f.workspace_id = ? AND f.path = ? AND r.workspace_id = ?",
+            (workspace_id, path, workspace_id),
         ).fetchall()
     except sqlite3.OperationalError:
         return {}

@@ -1379,9 +1379,15 @@ json の `data`:
    - **グラフの定義**（`index/rank.py`、809eff4）: 辺はワークスペース内のシンボル（`is_external = 0`）を指すものだけ（`lk://_ext/` の外部シンボルは辺にしない。`Exception` や `Decimal` が上位を占めないため）。自己ループは捨て、`(始点, 終点)` の組は種別・参照箇所の数に関わらず 1 本。テストファイルからの辺も数える（索引上の重要度は `include_tests` に依らず、`include_tests: false` はテストファイルを表示と順位から外すだけ）。減衰係数 0.85、同じ入力なら同じ値（決定的）。
    - **公開シンボル**（21a の判断。実装で確定 2026-10-29）: 修飾子に `priv` / `prot` を持たず、種別が `Field` / `Property` / `Column` / `Cell` / `Key` / `Tag` でないもの。修飾子が空（ctags 由来など可視性の分からないもの）は公開として扱い、`conf=heuristic` を付ける。データ形式の最上位の節 `Key` / `Tag` と、クラスやテーブルの中身は、親が代表になるので地図に出さない。
    - 表示する `rank` は先頭のファイルを 1.00 とした相対値（`alpha` は 0.00）。
-3. 詰める順序は、①ディレクトリ要約行、②スコア降順のファイルブロック、③各ブロック内は公開シンボルをスコア降順に `max_symbols_per_file` 件まで、とする。
+3. 詰める順序は、①概観（ディレクトリ要約行・パッケージ・入口のモジュール・サブパッケージ）、②スコア降順のファイルブロック、③各ブロック内は公開シンボルをスコア降順に `max_symbols_per_file` 件まで、とする。
    - **ディレクトリ要約行**（実装で確定 2026-10-29、458a4cb・3e8d099）は、トップレベルのディレクトリ別のファイル数を多い順（同数はパスの辞書順）に 12 件まで出し、超えた分は `+N more dirs` とする（例: `- src/ (42 files), tests/ (18 files), +3 more dirs`）。ルート直下のファイルはルート（`./`）に数える。
-   - 予算が小さいとき、縮退の最後にディレクトリ要約行も外す。json の `tree[]` は `max_tokens ÷ 40` 件（最低 1 件、ファイル数の多い順）までに絞る（予約分が予算を食い尽くさないため）。
+   - **概観**（MUST。BUG-0120、2026-10-31）: ディレクトリ要約行の後ろに、初めてのリポジトリで最初に知りたい「どんなパッケージがあり、入口はどこか」を数行で出す。理由: 被参照の多いファイルの骨格だけでは全体の形が分からない（能力ベンチの T01 で `src/mnemo/api`・`src/mnemo/tools` など主要なパッケージの再現率が 0.556 だった）。行は次の順。
+     - `- packages: <根> (N files), …`: **コードのパッケージの根**。トップレベルのディレクトリのうちコードのファイルを持つもの（`.` で始まる隠しディレクトリは除く）で、直下にコードのファイルが無くコードを持つ子が 1 つだけのディレクトリはその子とつなぐ（`src/` → `src/mnemo/`、`web/` → `web/src/`）。並びは重要度（配下のファイルのスコアの和）の降順、同じならファイル数の降順、パスの辞書順。10 件まで、残りは `+N more`。N は配下（再帰）のコードのファイル数。
+     - `- entry modules: …`: **入口のモジュール**。`pyproject.toml` の `[project.scripts]`・`[project.gui-scripts]`・`[tool.poetry.scripts]` が指すモジュールのファイル（`pyproject.toml` のあるディレクトリから `mod/sub.py`・`mod/sub/__init__.py`・`src/` の下の同じ形）、次に名前（拡張子を除く）が `main`・`__main__`・`app`・`cli` か `*_entry` のコードのファイルを浅い順（同じ深さはスコアの降順）に、合わせて 8 件まで。
+     - `- <根>: <サブパッケージ> (N), …`: **2 段目のサブパッケージ**。根の直下のコードを持つディレクトリ（同じくつなぐ）をフルパスで、根の順・同じ根ではファイル数の降順に（いちばん重要なパッケージの中の形を先に見せる。PageRank は API・ツールのような呼ばれる側でないパッケージを低く見るので 2 段目は大きさで並べる）。
+     - コードのファイルは、Tier 3（データ・文書）と `dot`・`mermaid`・`openapi`・`binary`・`secret`・`unknown` を除き、Tier 1・2 で本文を解析しなかったもの（圧縮済みの JS など `lexical_fallback`）も除いたもの。`include_tests` と `scope_paths` の絞り込みの後のファイルで数える。
+     - 大きさは 375 トークン（既定の予算 1500 の 1/4）までで、根 → 入口 → サブパッケージの順に入るだけ入れる。**`max_tokens` に依らない**: 予算に比例させると、予算を少し上げたときに概観が 1 項目ぶん伸びて後ろのファイルブロックが 1 つ落ちる帯ができ、§5.6 規則 5（BUG-0067）を破る。
+   - 予算が小さく先頭のレコードが丸ごと入らないときは、概観の行を後ろ（サブパッケージ → 入口のモジュール）から外して先頭のファイルブロックを丸ごと残し、次にディレクトリ要約行とパッケージの行を残したままブロックを縮め（規約 4）、最後にその 2 行も外す。json の `tree[]` は `max_tokens ÷ 40` 件（最低 1 件、ファイル数の多い順）まで、`packages[]` / `entry_modules[]` は compact に直して `max_tokens ÷ 10`（375 まで）に収まる分までに絞る（予約分が予算を食い尽くさないため）。
 4. 予算が尽きたら残りのファイルをディレクトリ別件数で `# summary:` 行に要約し、`next_cursor` を発行する。1 レコードは 1 ファイルブロック（途中で切らない。入らないブロックは縮退版にする: シグネチャを外す → 重要でない順にシンボルを減らす → ヘッダだけ）。
 5. Tier 4 ファイルは ctags 推定のシンボルがあればそれを `conf=heuristic` 付きで載せ、無ければファイル名だけを載せる。
 
@@ -1390,6 +1396,9 @@ json の `data`:
 ```
 # get_repo_map ok conf=exact lsp=ready rev=WORKING_TREE ws=app ~1480/1500tok
 - src/ (42 files), tests/ (18 files), notebooks/ (3 files), conf/ (2 files)
+- packages: src/ (40 files), notebooks/ (3 files)
+- entry modules: src/main.py
+- src/: src/services/ (12), src/api/ (9), src/models/ (8)
 === src/services/payment.py (245 lines) ===
 - rank: 1.00 fan_in: 23
 [Class] PaymentProcessor @L25-240
@@ -1407,6 +1416,8 @@ json の `data`:
 |---|---|---|
 | `ranking_used` | string | 実際に使った順位付け |
 | `tree[]` | object[] | `dir`, `file_count`, `line_count` |
+| `packages[]` | object[] | 概観のパッケージの根: `dir`, `file_count`, `line_count`, `children[]`（`dir`, `file_count`） |
+| `entry_modules[]` | string[] | 概観の入口のモジュール（パス） |
 | `files[]` | object[] | `path`, `rank`, `fan_in`, `line_count`, `language`, `tier`, `symbols[]`（SymbolRecord の部分集合: `urn`, `name`, `qualified_name`, `kind`, `modifiers`, `range`, `signature`, `confidence_level`） |
 
 **エラー**:

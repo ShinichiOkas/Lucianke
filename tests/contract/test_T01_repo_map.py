@@ -280,8 +280,11 @@ async def test_compact_uses_its_budget_when_a_degraded_file_is_further_down(pipe
     assert "! DEGRADED" not in r.text and "# more: cursor=" in r.text, r.text
     assert int(m.group(2)) >= 0.9 * max_tokens, (head, r.text)
     assert int(m.group(2)) <= max_tokens
-    # 先頭のファイルはシグネチャつきのシンボルを丸ごと返す（以前の 260 では `retry @L20-24` だけ）
-    assert "[Function] pub retry(attempt: int) -> int @L20-24" in r.text, r.text
+    # 先頭のファイルはシグネチャつきのシンボルを丸ごと返す（以前の 260 では `retry @L20-24` だけで予算も余っていた）。
+    # 260 では概観のパッケージの行を残してシグネチャを外す（小さい予算でも全体の形を先に見せる。BUG-0120）
+    want = "[Function] pub retry(attempt: int) -> int @L20-24" if max_tokens >= 300 else "[Function] pub retry @L20-24"
+    assert want in r.text, r.text
+    assert "- packages: src/shop/ (" in r.text, r.text
 
 
 async def test_smaller_budget_is_a_prefix_of_the_larger(pipeline: Pipeline) -> None:
@@ -321,6 +324,51 @@ async def test_compact_shape_follows_the_spec_example(pipeline: Pipeline) -> Non
     method = block[cls + 1]
     assert method.startswith("  [Method] pub async process_charge(")  # 入れ子（選ばれた親の下）と短い名前
     assert "-> Receipt" in method
+
+
+def _overview_lines(text: str) -> list[str]:
+    out: list[str] = []
+    for line in text.splitlines()[1:]:
+        if line.startswith(("=== ", "# ")):
+            break
+        if line.startswith("- "):  # ``! DEGRADED`` などの行は概観ではない
+            out.append(line)
+    return out
+
+
+async def test_overview_lists_packages_subpackages_and_entry_modules(pipeline: Pipeline) -> None:
+    """先頭の概観: コードのパッケージの根（src/ → src/shop/、web/ → web/src/ とつなぐ）、2 段目のサブパッケージ（フルパス・
+    ファイル数）、入口のモジュール。文書・データだけのディレクトリ（docs/・conf/）は根にしない（BUG-0120）。"""
+    r = await repo_map(pipeline, "compact", max_tokens=3000)
+    assert g.validate(r.text) == [], r.text
+    ov = _overview_lines(r.text)
+    assert ov[0].startswith("- src/ (") and "./ (" in ov[0]  # トップレベルの行（今までどおり）
+    packages = next(x for x in ov if x.startswith("- packages: "))
+    assert packages.startswith("- packages: src/shop/ (10 files), web/src/ (2 files)"), packages
+    assert "docs/" not in packages and "conf/" not in packages
+    assert "- entry modules: web/src/app.ts" in ov
+    assert "- src/shop/: src/shop/models/ (4), src/shop/services/ (3), src/shop/api/ (2)" in ov
+    j = await repo_map(pipeline, max_tokens=3000)
+    data = j.structured["data"]
+    assert data["packages"][0]["dir"] == "src/shop/" and data["packages"][0]["file_count"] == 10
+    assert [c["dir"] for c in data["packages"][0]["children"]] == ["src/shop/models/", "src/shop/services/", "src/shop/api/"]
+    assert data["entry_modules"] == ["web/src/app.ts"]
+
+
+async def test_overview_and_file_blocks_never_shrink_as_max_tokens_grows(pipeline: Pipeline) -> None:
+    """概観は ``max_tokens`` に依らない大きさで、予算が足りないときだけ先頭のレコードの縮退で行を外す。予算を上げて
+    見えていた概観の行・ファイルが消えることはない（仕様書 §5.6 規則 5。BUG-0067・BUG-0120）。"""
+    prev_ov: set[str] = set()
+    prev_files: list[str] = []
+    for max_tokens in range(180, 901, 15):
+        r = await repo_map(pipeline, "compact", max_tokens=max_tokens)
+        assert g.validate(r.text) == [], (max_tokens, r.text)
+        ov = set(_overview_lines(r.text))
+        files = re.findall(r"^=== (\S+) \(", r.text, flags=re.M)
+        assert prev_ov <= ov, (max_tokens, prev_ov - ov)
+        assert files[: len(prev_files)] == prev_files, (max_tokens, prev_files, files)
+        prev_ov, prev_files = ov, files
+    assert any(x.startswith("- entry modules: ") for x in prev_ov)
 
 
 async def test_include_signatures_false_drops_parameters(pipeline: Pipeline) -> None:

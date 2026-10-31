@@ -7,7 +7,8 @@
   （``index.rank``。シンボルの値は差分索引の後に ``_symbol_rank`` へ書かれる）。``fan_in`` は同じ件数の fan_in の和。
   ``alpha`` はパス順。``_symbol_rank`` が空（索引前・参照が無い）なら ``alpha`` に降格し ``! ranking=alpha (graph not ready)``。
   同点はパスの辞書順。表示する ``rank`` は先頭のファイルを 1.00 とした相対値（``alpha`` は 0.00）。
-* 詰める順序（処理規約 3）: 先頭のファイルブロックの前にディレクトリ要約行（トップレベルのディレクトリ別のファイル数）、
+* 詰める順序（処理規約 3）: 先頭のファイルブロックの前に概観（``tools._overview``。トップレベルのディレクトリ別のファイル数の行、
+  コードのパッケージの根と 2 段目のサブパッケージのファイル数、入口のモジュール。``OVERVIEW_MAX_TOKENS`` まで。BUG-0120）、
   次にスコア降順のファイルブロック。各ブロックは公開シンボルをスコア順に上位 N 件、行の順に入れ子で出す。
   予算が尽きたら残りは ``# summary: N more files (src: 30, …)``（ディレクトリ別）と ``# more: cursor=…``。
   1 レコードは 1 ファイルブロック（途中で切らない。入らないときは縮退版: シグネチャ → シンボルの数 の順に減らす）。
@@ -37,6 +38,7 @@ from lucianke.core.model import Confidence, EngineChoice, RelPath, SymbolRecord,
 from lucianke.core.records import Record, ToolOutput
 from lucianke.core.tokens import TokenEstimator
 from lucianke.index import queries, rank
+from lucianke.tools import _overview
 from lucianke.tools._base import WORKING_TREE, CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._nav import workspace_of
 from lucianke.tools.t03_search_workspace_symbols import index_reader
@@ -47,6 +49,9 @@ GRAPH_NOT_READY = "ranking=alpha (graph not ready)"
 TREE_LINE_MAX_DIRS = 12
 TREE_JSON_TOKENS_PER_DIR = 40
 """json の ``tree[]`` に載せるディレクトリ数の上限は ``max_tokens`` をこれで割った数（予約分が予算を食い尽くさないため。ファイル数の多い順）。"""
+JSON_OVERVIEW_SHARE = 10
+"""json の ``packages[]`` / ``entry_modules[]`` は、compact に直して ``max_tokens`` のこの分の 1（``OVERVIEW_MAX_TOKENS`` まで）に収まる分だけ
+（``tree[]`` と同じく、静的な欄が小さい予算を食い尽くさないため。compact の概観は ``max_tokens`` に依らない。BUG-0120）。"""
 SUMMARY_MAX_GROUPS = 8
 EXTRA_RECORDS = 3
 """予算を超えたあとにも作っておくファイルブロックの数（パッカーの ``# summary:`` が「残り」を見られるように）。"""
@@ -199,11 +204,9 @@ def _block(
     shown: list[_Shown],
     *,
     with_signatures: bool,
-    tree_note: str | None,
+    overview: tuple[str, ...],
 ) -> tuple[str, ...]:
-    lines: list[str] = []
-    if tree_note is not None:
-        lines.append(L.note(tree_note))
+    lines: list[str] = [L.note(text) for text in overview]
     lines.append(L.file_block_header(f.path, lines=f.line_count))
     lines.append(L.note(f"rank: {rank_text:.2f} fan_in: {f.fan_in}"))
     for item in shown:
@@ -240,10 +243,10 @@ def _make_record(
     shown: list[_Shown],
     *,
     with_signatures: bool,
-    tree_note: str | None,
+    overview: tuple[str, ...] = (),
     reselect: Callable[[int], list[_Shown]] | None = None,
 ) -> Record:
-    lines = _block(L, f, rank_value, shown, with_signatures=with_signatures, tree_note=tree_note)
+    lines = _block(L, f, rank_value, shown, with_signatures=with_signatures, overview=overview)
     data = {
         "path": f.path,
         "rank": round(rank_value, 4),
@@ -255,19 +258,30 @@ def _make_record(
     }
 
     def shrink(budget: int) -> Record | None:
-        """残り ``budget`` トークンに収まる縮退版: シグネチャを外す → 重要でない順にシンボルを減らす → ヘッダだけ。"""
+        """残り ``budget`` トークンに収まる縮退版: シグネチャを外す → 重要でない順にシンボルを減らす → ヘッダだけ。
+
+        先頭のレコード（概観つき）は、まず概観の行を後ろ（サブパッケージ → 入口）から外してブロックを丸ごと残し、次に
+        トップレベルの行とパッケージの行を残したままブロックを縮め、最後にその 2 行も外す。段の順は固定なので、予算が大きいほど
+        浅い段で返る（BUG-0067）。"""
         candidates: list[tuple[list[_Shown], bool]] = []
         if with_signatures and shown:
             candidates.append((shown, False))
         if reselect is not None:
             candidates += [(reselect(k), False) for k in range(len(shown) - 1, -1, -1)]
-        for note in (tree_note, None):  # 最後の手段としてディレクトリ要約行も外す
-            for subset, sigs in candidates + ([([], False)] if note is None else []):
-                text = "\n".join(_block(L, f, rank_value, subset, with_signatures=sigs, tree_note=note))
-                if _EST.count(text) <= budget:
-                    return _make_record(
-                        L, f, index, rank_value, subset, with_signatures=sigs, tree_note=note, reselect=None
-                    )
+        keep = min(len(overview), _overview.CORE_LINES)
+        ladder: list[tuple[tuple[str, ...], list[_Shown], bool]] = [
+            (overview[:n], shown, with_signatures) for n in range(len(overview) - 1, keep - 1, -1)
+        ]
+        for n in range(keep, -1, -1):
+            ladder += [(overview[:n], subset, sigs) for subset, sigs in candidates]
+            if n == 0:
+                ladder.append(((), [], False))
+        for note, subset, sigs in ladder:
+            text = "\n".join(_block(L, f, rank_value, subset, with_signatures=sigs, overview=note))
+            if _EST.count(text) <= budget:
+                return _make_record(
+                    L, f, index, rank_value, subset, with_signatures=sigs, overview=note, reselect=None
+                )
         return None
 
     return Record(
@@ -278,7 +292,7 @@ def _make_record(
         data=data,
         confidence=_confidence(f, shown),
         group=_top_dir(f.path),
-        shrink=shrink if shown or with_signatures else None,
+        shrink=shrink if shown or with_signatures or overview else None,
     )
 
 
@@ -352,6 +366,7 @@ class _Built:
     warnings: list[str]
     tier: Tier
     languages: str
+    overview: dict[str, Any]
 
 
 def _build(
@@ -379,8 +394,12 @@ def _build(
         def rank_of(f: rank.RepoMapFile) -> float:
             return _metric(f, ranking) / top if top > 0 else 0.0
 
-        tree_text = _tree_note(ordered)
+        overview = _overview.build(ordered, ws.root, _tree_note(ordered), _EST.count)
         budget = ctx.call.max_tokens
+        json_overview = _overview.build(
+            ordered, ws.root, None, _EST.count,
+            max_tokens=min(_overview.OVERVIEW_MAX_TOKENS, budget // JSON_OVERVIEW_SHARE),
+        )  # fmt: skip
         records: list[Record] = []
         spent = 0
         extra = 0
@@ -422,7 +441,7 @@ def _build(
                 rank_of(f),
                 shown,
                 with_signatures=args.include_signatures,
-                tree_note=tree_text if i == 0 else None,
+                overview=overview.lines if i == 0 else (),
                 reselect=reselect,
             )
             records.append(rec)
@@ -438,6 +457,7 @@ def _build(
         warnings,
         tier,
         ",".join(languages) if languages else "n/a",
+        json_overview.data(),
     )
 
 
@@ -455,6 +475,7 @@ async def handler(ctx: ToolContext, args: GetRepoMapArgs) -> ToolOutput:
         data_static={
             "ranking_used": built.ranking_used,
             "tree": built.tree[: max(1, ctx.call.max_tokens // TREE_JSON_TOKENS_PER_DIR)],
+            **built.overview,
         },
         summarize=_summarizer(built.ordered, len(built.records)),
         tier=built.tier,
@@ -471,7 +492,7 @@ SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        "Map an unfamiliar repository within a token budget: directory counts, then files ranked by importance (PageRank), each with its top public symbols and signatures. First call in a new codebase. Test files are hidden unless include_tests=true."
+        "Map an unfamiliar repository within a token budget: directory counts, code packages with their sub-packages and entry modules, then files ranked by importance (PageRank), each with its top public symbols and signatures. First call in a new codebase. Test files are hidden unless include_tests=true."
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

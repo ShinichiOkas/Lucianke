@@ -27,4 +27,4 @@
   （`InstanceLock` で `InstanceLock`・`DirInstanceLock` だけが返り `InstanceLock.acquire` などのメンバーは出ない、`prefix` も同じ、
   `InstanceLock.acq` でメンバーが返る、名前で当たるメンバー `holder_pid` は今までどおり）。`tests/unit/test_index_ingest.py` の
   `test_search_prefix` / `test_search_fuzzy` の期待を直した（`pay` で `PaymentProcessor.process_charge` を返さない。`.` 付きで返す）。
-- 能力ベンチ（Mnemo の固定の写し、`--only T01,T02`）: T02 は直す前 F1 0.667（適合率 0.5・再現率 1.0）。直した後は下の BUG-0120 の確認と合わせて走らせた結果を BUG-0120 の票に書く。
+- 能力ベンチ（Mnemo の固定の写し、`--only T01,T02`）: **T02 F1 0.667 → 1.0**（適合率 0.5 → 1.0・再現率 1.0。返るのは `InstanceLock`・`DirInstanceLock`・`RecallInstanceLock`・テストの `TestInstanceLockHolder` の 4 件、応答 282 → 125 トークン）。BUG-0120 の確認と同じ走りで測った。
