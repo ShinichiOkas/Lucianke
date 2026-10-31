@@ -98,6 +98,9 @@ class DiagnosticsHub:
         self.publish_count = 0
         """受信した ``publishDiagnostics`` の通数（ルート外の URI も含む）。"""
         self.last_received_at: float | None = None
+        self.sent_at_of: Callable[[RelPath], float | None] | None = None
+        """その文書を LSP に最後に送った時刻（``DocumentSync.sent_at_of``。ハンドルが結ぶ）。同じ内容への同じ診断の再送を
+        見分けるのに使う（``on_publish``）。``None`` なら見分けず、受信のたびに書き込む。"""
         self.provisional_empty = True
         """最初の受信が空の診断を、本物の前の仮のものかもしれないと扱うか（``LspServerDef.provisional_empty``。BUG-0058）。"""
         self.analysed = False
@@ -130,10 +133,12 @@ class DiagnosticsHub:
         diags = [d for d in raw if isinstance(d, dict)] if isinstance(raw, list) else []
         seq = self._seq.get(path, 0) + 1
         self._seq[path] = seq
+        prev = self._entries.get(path)
+        resent = prev is not None and self._is_resend(path, prev, version, diags)
         self._entries[path] = DiagnosticsEntry(version, received_at, tuple(diags), seq)
         self._receipts.setdefault(path, deque(maxlen=_RECENT_RECEIPTS)).append(received_at)
         self._write_failed.discard(path)
-        if self._on_diagnostics is not None:
+        if self._on_diagnostics is not None and not resent:
             # 書き込みを先に始める。待ち手を起こす（下）のは「受信があった」という合図にすぎず、揃ったかどうかは
             # ``_satisfied`` が書き込みの済み具合も見て決める（書き込み中は、起きた待ち手がまた待つ）。
             try:
@@ -145,6 +150,23 @@ class DiagnosticsHub:
                 if isinstance(result, concurrent.futures.Future) or inspect.isawaitable(result):
                     self._spawn(result, path, seq)
         self._wake(path)
+
+    def _is_resend(
+        self, path: RelPath, prev: DiagnosticsEntry, version: int | None, diags: list[dict[str, Any]]
+    ) -> bool:
+        """前の受信と同じ文書の内容（その後 LSP に何も送っていない）への、同じ版・同じ診断の再送か。
+
+        再送なら index にはもう同じ行が入っているので書き込まない（書き込みが済んでいて、失敗もしていないときだけ）。
+        typescript-language-server は、どの文書を開いても・要求のたびに、開いている文書の診断を全部求め直し、問題のある文書の
+        診断を毎回出し直す。以前はそのたびに書き込みを積み、``get_diagnostics`` が書き込みの済むのを待って、内容の変わらない
+        文書でも呼び出しのたびに数百 ms〜2 秒かかっていた（BUG-0058）。
+        """
+        if prev.version != version or prev.diagnostics != tuple(diags):
+            return False
+        if path in self._pending_writes or path in self._write_failed or self.sent_at_of is None:
+            return False
+        sent = self.sent_at_of(path)
+        return sent is not None and sent <= prev.received_at
 
     def _wake(self, path: RelPath) -> None:
         for fut in self._waiters.pop(path, ()):

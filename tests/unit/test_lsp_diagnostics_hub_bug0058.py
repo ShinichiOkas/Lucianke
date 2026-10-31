@@ -113,3 +113,44 @@ async def test_a_first_empty_publish_is_final_for_a_server_without_provisional_e
     assert (
         await maybe.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=50) is False
     )  # 静止時間の前は揃わない
+
+
+async def test_an_identical_resend_for_unchanged_content_is_not_written_again(ws: Workspace) -> None:
+    """tsls は開いている文書の診断を何度も出し直す。内容を送っていないのに同じ版・同じ診断が届いたら、書き込みを積まない
+    （待ち手は書き込みを待たずに揃う）。内容を送った後・診断が違う・前の書き込みが失敗した・文書が開いていないときは書く。"""
+    import asyncio
+
+    writes: list[tuple[str, int]] = []
+    gate = asyncio.Event()
+
+    def on_diagnostics(path: RelPath, diags: list, version: int | None) -> object:
+        writes.append((str(path), len(diags)))  # 書き込みを積んだ（ハブが受信のその場で呼ぶ）
+        return gate.wait()  # 書き込みの終わり（ハブが待つ awaitable）
+
+    hub = DiagnosticsHub(ws, on_diagnostics=on_diagnostics)
+    sent = {A: 1.0}
+    hub.sent_at_of = sent.get
+
+    publish(hub, ws, A, None, n=2)
+    assert len(writes) == 1
+    gate.set()
+    assert await hub.wait_for(A, min_version=None, sent_at=1.0, timeout_ms=5000) is True
+
+    gate.clear()  # これ以降の書き込みは終わらない: 書き込みを積めば wait_for は時間切れになる
+    publish(hub, ws, A, None, n=2)  # 同じ内容への同じ診断の再送
+    assert len(writes) == 1
+    assert await hub.wait_for(A, min_version=None, sent_at=1.0, timeout_ms=1000) is True
+
+    publish(hub, ws, A, None, n=3)  # 診断が違う
+    assert len(writes) == 2
+    gate.set()
+    await asyncio.sleep(0)
+    assert await hub.wait_for(A, min_version=None, sent_at=1.0, timeout_ms=5000) is True
+
+    sent[A] = 10**9  # 内容を送った（送信時刻が前の受信より後）
+    publish(hub, ws, A, None, n=3)
+    assert len(writes) == 3
+
+    publish(hub, ws, B, None, n=1)  # 開いていない文書（送信時刻が分からない）
+    publish(hub, ws, B, None, n=1)
+    assert [w for w in writes if w[0] == str(B)] == [(str(B), 1), (str(B), 1)]

@@ -186,6 +186,7 @@ class LspHandle:
         self.history: deque[LspState] = deque([LspState.STANDBY], maxlen=64)
         self.documents = DocumentSync(ws, self._notify, max_open=pool._open_docs_max)
         self.diagnostics = DiagnosticsHub(ws, source=language_id, on_diagnostics=self._on_diagnostics)
+        self.diagnostics.sent_at_of = self.documents.sent_at_of
         self.documents.on_close = self.diagnostics.forget
 
         self._pool = pool
