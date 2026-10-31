@@ -11,6 +11,8 @@
    （``tools/`` の pkgutil 列挙・各ツールの import が exe の中でも漏れていない）
 4. ``tests/fixtures/poly`` の写しを索引して、T-03・T-07 が正しい答えを返す（文法・SQL スキーマ・``.scm`` のクエリが同梱されている）
 5. stdout に JSON-RPC 以外の 1 行も出ない（stdio の純度）。stdin を閉じると終了コード 0 で終わる
+6. ``src/lucianke`` の写しを走査の解析の子プロセス（spawn。BUG-0127）2 つで索引できる。子が壊れず、サーバーの終了の後に
+   子が残らない（Windows で確かめる。exe の子は exe 自身なので、入口の ``freeze_support`` が受けないと子がサーバーになる）
 
 キャッシュは一時フォルダ（``LUCIANKE_CACHE_DIR``）に分け、利用者のキャッシュを汚さない。
 """
@@ -132,6 +134,50 @@ def wait_for_index(s: Session) -> str:
         time.sleep(1)
 
 
+def child_processes(exe: Path, parent_pid: int) -> list[int] | None:
+    """Windows: ``parent_pid`` を親に持つ同じ exe のプロセス（親が終わっても親の番号は残る）。ほかの OS は ``None``（見ない）。"""
+    if sys.platform != "win32":
+        return None
+    query = f"Get-CimInstance Win32_Process -Filter \"Name='{exe.name}' AND ParentProcessId={parent_pid}\" | % ProcessId"
+    cp = subprocess.run(  # noqa: S603, S607  OS の PowerShell でプロセスの一覧を読むだけ
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", query],
+        capture_output=True, text=True, timeout=60, check=False,
+    )  # fmt: skip
+    return [int(x) for x in cp.stdout.split() if x.isdigit()]
+
+
+def smoke_worker_processes(exe: Path, work: Path) -> None:
+    """走査の解析の子プロセス（spawn。BUG-0127）が exe で動く: 子は exe 自身を ``--multiprocessing-fork`` で起こすので、
+    入口の ``freeze_support`` が受けないと子がサーバーとして立ち上がる。poly は ``POOL_MIN_FILES`` に届かないので、
+    ``src/lucianke`` の写し（100 ファイル超）を子 2 つ（2 コアの機でも子を使うよう固定）で索引する。"""
+    big = work / "big"
+    shutil.copytree(ROOT / "src" / "lucianke", big / "lucianke")
+    cache = work / "cache-big"
+    env = {**os.environ, "LUCIANKE_CACHE_DIR": str(cache), "LUCIANKE_INDEX_WORKERS": "2", "PYTHONUTF8": "1"}
+    s = Session([str(exe)], cwd=big, env=env)
+    s.initialize()
+    err, _ = s.call("configure_workspace", {"action": "set_roots", "root_paths": [str(big)]})
+    check(not err, "configure_workspace set_roots")
+    status_text = wait_for_index(s)
+    check("reindex done" in status_text, "index finished (reindex done)")
+    err, text = s.call("search_workspace_symbols", {"query": "AnalysisPool"})
+    check(not err and "AnalysisPool" in text, "search_workspace_symbols finds a class analysed in a worker process")
+    pid = s.proc.pid
+    code = s.close()
+    check(code == 0, f"server exits 0 on stdin EOF (got {code})")
+    log = "".join(p.read_text("utf-8", "replace") for p in (cache / "logs").glob("*.log"))
+    check("analysis worker processes: 2" in log, "the scan ran in 2 worker processes")
+    check("worker processes broke" not in log and "could not start the analysis worker" not in log,
+          "no worker process failed to start or broke")  # fmt: skip
+    left = child_processes(exe, pid)
+    deadline = time.monotonic() + 15
+    while left and time.monotonic() < deadline:
+        time.sleep(1)
+        left = child_processes(exe, pid)
+    if left is not None:
+        check(not left, f"no worker process outlives the server (left: {left})")
+
+
 def smoke(exe: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="lucianke-smoke-") as tmp:
         work = Path(tmp)
@@ -182,6 +228,9 @@ def smoke(exe: Path) -> None:
         check(not err and "PaymentProcessor" in text, "get_file_skeleton reads the file")
         code = s.close()
         check(code == 0, f"server exits 0 on stdin EOF (got {code})")
+
+        print("[tools/call on a copy of src/lucianke with analysis worker processes]")
+        smoke_worker_processes(exe, work)
 
 
 def main(argv: list[str] | None = None) -> int:
