@@ -4,6 +4,8 @@
 ``index.queries`` で引くだけで、LSP は使わない（``exact`` と ``structural`` は同じ結果を返す。仕様書 T-03「精度と降格」）。
 
 * 一致の順位は 完全一致 > 前方一致 > 名前の部分一致 > シグネチャ・Doc だけの一致（名前に当たらない ``fuzzy`` の FTS 一致。BUG-0069）、
+  ``fuzzy`` / ``prefix`` で query に ``.`` が無ければ自分の名前（``name``）だけに当て、限定名は見ない（クラス名で探して
+  そのメンバーを返さない。``.`` があれば限定名に当てる。BUG-0121）。
   同順位は コードのシンボル > データファイルの Key / Tag、``pagerank`` 降順（``FileInfo`` に載ったら使う。無ければ 0）、パスの辞書順。
 * compact のヒットの行は ``path#qualified(sig)``。URN はそこから導けるので ``urn:`` 行は導けないとき（``lex:`` など）だけ。
   シグネチャは ``SEARCH_SIGNATURE_MAX_CHARS``（160）文字で ``…)`` に切る（json の ``signature`` は全文。BUG-0069）。
@@ -235,10 +237,15 @@ def _match_tier(sym: SymbolRecord, query: str, rx: re.Pattern[str] | None) -> in
 
 
 def _names_match(name: str, qualified: str, q: str) -> bool:
-    """名前か限定名に当たる（部分文字列、または query の各語が名前の語の前方一致）。当たらなければシグネチャ・Doc だけの一致。"""
-    if q in name or q in qualified:
+    """名前に当たる（部分文字列、または query の各語が名前の語の前方一致）。当たらなければシグネチャ・Doc だけの一致。
+
+    限定名を見るのは query に ``.`` があるとき（``InstanceLock.acq``）だけ。``.`` が無い query を限定名に当てると、
+    ``InstanceLock`` で ``InstanceLock.acquire`` などクラスのメンバーがすべて「名前の一致」になる（BUG-0121）。
+    """
+    target = qualified if "." in q else name
+    if q in target:
         return True
-    words = _WORD_RE.findall(qualified)
+    words = _WORD_RE.findall(target)
     tokens = _WORD_RE.findall(q)
     return bool(tokens) and all(any(w.startswith(t) for w in words) for t in tokens)
 
@@ -541,7 +548,7 @@ TOOL_SPEC = ToolSpec(
     handler=handler,
     default_max_tokens=1500,
     description=(
-        'Find symbols by name (match: fuzzy | prefix | exact | regex), kind and type signature ("A -> B": parameters contain A, return type contains B). Use before resolve_symbols when you know only part of a name. With 0 hits it greps non-code files (degraded).'
+        'Find symbols by name (match: fuzzy | prefix | exact | regex), kind and type signature ("A -> B": parameters contain A, return type contains B). Without "." the query matches the own name (a class, not its members); "Class.mem" finds members. Use before resolve_symbols when you know only part of a name. With 0 hits it greps non-code files (degraded).'
     ),
     max_confidence=Confidence.STRUCTURAL,
     milestone="M1",

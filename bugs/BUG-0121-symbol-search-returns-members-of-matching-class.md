@@ -11,3 +11,20 @@
 ## 利用者（呼ぶ側の AI）として困ること
 
 - 名前で探すと、一致したクラスの中身が並んで、探している定義が埋もれる（トークンも使う）。メンバーが欲しいときは `InstanceLock.` のようにドット付きで探せる。
+
+## 原因・直し方・確認（2026-10-31）
+
+- 原因: `fuzzy` / `prefix` の当て先に限定名（`qualified_name`）が入っていた。索引の検索（`index/queries.search_symbols_fts`）の FTS5 は
+  `fuzzy` で `name` / `qualified_name` / `signature` / `doc_summary` の全列、`prefix` で `{name qualified_name}` を見ていて、
+  `InstanceLock.acquire` の限定名の語 `instancelock` に `InstanceLock` の語が当たった。T-03 の順位付け（`_names_match`）も
+  限定名の部分文字列・語を「名前の一致」に数えていたので、メンバーが名前の部分一致（BUG-0069 の 3 段目）として並んだ。
+- 直し方（呼ぶ側の AI の使いやすさで決めた）: query に `.` が無いときは、シンボル自身の名前（`name`）だけに当てる。
+  FTS5 の列は `fuzzy` で `{name signature doc_summary}`、`prefix` で `{name}`。順位付けの「名前の部分一致」も `name` の部分文字列・語だけで見る。
+  query に `.` があるとき（`InstanceLock.acq`）だけ今までどおり限定名に当てる。BUG-0069 の順位（完全一致 > 前方一致 > 名前の部分一致 >
+  シグネチャ・Doc だけの一致）はそのまま。`exact` と `regex` は変えていない。ツールの説明に「`.` が無ければ自身の名前、メンバーは `Class.mem`」を 1 文足した。
+- 仕様書 T-03 の処理規約 2 に「当てる名前」の規則と理由を書いた。
+- 試験: `tests/contract/test_T03_T04.py::test_t03_query_without_dot_matches_own_name_not_members_of_a_matching_class`
+  （`InstanceLock` で `InstanceLock`・`DirInstanceLock` だけが返り `InstanceLock.acquire` などのメンバーは出ない、`prefix` も同じ、
+  `InstanceLock.acq` でメンバーが返る、名前で当たるメンバー `holder_pid` は今までどおり）。`tests/unit/test_index_ingest.py` の
+  `test_search_prefix` / `test_search_fuzzy` の期待を直した（`pay` で `PaymentProcessor.process_charge` を返さない。`.` 付きで返す）。
+- 能力ベンチ（Mnemo の固定の写し、`--only T01,T02`）: T02 は直す前 F1 0.667（適合率 0.5・再現率 1.0）。直した後は下の BUG-0120 の確認と合わせて走らせた結果を BUG-0120 の票に書く。

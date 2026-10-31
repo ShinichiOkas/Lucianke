@@ -712,7 +712,9 @@ def test_search_prefix(conn: sqlite3.Connection) -> None:
     assert set(names("process")) == {"process", "PaymentProcessor.process_charge"}
     assert names("process")[0] == "process"  # 名前が query と一致するものが先
     assert set(names("proc")) == {"process", "PaymentProcessor.process_charge"}
-    assert set(names("pay")) == {"PaymentProcessor", "PaymentProcessor.process_charge", "refund_payment"}
+    # "." の無い query は自分の名前だけに当てる: クラス名の前方でそのメンバーを当てない（BUG-0121）
+    assert set(names("pay")) == {"PaymentProcessor", "refund_payment"}
+    assert names("PaymentProcessor.proc") == ["PaymentProcessor.process_charge"]  # "." があれば限定名も見る
     assert names("process charge") == ["PaymentProcessor.process_charge"]  # 各語が AND
     assert names("invoices") == []  # prefix は name / qualified_name だけ（doc は見ない）
     assert names("process", kinds=["method"]) == ["PaymentProcessor.process_charge"]
@@ -733,7 +735,10 @@ def test_search_fuzzy(conn: sqlite3.Connection) -> None:
     assert "PaymentProcessor.process_charge" in names("amount")  # signature の語
     assert names("zzz") == []
     assert "process_other" not in "".join(names("process"))  # 別ワークスペースは出ない
-    assert set(names("pay")) == {"PaymentProcessor", "PaymentProcessor.process_charge", "refund_payment"}
+    # "." の無い query は限定名を見ない: クラス名で、名前にもシグネチャにも当たらないメンバーを当てない（BUG-0121）
+    assert set(names("pay")) == {"PaymentProcessor", "refund_payment"}
+    assert set(names("PaymentProcessor")) == {"PaymentProcessor"}
+    assert "PaymentProcessor.process_charge" in names("PaymentProcessor.process")  # "." があれば限定名に当てる
     assert names("process", kinds=["Class"]) == ["PaymentProcessor"]  # 部分文字列でも種別で絞れる
     assert names("process", kinds=["Enum"]) == []
     assert names("PROCESSOR")[0] == "PaymentProcessor"

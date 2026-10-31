@@ -360,10 +360,13 @@ def search_symbols_fts(
     """シンボルを名前などで探す（T-03）。ワークスペース内のシンボルだけ（外部シンボルは除く）。
 
     * ``exact``: ``name`` または ``qualified_name`` が ``query`` と完全一致（大文字小文字を区別する）。
-    * ``prefix``: ``query`` の各語が ``name`` / ``qualified_name`` のどれかの語の前方一致（FTS5。語は英数字の連なり。
+    * ``prefix``: ``query`` の各語が ``name`` のどれかの語の前方一致（FTS5。語は英数字の連なり。
       ``process_charge`` は ``process`` と ``charge``）。
-    * ``fuzzy``: 各語が ``name`` / ``qualified_name`` / ``signature`` / ``doc_summary`` のどれかの語の前方一致
+    * ``fuzzy``: 各語が ``name`` / ``signature`` / ``doc_summary`` のどれかの語の前方一致
       （FTS5）、または ``name`` が ``query`` を（大文字小文字を無視して）部分文字列として含む。
+    * ``query`` に ``.`` があるとき（限定名で探している）だけ、``prefix`` / ``fuzzy`` の FTS は ``qualified_name`` の語も見る。
+      ``.`` が無ければ限定名は見ない: ``InstanceLock`` で ``InstanceLock.acquire`` などクラスのメンバーまで当てない
+      （名前に query を含まないのに、限定名の親の部分で当たっていた。メンバーは ``InstanceLock.acq`` で探せる。BUG-0121）。
 
     並びは、名前が ``query`` と一致するもの、FTS5 の ``bm25``（名前の重み大）、名前の短さ、名前順。
     """
@@ -385,10 +388,12 @@ def search_symbols_fts(
         return [_symbol(r) for r in conn.execute(sql, params).fetchall()]
 
     tokens = _fts_tokens(query)
+    qualified = "." in query  # 限定名で探している（BUG-0121）
     if match == "prefix":
         if not tokens:
             return []
-        fts = " AND ".join("{name qualified_name} : " + _fts_phrase(t) for t in tokens)
+        columns = "{name qualified_name} : " if qualified else "{name} : "
+        fts = " AND ".join(columns + _fts_phrase(t) for t in tokens)
         sql = (
             "WITH hits AS (SELECT rowid AS rid, bm25(symbols_fts, 10.0, 5.0, 2.0, 1.0) AS score"
             " FROM symbols_fts WHERE symbols_fts MATCH :fts) "
@@ -403,7 +408,8 @@ def search_symbols_fts(
 
     if match != "fuzzy":
         raise ValueError(f"unknown match mode: {match!r}")
-    fts_all = " AND ".join(_fts_phrase(t) for t in tokens)
+    columns = "" if qualified else "{name signature doc_summary} : "
+    fts_all = " AND ".join(columns + _fts_phrase(t) for t in tokens)
     # FTS の一致（bm25 つき）と、名前の部分文字列の一致（bm25 なし）を UNION ALL で足してから並べる。
     # 以前は ``LEFT JOIN hits h ON h.rid = s.rowid`` で足していたが、ORDER BY があると SQLite が ``hits`` を自動索引なしの
     # 総なめ（``SCAN h``）にし、シンボル数 × 一致数の比較になった（1,800 シンボル・200 一致で 25 ms。BUG-0027）。

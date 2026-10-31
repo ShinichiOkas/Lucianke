@@ -46,15 +46,15 @@ class _Svc(ToolServices):
     reader_pool: ReaderPool | None = None
 
 
-async def _ingest_poly(svc: ToolServices, db: Path, *, data_symbols: bool = False) -> None:
+async def _ingest_poly(svc: ToolServices, db: Path, *, data_symbols: bool = False, root: Path = POLY) -> None:
     """``data_symbols`` は Tier 3 のデータファイルの Key / Tag も索引に入れる（``Indexer`` と同じく ``get_adapter(...).symbols``）。"""
     ws = svc.workspace()
     conn = open_writer(db)
     ensure_schema(conn)
     conn.execute("BEGIN IMMEDIATE")
-    upsert_workspace(conn, {"workspace_id": ws.workspace_id, "root_path": str(POLY)})
-    for path in sorted(p for p in POLY.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
-        rel = path.relative_to(POLY).as_posix()
+    upsert_workspace(conn, {"workspace_id": ws.workspace_id, "root_path": str(root)})
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
+        rel = path.relative_to(root).as_posix()
         data = path.read_bytes()
         det = detect(RelPath(rel), data[:HEAD_BYTES])
         if not det.index_content:
@@ -415,6 +415,52 @@ async def test_t03_db_path_is_enough(tmp_path: Path) -> None:
         "search_workspace_symbols", {"query": "process_charge", "format": "json"}
     )
     assert not r.is_error and names(r)[0] == "PaymentProcessor.process_charge"
+
+
+_INSTANCE_LOCK_PY = """class InstanceLock:
+    def __init__(self, run_dir: str) -> None:
+        self.run_dir = run_dir
+
+    def acquire(self) -> bool:
+        return True
+
+    def release(self) -> None:
+        pass
+
+
+class DirInstanceLock(InstanceLock):
+    def holder_pid(self) -> int:
+        return 0
+"""
+
+
+async def test_t03_query_without_dot_matches_own_name_not_members_of_a_matching_class(tmp_path: Path) -> None:
+    """``.`` の無い query は自分の名前に当て、限定名（``InstanceLock.acquire``）では当てない。メンバーは
+    ``InstanceLock.acq`` のように ``.`` 付きで探す（BUG-0121。能力ベンチの T02 で適合率 0.5 だった）。"""
+    root = tmp_path / "ws"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "locks.py").write_bytes(_INSTANCE_LOCK_PY.encode("utf-8"))
+    db = tmp_path / "paad.sqlite"
+    svc = _Svc(roots=lambda: [str(root)], trees=TreeCache(), lines=compact)
+    await _ingest_poly(svc, db, root=root)
+    holder = _DbSvc(roots=svc.roots, trees=svc.trees, lines=compact, db_path=db)
+    registry = ToolRegistry()
+    registry.register(t03.TOOL_SPEC)
+    pipe = Pipeline(registry, services=holder)
+
+    async def found(**args: Any) -> list[str]:
+        r = await pipe.call_tool("search_workspace_symbols", {"format": "json", **args})
+        assert not r.is_error, r.text
+        return names(r)
+
+    got = await found(query="InstanceLock")
+    assert got[0] == "InstanceLock"  # 完全一致が先
+    assert set(got) == {"InstanceLock", "DirInstanceLock"}, got  # メンバー（acquire・__init__ など）は出ない
+    assert set(await found(query="instancelock")) == {"InstanceLock", "DirInstanceLock"}  # 大文字小文字は無視
+    assert await found(query="InstanceLock", match="prefix") == ["InstanceLock"]
+    assert (await found(query="InstanceLock.acq"))[0] == "InstanceLock.acquire"  # "." があれば限定名に当てる
+    assert (await found(query="InstanceLock.acq", match="prefix")) == ["InstanceLock.acquire"]
+    assert "DirInstanceLock.holder_pid" in await found(query="holder_pid")  # 名前で当たるメンバーは今までどおり
 
 
 @dataclass(slots=True)
