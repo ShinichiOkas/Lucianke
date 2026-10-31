@@ -86,3 +86,30 @@ async def test_t06_t07_do_not_open_and_wait_for_the_target_once_the_lsp_has_anal
     publish(hub, ws, B, 1)
     handle = SimpleNamespace(diagnostics=hub)
     assert await _lsp_exact.await_first_diagnostic(handle, A, timeout_s=5.0) is True  # type: ignore[arg-type]
+
+
+async def test_a_first_empty_publish_is_final_for_a_server_without_provisional_empties(ws: Workspace) -> None:
+    """ruff（``provisional_empty=False``）の最初の空の診断は本物: 静止時間（300 ms）を待たずに揃う。既定（basedpyright など）は待つ。"""
+    import time
+
+    from lucianke.lsp.diagnostics import PROVISIONAL_QUIET_MS
+    from lucianke.lsp.servers import default_server
+
+    lint = default_server("python", "lint")
+    assert lint is not None and lint.name == "ruff" and lint.provisional_empty is False
+    types = default_server("python", "types")
+    assert types is not None and types.provisional_empty is True
+
+    final = DiagnosticsHub(ws)
+    final.provisional_empty = False
+    publish(final, ws, A, 1, n=0)
+    start = time.perf_counter()
+    assert await final.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=5000) is True
+    assert time.perf_counter() - start < PROVISIONAL_QUIET_MS / 1000
+
+    maybe = DiagnosticsHub(ws)
+    publish(maybe, ws, A, 1, n=0)
+    assert maybe.is_provisional(A) is True
+    assert (
+        await maybe.wait_for(A, min_version=1, sent_at=0.0, timeout_ms=50) is False
+    )  # 静止時間の前は揃わない

@@ -87,6 +87,7 @@ __all__ = [
     "PRIME_MAX",
     "LspRoute",
     "PrimeSet",
+    "SITES",
     "SiteIndex",
     "SiteInfo",
     "cached_rows",
@@ -533,9 +534,56 @@ class SiteInfo:
     guard: str | None
 
 
+_SITES_MAX = 1024
+
+
+class _SiteCache:
+    """``(ワークスペース, ファイル, 内容の sha256)`` → そのファイルの ``(行, 列)`` → ``SiteInfo``。LRU。スレッド安全（BUG-0058）。
+
+    参照箇所の分類は内容だけで決まる（``extract_relations`` は構文木と、同じ内容から取ったシンボルしか見ない）ので、内容の
+    sha256 が同じなら問い合わせをまたいで使い回せる。以前は問い合わせごとに参照元のファイルを構文木にかけ直していて、冷えた
+    T-06 の所要の大半（参照元が数ファイルで 100〜200 ms）がこの分類だった。
+    """
+
+    def __init__(self) -> None:
+        self._data: OrderedDict[tuple[str, str, str], dict[tuple[int, int], SiteInfo]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple[str, str, str]) -> dict[tuple[int, int], SiteInfo] | None:
+        with self._lock:
+            value = self._data.get(key)
+            if value is not None:
+                self._data.move_to_end(key)
+            return value
+
+    def put(self, key: tuple[str, str, str], value: dict[tuple[int, int], SiteInfo]) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > _SITES_MAX:
+                self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+
+SITES = _SiteCache()
+
+
+def _read_sha(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 @dataclass(slots=True)
 class SiteIndex:
-    """ファイルごとに ``(行, 列)``（0 始まり）→ ``SiteInfo``。ファイルは 1 度だけ構文木にかける（並行に聞かれても 1 度。BUG-0091）。"""
+    """ファイルごとに ``(行, 列)``（0 始まり）→ ``SiteInfo``。ファイルは 1 度だけ構文木にかける（並行に聞かれても 1 度。BUG-0091）。
+
+    構文木にかけた結果は内容の sha256 ごとにプロセスの中で覚え（``SITES``）、問い合わせをまたいで使い回す（BUG-0058）。
+    """
 
     services: Any
     ws: Workspace
@@ -556,6 +604,10 @@ class SiteIndex:
 
     async def _load(self, rel: str) -> dict[tuple[int, int], SiteInfo]:
         try:
+            sha = await asyncio.to_thread(_read_sha, to_abs(self.ws, RelPath(rel)))
+            hit = SITES.get((self.ws.workspace_id, rel, sha)) if sha is not None else None
+            if hit is not None:
+                return hit
             an = await analyze_file(self.services, self.ws, rel)
             spec = get_support(an.language_id)
             grammar = spec.grammar()  # type: ignore[union-attr]
@@ -577,7 +629,9 @@ class SiteIndex:
                     )
                 return out
 
-            return await asyncio.to_thread(run)
+            out = await asyncio.to_thread(run)
+            SITES.put((self.ws.workspace_id, rel, an.sha256), out)
+            return out
         except Exception:  # noqa: BLE001  分類できないファイルは REFERENCES / r とファイルの URN で扱う
             _log.debug("could not classify the sites of %s", rel, exc_info=True)
             return {}

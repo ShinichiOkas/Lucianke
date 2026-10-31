@@ -788,6 +788,9 @@ async def _exact_references(
     spans["references"], t = time.monotonic() - t, time.monotonic()
     target_urn = str(sym.urn)
     sites = lx.SiteIndex(ctx.services, ws)
+    # 参照元のファイルの分類は並行に（構文木はスレッド。内容が同じなら前の問い合わせの分類を使い回す。BUG-0058）
+    rels = sorted({str(loc.rel) for loc in locs})
+    infos = dict(zip(rels, await asyncio.gather(*(sites.of(r) for r in rels)), strict=True))
     facts = []
     rows: list[queries.ReferenceRow] = []
     for loc in locs:
@@ -795,9 +798,7 @@ async def _exact_references(
         start = (loc.range.start.line, loc.range.start.col)
         if loc.rel == sym.path and (sel.start.line, sel.start.col) <= start < (sel.end.line, sel.end.col):
             continue  # 宣言そのもの
-        fact = lx.reference_fact(
-            target_urn, rel, loc.range, (await sites.of(rel)).get(start), ws.workspace_id
-        )
+        fact = lx.reference_fact(target_urn, rel, loc.range, infos[rel].get(start), ws.workspace_id)
         if fact is not None:
             facts.append(fact)
             rows.append(lx.row_of(fact, rel))
@@ -829,7 +830,7 @@ async def _exact_references(
             ctx.services, db_path, ws.workspace_id, [("refs", target_urn)], label="lsp:references:marks"
         )
         spans["marks"] = time.monotonic() - t
-    lx.log_slow_spans("references", str(sym.qualified_name), spans, sites=len(rows))
+    lx.log_slow_spans("references", str(sym.qualified_name), spans, rows=len(rows), files=len(rels))
     return rows
 
 

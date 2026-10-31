@@ -99,6 +99,10 @@ class LspServerDef:
             references・implementation・executeCommand。BUG-0090）。
         restart_on_errors: エラー応答の ``message`` にこのどれかを含むと、そのプロセスはその method に以後答えられない壊れ方を
             したとみなして起動し直す（``LspHandle.record_broken``。BUG-0090）。``no_cancel_methods`` で防げなかったときの回復。
+        provisional_empty: 文書の最初の ``publishDiagnostics`` が空でも、本物の前の仮のものかもしれない（``DiagnosticsHub`` は
+            ``$/progress end`` か静止時間まで「揃った」としない）。basedpyright は複数文書の解析の途中で、まだ検査していない文書に
+            空の診断を出す（S-04）。tsls は診断の種類（構文・意味・提案）ごとに分けて出す。文書ごとにその場で検査して 1 度で
+            出し切るサーバー（ruff）は ``False``（以前は問題の無い文書を開くたびに静止時間の 300 ms を待っていた。BUG-0058）。
     """
 
     language_id: str
@@ -116,6 +120,7 @@ class LspServerDef:
     ready_signal: ReadySignal = "progress"
     no_cancel_methods: frozenset[str] = frozenset()
     restart_on_errors: tuple[str, ...] = ()
+    provisional_empty: bool = True
 
     @property
     def document_language_id(self) -> str:
@@ -246,6 +251,8 @@ SERVERS: tuple[LspServerDef, ...] = (
         # ruff は $/progress を出さず、診断も文書を開くまで出さない（起動は 12 ms）。progress の合図のままだと、最初の
         # publishDiagnostics は ready を待たれた文書からしか来ないので ready_fallback_s（15 秒）まで ready にならない（BUG-0050）。
         ready_signal="initialized",
+        # 文書を開くとその場で検査して 1 度で出し切る（S-04: 11 ms）。最初の空の診断は本物（BUG-0058）
+        provisional_empty=False,
     ),
     # TypeScript / JavaScript: typescript-language-server が既定（診断が常に最新）、vtsls が代替（TypeScript を同梱するので
     # ワークスペースに tsserver.js が無いときの逃げ先）。どちらも Node が要る。

@@ -681,6 +681,7 @@ class LspPool:
         h.defn = defn
         h.server_name = defn.name
         h.diagnostics.source = defn.name
+        h.diagnostics.provisional_empty = defn.provisional_empty
         h._tokens.clear()
         h._up_since = None
         h.documents.reset()

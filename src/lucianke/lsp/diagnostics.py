@@ -98,6 +98,8 @@ class DiagnosticsHub:
         self.publish_count = 0
         """受信した ``publishDiagnostics`` の通数（ルート外の URI も含む）。"""
         self.last_received_at: float | None = None
+        self.provisional_empty = True
+        """最初の受信が空の診断を、本物の前の仮のものかもしれないと扱うか（``LspServerDef.provisional_empty``。BUG-0058）。"""
         self.analysed = False
         """起動（``reset`` の後）から、どれかの文書の ``publishDiagnostics`` を 1 通でも受けたか（ルート外の URI も含む）。
         basedpyright は解析の周期の終わりに診断を出すので、``True`` は「LSP がワークスペースのファイルの一覧を持って解析を
@@ -238,7 +240,7 @@ class DiagnosticsHub:
     def is_provisional(self, path: RelPath) -> bool:
         """最初の受信が空で、まだ確定していない（``settle_all`` も静止時間も済んでいない）。"""
         entry = self._entries.get(path)
-        if entry is None or entry.seq != 1 or entry.diagnostics:
+        if not self.provisional_empty or entry is None or entry.seq != 1 or entry.diagnostics:
             return False
         if entry.received_at <= self._settled_at:
             return False
