@@ -1,7 +1,7 @@
 name: release
 # 配布は exe 形式（師匠の判断 2026-10-31）。v* のタグを push すると、Windows で exe（PyInstaller・onedir）をビルドし、
 # tools/smoke_exe.py で確かめてから、zip と sha256 を GitHub Release に上げる。手動の起動（workflow_dispatch）は
-# 成果物（artifact）に上げるだけで、Release は作らない。
+# 成果物（artifact）に上げるだけで、Release は作らない。v<版>-<接尾辞>（-rc1 など）のタグは prerelease（試しの走らせ方）。
 on:
   push:
     tags: ["v*"]
@@ -25,11 +25,16 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
       - name: 版とタグを照らす
+        # v<__version__> は正式な Release。v<__version__>-<接尾辞>（-rc1・-test1 など。試しの走らせ方）は prerelease にする
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           $version = (Select-String -Path src/lucianke/__init__.py -Pattern '^__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match __version__ $version" }
+          $tag = "${{ github.ref_name }}"
+          if ($tag -eq "v$version") { $pre = "false" }
+          elseif ($tag -match ("^v" + [regex]::Escape($version) + "-[0-9A-Za-z.]+$")) { $pre = "true" }
+          else { throw "tag $tag does not match __version__ $version (v$version or v$version-<suffix>)" }
+          "PRERELEASE=$pre" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: ビルド・確かめ・zip（build.ps1）
         shell: pwsh
         run: ./build.ps1 -Zip -NoInstall
@@ -45,4 +50,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" (Get-ChildItem dist/lucianke-*.zip*).FullName --generate-notes --title "${{ github.ref_name }}"
+        run: |
+          $assets = (Get-ChildItem dist/lucianke-*.zip*).FullName
+          $flags = @("--generate-notes", "--title", "${{ github.ref_name }}")
+          if ($env:PRERELEASE -eq "true") { $flags += "--prerelease" }
+          gh release create "${{ github.ref_name }}" @assets @flags
