@@ -41,3 +41,12 @@ BUG-0127 で触ったファイルの、自分の変更と関係のない既存�
 ## 再現
 
 `origin/main` で `uv run ruff format --check src tests`、または上のファイルに `uv run ruff format --diff <ファイル>`。
+
+## 原因・直し方・確認（2026-10-31）
+
+- 原因: 直す役への指示（親が書いた規約）に `ruff format --check <変えた .py>` を入れたこと。このリポジトリは `ruff format` を使っていない。
+  lint は CI と同じ引数なしの `uv run ruff check` だけで、全体の整形はしない（`docs/HANDOFF.md` §1「全体整形はしない（差分が膨らむだけ）。
+  触ったファイルだけ手で揃える」）。行末の日本語コメントの位置などを ruff format が動かすため、既存の 113 ファイルは未整形のままが正。
+- 直し方: コードは変えない。親の指示の規約から `ruff format --check` を外した（以後の直す役の指示は `uv run ruff check` だけ）。
+  `docs/HANDOFF.md` §1 の記述（「インストール済み ruff とリポジトリの版のずれ」）は理由が違うので、「ruff format は使わない」に直した。
+- 確認: `origin/main` で `uv run ruff check` は `All checks passed!`。

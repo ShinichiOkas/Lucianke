@@ -20,7 +20,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   - F-PY(httpx)・F-TS(ky) は、`tests/contract_fixtures/` を走らせると conftest がセッションに 1 回 `bench/fetch_fixtures.py` で取得する。**取得に失敗したら赤（エラー）**になる（黙って skip しない）。初回は git と GitHub への通信が要る。
   - オフラインで走らせるときだけ `LUCIANKE_NO_FIXTURE_FETCH=1`。未取得分の契約テストは「NOT CHECKED」と明記した skip になる（**skip は pass ではない**。この状態で green と言わない）。
 - **新しく赤が出たら、それは引き継いだ変更のせい**なので先に直す（今は全 green が基準）。
-- `uv run ruff check src tests` は clean。`ruff format --check` は 56 ファイルが未整形になるが、**これはインストール済み ruff とリポジトリの版のずれ**。全体整形はしない（差分が膨らむだけ）。触ったファイルだけ手で揃える。
+- lint は CI と同じ引数なしの `uv run ruff check`（clean）。**`ruff format` は使わない**（行末の日本語コメントなどを動かす。`ruff format --check` は 113 ファイルが未整形と出るが、それが正）。全体整形はしない（差分が膨らむだけ）。触ったファイルだけ手で揃える（BUG-0130）。
 
 ## 1. 状態
 
