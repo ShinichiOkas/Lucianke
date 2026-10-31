@@ -36,6 +36,7 @@ POLY_EXPECTED: dict[str, tuple[str, int]] = {
     "notebooks/eda.ipynb": ("ipynb", 2),
     "proto/order.proto": ("proto", 2),
     "pyproject.toml": ("toml", 3),
+    "pyrightconfig.json": ("json", 3),  # basedpyright の設定の根をフィクスチャに止める（BUG-0129）
     "reports/junit.xml": ("xml", 3),
     "src/shop/__init__.py": ("python", 1),
     "src/shop/api/__init__.py": ("python", 1),
@@ -484,11 +485,14 @@ def test_is_test_extra_globs_from_language_support():
     [
         ("tests/fixtures/untyped_calls/app/engine.py", ("tests/fixtures/untyped_calls",)),
         ("tests/fixtures/untyped_calls/tests/test_pack.py", ("tests/fixtures/untyped_calls",)),
-        ("Tests/Fixtures/Poly/src/a.py", ("Tests/Fixtures/Poly",)),  # 大文字小文字は区別せず、綴りはそのまま返す
+        # 大文字小文字は区別せず、綴りはそのまま返す
+        ("Tests/Fixtures/Poly/src/a.py", ("Tests/Fixtures/Poly",)),
         ("src/pkg/test/testdata/case1/x.py", ("src/pkg/test/testdata/case1",)),
-        ("web/__tests__/__fixtures__/p/a.ts", ("web/__tests__/__fixtures__/p",)),  # __tests__ は JS のグロブから
+        # __tests__ は JS のグロブから
+        ("web/__tests__/__fixtures__/p/a.ts", ("web/__tests__/__fixtures__/p",)),
         ("tests/fixtures/a/tests/fixtures/b/x.py", ("tests/fixtures/a", "tests/fixtures/a/tests/fixtures/b")),
-        ("tests/fixtures/tests/fixtures/q/z.py", ("tests/fixtures/tests",)),  # ルートの名前は数え直しに使わない
+        # ルートの名前は数え直しに使わない
+        ("tests/fixtures/tests/fixtures/q/z.py", ("tests/fixtures/tests",)),
         ("tests/fixtures/db.py", ()),  # fixtures の直下のファイルはルートを作らない
         ("src/fixtures/x/a.py", ()),  # テストディレクトリの外の fixtures は見本ではない
         ("tests/unit/test_a.py", ()),
@@ -508,7 +512,8 @@ def test_dir_names_of_tests_from_language_globs():
         "tests",
         "__tests__",
     }
-    assert fixture_roots("web/__tests__/__fixtures__/p/a.ts") == ()  # __tests__ を知らなければルートにならない
+    # __tests__ を知らなければルートにならない
+    assert fixture_roots("web/__tests__/__fixtures__/p/a.ts") == ()
 
 
 def test_detected_is_hashable_and_frozen():

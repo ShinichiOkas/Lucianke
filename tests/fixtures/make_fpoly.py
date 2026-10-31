@@ -48,8 +48,17 @@ dependencies = [
 line-length = 100
 """
 
-for p in ["src/shop/__init__.py", "src/shop/services/__init__.py", "src/shop/api/__init__.py",
-          "src/shop/models/__init__.py"]:
+# basedpyright の設定の根をこのフィクスチャに止める（BUG-0129）。pyproject.toml に [tool.pyright] が無いと、basedpyright は
+# 親のディレクトリへ設定を探しに行き、Lucianke のリポジトリの pyrightconfig.json（tests/fixtures を除外）を採るので、
+# F-POLY のファイルが解析の対象から外れ、Lucianke 自身のコードを走査していた（get の呼び出し階層が 2 分超、答えは空）
+FILES["pyrightconfig.json"] = '{\n  "typeCheckingMode": "standard"\n}\n'
+
+for p in [
+    "src/shop/__init__.py",
+    "src/shop/services/__init__.py",
+    "src/shop/api/__init__.py",
+    "src/shop/models/__init__.py",
+]:
     FILES[p] = ""
 
 FILES["src/shop/services/payment.py"] = '''"""決済サービス。"""
@@ -213,12 +222,16 @@ def 合計金額(receipts: list[Receipt]) -> Decimal:
 FILES["src/shop/models/crlf_bom.py"] = (
     b"\xef\xbb\xbf"
     + '"""CRLF and BOM fixture."""\n\n\ndef crlf_function(x: int) -> int:\n    """Doubles x."""\n    return x * 2\n\n\n'
-      'class CrlfClass:\n    def method(self) -> str:\n        return "crlf"\n'.replace("\n", "\r\n").encode("utf-8")
+    'class CrlfClass:\n    def method(self) -> str:\n        return "crlf"\n'.replace("\n", "\r\n").encode(
+        "utf-8"
+    )
 )
 
-FILES["src/shop/models/no_final_newline.py"] = b"def no_newline_at_end(value: int) -> int:\n    return value + 1"
+FILES["src/shop/models/no_final_newline.py"] = (
+    b"def no_newline_at_end(value: int) -> int:\n    return value + 1"
+)
 
-FILES["tests/test_payment.py"] = '''from decimal import Decimal
+FILES["tests/test_payment.py"] = """from decimal import Decimal
 
 import pytest
 
@@ -231,50 +244,89 @@ async def test_charge_ok():
     p = PaymentProcessor(LimitTable())
     r = await p.process_charge(PaymentRequest(order_id="o1", amount=Decimal("100")))
     assert r.order_id == "o1"
-'''
+"""
 
 png = base64.b64encode(bytes(range(256)) * 40).decode()
 nb = {
     "cells": [
-        {"cell_type": "markdown", "metadata": {}, "source": ["# 売上データの探索\n", "\n", "この Notebook はフィクスチャ。"]},
-        {"cell_type": "code", "execution_count": 3, "metadata": {"tags": []}, "outputs": [],
-         "source": ["import json\n", "from pathlib import Path"]},
-        {"cell_type": "code", "execution_count": 12, "metadata": {}, "outputs": [
-            {"name": "stdout", "output_type": "stream",
-             "text": [f"OUTPUT_SENTINEL_STREAM row {i}\n" for i in range(300)]},
-            {"data": {"image/png": png, "text/plain": ["<Figure OUTPUT_SENTINEL_IMAGE>"]}, "metadata": {},
-             "output_type": "display_data"},
-        ], "source": [
-            "def load_frame(path: str) -> list[dict]:\n",
-            '    """JSON Lines を読む。"""\n',
-            "    rows = []\n",
-            '    for line in Path(path).read_text(encoding="utf-8").splitlines():\n',
-            "        rows.append(json.loads(line))\n",
-            "    return rows\n",
-            "\n",
-            'frame = load_frame("data.jsonl")',
-        ]},
-        {"cell_type": "code", "execution_count": 13, "metadata": {}, "outputs": [
-            {"output_type": "execute_result", "execution_count": 13,
-             "data": {"text/plain": ["OUTPUT_SENTINEL_RESULT 42"]}, "metadata": {}}],
-         "source": ["len(frame)"]},
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["# 売上データの探索\n", "\n", "この Notebook はフィクスチャ。"],
+        },
+        {
+            "cell_type": "code",
+            "execution_count": 3,
+            "metadata": {"tags": []},
+            "outputs": [],
+            "source": ["import json\n", "from pathlib import Path"],
+        },
+        {
+            "cell_type": "code",
+            "execution_count": 12,
+            "metadata": {},
+            "outputs": [
+                {
+                    "name": "stdout",
+                    "output_type": "stream",
+                    "text": [f"OUTPUT_SENTINEL_STREAM row {i}\n" for i in range(300)],
+                },
+                {
+                    "data": {"image/png": png, "text/plain": ["<Figure OUTPUT_SENTINEL_IMAGE>"]},
+                    "metadata": {},
+                    "output_type": "display_data",
+                },
+            ],
+            "source": [
+                "def load_frame(path: str) -> list[dict]:\n",
+                '    """JSON Lines を読む。"""\n',
+                "    rows = []\n",
+                '    for line in Path(path).read_text(encoding="utf-8").splitlines():\n',
+                "        rows.append(json.loads(line))\n",
+                "    return rows\n",
+                "\n",
+                'frame = load_frame("data.jsonl")',
+            ],
+        },
+        {
+            "cell_type": "code",
+            "execution_count": 13,
+            "metadata": {},
+            "outputs": [
+                {
+                    "output_type": "execute_result",
+                    "execution_count": 13,
+                    "data": {"text/plain": ["OUTPUT_SENTINEL_RESULT 42"]},
+                    "metadata": {},
+                }
+            ],
+            "source": ["len(frame)"],
+        },
     ],
-    "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-                 "language_info": {"name": "python"}},
-    "nbformat": 4, "nbformat_minor": 5,
+    "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python"},
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5,
 }
 FILES["notebooks/eda.ipynb"] = json.dumps(nb, ensure_ascii=False, indent=1) + "\n"
 
 cases = []
 for i in range(40):
     if i in (7, 23):
-        cases.append(f'    <testcase classname="tests.test_payment" name="test_case_{i}" time="0.01">'
-                     f'<failure message="assert 1 == 2">Traceback FAILURE_SENTINEL_{i}</failure></testcase>')
+        cases.append(
+            f'    <testcase classname="tests.test_payment" name="test_case_{i}" time="0.01">'
+            f'<failure message="assert 1 == 2">Traceback FAILURE_SENTINEL_{i}</failure></testcase>'
+        )
     else:
         cases.append(f'    <testcase classname="tests.test_payment" name="test_case_{i}" time="0.01"/>')
-FILES["reports/junit.xml"] = ('<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n'
-                              '  <testsuite name="pytest" tests="40" failures="2" errors="0" time="0.40">\n'
-                              + "\n".join(cases) + "\n  </testsuite>\n</testsuites>\n")
+FILES["reports/junit.xml"] = (
+    '<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n'
+    '  <testsuite name="pytest" tests="40" failures="2" errors="0" time="0.40">\n'
+    + "\n".join(cases)
+    + "\n  </testsuite>\n</testsuites>\n"
+)
 
 FILES["db/schema.sql"] = """CREATE TABLE orders (
   order_id TEXT PRIMARY KEY,
@@ -333,12 +385,21 @@ FILES["docs/api.rst"] = """決済 API
 :class:`PaymentProcessor` の :func:`process_charge` を呼ぶ。上限は :class:`shop.services.limits.LimitTable` を参照。
 """
 
-FILES["conf/settings.json"] = json.dumps({
-    "service": {"name": "shop", "port": 8080},
-    "limits": [{"currency": "JPY", "max": 1000000}, {"currency": "USD", "max": 10000},
-               {"currency": "EUR", "max": 9000}],
-    "features": {"discount": True, "retry": {"max_attempts": 3}},
-}, indent=2) + "\n"
+FILES["conf/settings.json"] = (
+    json.dumps(
+        {
+            "service": {"name": "shop", "port": 8080},
+            "limits": [
+                {"currency": "JPY", "max": 1000000},
+                {"currency": "USD", "max": 10000},
+                {"currency": "EUR", "max": 9000},
+            ],
+            "features": {"discount": True, "retry": {"max_attempts": 3}},
+        },
+        indent=2,
+    )
+    + "\n"
+)
 
 FILES["conf/app.yaml"] = """service:
   name: shop
