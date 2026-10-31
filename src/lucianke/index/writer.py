@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from lucianke.index.connection import ReaderPool, open_writer, read_data_version
+from lucianke.index.connection import open_writer, read_data_version
 from lucianke.index.migrate import SchemaAction, ensure_schema
 
 if TYPE_CHECKING:
@@ -87,8 +87,9 @@ class IndexWriter:
         self._pending = 0  # submit 済みで、まだ結果が決まっていないジョブ
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
-        self._reader: ReaderPool | None = None
-        self._reader_lock = threading.Lock()
+        # コミット済みの ``_meta.data_version``。書き手スレッドだけが（コミットの後に）進める。別プロセスは書かない前提
+        # （書き手は 1 つ。BUG-0131: 呼び出しのたびに DB を読むと、イベントループの上で約 0.8 ms・並行する呼び出しは並ぶ）
+        self._data_version = 0
         self.schema_action: SchemaAction | None = None
         self._thread = threading.Thread(target=self._run, name="lucianke-index-writer", daemon=True)
         self._thread.start()
@@ -163,19 +164,15 @@ class IndexWriter:
         return format_edit_id(seq)
 
     def data_version(self) -> int:
-        """現在の ``_meta.data_version``（コミット済みの値を DB から読む）。カーソルとキャッシュの無効化に使う。
+        """現在の ``_meta.data_version``（コミット済みの値。書き手がコミットした後に覚えた値を返す。DB は読まない）。
 
-        ツールの読み取りの中で、読んだ行と同じ断面の値が要るときは、借りている接続で
+        カーソルとキャッシュの無効化に使う。ジョブの結果（Future）が決まる前に更新するので、``result()`` の後に呼べば
+        そのジョブの分が入っている。ツールの読み取りの中で、読んだ行と同じ断面の値が要るときは、借りている接続で
         ``connection.read_data_version(conn)`` を呼ぶこと。
         """
-        with self._reader_lock:
-            if not self._accepting:
-                raise WriterClosedError("index writer is closed")
-            if self._reader is None:
-                self._reader = ReaderPool(self._path, size=1)
-            reader = self._reader
-        with reader.reader() as conn:
-            return read_data_version(conn)
+        if not self._accepting:
+            raise WriterClosedError("index writer is closed")
+        return self._data_version
 
     # --- 終了 -------------------------------------------------------------------------------
 
@@ -188,10 +185,6 @@ class IndexWriter:
             self._accepting = False
             while self._pending > 0 and self._thread.is_alive():
                 self._cond.wait(0.1)
-        with self._reader_lock:
-            reader, self._reader = self._reader, None
-        if reader is not None:
-            reader.close()  # 最後の接続を閉じるのは書き手にして、-wal / -shm が消えるようにする
         if first and self._thread.is_alive():
             self._queue.put(None)
         self._thread.join()
@@ -218,6 +211,13 @@ class IndexWriter:
             return
         try:
             self.schema_action = ensure_schema(conn)
+        except BaseException as exc:
+            self._start_error = exc
+            conn.close()
+            self._ready.set()
+            return
+        try:
+            self._data_version = read_data_version(conn)
         except BaseException as exc:
             self._start_error = exc
             conn.close()
@@ -263,9 +263,13 @@ class IndexWriter:
             result = job.fn(conn)
             if not conn.in_transaction:
                 raise RuntimeError(f"write job {job.label!r} ended the transaction itself")
+            committed_version: int | None = None
             if job.bumps_version:
                 conn.execute("UPDATE _meta SET data_version = data_version + 1")
+                committed_version = read_data_version(conn)
             conn.execute("COMMIT")
+            if committed_version is not None:
+                self._data_version = committed_version  # 結果を載せる前に（待っている側が新しい値を見る）
         except BaseException as exc:
             self._rollback(conn, job.label)
             _log.error("write job %r failed and was rolled back", job.label, exc_info=exc)

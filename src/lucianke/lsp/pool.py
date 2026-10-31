@@ -537,6 +537,19 @@ class LspPool:
             LspStatus.STANDBY, None, self._expected_name(language_id, ws, role, defs), None, None
         )
 
+    def state_of(self, language_id: str, ws: Workspace, role: Role = "types") -> LspStatus:
+        """``status(...).status`` だけ。起動コマンドを探さない（ファイルを stat しない）。
+
+        ``status`` は止まっている（standby）ときの名前のために優先順で起動コマンドを探し、呼び出しごとに venv などを
+        stat する（BUG-0131: 約 1 ms）。編集のたびに要る「LSP が使えるか」の判定は状態だけで足りる。
+        """
+        h = self._handles.get((language_id, ws.workspace_id, role))
+        if h is not None:
+            return h.state.public
+        if not self._defs(language_id, role):
+            return LspStatus.NOT_APPLICABLE
+        return LspStatus.STANDBY
+
     def get(
         self, language_id: str, ws: Workspace, *, role: Role = "types", start_if_needed: bool = True
     ) -> LspHandle | None:

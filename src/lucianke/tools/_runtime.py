@@ -580,7 +580,11 @@ class WiredServices(ToolServices):
             return {}  # LSP が無い（構文検証だけに降格する）
         router = make_router(ws)
 
+        state_of = getattr(pool, "state_of", None)  # 起動コマンドを探さない（BUG-0131）。偽物のプールは status で
+
         def lsp_status(language_id: str) -> LspStatus:
+            if state_of is not None:
+                return state_of(language_id, ws)  # type: ignore[no-any-return]
             return pool.status(language_id, ws).status
 
         return {"documents": router, "diagnostics_hub": router.diagnostics_hub, "lsp_status": lsp_status}
