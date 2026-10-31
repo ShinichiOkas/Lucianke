@@ -99,6 +99,7 @@ __all__ = [
     "prime_documents",
     "degraded_choice",
     "is_lsp_failure",
+    "log_slow_spans",
     "lsp_status_of",
     "reference_fact",
     "route_for",
@@ -337,7 +338,14 @@ async def await_first_diagnostic(handle: LspHandle, rel: RelPath, *, timeout_s: 
     ``True`` は「LSP がこの文書の解析を済ませた」合図。呼び手はこのときだけ、LSP の答えを ``exact`` の集合として覚える。
     ``False`` でも答えは ``exact`` で返してよいが、目印は置かない（解析前の部分的な答えを固定しない）。
     すでに開いていて診断を受信済みの文書は待たずに ``True``。``ready`` でない・切断は ``E_LSP_UNAVAILABLE``（呼び手が降格する）。
+
+    LSP が起動後にどれかの文書の診断をすでに出していれば（``DiagnosticsHub.analysed``）、開かず待たずに ``True``（BUG-0058）。
+    起動直後の部分的な答えは LSP 全体の状態（ファイルの一覧を持って解析を 1 周する前）で、文書ごとの状態ではない（T-07 の
+    ``_settle_path`` と同じ理由）。以前は対象の文書ごとに開いて最初の診断を待っていたので、冷えた対象の問い合わせのたびに
+    その文書の型検査（と、診断の無い文書では空の最初の診断を信用するまでの 300 ms）を待っていた。要求はその文書を開いて送る。
     """
+    if getattr(handle.diagnostics, "analysed", False) is True:
+        return True
     limit = FIRST_DIAGNOSTIC_WAIT_S if timeout_s is None else min(FIRST_DIAGNOSTIC_WAIT_S, timeout_s)
     sent_at = await features.sync_document(handle, rel)
     if sent_at is None:
@@ -685,7 +693,25 @@ EXACT_LANES = 1
 連続 3 回で LSP を落とす）。重ねるのは LSP を待たない仕事（最初の診断の待ち・呼び出し箇所の構文木）だけにする（BUG-0091 の実測）。"""
 
 _ASK_SLOW_S = 0.5
-"""BUG-0058: 1 ノードの LSP 呼び出し（``_ask``）がこの秒数を超えたら、各段の内訳をログに落とす（閾値ガード付きの計時）。"""
+"""BUG-0058: 1 ノードの LSP 呼び出し（``_ask``）・T-06 の references 1 回がこの秒数を超えたら、各段の内訳をログに落とす
+（閾値ガード付きの計時。``log_slow_spans``）。"""
+
+
+def log_slow_spans(what: str, name: str, spans: dict[str, float], **extra: Any) -> None:
+    """``spans``（段 → 秒）の合計が ``_ASK_SLOW_S`` 以上なら、内訳を 1 行の INFO に落とす（event ``lsp_exact_slow``）。"""
+    total = sum(spans.values())
+    if total < _ASK_SLOW_S:
+        return
+    _log.info(
+        "slow LSP %s: %s total=%.0fms %s%s",
+        what,
+        name,
+        total * 1000,
+        " ".join(f"{k}={v * 1000:.0f}ms" for k, v in spans.items()),
+        "".join(f" {k}={v}" for k, v in extra.items()),
+        extra={"event": "lsp_exact_slow"},
+    )
+
 
 EXACT_BACKGROUND_S = 60.0
 """1 問い合わせの予算で打ち切ったとき、すでに LSP に送っていた要求の答えを裏で待ち続ける上限（秒。根の要求の期限は予算の残り
@@ -962,8 +988,17 @@ class CallEdgeSource:
             raise first if first is not None else self._cut_error()
 
     async def flush(self) -> bool:
-        """LSP から取った辺を書き戻し、読み戻して一致したノードに目印を置く。書けたら ``True``。"""
-        if not self.staged or not await write_facts(self.services, self.staged, label="lsp:call_hierarchy"):
+        """LSP から取った辺を書き戻し、読み戻して一致したノードに目印を置く。書けたら ``True``。
+
+        LSP が答えたノードがすべて 0 件（辺が無い）でも、書き手があれば目印は置く（読み戻した exact 行が 0 件のときだけ一致する。
+        BUG-0058。以前は覚えず、呼び出し元の無い関数を聞くたびに LSP に聞き直していた）。
+        """
+        if not self.staged_rows:
+            return False
+        if self.staged:
+            if not await write_facts(self.services, self.staged, label="lsp:call_hierarchy"):
+                return False
+        elif writer_of(self.services) is None:
             return False
         self.wrote = True
         confirmed = await asyncio.to_thread(self._confirm_all)
@@ -1659,14 +1694,5 @@ class CallEdgeSource:
         loaded = await asyncio.gather(*(self.sites.of(rel) for rel in rels))
         infos = dict(zip(rels, loaded, strict=True))
         spans["sites"] = time.monotonic() - t
-        total = sum(spans.values())
-        if total >= _ASK_SLOW_S:
-            _log.info(
-                "slow LSP call hierarchy: %s %s total=%.0fms %s",
-                sym.qualified_name,
-                direction,
-                total * 1000,
-                " ".join(f"{k}={v * 1000:.0f}ms" for k, v in spans.items()),
-                extra={"event": "lsp_call_hierarchy_slow"},
-            )
+        log_slow_spans(f"call hierarchy {direction}", str(sym.qualified_name), spans, depth=job.depth)
         return edges, infos

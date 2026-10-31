@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -117,17 +118,11 @@ ACCURACY_WARNING = (
 
 class FindReferencesArgs(CommonArgs):
     target: TargetRefArg
-    query_type: Literal["references", "implementations", "type_hierarchy", "all"] = Field(
-        default="all"
-    )
+    query_type: Literal["references", "implementations", "type_hierarchy", "all"] = Field(default="all")
     include_tests: bool = Field(default=True)
     include_declaration: bool = Field(default=False)
-    context_snippet: bool = Field(
-        default=True, description="Add the code of the reference line."
-    )
-    use_kinds: list[UseName] | None = Field(
-        default=None
-    )
+    context_snippet: bool = Field(default=True, description="Add the code of the reference line.")
+    use_kinds: list[UseName] | None = Field(default=None)
     scope_paths: list[str] | None = Field(default=None)
     include_lexical_in_other_files: bool = Field(
         default=False,
@@ -171,7 +166,8 @@ class _Found:
     # exact の答えに無い、名前で結べる位置（補足の欄 ``data.name_matched``。references には混ぜない。BUG-0107）
     name_matched: list[_Ref] = field(default_factory=list)
     unattributed: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_calls
-    unattributed_refs: list[dict[str, Any]] = field(default_factory=list)  # data.unattributed_refs（属性の読み書き。BUG-0095）
+    # data.unattributed_refs（属性の読み書き。BUG-0095）
+    unattributed_refs: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _glob_list(scope_paths: list[str]) -> list[str]:
@@ -655,7 +651,9 @@ def name_matched_header(n: int) -> str:
     return f"not in exact answer (matched by name; receiver type unknown to the LSP): {n} sites"
 
 
-def _name_matched_records(L: Any, found: _Found, start: int, target_urn: str, show_snippet: bool) -> list[Record]:
+def _name_matched_records(
+    L: Any, found: _Found, start: int, target_urn: str, show_snippet: bool
+) -> list[Record]:
     """``found.name_matched`` のレコード（本体の後ろ。``Record.section`` で json の ``data.name_matched`` に置く）。
 
     見出しは欄の最初のレコードの行に含める（ページの末尾に見出しだけが残らない）。続きのページでは見出しは出ないが、
@@ -760,6 +758,9 @@ async def _exact_references(
     """
     sym = pre.sym
     assert route.handle is not None
+    # BUG-0058: 各段の所要（秒）。合計が閾値を超えた呼び出しだけ内訳をログに落とす（T-07 の ``_ask`` と同じ閾値ガード付き）
+    spans: dict[str, float] = {}
+    t = time.monotonic()
     if lx.needs_priming(route.file.language):
         # tsserver は tsconfig の include に入らないファイル（test/ など）を、開かれるまで探さない（BUG-0047）。
         # 対象の名前を含むファイルを先に開いてから聞くので、結果は「LSP が見たものそのまま」のまま（exact）。
@@ -768,11 +769,14 @@ async def _exact_references(
         note = prime.warning(sym.name)
         if note:
             pre.warnings.append(note)
-    # 起動直後の LSP は ``ready`` でも、その文書の最初の診断が来るまで解析が済んでいない（BUG-0012）。文書を開いて最初の診断を
-    # 待ってから聞く。待てなかった（上限）ときも exact で答えるが、解析前の部分的な答えかもしれないので目印は置かない。
+    # 起動直後の LSP は ``ready`` でも、最初の診断が来るまで解析が済んでいない（BUG-0012）。LSP が起動後にまだどの文書の診断も
+    # 出していなければ、文書を開いて最初の診断を待ってから聞く（出していれば待たない。BUG-0058）。待てなかった（上限）ときも
+    # exact で答えるが、解析前の部分的な答えかもしれないので目印は置かない。
+    spans["prime"], t = time.monotonic() - t, time.monotonic()
     settled = True
     if lx.needs_first_diagnostic(route.file.language):
         settled = await lx.await_first_diagnostic(route.handle, sym.path, timeout_s=budget.left_s())
+    spans["settle"], t = time.monotonic() - t, time.monotonic()
     sel = sym.selection or sym.range
     locs = await features.references(
         route.handle,
@@ -781,6 +785,7 @@ async def _exact_references(
         include_declaration=False,
         **budget.request(features.LSP_TIMEOUT_REFERENCES_MS),
     )
+    spans["references"], t = time.monotonic() - t, time.monotonic()
     target_urn = str(sym.urn)
     sites = lx.SiteIndex(ctx.services, ws)
     facts = []
@@ -804,16 +809,27 @@ async def _exact_references(
             "the LSP found no references although the index has some; it may not have finished analysing",
             details={"reason": "indexing"},
         )
-    wrote = await lx.write_facts(ctx.services, facts, label=f"lsp:references:{sym.qualified_name}")
-    # 0 件の答え・最初の診断の前の答えは覚えない（未完了の LSP の空振りや部分的な答えを固定しないため）
+    spans["sites"], t = time.monotonic() - t, time.monotonic()
+    if facts:
+        wrote = await lx.write_facts(ctx.services, facts, label=f"lsp:references:{sym.qualified_name}")
+    else:
+        # 0 件の答え（索引にも参照が無い。あれば上で降格している）も、解析の後の答えなら覚える（BUG-0058）。書く行は無いが、
+        # 読み戻した exact 行が 0 件のときだけ目印が付く（以前の答えの exact 行が残っていれば一致せず、覚えない）。以前は
+        # 覚えなかったので、参照の無いシンボル（テスト関数など）は同じ問い合わせのたびに LSP に聞き直していた
+        wrote = lx.writer_of(ctx.services) is not None
+    spans["write"], t = time.monotonic() - t, time.monotonic()
+    # 最初の診断の前の答えは覚えない（未完了の LSP の部分的な答えを固定しないため）
     if (
         wrote
         and settled
         and await asyncio.to_thread(_confirm, db_path, ws.workspace_id, target_urn, rows, pre.token)
     ):
+        spans["confirm"], t = time.monotonic() - t, time.monotonic()
         await lx.persist_marks(
             ctx.services, db_path, ws.workspace_id, [("refs", target_urn)], label="lsp:references:marks"
         )
+        spans["marks"] = time.monotonic() - t
+    lx.log_slow_spans("references", str(sym.qualified_name), spans, sites=len(rows))
     return rows
 
 
@@ -822,7 +838,9 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
     db_path = db_path_of(ctx)
     ws = workspace_of(ctx, args.workspace_id)
     L = ctx.services.lines  # type: ignore[attr-defined]
-    await ensure_target_indexed(ctx, ws, args.target)  # 走査がまだ届いていないファイルは先取りする（BUG-0070）
+    await ensure_target_indexed(
+        ctx, ws, args.target
+    )  # 走査がまだ届いていないファイルは先取りする（BUG-0070）
     pre = await asyncio.to_thread(_pre, db_path, ws, args)
 
     # 経路: PaaD の exact 行（2 回目以降）→ LSP（1 回目）→ structural（降格）
@@ -850,8 +868,12 @@ async def handler(ctx: ToolContext, args: FindReferencesArgs) -> ToolOutput:
                             raise
                         _log.info("LSP references failed; answering from the index: %r", exc)
                         engine = lx.degraded_choice(route, exc)
-                        if isinstance(exc, TimeoutError):  # 要求の期限は予算の残り: 切れたのは予算（BUG-0091）
-                            engine = replace(engine, warning=lx.budget_timeout_warning(budget, exc, what="参照"))
+                        if isinstance(
+                            exc, TimeoutError
+                        ):  # 要求の期限は予算の残り: 切れたのは予算（BUG-0091）
+                            engine = replace(
+                                engine, warning=lx.budget_timeout_warning(budget, exc, what="参照")
+                            )
                             budget_note = lx.budget_timeout_note(budget, exc, what="references")
                 if exact_rows is None:
                     engine = replace(engine, warning=(engine.warning or "") + HIERARCHY_NOTE)

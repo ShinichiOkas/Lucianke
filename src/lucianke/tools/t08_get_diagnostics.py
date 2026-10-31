@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -66,6 +67,7 @@ from lucianke.lsp.pool import LspHandle, LspState, PoolStatus
 from lucianke.lsp.servers import servers_for
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._building import ensure_indexed
+from lucianke.tools._lsp_exact import log_slow_spans
 from lucianke.tools._nav import db_path_of, reader, workspace_of
 from lucianke.tools._rev import reject_unsupported_revision
 from lucianke.workspace.paths import confine, to_abs
@@ -313,10 +315,12 @@ async def _collect_one(
 ) -> _LspResult:
     """1 ファイル × 1 ハンドル: 最新の内容を LSP に見せ、版待ちをして、ハブの診断を ``_Diag`` にする。"""
     rel = RelPath(file.path)
+    t = time.monotonic()
     data = await asyncio.to_thread(_read, ws, file.path)
     if data is None:
         return _LspResult(error=f"{file.path}: cannot read the file")
     language_id = handle.defn.document_language_id if handle.defn is not None else handle.language_id
+    was_open = handle.documents.is_open(rel)
     try:
         version = handle.documents.sync(rel, _text_of(data), language_id)
     except ConnectionError as e:
@@ -324,9 +328,18 @@ async def _collect_one(
     handle.touch()
     sent_at = handle.documents.sent_at_of(rel)
     hub = handle.diagnostics
+    spans = {"sync": time.monotonic() - t}
+    t = time.monotonic()
     ok = await hub.wait_for(
         rel, min_version=version, sent_at=sent_at if sent_at is not None else 0.0, timeout_ms=wait_ms
     )
+    spans["wait"] = time.monotonic() - t
+    # BUG-0058: 診断待ちの内訳（閾値ガード付き）
+    log_slow_spans(
+        "diagnostics", f"{handle.server_name or handle.language_id}:{file.path}", spans,
+        opened=not was_open, ok=ok, seq=getattr(hub.get(rel), "seq", None),
+        n=len(getattr(hub.get(rel), "diagnostics", ()) or ()),
+    )  # fmt: skip
     entry = hub.get(rel)
     result = _LspResult(pending=not ok)
     if entry is None:
@@ -743,7 +756,8 @@ async def handler(ctx: ToolContext, args: GetDiagnosticsArgs) -> ToolOutput:
     warnings: list[str] = []
 
     rels = None if args.paths is None else [confine(ws, p, param="paths") for p in args.paths]
-    for rel in rels or ():  # 索引の走査の途中は、まだ届いていないファイルを先取りする（BUG-0070）。できなければ下の「索引に無い」の警告
+    # 索引の走査の途中は、まだ届いていないファイルを先取りする（BUG-0070）。できなければ下の「索引に無い」の警告
+    for rel in rels or ():
         with contextlib.suppress(LuciankeError):
             await ensure_indexed(ctx, ws, str(rel))
     scope = await asyncio.to_thread(_load_scope, db_path, ws, rels)

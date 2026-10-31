@@ -96,6 +96,10 @@ class DiagnosticsHub:
         self.publish_count = 0
         """受信した ``publishDiagnostics`` の通数（ルート外の URI も含む）。"""
         self.last_received_at: float | None = None
+        self.analysed = False
+        """起動（``reset`` の後）から、どれかの文書の ``publishDiagnostics`` を 1 通でも受けたか（ルート外の URI も含む）。
+        basedpyright は解析の周期の終わりに診断を出すので、``True`` は「LSP がワークスペースのファイルの一覧を持って解析を
+        1 周した」合図（``ready`` は猶予時間でも立つので、それだけでは解析の前かもしれない。BUG-0012・BUG-0058）。"""
 
     # --- 受信 -----------------------------------------------------------------------
 
@@ -110,6 +114,7 @@ class DiagnosticsHub:
         received_at = self._clock()
         self.publish_count += 1
         self.last_received_at = received_at
+        self.analysed = True
         uri = params.get("uri")
         path = from_file_uri(self.ws, uri) if isinstance(uri, str) else None
         if path is None:
@@ -249,6 +254,7 @@ class DiagnosticsHub:
         self._gen += 1
         self.clear()
         self._settled_at = float("-inf")
+        self.analysed = False
         self._wake_all()
 
     # --- 版待ち ---------------------------------------------------------------------
