@@ -317,12 +317,43 @@ def build_initialization_options(
     return options
 
 
+PYRIGHT_CONFIG_NAME = "pyrightconfig.json"
+
+
+def pinned_pyright_config(workspace_root: str | os.PathLike[str]) -> Path | None:
+    """basedpyright / pyright に設定ファイルとして明示する、ワークスペースの根の ``pyproject.toml``。明示しないなら ``None``。
+
+    basedpyright（1.40.2 = pyright 1.1.414 で確認）は、ワークスペースの根の ``pyrightconfig.json`` を探し、無ければ根の
+    ``pyproject.toml`` を読む。その ``pyproject.toml`` に ``[tool.pyright]`` / ``[tool.basedpyright]`` が無い（読めない）と、
+    **それが無いものとして親のディレクトリの ``pyrightconfig.json`` / ``pyproject.toml`` を探して採る**。親の設定の
+    ``include`` / ``exclude`` がワークスペースのファイルを外すと、呼び出し階層・参照の答えが空になり、親の大きな木を走査して
+    返らなくなる（BUG-0132）。設定ファイルを明示（``analysis.configFilePath``）すると親を探さない: 節があればそれを、無ければ
+    既定の設定（と ``workspace/configuration`` の値）で根の下を解析する。
+
+    * 根に ``pyrightconfig.json`` がある → ``None``（サーバーがそれを採る。利用者の設定を尊重する）。
+    * 根に ``pyproject.toml`` がある → そのパス（節があればサーバーは同じ設定を読むので、尊重は変わらない）。
+    * どちらも無い → ``None``（このときサーバーは親を探さない。存在しないパスを渡すと、ディレクトリを設定として読もうとして
+      エラーをログに出す）。
+
+    起動のときだけ引く（根の設定を後から作る・消すと、LSP を起動し直すまで反映されない。サーバーの監視の登録は受けていない）。
+    """
+    root = Path(workspace_root)
+    try:
+        if (root / PYRIGHT_CONFIG_NAME).is_file():
+            return None
+        pyproject = root / "pyproject.toml"
+        return pyproject if pyproject.is_file() else None
+    except OSError:
+        return None
+
+
 def build_settings(
     defn: LspServerDef,
     *,
     python_path: str | os.PathLike[str] | None = None,
     extra_paths: Sequence[str | os.PathLike[str]] = (),
     tsserver_path: str | os.PathLike[str] | None = None,
+    config_file: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """``defn.settings`` の複製に、実行時にしか決まらない値を重ねる（``LspClient.set_settings`` に渡す）。
 
@@ -335,16 +366,23 @@ def build_settings(
       ``defn.settings`` が既に ``extraPaths`` を持つならそれが先。利用者の ``pyrightconfig.json`` は pyright 自身が優先する。
     * ``tsserver_path``: vtsls へ ``vtsls.autoUseWorkspaceTsdk`` と ``typescript.tsdk``（``tsserver.js`` のある ``lib``）を返して
       ワークスペースの TypeScript を使わせる。返さないと同梱の TypeScript を使う（S-5）。
+    * ``config_file``: basedpyright / pyright に明示する設定ファイル（``pinned_pyright_config`` が返す根の ``pyproject.toml``）。
+      ``analysis.configFilePath`` に入れる（basedpyright は ``basedpyright.analysis`` があれば ``python.analysis`` を読まないので
+      両方に）。渡さないと、根の ``pyproject.toml`` に pyright の節が無いとき親のディレクトリの設定を採る（BUG-0132）。
     """
     settings: dict[str, Any] = copy.deepcopy(dict(defn.settings))
-    if python_path is not None and defn.language_id == "python" and defn.role == "types":
+    python_types = defn.language_id == "python" and defn.role == "types"
+    if python_path is not None and python_types:
         settings.setdefault("python", {})["pythonPath"] = os.fspath(python_path)
-    if extra_paths and defn.language_id == "python" and defn.role == "types":
+    for key, value in (
+        ("extraPaths", [os.fspath(p) for p in extra_paths] if extra_paths else None),
+        ("configFilePath", os.fspath(config_file) if config_file is not None else None),
+    ):
+        if value is None or not python_types:
+            continue
         for section in ("python", "basedpyright"):
             if section == "python" or section in settings:
-                settings.setdefault(section, {}).setdefault("analysis", {}).setdefault(
-                    "extraPaths", [os.fspath(p) for p in extra_paths]
-                )
+                settings.setdefault(section, {}).setdefault("analysis", {}).setdefault(key, value)
     if defn.tsserver_via == "settings" and tsserver_path is not None:
         settings.setdefault("vtsls", {})["autoUseWorkspaceTsdk"] = True
         settings.setdefault("typescript", {})["tsdk"] = os.fspath(Path(tsserver_path).parent)

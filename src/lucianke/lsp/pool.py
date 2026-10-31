@@ -67,6 +67,7 @@ from lucianke.lsp.servers import (
     find_command,
     find_tsserver,
     host_venv,
+    pinned_pyright_config,
     servers_for,
 )
 from lucianke.workspace.paths import to_file_uri
@@ -705,8 +706,12 @@ class LspPool:
         env = h.ws.python_env
         python = env.interpreter if env is not None else None
         extra = [h.ws.root / p for p in env.extra_paths] if env is not None else []
+        # 根の pyproject.toml を設定ファイルとして明示し、親のディレクトリの pyright の設定を採らせない（BUG-0132）
+        pinned = pinned_pyright_config(h.ws.root) if defn.language_id == "python" and defn.role == "types" else None
         client.set_settings(
-            build_settings(defn, python_path=python, extra_paths=extra, tsserver_path=tsserver)
+            build_settings(
+                defn, python_path=python, extra_paths=extra, tsserver_path=tsserver, config_file=pinned
+            )
         )
         h.diagnostics.attach(client)
         client.on_notification("$/progress", h._on_progress)
