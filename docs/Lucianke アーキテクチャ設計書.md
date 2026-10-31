@@ -2096,16 +2096,18 @@ build-backend = "hatchling.build"
   }
 }
 
-// .mcp.json（リポジトリで開発するとき。実装で確定 2026-10-29、BUG-0030・1734b29・251eeb3）
+// .mcp.json（リポジトリで開発するとき。実装で確定 2026-10-29、BUG-0030・1734b29・251eeb3。「.」は cf4497c・BUG-0126）
 {
   "mcpServers": {
     "lucianke": {
       "command": "uv",
-      "args": ["run", "--directory", "<repo>", "python", "-P", "-m", "lucianke"]
+      "args": ["run", "--directory", ".", "python", "-P", "-m", "lucianke"]
     }
   }
 }
 ```
+
+- **`--directory` は「.」**（ホストがプロジェクトの根で起こす）。マシン固有の絶対パスを書かない。別 PC の `S:/work/develop/Lucianke` が入っていた頃は、S: の無い PC で `uv` が引数を読んだすぐ後に `error: 指定されたパスが見つかりません。 (os error 3)`（文脈なし）で落ち、Lucianke の Python まで届かずにつながらなかった（BUG-0126。`tests/unit/test_server_launch_guard.py` が「.」を見張る）。ホストは起動するときに `.mcp.json` を読むので、変えたら起動し直す。clone した直後・新しい worktree では先に `uv sync` を流す（最初の `uv run` は依存を入れるだけで 15 秒を超え、Claude Code の接続の上限 30 秒に届いて `CONNECT_TIMEOUT` になった。2026-10-31 実測）。つながるかは `claude mcp list` で確かめる。
 
 - `uv tool install lucianke[all]` または `pipx install lucianke[all]`。
 - **開発時の起動は `python -P -m lucianke`**（コンソールスクリプトの `lucianke.exe` を使わない）。`uv run` は起動のたびに環境を同期し、`pyproject.toml` が変わっていると editable の `lucianke.exe` を入れ直そうとするが、Windows では**動いている exe は消せない**（`os error 32`）ので、Lucianke を MCP でつないだままだと全員の `uv run` が落ちる（BUG-0030）。`python -m lucianke` なら握るのは `python.exe` で、同期は python のバージョンが変わらない限り触らない。`-P` は cwd（解析対象のワークスペース。任意の Python ファイルを含む）を `sys.path` に足さないため（足すとワークスペースの `mcp.py` などが SDK を隠しうる）。テスト・ベンチも同じ形で起こす（`tests/_server_cmd.py` の `server_argv`、`bench/_stdio.py`。`tests/unit/test_server_launch_guard.py` が `uv run … lucianke` に戻っていないかを見張る）。

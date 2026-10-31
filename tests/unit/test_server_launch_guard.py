@@ -3,7 +3,8 @@
 ``uv run ... lucianke``（コンソールスクリプトの ``lucianke.exe``）で起こしたサーバーが動いている間に ``pyproject.toml``
 が変わると、Windows では全員の ``uv run`` が exe を消せず（os error 32）テストの前に落ちる。テスト・ベンチは
 ``tests/_server_cmd.py`` / ``bench/_stdio.py`` の ``server_argv``（``sys.executable -P -m lucianke``）で起こす。
-ホストの設定 ``.mcp.json`` も同じ形（``uv run --directory <repo> python -P -m lucianke``。``uv run ... lucianke`` ではない）。
+ホストの設定 ``.mcp.json`` も同じ形（``uv run --directory . python -P -m lucianke``。``uv run ... lucianke`` ではない。
+``--directory`` に絶対パスを焼き込むと、その置き先の無い PC では uv が os error 3 で落ちてつながらない。BUG-0126）。
 ここは (1) その形を固定し、(2) tests/ と bench/ に ``uv run`` 経由の起動が戻ってきたら落とし、
 (3) ``.mcp.json`` が ``lucianke.exe`` を握らない形で、``python -m lucianke`` の入口（``[project.scripts] lucianke`` と同じ ``main``）を指し続けることを確かめる
 （縦切りの e2e が以前担っていた確認）。
@@ -24,7 +25,9 @@ from _server_cmd import server_argv  # noqa: E402
 # 組み立てて書く（この見張り自身が検出されないように）
 _FORBIDDEN = {
     "uv run ... lucianke": re.compile(r'"run"[^\n]*"' + "lucianke" + r'"'),
-    "uv_argv の定義（廃止した名前。呼び出しは AttributeError で落ちる）": re.compile(r"\bdef uv" + r"_argv\b"),
+    "uv_argv の定義（廃止した名前。呼び出しは AttributeError で落ちる）": re.compile(
+        r"\bdef uv" + r"_argv\b"
+    ),
     "uv を command にして起こす": re.compile(r'command\s*=\s*"' + r'uv"'),
 }
 _SCAN_DIRS = ("tests", "bench")
@@ -50,7 +53,9 @@ def test_no_test_or_bench_launches_the_server_through_uv_run() -> None:
                 for m in rx.finditer(text):
                     line = text.count("\n", 0, m.start()) + 1
                     offenders.append(f"{path.relative_to(REPO).as_posix()}:{line}: {why}")
-    assert not offenders, "実プロセスのサーバーは server_argv() で起こす（BUG-0030）:\n" + "\n".join(offenders)
+    assert not offenders, "実プロセスのサーバーは server_argv() で起こす（BUG-0030）:\n" + "\n".join(
+        offenders
+    )
 
 
 def test_bench_server_argv_matches_tests() -> None:
@@ -75,7 +80,12 @@ def test_host_config_launches_python_dash_m_not_the_console_script() -> None:
     # 作業ディレクトリは「.」（ホストがプロジェクトの根で起動する）。マシン固有の絶対パスを焼き込むと別の PC で起動に失敗し、
     # MCP がつながらない（2026-10-31: S:/work/develop/Lucianke が入っていて C: の作業ツリーで CONNECTION_CLOSED）
     assert args[2] == ".", f".mcp.json must not bake a machine-specific path: {args[2]!r}"
-    assert args[3:] == ["python", "-P", "-m", "lucianke"]  # コンソールスクリプトの ``lucianke`` を直接起こさない
+    assert args[3:] == [
+        "python",
+        "-P",
+        "-m",
+        "lucianke",
+    ]  # コンソールスクリプトの ``lucianke`` を直接起こさない
     assert args[3:] == ["python", *server_argv()[1:]]  # テスト・ベンチと同じ形
     # ``python -m lucianke`` が実行する ``__main__`` は、コンソールスクリプトと同じ ``main`` を呼ぶ
     scripts = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]

@@ -24,6 +24,9 @@ Project Luciankeは、コーディングエージェントにおけるトーク�
 
 ## 開発メモ
 - `.mcp.json` の起動は `uv run --directory . python -P -m lucianke`（`.` はホストが起動するプロジェクトの根。マシン固有の絶対パスを書かない。コンソールスクリプトの `lucianke.exe` を使わない）。Lucianke を MCP でつないだままでも `.venv\Scripts\lucianke.exe` を握らないので、`pyproject.toml` を変えて `uv run` / `uv sync` が `lucianke.exe` を入れ直しても `os error 32` で失敗しない（Windows では動いている exe を消せない。BUG-0030）。握るのは `python.exe` で、同期は python のバージョンが変わらない限り触らない。テスト・ベンチも同じ形（`python -P -m lucianke`。`tests/_server_cmd.py`、`bench/_stdio.py` の `server_argv`）で起こす。`-P` は cwd（解析対象のワークスペース）を `sys.path` に足さないため。ホストの `uv run ... lucianke` に戻さないこと（`tests/unit/test_server_launch_guard.py` が見張る）。
+- clone した直後・新しい worktree では、Claude Code を開く前に `uv sync` を 1 回流す。最初の `uv run` は `.venv` を作って依存を入れるので、ホストの接続の上限（Claude Code は 30 秒）を超えて `CONNECT_TIMEOUT` になる（2026-10-31 に worktree で実測: 依存 65 個を入れるだけで 15.5 秒かかり、Lucianke が起きる前に 30 秒で打ち切られた。2 回目は 4 秒でつながる。BUG-0126）。
+- ホストは起動するときに `.mcp.json` を読む。`.mcp.json` を変えたら Claude Code を起動し直す（変える前に起動したセッションは古い引数で起こしたときの失敗のまま切れて見える。BUG-0126）。`uv` が文脈なしで `error: 指定されたパスが見つかりません。 (os error 3)` だけを出して落ちるのは、`--directory` の先が無いとき（別 PC の絶対パスなど）。
+- つながるかは `claude mcp list` で確かめる（ホストと同じく shell を通さずに起こし、initialize までする。`lucianke: ... - ✔ Connected`）。ホストのログは `%LOCALAPPDATA%\claude-cli-nodejs\Cache\<プロジェクトの根のパスの英数字以外を - にした名前（例 C--Users-you-work-Lucianke）>\mcp-logs-lucianke\*.jsonl`。
 
 ---
 *論理的整合性と構造的なエレガンスの追求。*
