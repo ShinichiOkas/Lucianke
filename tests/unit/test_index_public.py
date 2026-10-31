@@ -13,6 +13,7 @@ from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import (
     GREP_MATCHES_MAX,
     QUERY_LENGTH_MAX,
+    QUERY_TIMEOUT_MAX_MS,
     REGEX_PATTERN_MAX_CHARS,
     SNIPPET_MAX_CHARS,
 )
@@ -22,9 +23,11 @@ from lucianke.index.public import (
     QueryTimeout,
     check_statement,
     compile_grep_pattern,
+    default_timeout_ms,
     open_public,
     run_query,
     scan_grep,
+    timeout_for_index_size,
 )
 
 SCHEMA = Path(lucianke.index.__file__).parent / "schema.sql"
@@ -153,7 +156,7 @@ def test_limit_out_of_range(db: Path, limit: int):
 
 
 def test_timeout_ms_out_of_range(db: Path):
-    for bad in (0, 5001):
+    for bad in (0, QUERY_TIMEOUT_MAX_MS + 1):
         with pytest.raises(LuciankeError) as exc:
             run_query(db, "SELECT 1", timeout_ms=bad)
         assert exc.value.code is ErrorCode.E_INVALID_ARGUMENT
@@ -539,3 +542,57 @@ def test_grep_exclude_receives_absolute_paths_for_dirs_and_files(ws: Path):
     assert all(p.is_absolute() for p in seen)
     assert any(p.name == "pkg" for p in seen)
     assert "src/pkg/b.py" not in {r[0] for r in scan.rows}
+
+
+# --- 大きなリポジトリの集計（BUG-0125） ---------------------------------------------------
+
+
+def test_timeout_ms_accepts_up_to_the_max(db: Path):
+    assert QUERY_TIMEOUT_MAX_MS == 30000
+    assert run_query(db, "SELECT 1", timeout_ms=QUERY_TIMEOUT_MAX_MS).row_count == 1
+
+
+def test_default_timeout_grows_with_index_size(tmp_path: Path):
+    small = tmp_path / "small.sqlite"
+    small.write_bytes(b"x" * 1024)
+    assert default_timeout_ms(small) == 300  # 小さな索引は今までどおり。暴走を早く止める
+    mb = 1024 * 1024
+    assert timeout_for_index_size(5 * mb) == 300
+    assert (
+        4000 <= timeout_for_index_size(88 * mb) <= 6000
+    )  # 票の Mnemo 級（4,000 ファイル・約 40 万行で約 90 MB）
+    assert timeout_for_index_size(2048 * mb) == 10000  # 既定が延びるのはここまで。以上は引数で 30 秒まで
+    assert default_timeout_ms(tmp_path / "absent.sqlite") == 300
+
+
+def test_public_connection_has_a_large_page_cache(db: Path):
+    con = open_public(db, layers=frozenset({"ro", "query_only"}))  # PRAGMA は authorizer が拒否する
+    try:
+        assert con.execute("PRAGMA cache_size").fetchone()[0] == -65536  # 既定の 2 MiB では結合が 5 倍遅い
+        assert con.execute("PRAGMA mmap_size").fetchone()[0] > 0
+    finally:
+        con.close()
+
+
+SLOW = "SELECT count(*) FROM " + ", ".join(f"symbols t{i}" for i in range(20))  # 4 行の 20 乗の直積
+
+
+def test_timeout_tells_the_caller_how_far_to_extend_and_what_to_rewrite(db: Path):
+    with pytest.raises(QueryTimeout) as exc:
+        run_query(db, SLOW, timeout_ms=100)
+    d = exc.value.details
+    assert d["timeout_ms"] == 100
+    assert d["max_timeout_ms"] == QUERY_TIMEOUT_MAX_MS
+    assert d["can_extend"] is True
+    assert d["suggested_timeout_ms"] == 400  # 4 倍。上限まで
+    assert d["full_scans"]  # 全件を読んでいる表（実行計画の SCAN）
+    assert "timeout_ms up to 30000" in d["hint"] and "subquery" in d["hint"]
+
+
+def test_timeout_at_the_max_says_extending_is_useless(db: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("lucianke.index.public.QUERY_TIMEOUT_MAX_MS", 200)  # 本物の上限（30 秒）を待たない
+    with pytest.raises(QueryTimeout) as exc:
+        run_query(db, INFINITE, timeout_ms=200)
+    d = exc.value.details
+    assert d["can_extend"] is False and d["suggested_timeout_ms"] is None
+    assert "retry with timeout_ms" not in d["hint"] and "subquery" in d["hint"]

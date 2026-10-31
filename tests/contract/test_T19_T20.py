@@ -369,9 +369,28 @@ async def test_t20_post4_elapsed_within_timeout(pipeline: Pipeline) -> None:
     assert t.is_error and t.structured["error"]["code"] == "E_TIMEOUT"
     assert t.structured["error"]["details"]["partial"] is True
     assert t.structured["data"]["elapsed_ms"] <= 1000  # 部分結果が data に載る
-    for bad in (49, 5001):
+    for bad in (49, 30001):
         r = await query(pipeline, "SELECT 1", timeout_ms=bad)
         assert r.structured["error"]["code"] == "E_INVALID_ARGUMENT"
+
+
+async def test_t20_timeout_reports_effective_limit_and_how_to_retry(pipeline: Pipeline) -> None:
+    """BUG-0125: 打ち切られた応答から、どこまで延ばせるか・どう書き直すかが分かる。既定は索引の大きさで決まる。"""
+    ok = await query(pipeline, "SELECT 1 AS one")
+    assert ok.structured["data"]["timeout_ms"] == 300  # 小さな索引の既定
+    runaway = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
+    t = await query(pipeline, runaway, timeout_ms=50)
+    d = t.structured["error"]["details"]
+    assert (d["timeout_ms"], d["max_timeout_ms"], d["can_extend"], d["suggested_timeout_ms"]) == (
+        50,
+        30000,
+        True,
+        200,
+    )
+    assert "subquery" in d["hint"]
+    assert t.structured["data"]["timeout_ms"] == 50
+    big = await query(pipeline, "SELECT 1", timeout_ms=30000)
+    assert big.structured["ok"]  # 上限は 30 秒
 
 
 async def test_t20_post5_params_and_named_binds_correspond(pipeline: Pipeline) -> None:

@@ -36,9 +36,13 @@ from lucianke.core.limits import (
     DEGRADED_GREP_MS,
     GREP_MATCHES_MAX,
     MAX_FILE_BYTES,
+    QUERY_CACHE_KIB,
     QUERY_LENGTH_MAX,
+    QUERY_MMAP_BYTES,
     QUERY_ROWS_DEFAULT,
     QUERY_ROWS_MAX,
+    QUERY_TIMEOUT_AUTO_MAX_MS,
+    QUERY_TIMEOUT_AUTO_MS_PER_MB,
     QUERY_TIMEOUT_DEFAULT_MS,
     QUERY_TIMEOUT_MAX_MS,
     REGEX_PATTERN_MAX_CHARS,
@@ -394,6 +398,10 @@ def open_public(
             con.execute("PRAGMA query_only = ON")
             if con.execute("PRAGMA query_only").fetchone()[0] != 1:  # 閉じる側に倒す
                 raise LuciankeError(ErrorCode.E_INTERNAL, "failed to enable query_only")
+        # 既定の 2 MiB のキャッシュでは、4,000 ファイル級の索引の結合・集計（シンボルを主キーで引く）が 5 倍遅い
+        # （BUG-0125。実測 9.8 秒 → 1.7 秒）。1 要求 1 接続なので、確保は読んだページの分だけで、閉じれば返る。
+        con.execute(f"PRAGMA cache_size = -{QUERY_CACHE_KIB}")
+        con.execute(f"PRAGMA mmap_size = {QUERY_MMAP_BYTES}")
         con.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _VALUE_MAX_BYTES)
         con.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, QUERY_LENGTH_MAX)
         names = {
@@ -718,9 +726,13 @@ def run_query(
     setup = None if scan is None else (lambda con: _install_grep(con, scan.rows))
     con = open_public(db_path, setup=setup)
     try:
-        result = _execute(
-            con, ("EXPLAIN QUERY PLAN " + sql) if explain else sql, bind, limit, timeout_ms, explain
-        )
+        try:
+            result = _execute(
+                con, ("EXPLAIN QUERY PLAN " + sql) if explain else sql, bind, limit, timeout_ms, explain
+            )
+        except QueryTimeout as exc:
+            _advise_timeout(con, sql, bind, timeout_ms, exc)
+            raise
     finally:
         con.close()
     if scan is None or grep is None:
@@ -732,6 +744,72 @@ def run_query(
         "scope_paths": scan.scope_paths,
     }
     return dataclasses.replace(result, grep_fallback=fallback)
+
+
+def default_timeout_ms(db_path: Path) -> int:
+    """``timeout_ms`` を渡さなかったときの期限。索引ファイル 1 MB あたり 60 ms（下限 300 ms・上限 10 秒）。
+
+    大きなリポジトリの集計（relations の全件を数える・結合する）は索引の大きさに比例して遅くなる（BUG-0125。
+    4,000 ファイル・約 40 万行の関係で 90 MB、結合つきの集計が 1.5〜2 秒）。小さな索引は今までどおり 300 ms で
+    暴走を早く止める。ファイルの大きさだけで決めるので、同じ索引なら同じ値になる。
+    """
+    try:
+        size = db_path.stat().st_size
+    except OSError:
+        return QUERY_TIMEOUT_DEFAULT_MS
+    return timeout_for_index_size(size)
+
+
+def timeout_for_index_size(size_bytes: int) -> int:
+    """``default_timeout_ms`` の計算（索引ファイルの大きさ → 期限）。"""
+    scaled = int(size_bytes / (1024 * 1024) * QUERY_TIMEOUT_AUTO_MS_PER_MB)
+    return max(QUERY_TIMEOUT_DEFAULT_MS, min(QUERY_TIMEOUT_AUTO_MAX_MS, scaled))
+
+
+def _advise_timeout(
+    con: PublicConnection, sql: str, bind: dict[str, _BindValue], timeout_ms: int, exc: QueryTimeout
+) -> None:
+    """``E_TIMEOUT`` の ``details`` に、呼ぶ側が次の手を決められる手がかりを足す（BUG-0125）。
+
+    * ``max_timeout_ms`` / ``suggested_timeout_ms``: 引数で延ばせる上限と、次に試す値（4 倍・上限まで）。
+      ``can_extend`` が false なら延ばしても無駄で、問い合わせを絞る。
+    * ``full_scans``: 実行計画で索引を使わずに全件を読む表（``EXPLAIN QUERY PLAN`` の ``SCAN``。実行はしない）。
+    * ``hint``: 問い合わせの書き直しの手がかり。
+    """
+    can_extend = timeout_ms < QUERY_TIMEOUT_MAX_MS
+    scans: list[str] = []
+    sorts = False
+    con.guard.deadline = float("inf")
+    try:
+        for row in con.execute("EXPLAIN QUERY PLAN " + sql, bind).fetchall():
+            detail = str(row[3])
+            if detail.startswith("SCAN "):
+                scans.append(detail[5:].split(" USING ")[0].strip())
+            sorts = sorts or "TEMP B-TREE" in detail
+    except sqlite3.Error:
+        pass
+    hints: list[str] = []
+    if can_extend:
+        hints.append(f"retry with timeout_ms up to {QUERY_TIMEOUT_MAX_MS}")
+    if scans:
+        hints.append(
+            "narrow the scan: add WHERE on indexed columns (relations.target_urn / source_urn / relation_kind, "
+            "symbols.file_id / name / kind, files.path) so SQLite uses an index"
+        )
+    hints.append(
+        "aggregate the big table alone in a subquery first (GROUP BY target_urn LIMIT n), then JOIN symbols / files "
+        "on the few result rows; select only the columns you need"
+        + ("; ORDER BY / GROUP BY on a computed value builds a temp B-tree over all rows" if sorts else "")
+    )
+    exc.details.update(
+        {
+            "max_timeout_ms": QUERY_TIMEOUT_MAX_MS,
+            "suggested_timeout_ms": min(QUERY_TIMEOUT_MAX_MS, timeout_ms * 4) if can_extend else None,
+            "can_extend": can_extend,
+            "full_scans": sorted(set(scans)),
+            "hint": "; ".join(hints),
+        }
+    )
 
 
 def _execute(

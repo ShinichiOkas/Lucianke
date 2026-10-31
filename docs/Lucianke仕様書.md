@@ -3044,7 +3044,7 @@ json の `data`:
 | `limit` | integer | MAY | 200 | 1〜2000。返す最大行数 |
 | `auto_fallback_grep_pattern` | string | MAY | なし | 指定時、ワークスペース内を単語境界付き正規表現で検索し、結果を一時テーブル `temp_grep_matches` としてクエリから参照できるようにする |
 | `grep_scope_paths` | array of string | MAY | なし | 上記 grep の対象パス制限 |
-| `timeout_ms` | integer | MAY | 300 | 50〜5000 |
+| `timeout_ms` | integer | MAY | 索引の大きさで決まる（下記） | 50〜30000 |
 | `explain` | boolean | MAY | false | true のとき実行せず、実行計画（`EXPLAIN QUERY PLAN`）だけを返す |
 
 **処理規約**
@@ -3053,7 +3053,9 @@ json の `data`:
 2. **接続**: 読み取り専用で開き（`SQLITE_OPEN_READONLY` 相当）、`PRAGMA query_only = ON` を設定し、認可フック（authorizer 相当）で読み取り以外の操作を拒否する。DB 本体への書き込みについて、3 重の防御のいずれか 1 つが欠けても他が効く構成とする（MUST。副作用を止められるのは authorizer と禁止語検査だけなので、これらは省かない。§13.2）。
 3. **一時テーブル**: `auto_fallback_grep_pattern` が指定されたとき、クエリ実行前に `temp_grep_matches(path TEXT, line INTEGER, snippet TEXT, confidence_level TEXT)` を接続ローカルの一時領域に作り、`.gitignore` と `exclude_globs` を尊重して単語境界付きで検索した結果を入れる。`confidence_level` は常に `'lexical_fallback'`。マッチ上限は 10,000 件で、超えたら `data.grep_fallback.truncated: true`。概念文書の「結果 0 件のとき自動的に grep」は採用せず、**指定があれば必ず作る** 決定論的な挙動とする。作成と投入は `query_only` と認可フックの設定より前に済ませる（設計書 §7.6.4）。
 4. **バインド**: `params` の各キーは `query` 中に `:key` として現れなければならず、現れないキー、または `params` に無いバインド名があれば `E_INVALID_ARGUMENT`。
-5. **実行**: `limit + 1` 行まで取り、`limit + 1` 行目が存在すれば `truncated: true`。進捗ハンドラ（`progress_handler` 相当）で `timeout_ms` を監視し、超えたら中断して `E_TIMEOUT`（取得済みの行を `data.rows` に入れ、`details.partial: true`）。
+5. **実行**: `limit + 1` 行まで取り、`limit + 1` 行目が存在すれば `truncated: true`。進捗ハンドラ（`progress_handler` 相当）で `timeout_ms` を監視し、超えたら中断して `E_TIMEOUT`（取得済みの行を `data.rows` に入れ、`details.partial: true`）。接続のページキャッシュは 64 MiB、`mmap` は 256 MiB とする（SQLite の既定の 2 MiB では、シンボルを主キーで引く結合・集計が 5 倍遅い。BUG-0125）。
+5a. **期限（BUG-0125）**: `timeout_ms` を渡さないときの期限は、索引ファイルの大きさ 1 MB あたり 60 ms（下限 300 ms・上限 10 秒）。小さな索引は 300 ms で暴走を早く止め、4,000 ファイル・約 40 万行の関係（約 90 MB）なら約 5 秒になる。引数の上限は 30,000 ms（呼ぶ側の MCP の時間の上限〈多くは 60〜120 秒〉より短く。§12.8 の読み取りの 10,000 ms はこのツールには適用せず、`timeout_ms` が優先する）。実際に使った期限は `data.timeout_ms` に返す。
+5b. **打ち切りの手がかり（BUG-0125）**: `E_TIMEOUT` の `details` に次を入れ、呼ぶ側が延ばすか書き直すかを決められるようにする。`timeout_ms`（使った期限）、`max_timeout_ms`（30000）、`can_extend`（期限が上限未満か）、`suggested_timeout_ms`（次に試す値。期限の 4 倍を上限で切る。`can_extend` が false なら `null`）、`full_scans[]`（実行計画〈`EXPLAIN QUERY PLAN`。実行はしない〉で索引を使わず全件を読む表）、`hint`（書き直しの手がかり。大きな表を単独で集計してから結合する・索引のある列で絞る・必要な列だけ選ぶ）。
 6. **結果の形**: 1 レコードは 1 行。compact では Markdown 表とし、各セルは 80 文字で `…` 省略、NULL は `NULL` と表示する。列名はクエリの別名をそのまま使う。
 7. **グラフ出力**: `format: "dot"` / `"mermaid"` は結果に `source_urn` と `target_urn` の両列があるときだけ許可し、`relation_kind` 列があればエッジのラベルにする。両列が無ければ `E_INVALID_ARGUMENT`。
 8. **精度メタデータ**: 結果に `confidence_level` 列があれば、その値を集計して `_resolution_meta.confidence_breakdown` と `mixed` を埋め、最低水準を `confidence_level` に書く。列が無ければ、参照したビューに `exact` 以外の行が存在するとき `mixed: true`、`confidence_level: "exact"`、`accuracy_warning` に「結果に降格行が含まれうる。`confidence_level` 列を選択して確かめること」と書く。`temp_grep_matches` を参照したクエリは常に `is_degraded: true`。
@@ -3082,6 +3084,7 @@ json の `data`:
 | `row_count` | integer | 返した行数（`limit` 以下） |
 | `truncated` | boolean | `limit` で切ったか |
 | `elapsed_ms` | integer | 実行時間 |
+| `timeout_ms` | integer | 使った期限（処理規約 5a。渡さなければ索引の大きさで決めた値） |
 | `grep_fallback` | object \| null | `{pattern, matches, truncated, scope_paths}` |
 | `plan[]` | array | `explain: true` のときの実行計画行 |
 
@@ -3090,7 +3093,7 @@ json の `data`:
 - `E_QUERY_REJECTED`: 処理規約 1 のいずれか（`details.reason` に `"multiple_statements"` / `"not_select"` / `"forbidden_keyword"` / `"non_public_object"` / `"syntax_error"`、必要なら `details.sqlite_message`）。
 - `E_INVALID_ARGUMENT`: `params` と `:name` の不一致。`limit` / `timeout_ms` が範囲外。`format: "dot"` / `"mermaid"` で `source_urn` / `target_urn` 列が無い。`grep_scope_paths` がルート外。
 - `E_UNSUPPORTED`: `query_language: "datalog"`。
-- `E_TIMEOUT`: `timeout_ms` 超過。部分結果あり。
+- `E_TIMEOUT`: `timeout_ms` 超過。部分結果あり。`details` に再試行の手がかり（処理規約 5b）。
 - `E_WORKSPACE_NOT_CONFIGURED` / `E_CURSOR_EXPIRED`: §5.8 のとおり。索引更新後の `cursor` は `E_CURSOR_EXPIRED`。
 
 **精度と降格**
@@ -3102,7 +3105,7 @@ json の `data`:
 1. どのような `query` を与えても、呼び出し前後で DB ファイルの SHA-256 と公開ビューの各行数が変わらない。
 2. `INSERT` / `UPDATE` / `DELETE` / `CREATE` / `DROP` / `ALTER` / `ATTACH` / `PRAGMA` のいずれかを先頭に持つ文、または `;` で区切った複文は、`ok: false`・`error.code: "E_QUERY_REJECTED"` で返り、DB に変更が無い。
 3. `row_count` は `limit` 以下であり、`truncated` は「`limit + 1` 行目が存在したか」と一致する。
-4. `ok: true` のとき `elapsed_ms` は `timeout_ms` 以下である。
+4. `ok: true` のとき `elapsed_ms` は `data.timeout_ms`（使った期限）以下である。
 5. `params` の各キーは `query` 中に `:key` として 1 回以上現れ、`query` 中の各 `:name` は `params` のキーとして存在する。
 
 ---

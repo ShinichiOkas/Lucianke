@@ -25,13 +25,19 @@ from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.limits import (
     QUERY_ROWS_DEFAULT,
     QUERY_ROWS_MAX,
-    QUERY_TIMEOUT_DEFAULT_MS,
     QUERY_TIMEOUT_MAX_MS,
 )
 from lucianke.core.model import Confidence, EngineChoice, RelPath
 from lucianke.core.records import Record, ToolOutput
 from lucianke.index.connection import open_reader
-from lucianke.index.public import TEMP_GREP_TABLE, GrepSpec, QueryResult, QueryTimeout, run_query
+from lucianke.index.public import (
+    TEMP_GREP_TABLE,
+    GrepSpec,
+    QueryResult,
+    QueryTimeout,
+    default_timeout_ms,
+    run_query,
+)
 from lucianke.tools._base import GRAPH_FORMATS, CommonArgs, ToolContext, ToolSpec
 from lucianke.workspace.paths import is_excluded
 
@@ -57,8 +63,8 @@ class QueryProjectDbArgs(CommonArgs):
         description="Word-bounded regex; matches go to temp table temp_grep_matches.",
     )
     grep_scope_paths: list[str] | None = Field(default=None)
-    timeout_ms: int = Field(
-        default=QUERY_TIMEOUT_DEFAULT_MS,
+    timeout_ms: int | None = Field(
+        default=None,
         ge=QUERY_TIMEOUT_MIN_MS,
         le=QUERY_TIMEOUT_MAX_MS,
     )
@@ -200,6 +206,7 @@ def _build_output(
     *,
     db_path: Path,
     caution: bool,
+    timeout_ms: int,
 ) -> ToolOutput:
     names = _unique_names(result.columns)
     degraded_by_grep = TEMP_GREP_TABLE in result.tables_read
@@ -237,6 +244,7 @@ def _build_output(
         "row_count": result.row_count,
         "truncated": result.truncated,
         "elapsed_ms": result.elapsed_ms,
+        "timeout_ms": timeout_ms,
         "grep_fallback": result.grep_fallback,
         "plan": result.plan if result.plan is not None else [],
         "tables_read": list(result.tables_read),
@@ -270,6 +278,7 @@ async def handler(ctx: ToolContext, args: QueryProjectDbArgs) -> ToolOutput:
         )
     db_path = _db_path(ctx)
     grep = _grep_spec(ctx, args)
+    timeout_ms = args.timeout_ms if args.timeout_ms is not None else default_timeout_ms(db_path)
     try:
         result = await asyncio.to_thread(
             run_query,
@@ -277,12 +286,12 @@ async def handler(ctx: ToolContext, args: QueryProjectDbArgs) -> ToolOutput:
             args.query,
             params=args.params,
             limit=args.limit,
-            timeout_ms=args.timeout_ms,
+            timeout_ms=timeout_ms,
             grep=grep,
             explain=args.explain,
         )
     except QueryTimeout as exc:
-        partial = _build_output(ctx, args, exc.result, db_path=db_path, caution=False)
+        partial = _build_output(ctx, args, exc.result, db_path=db_path, caution=False, timeout_ms=timeout_ms)
         raise LuciankeError(exc.code, exc.message, details=exc.details, partial=partial) from None
     if args.format in GRAPH_FORMATS and not set(_GRAPH_COLUMNS) <= {n for n, _ in result.columns}:
         raise LuciankeError(
@@ -297,7 +306,7 @@ async def handler(ctx: ToolContext, args: QueryProjectDbArgs) -> ToolOutput:
         and not args.explain
         and await asyncio.to_thread(_lower_rows_exist, db_path, result.tables_read)
     )
-    return _build_output(ctx, args, result, db_path=db_path, caution=caution)
+    return _build_output(ctx, args, result, db_path=db_path, caution=caution, timeout_ms=timeout_ms)
 
 
 TOOL_SPEC = ToolSpec(

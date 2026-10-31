@@ -38,7 +38,11 @@ EXPECTED: dict[str, object] = {
     "NEW_CODE_MAX_BYTES": 1024 * 1024,
     "JOURNAL_KEEP": 50,
     "QUERY_TIMEOUT_DEFAULT_MS": 300,
-    "QUERY_TIMEOUT_MAX_MS": 5000,
+    "QUERY_TIMEOUT_MAX_MS": 30000,  # BUG-0125: 5000 では大きなリポジトリの集計が打ち切られる
+    "QUERY_TIMEOUT_AUTO_MS_PER_MB": 60,
+    "QUERY_TIMEOUT_AUTO_MAX_MS": 10000,
+    "QUERY_CACHE_KIB": 65536,
+    "QUERY_MMAP_BYTES": 268435456,
     "QUERY_ROWS_DEFAULT": 200,
     "QUERY_ROWS_MAX": 2000,
     "QUERY_LENGTH_MAX": 64 * 1024,
@@ -70,7 +74,8 @@ def test_no_unlisted_constants() -> None:
 
 
 def test_internal_consistency() -> None:
-    assert limits.QUERY_TIMEOUT_DEFAULT_MS <= limits.QUERY_TIMEOUT_MAX_MS
+    assert limits.QUERY_TIMEOUT_DEFAULT_MS <= limits.QUERY_TIMEOUT_AUTO_MAX_MS <= limits.QUERY_TIMEOUT_MAX_MS
+    assert limits.QUERY_TIMEOUT_MAX_MS < 60_000  # 呼ぶ側の MCP の時間の上限（多くは 60〜120 秒）より短い
     assert limits.QUERY_ROWS_DEFAULT <= limits.QUERY_ROWS_MAX
     assert limits.DIAGNOSTICS_WAIT_DEFAULT_MS <= limits.DIAGNOSTICS_WAIT_MAX_MS
     assert len(limits.LSP_RESTART_BACKOFF_S) == limits.LSP_RESTART_MAX
