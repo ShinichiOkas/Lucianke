@@ -42,6 +42,7 @@ __all__ = [
     "DiagnosticRow",
     "NameCallRow",
     "ReferenceRow",
+    "SymbolOutline",
     "count_references_to",
     "data_version",
     "diagnostics_for",
@@ -61,8 +62,10 @@ __all__ = [
     "search_symbols_fts",
     "symbol_at",
     "symbol_by_urn",
+    "symbol_outline",
     "symbol_parents",
     "symbols_by_qualified_suffix",
+    "symbols_by_urns",
     "symbols_in_file",
 ]
 
@@ -258,6 +261,48 @@ def symbols_in_file(conn: sqlite3.Connection, workspace_id: str, path: str) -> l
         (workspace_id, path),
     ).fetchall()
     return [_symbol(r) for r in rows]
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolOutline:
+    """ファイルのシンボルの、選ぶのに要るだけの列（``symbol_outline``）。行は DB の表記（1 始まり）。"""
+
+    urn: str
+    qualified_name: str
+    kind: str
+    modifiers: tuple[str, ...]
+    start_line: int
+    end_line: int
+    parent_urn: str | None
+
+
+def symbol_outline(conn: sqlite3.Connection, workspace_id: str, path: str) -> list[SymbolOutline]:
+    """ファイルのシンボルの ``SymbolOutline``。順は ``symbols_in_file`` と同じ（開始行の昇順、同じ開始行なら範囲の広い順）。
+
+    全部の列の ``SymbolRecord`` を作らずに選ぶ（T-01 はファイルの数百のシンボルから数件を選ぶ。選んだものだけ
+    ``symbols_by_urns`` で引く。BUG-0128）。親（``parent_urn``）も同じ文で読む（``symbol_parents`` と同じ値）。
+    """
+    rows = conn.execute(
+        "SELECT s.urn, s.qualified_name, s.kind, s.modifiers_json, s.start_line, s.end_line, s.parent_urn"
+        " FROM symbols s JOIN files f ON f.file_id = s.file_id"
+        " WHERE f.workspace_id = ? AND f.path = ? ORDER BY s.start_line, s.end_line DESC, s.urn",
+        (workspace_id, path),
+    ).fetchall()
+    return [
+        SymbolOutline(str(u), str(q), str(k), _modifiers(m), int(sl), int(el), None if p is None else str(p))
+        for u, q, k, m, sl, el, p in rows
+    ]
+
+
+def symbols_by_urns(conn: sqlite3.Connection, urns: Sequence[str]) -> dict[str, SymbolRecord]:
+    """URN の完全一致で引いた ``{urn: SymbolRecord}``（無い URN は含まない）。"""
+    if not urns:
+        return {}
+    unique = list(dict.fromkeys(urns))
+    rows = conn.execute(
+        _SYMBOL_SELECT + f" WHERE s.urn IN ({', '.join('?' * len(unique))})", unique
+    ).fetchall()
+    return {str(r[0]): _symbol(r) for r in rows}
 
 
 def symbol_parents(conn: sqlite3.Connection, workspace_id: str, path: str) -> dict[str, str | None]:
