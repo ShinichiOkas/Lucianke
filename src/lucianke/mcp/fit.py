@@ -18,6 +18,9 @@
 4. **``used_tokens_est`` を数え直しに合わせる**: ヘッダの ``~used``・json の ``budget.used_tokens_est`` の桁数は全文の数に効く
    （数字は 1 文字ずつ数える）ので、数え直した値で描き直して、値が動かなくなるまで繰り返す（桁数が変わらなければ 1 回で収まる）。
    数えるときの ``timing_ms`` は最大の桁数に固定する（実際の全文以上の上限。同じ入力なら呼び出しごとに同じ値になる）。
+5. **呼び直しの目安を確かめる**: 1 件も入らない（前置きだけで超える）ときは、警告の「raise max_tokens to ~N」の N で 1〜4 を
+   やり直し、警告なしに収まる（レコードがあれば 1 件以上入る）まで N を上げてから、その N で警告を書く（BUG-0110。N では
+   ``~used/max`` の桁数などで前置きが大きくなりうる。言われたとおりに呼び直してまた 0 件にならないように）。
 
 dot / mermaid は BUG-0053 で追加（FITTED_FORMATS）。``Packer.pack`` を通す（records=0 なので実質 no-op）が、probe で
 前置きを数える。``page.max_tokens`` をレンダラ（``graph._render``）に伝え、レンダラがグラフのノード / エッジ数を二分探索で
@@ -45,6 +48,8 @@ FITTED_FORMATS: Final = ("compact", "json", "dot", "mermaid")
 _PROBE_TIMING_MS: Final = 99_999  # 前置きの見積もりに使う ``timing_ms``（json の桁数を最大幅にする）
 _MAX_PACK_ROUNDS: Final = 8  # 前置きの見積もりが足りなかったときの詰め直しの上限
 _MAX_USED_ROUNDS: Final = 5  # ``used_tokens_est`` の桁数が変わるときの描き直しの上限
+#: 1 件も入らないときの呼び直しの目安を、描いた全文で確かめて上げる回数の上限（BUG-0110）
+_MAX_NEED_ROUNDS: Final = 6
 
 #: 形式ごとに、パッカーが応答の本文を見積もるときの関数。compact は ``Packer`` の既定（``Record.lines`` ・トレーラの 2 行）。
 #: dot / mermaid は records=0 なので実質不使用だが、共通ループで呼ばれるため空 dict を登録する（BUG-0053）。
@@ -85,10 +90,11 @@ def pack_and_render(
     ``timing_ms`` は描画ごとに呼ぶ（サーバー内の処理時間の現在値）。
     """
 
-    def render(page: Page, meta: ResolutionMeta, *, timing: int) -> Rendered:
+    def render(page: Page, meta: ResolutionMeta, *, timing: int, max_tokens: int | None = None) -> Rendered:
+        at = call if max_tokens is None else dataclasses.replace(call, max_tokens=max_tokens)
         return renderer(
             RenderInput(
-                call=dataclasses.replace(call, timing_ms=timing),
+                call=dataclasses.replace(at, timing_ms=timing),
                 meta=meta,
                 out=out,
                 page=page,
@@ -105,22 +111,8 @@ def pack_and_render(
 
     estimator: TokenEstimator = getattr(packer, "estimator", None) or TokenEstimator()
     est = estimator.count
-    max_tokens = call.max_tokens
     kwargs = _PACKER_KWARGS[fmt]
-
-    # 1. 前置き（レコード以外の全部）を、同じレンダラで 0 件のページを描いて数える
     total = max(out.total_estimate or 0, len(out.records))
-    probe_page = Page(
-        records=(),
-        next_cursor=None,
-        summary=None,
-        total_estimate=total,
-        remaining=0,
-        used_tokens_est=max_tokens,
-        max_tokens=max_tokens,
-        truncated=False,
-    )
-    reserved = est(render(probe_page, build_meta(out, None), timing=_PROBE_TIMING_MS).text)
 
     def settle(page: Page, meta: ResolutionMeta) -> tuple[Rendered, Page, int]:
         """4. ``used_tokens_est`` を全文の数え直しに合わせる。``(描いた結果, 描いたページ, 数え直した値)``。
@@ -128,29 +120,64 @@ def pack_and_render(
         数え直しは ``timing_ms`` を最大の桁数にした全文で行う（実際の全文以上の上限になる。同じ入力なら呼び出しごとの
         処理時間にかかわらず同じ値になる。json の ``timing_ms`` は全文に入る）。
         """
+        mt = page.max_tokens
         used = page.used_tokens_est
         for _ in range(_MAX_USED_ROUNDS):
             shown = dataclasses.replace(page, used_tokens_est=used)
-            recount = est(render(shown, meta, timing=_PROBE_TIMING_MS).text)
+            recount = est(render(shown, meta, timing=_PROBE_TIMING_MS, max_tokens=mt).text)
             if recount == used:
                 break
             used = recount
-        return render(shown, meta, timing=timing_ms()), shown, recount  # 収束しなければ（桁数の境目）ヘッダの値は数え直しと数トークンずれうる
+        # 収束しなければ（桁数の境目）ヘッダの値は数え直しと数トークンずれうる
+        return render(shown, meta, timing=timing_ms(), max_tokens=mt), shown, recount
 
-    for _ in range(_MAX_PACK_ROUNDS):
-        # 2. 詰める
-        page = packer.pack(
-            out,
+    def fit_at(max_tokens: int, min_need: int) -> tuple[Rendered, Page, ResolutionMeta, int]:
+        """1〜4 を ``max_tokens`` で行う。``(描いた結果, ページ, メタ, 数え直した値)``。``min_need`` はパッカーへ渡す
+        （1 件も入らないときの呼び直しの目安の下限。5 で確かめた値）。"""
+        # 1. 前置き（レコード以外の全部）を、同じレンダラで 0 件のページを描いて数える
+        probe_page = Page(
+            records=(),
+            next_cursor=None,
+            summary=None,
+            total_estimate=total,
+            remaining=0,
+            used_tokens_est=max_tokens,
             max_tokens=max_tokens,
-            offset=offset,
-            reserved_tokens=reserved,
-            cursor_factory=cursor_factory,
-            **kwargs,
+            truncated=False,
         )
-        meta = build_meta(out, page)
-        rendered, page, recount = settle(page, meta)
-        # 3. 全文が予算に収まったか。1 件も入っていないなら、これ以上減らせない（前置きだけで超える呼び出し側の誤り）
-        if recount <= max_tokens or not page.records:
-            break
-        reserved += recount - max_tokens
+        reserved = est(
+            render(probe_page, build_meta(out, None), timing=_PROBE_TIMING_MS, max_tokens=max_tokens).text
+        )
+        for _ in range(_MAX_PACK_ROUNDS):
+            # 2. 詰める
+            page = packer.pack(
+                out,
+                max_tokens=max_tokens,
+                offset=offset,
+                reserved_tokens=reserved,
+                cursor_factory=cursor_factory,
+                min_need=min_need,
+                **kwargs,
+            )
+            meta = build_meta(out, page)
+            rendered, page, recount = settle(page, meta)
+            # 3. 全文が予算に収まったか。1 件も入っていないなら、これ以上減らせない（前置きだけで超える呼び出し側の誤り）
+            if recount <= max_tokens or not page.records:
+                break
+            reserved += recount - max_tokens
+        return rendered, page, meta, recount
+
+    rendered, page, meta, _ = fit_at(call.max_tokens, 0)
+    if page.need_max_tokens is not None:
+        # 5. 1 件も入らない（前置きだけで超える）。警告の「raise max_tokens to ~N」を、N で描き直した全文で確かめる
+        #    （N では ``~used/max`` の桁数が増える・json の封筒の数字が長くなるなど、前置きが今の予算で数えたより大きくなりうる。
+        #    パッカーの見積もりのままだと、言われたとおりに呼び直してもまた 0 件のことがありえた。BUG-0110）。
+        #    パッカーの見積もりから、N で警告なしに収まる（レコードがあれば 1 件以上入る）まで上げ、その値で警告を書き直す
+        need = page.need_max_tokens
+        for _ in range(_MAX_NEED_ROUNDS):
+            _, at_need, _, recount = fit_at(need, 0)
+            if at_need.need_max_tokens is None and recount <= need:
+                break
+            need = max(need + 1, at_need.need_max_tokens or 0, recount)
+        rendered, page, meta, _ = fit_at(call.max_tokens, need)  # 最後に描くのは呼ばれた予算の応答
     return Fitted(rendered, page, meta)

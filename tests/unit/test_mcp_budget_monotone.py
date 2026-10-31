@@ -28,8 +28,8 @@ from test_mcp_budget import (
     words,
 )
 
-from lucianke.core.records import Record, split_offset
-from lucianke.mcp.budget import Packer
+from lucianke.core.records import Record, join_offset, split_offset
+from lucianke.mcp.budget import Packer, trailer_lines
 from lucianke.mcp.types import Page
 
 # --- 部品 -----------------------------------------------------------------------------------
@@ -254,6 +254,29 @@ def test_a_long_summary_is_cut_to_its_share_and_never_pushes_records_out() -> No
     assert cut > 0
     short = Packer().pack(make_out(recs), max_tokens=500, reserved_tokens=30, cursor_factory=cursor_factory())
     assert short.summary is not None and not short.summary.endswith("…")  # ふつうの要約はふつうの予算で丸ごと入る
+
+
+def test_summary_share_never_pushes_out_the_smallest_shrunk_first_record() -> None:
+    """BUG-0110: 先頭が縮退できるとき、要約（SHOULD）の取り分は先頭の最も小さい縮退版と ``# more:`` 行を押し出さない。
+    その本文が入る予算からは必ず 1 件以上が返る（以前は 1/4 の取り分のために、その上の帯でも 0 件だった）。縮退版で
+    ページを閉じるときの要約（BUG-0067 の取り分）はこれまでどおり残る。予算に対して単調（``_scan``）。"""
+    first = rec("big", 400, group="a.py")
+    first = dataclasses.replace(first, shrink=_levels_shrink(first, [300, 120]))
+    recs = [first] + [rec(f"r{i}", 20, group=f"f{i}.py") for i in range(6)]
+    context = "smallest-first"
+    factory = cursor_factory(args={"case": context})
+    more_hi = EST.count("\n".join(trailer_lines(None, factory(join_offset(0, (1 << 31) - 1)), 7)) + "\n")
+    threshold = 20 + EST.count(words(120)) + 1 + more_hi  # 予約 + 最も小さい段（ask）+ 改行 + # more: 行（上限）
+    budgets = range(threshold - 40, threshold + 260)
+    pages = _scan(recs, budgets=budgets, reserved=20, summarize=lambda rest: "要約" * 60, context=context)
+    shrunk_with_summary = 0
+    for b, page in zip(budgets, pages, strict=True):
+        if b >= threshold:
+            assert page.records, (b, threshold)
+        if page.records and (page.records[0].tokens or 0) < 400 and page.summary:
+            shrunk_with_summary += 1
+    assert any(not p.records for p in pages)  # 境目の下も通っている
+    assert shrunk_with_summary > 0
 
 
 # --- T-02 の骨格レコード（BUG-0078） ------------------------------------------------------------------

@@ -399,7 +399,13 @@ def test_pack_nothing_fits_gives_zero_records_and_warning_without_a_cursor() -> 
     assert page.remaining == 2
     assert len(page.warnings) == 1
     assert "max_tokens" in page.warnings[0]
-    assert "~1000 tokens" in page.warnings[0] and "~1030 or more" in page.warnings[0]  # 必要な大きさ（予約の分も）
+    # 必要な大きさは予約 + 次のレコード + 続きの ``# more:`` 行（カーソル）か、それより小さければ予約 + 残りの全部（トレーラなし）。
+    # ここでは残り 1 件が小さいので全部のほうが小さい。以前は ``# more:`` 行を数えず、目安が小さすぎることがあった（BUG-0110）
+    more = EST.count("\n".join(trailer_lines(None, cursor_factory()(1), 1)) + "\n")
+    need = 30 + min(1000 + more, 1000 + 5)
+    assert need == 1035
+    assert "~1000 tokens" in page.warnings[0] and f"~{need} or more" in page.warnings[0]
+    assert page.need_max_tokens == need
     assert page.used_tokens_est == 30 + EST.count("! " + page.warnings[0] + "\n")  # トレーラは描かれないので数えない
     assert page.used_tokens_est <= 200
 
@@ -414,13 +420,36 @@ def test_pack_nothing_fits_at_an_offset_gives_no_cursor_either() -> None:
 
 
 def test_pack_nothing_fits_the_suggested_max_tokens_works() -> None:
-    """警告の目安（予約 + 次のレコード）まで上げれば、同じ引数でそのレコードが入る。"""
+    """警告の目安（予約 + 次のレコード + ``# more:`` 行）ちょうどに上げれば、同じ引数でそのレコードがカーソルつきで入る。
+    1 つ下では入らない（目安は最小）。以前は ``# more:`` 行を数えず、目安どおりに呼び直しても 0 件だった（BUG-0110）。"""
     recs = [rec("huge", 300), rec("next", 300)]
     small = Packer().pack(make_out(recs), max_tokens=200, reserved_tokens=40, cursor_factory=cursor_factory())
-    assert small.records == () and "~340 or more" in small.warnings[0]
-    page = Packer().pack(make_out(recs), max_tokens=340 + 60, reserved_tokens=40, cursor_factory=cursor_factory())
-    assert [r.key for r in page.records] == ["huge"]  # トレーラの分は余裕に含める
+    need = small.need_max_tokens
+    assert small.records == () and need is not None and f"~{need} or more" in small.warnings[0]
+    assert need == 340 + EST.count("\n".join(trailer_lines(None, cursor_factory()(1), 1)) + "\n")
+    page = Packer().pack(make_out(recs), max_tokens=need, reserved_tokens=40, cursor_factory=cursor_factory())
+    assert [r.key for r in page.records] == ["huge"]
     assert page.next_cursor is not None and decode_offset(page.next_cursor) == 1
+    assert page.used_tokens_est <= need and page.summary is None  # その予算では要約の取り分は 0（要約より 1 件を優先）
+    below = Packer().pack(make_out(recs), max_tokens=need - 1, reserved_tokens=40, cursor_factory=cursor_factory())
+    assert below.records == () and below.need_max_tokens == need
+
+
+def test_pack_summary_never_pushes_out_the_first_record_and_its_cursor() -> None:
+    """BUG-0110: 要約（SHOULD）の取り分（予算の 1/4 まで）は、先頭の 1 件と ``# more:`` 行を押し出さない。
+    以前は ``予約 + 先頭 + # more:`` から ``+ 予算の 1/4`` までの帯で 0 件になり、警告は呼んだ値より小さい値を勧めた。"""
+    recs = [rec(f"r{i}", 29, group=f"src/mod_{i % 3}.py") for i in range(5)]
+    out = make_out(recs, summarize=lambda rest: f"{len(rest)} more " + "(src/mod.py: 1) " * 5)
+    factory = cursor_factory()
+    more = EST.count("\n".join(trailer_lines(None, factory(1), 4)) + "\n")
+    threshold = 25 + 29 + more
+    for max_tokens in range(threshold - 5, threshold + 60):
+        page = Packer().pack(out, max_tokens=max_tokens, reserved_tokens=25, cursor_factory=factory)
+        if max_tokens < threshold:
+            assert page.records == () and f"~{threshold} or more" in page.warnings[0], max_tokens
+            continue
+        assert page.records and page.next_cursor is not None, max_tokens
+        assert page.used_tokens_est <= max_tokens, max_tokens
 
 
 def test_pack_cuts_summary_before_giving_up_on_records() -> None:

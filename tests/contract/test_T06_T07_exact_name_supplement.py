@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -160,9 +161,90 @@ async def test_t06_exact_section_respects_include_tests(fake: Fake) -> None:
     assert "tests/test_b.py" not in text
 
 
+USED = re.compile(r" ~(\d+)/(\d+)tok$")
+SITE = re.compile(r"^(\S+):(\d+):(\d+)  \[")
+RAISE = re.compile(r"raise max_tokens to ~(\d+) or more")
+MORE = re.compile(r"^# more: cursor=(\S+) ", re.MULTILINE)
+
+
+async def test_t06_exact_section_pages_with_the_budget_in_compact(fake: Fake) -> None:
+    """compact（既定の形式）でも、全体より小さい予算で本体と補足の欄がページをまたぐ（BUG-0110）。呼ぶ側の AI と同じく、
+    1 件も入らなければ警告の「raise max_tokens to ~N」に従って上げ、カーソルで辿る。目安は呼んだ値より大きく、従えば 1 件
+    以上が返る。各ページは予算内・exact のまま、全ページで同じ位置は 1 度だけ、順は本体 → 補足。"""
+    env = await fake.start("publish")
+    full = (await refs(env, "compact")).text
+    m = USED.search(full.splitlines()[0])
+    assert m, full
+    budget = int(m.group(1)) - 1  # 全部は入らない
+    seen: list[tuple[str, tuple[Any, ...]]] = []
+    cursor: str | None = None
+    pages = raised = 0
+    while True:
+        text = (await refs(env, "compact", max_tokens=budget, **({"cursor": cursor} if cursor else {}))).text
+        assert g.validate(text) == [], (g.validate(text), text)
+        head = text.splitlines()[0]
+        used = USED.search(head)
+        assert used and "conf=exact" in head, head
+        need = RAISE.search(text)
+        if need:  # 1 件も入らない: 目安は呼んだ値より大きい。従って呼び直す
+            assert not SITE.search(text) and not MORE.search(text), text
+            assert int(need.group(1)) > budget, text
+            budget = int(need.group(1))
+            raised += 1
+            assert raised < 3, text
+            continue
+        assert int(used.group(1)) <= budget, head
+        pages += 1
+        for line in text.splitlines()[1:]:
+            site = SITE.match(line)
+            if site:
+                part = "name" if line.endswith("conf=heuristic") else "ref"
+                seen.append((part, (site.group(1), int(site.group(2)), int(site.group(3)))))
+        more = MORE.search(text)
+        if not more:
+            break
+        cursor = more.group(1)
+        assert pages < 10
+    assert pages >= 2
+    assert seen == [("ref", EXACT)] + [("name", (p, line, col)) for p, line, col, _ in BY_NAME]
+
+
+async def test_t06_structural_compact_budget_sweep_never_returns_nothing_while_a_page_fits(fake: Fake) -> None:
+    """票 BUG-0110 の実測の形（LSP なし・structural・compact）: 0 件のまま「今より小さい max_tokens に上げよ」と言わない。
+    各予算で 1 件以上（続きがあればカーソルつき）か、0 件なら目安が呼んだ値より大きく、目安で呼び直すと 1 件以上が返る。
+    予算を上げて件数が減らない（BUG-0067）。
+
+    この答え（4 箇所・1 行約 22 トークン）では、カーソルの ``# more:`` 行（約 80 トークン）が残り 3 件より長いので、
+    「1 件 + カーソル」のページは全体より大きい。全体の手前では 0 件が正しく、目安は全体（トレーラなしの全部）になる。
+    以前は目安が ``# more:`` 行を数えず「前置き + 22」で、呼んだ値より小さかった。"""
+    env = await fake.start(None)
+    await refs(env, "compact")  # 1 回目は lsp=indexing の注意文。以後は lsp=unavailable で落ち着く
+    full = (await refs(env, "compact")).text
+    m = USED.search(full.splitlines()[0])
+    assert m and sum(1 for line in full.splitlines() if SITE.match(line)) == 4, full
+    whole = int(m.group(1))
+    counts: list[int] = []
+    for budget in range(whole - 120, whole + 1, 3):
+        text = (await refs(env, "compact", max_tokens=budget)).text
+        n = sum(1 for line in text.splitlines() if SITE.match(line))
+        need = RAISE.search(text)
+        if n == 0:
+            assert need and budget < int(need.group(1)) <= whole, (budget, whole, text)
+            again = (await refs(env, "compact", max_tokens=int(need.group(1)))).text
+            assert any(SITE.match(line) for line in again.splitlines()), (budget, again)
+        else:
+            assert need is None, text
+            used = USED.search(text.splitlines()[0])
+            assert used and int(used.group(1)) <= budget, text
+            assert n == 4 or MORE.search(text), (budget, text)  # 全部入らないならカーソルつき
+        assert not counts or n >= counts[-1], (budget, counts, n)
+        counts.append(n)
+    assert counts.count(0) > 0 and counts[-1] == 4  # 0 件の帯と全体の両方を通っている
+
+
 async def test_t06_exact_section_pages_with_the_budget(fake: Fake) -> None:
     """予算が小さいと本体と補足の欄はページをまたぐ。各ページは予算内・exact のまま、全ページで同じ位置は 1 度だけ、順は
-    本体 → 補足。（compact は小さい予算で 1 件も入らない別の不具合があるので json で確かめる。票 BUG-0110）"""
+    本体 → 補足（json。compact は上の試験）。"""
     env = await fake.start("publish")
     full = await refs(env)
     budget = full.structured["budget"]["used_tokens_est"] - 40  # 全部は入らない

@@ -26,6 +26,9 @@ class Page:
     max_tokens: int
     truncated: bool
     warnings: tuple[str, ...] = ()
+    # 1 件も入らない（前置きだけで超える）ページだけ: 呼び直しで少なくとも 1 件が返る（応答が収まる）``max_tokens`` の目安。
+    # 警告の「raise max_tokens to ~N」の N と同じ値（``mcp/fit.py`` が描いた全文で確かめて上げる。BUG-0110）。それ以外は None
+    need_max_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

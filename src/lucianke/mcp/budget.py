@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -41,6 +42,8 @@ RESUME_RETRIES: Final = 3  # 途中で切れた縮退版の続きのトレーラ
 #: ``# summary:`` 行に取り分ける上限（レコードに使える予算の 1/N）。要約がこれより長ければ「…」で切って収める。上限が予算に
 #: 比例する（予算 1 トークンにつき高々 1 トークンしか増えない）ので、予算を上げてもレコードの取り分は減らない（BUG-0067）
 SUMMARY_SHARE_DIVISOR: Final = 4
+#: 再開位置（``Record.resume``）の上限の見込み。続きのカーソルの長さの上限を数えるのに使う（BUG-0110。行番号は 31 ビットに収まる）
+_RESUME_MAX: Final = (1 << 31) - 1
 
 
 def trailer_lines(summary: str | None, cursor: str | None, remaining: int) -> tuple[str, ...]:
@@ -82,6 +85,20 @@ def default_summary(rest: Sequence[Record], unseen: int = 0) -> str:
     if others:
         parts.append(f"others: {others}")
     return f"{total} more ({', '.join(parts)})"
+
+
+def _raise_hint(need: int) -> str:
+    return f"raise max_tokens to ~{need} or more and call again with the same arguments"
+
+
+def no_fit_warning(max_tokens: int, need_first: int, need: int) -> str:
+    """1 件も入らないときの警告（仕様書 §5.6-4。BUG-0015）。``need`` は呼び直しで少なくとも 1 件が返る ``max_tokens``。"""
+    return f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens; {_raise_hint(need)}"
+
+
+def preamble_warning(max_tokens: int, preamble: int, need: int) -> str:
+    """前置きだけで予算を超えるときの警告（BUG-0064）。``need`` は呼び直しで応答が収まる ``max_tokens``。"""
+    return f"the response preamble alone needs ~{preamble} tokens, over max_tokens={max_tokens}; {_raise_hint(need)}"
 
 
 def _one_line(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
@@ -201,7 +218,10 @@ class Packer:
     1/``SUMMARY_SHARE_DIVISOR`` までで、それより長い要約は「…」で切って収める（ふつうの予算では要約は丸ごと入る）。
     取り分けの上限が予算に比例するので、予算を上げてもレコードの取り分は減らない。以前は要約の分を丸ごと先に取り分け、
     1 件も入らないときだけ要約を省いていたので、要約つきで 1 件入る予算に上げると、要約なしで入っていた後ろのレコードを
-    要約が押し出し、件数が減った（max_tokens を 2 上げて 11 件 → 1 件）。
+    要約が押し出し、件数が減った（max_tokens を 2 上げて 11 件 → 1 件）。取り分はさらに「先頭の 1 件の最も小さい形（縮退版。
+    無ければ丸ごと）と ``# more:`` 行」を押し出さない分までに抑える（BUG-0110）。1/4 を必ず取り分けていた間は、先頭の 1 件と
+    カーソルは入るのに要約の分で 0 件になる予算の帯があった（compact の既定の形式で、全体より少し小さい予算ではページが
+    進められなかった）。
 
     契約: ``reserved_tokens``（ヘッダ・``head_kv``・呼び手が出す警告の分）は呼び手が数えて渡す。
     ``reserved_tokens`` とトレーラの最小形だけで ``max_tokens`` を超える（前置きだけで予算を使い切る小さすぎる
@@ -209,8 +229,9 @@ class Packer:
     0 件でも、``warnings`` に呼び直しに要る ``max_tokens`` を名指しする（BUG-0064）。
 
     レコードが 1 件も入らないとき（仕様書 §5.6-4）は、レコード 0 件・``warnings`` に理由と必要な ``max_tokens`` の目安の
-    成功応答で、``next_cursor`` は出さない（BUG-0015）。オフセットが進まないカーソルは同じ呼び出しの繰り返しで、辿る
-    クライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、呼び出しに付けたカーソルは
+    成功応答で、``next_cursor`` は出さない（BUG-0015）。目安は先頭の 1 件を丸ごとと ``# more:`` 行（カーソル）が入る予算で、
+    ``Page.need_max_tokens`` にも入れる（BUG-0110。描いた全文で確かめて上げるのは ``mcp/fit.py``）。オフセットが進まない
+    カーソルは同じ呼び出しの繰り返しで、辿るクライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、呼び出しに付けたカーソルは
     ``max_tokens`` を上げた呼び直しにそのまま使える。``next_cursor`` を返すページは必ず 1 件以上を含み、オフセットが進む。
     """
 
@@ -230,8 +251,13 @@ class Packer:
         record_text: RecordText | None = None,
         trailer_text: TrailerText | None = None,
         form: str = "compact",
+        min_need: int = 0,
     ) -> Page:
-        """``form`` は応答の形式（``"json"`` なら縮退に ``Record.shrink_json`` を先に使う。``record_text`` は呼び手が合わせる）。"""
+        """``form`` は応答の形式（``"json"`` なら縮退に ``Record.shrink_json`` を先に使う。``record_text`` は呼び手が合わせる）。
+
+        1 件も入らない（前置きだけで超える）ページは、警告に呼び直しの目安の ``max_tokens`` を書き、``Page.need_max_tokens`` にも
+        入れる。``min_need`` はその目安の下限（呼び手が描いた全文で確かめた値。``mcp/fit.py``。BUG-0110）。
+        """
         est = self.estimator.count
         # 形式ごとの本文の見積もり（既定は compact の行。json は ``Record.data`` の JSON。BUG-0017）
         rt = record_text or _record_text
@@ -255,12 +281,11 @@ class Packer:
                 return self._page((), reserved_tokens, max_tokens, total, 0, None, None, ())
             # 前置きだけで予算を超える（BUG-0064）。レコードが元から無くても、1 件も入らないときと同じく呼び直しに
             # 要る ``max_tokens`` を名指しする（固定の下限は無いので、下限はこの実測値で呼び出しごとに伝える。BUG-0063）
-            warning = (
-                f"the response preamble alone needs ~{reserved_tokens} tokens, over max_tokens={max_tokens};"
-                f" raise max_tokens to ~{reserved_tokens} or more and call again with the same arguments"
-            )
+            need = max(reserved_tokens, min_need)
+            warning = preamble_warning(max_tokens, reserved_tokens, need)
             used = reserved_tokens + self.estimator.count("! " + warning + "\n")
-            return self._page((), used, max_tokens, total, 0, None, None, (warning,))
+            page = self._page((), used, max_tokens, total, 0, None, None, (warning,))
+            return dataclasses.replace(page, need_max_tokens=need)
 
         tok: dict[int, int] = {}
 
@@ -280,14 +305,14 @@ class Packer:
                 kept = tuple(records[i].with_tokens(tok[i]) for i in range(start, n))
                 return self._page(kept, reserved_tokens + running, max_tokens, total, 0, None, None, ())
 
-        # 要約の取り分の上限（予算 1 トークンにつき高々 1 トークンしか増えない）。要約を数えない形式（json）では使わない
-        share = max(0, avail) // SUMMARY_SHARE_DIVISOR
+        # 要約を数えない形式（json）では要約の取り分を使わない
         summary_counts = tt("x", None, 1) != tt(None, None, 1)
 
-        def tail_of(m: int, resume: int | None) -> tuple[int, int, int]:
-            """先頭 ``m`` 件（最後の 1 件の再開位置が ``resume``）を入れたときの ``(次のオフセット, 残り件数, トレーラ)``。
+        def trailer_of(m: int, resume: int | None) -> tuple[int, int, int, int]:
+            """先頭 ``m`` 件（最後の 1 件の再開位置が ``resume``）を入れたときの ``(次のオフセット, 残り件数, 素のトレーラ, 要約の分)``。
 
-            トレーラは ``# more:`` 行（json はカーソルの文字列）と、要約の行の ``share`` までの分。続きが無ければ残り 0・トレーラ 0。
+            素のトレーラは ``# more:`` 行（json はカーソルの文字列）、要約の分は要約の行を足したときに増える分（要約を数えない形式は 0）。
+            続きが無ければ残り 0・どちらも 0。
             """
             last = start + m - 1
             if resume is not None:  # 途中で切れた版の続きは同じレコードの再開位置から（最後の 1 件でも続きがある）
@@ -295,14 +320,61 @@ class Packer:
             else:
                 nxt, remaining = last + 1, n - last - 1 + unseen
             if remaining <= 0:
-                return nxt, 0, 0
+                return nxt, 0, 0, 0
             cursor = cursor_factory(nxt) if cursor_factory is not None else None
             bare = est(tt(None, cursor, remaining))
             if not summary_counts:
-                return nxt, remaining, bare
+                return nxt, remaining, bare, 0
             rest = records[last if resume is not None else last + 1 :]
             full = est(tt(self._summary(out, rest, unseen), cursor, remaining))
-            return nxt, remaining, bare + min(max(0, full - bare), share)
+            return nxt, remaining, bare, max(0, full - bare)
+
+        # 先頭の 1 件を丸ごと入れて ``# more:`` 行を付けた本文（要約なし）。これが入る予算なら、少なくとも 1 件は必ず返る
+        first_bare = trailer_of(1, None)[2]
+        first_need = cost_of(start) + first_bare
+        share_full = max(0, avail) // SUMMARY_SHARE_DIVISOR
+
+        def first_share() -> int:
+            """要約の取り分 ``min(share_full, max(0, avail - F))``（BUG-0067・BUG-0110）。
+
+            F は「先頭の 1 件の最も小さい形と ``# more:`` 行」が入るのに要る本文で、予算に依らない（丸ごとなら ``first_need``、
+            縮退版なら ``最小の ask + 1 + 再開位置が最大のときの # more: 行``。縮退版は ``ask`` に収まる最大の版を返すので、縮退版が
+            返る最小の ``ask`` が最も小さい形）。取り分は 1/4 まで、かつ先頭の 1 件の最も小さい形と ``# more:`` 行を押し出さない
+            分まで: 要約は SHOULD なので、1 件も返らなくなるくらいなら要約を削る（以前は 1/4 を必ず取り分けたので、先頭の 1 件と
+            ``# more:`` 行は入るのに 0 件で返る予算の帯があった）。どちらの上限も予算 1 トークンにつき高々 1 トークンしか増えない
+            ので ``avail - 取り分`` は予算について減らず、鎖の各形の「収まる」と縮退版の大きさは予算について単調のまま。
+            F は取り分が 1/4 より小さくなる範囲でだけ求める（縮退の呼び出しはふつう 1 回。帯の中でだけ二分探索する）。
+            """
+            whole = min(share_full, max(0, avail - first_need))
+            rec = records[start]
+            if whole == share_full or rec.shrink is None:
+                return whole
+            far = cursor_factory(join_offset(start, _RESUME_MAX)) if cursor_factory is not None else None
+            bare_hi = max(first_bare, est(tt(None, far, n - start + unseen)))
+            lo = avail - share_full - bare_hi - 1  # 最小の ask がこれ以下なら F ≤ avail - share_full（取り分は 1/4 のまま）
+            if lo >= 1 and self._shrink(rec, lo, rt, form) is not None:
+                return share_full
+            lo, hi = max(1, lo + 1), avail - bare_hi - 1  # hi より大きい最小の ask は avail に入らない（F は丸ごとの側）
+            if hi < lo or self._shrink(rec, hi, rt, form) is None:
+                return whole
+            while lo < hi:  # 縮退版が返る最小の ask（縮退版は ask について単調）
+                mid = (lo + hi) // 2
+                if self._shrink(rec, mid, rt, form) is None:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            return min(share_full, max(0, avail - min(first_need, lo + 1 + bare_hi)))
+
+        shares: list[int] = []  # 要約の取り分（要約の分がある形を初めて数えるときに 1 度だけ求める。縮退の呼び出しを増やさない）
+
+        def tail_of(m: int, resume: int | None) -> tuple[int, int, int]:
+            """先頭 ``m`` 件を入れたときの ``(次のオフセット, 残り件数, トレーラ)``。トレーラは素のトレーラと要約の取り分までの分。"""
+            nxt, remaining, bare, extra = trailer_of(m, resume)
+            if not extra:
+                return nxt, remaining, bare
+            if not shares:
+                shares.append(first_share())
+            return nxt, remaining, bare + min(extra, shares[0])
 
         def shrunk_last(m: int, room: int, tail: int) -> tuple[Record, int, int, int, int] | None:
             """``m`` 件目を縮退させて最後の 1 件にする: 残り ``room`` にトレーラ込みで入る最も大きい縮退版。
@@ -356,14 +428,24 @@ class Packer:
             # 1 件も入らない。カーソルは出さない（BUG-0015）: オフセットが進まないカーソルは、同じ呼び出しをもう一度
             # するだけで、辿るクライアントが止まらない。カーソルは ``max_tokens`` を含まない引数で結ばれているので、
             # 呼び出しに付けたカーソルはそのまま使える。``max_tokens`` を上げて同じ引数で呼び直させる。
-            # トレーラ（要約・``# more:``）も描かれないので数えない。
-            need_first = cost_of(start)
-            warning = (
-                f"no record fits in max_tokens={max_tokens}: the next record needs ~{need_first} tokens;"
-                f" raise max_tokens to ~{reserved_tokens + need_first} or more and call again with the same arguments"
-            )
+            # トレーラ（要約・``# more:``）も描かれないので数えない。呼び直しの目安は、先頭の 1 件を丸ごとと ``# more:`` 行
+            # （続きがあれば）が入る予算（その予算では要約の取り分は 0 なので必ず入る。以前は ``# more:`` 行を数えず、
+            # 呼んだ ``max_tokens`` より小さい値を勧めることがあった。BUG-0110）
+            #    残りが全部（トレーラなしで）それより小さく入るなら、そちらが目安（カーソルの行は長い〈約 60〜80 トークン〉ので、
+            #    件数の少ない答えでは「1 件 + カーソル」より「全部」のほうが小さい）
+            body = first_need
+            if not unseen:
+                whole = 0
+                for i in range(start, n):
+                    whole += cost_of(i)
+                    if whole >= body:
+                        break
+                body = min(body, whole)
+            need = max(reserved_tokens + body, min_need)
+            warning = no_fit_warning(max_tokens, cost_of(start), need)
             used = reserved_tokens + est("! " + warning + "\n")
-            return self._page((), used, max_tokens, total, n - start + unseen, None, None, (warning,))
+            page = self._page((), used, max_tokens, total, n - start + unseen, None, None, (warning,))
+            return dataclasses.replace(page, need_max_tokens=need)
 
         m, last, last_size, nxt, remaining, _ = chosen
         kept = (*(records[j].with_tokens(cost_of(j)) for j in range(start, start + m - 1)), last.with_tokens(last_size))
