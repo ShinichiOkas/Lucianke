@@ -169,6 +169,11 @@ def _entry_modules(root: Path, files: Sequence[rank.RepoMapFile], code: Sequence
     return out[:ENTRY_MAX]
 
 
+def entry_modules(files: Sequence[rank.RepoMapFile], root: Path) -> list[str]:
+    """入口のモジュール（``build`` の ``entries`` に渡す）。``pyproject.toml`` を読むので、同じ地図の 2 つの概観で 1 度だけ呼ぶ。"""
+    return _entry_modules(root, files, [f for f in files if is_code(f)])
+
+
 def build(
     files: Sequence[rank.RepoMapFile],
     root: Path,
@@ -176,8 +181,11 @@ def build(
     count: Callable[[str], int],
     *,
     max_tokens: int = OVERVIEW_MAX_TOKENS,
+    entries: list[str] | None = None,
 ) -> Overview:
-    """概観を組み立てる。項目は 根 → 入口 → サブパッケージ（重要度順）の順に、``max_tokens`` に収まるだけ足す。"""
+    """概観を組み立てる。項目は 根 → 入口 → サブパッケージ（重要度順）の順に、``max_tokens`` に収まるだけ足す。
+
+    ``entries`` は ``entry_modules(files, root)`` の結果（無ければここで求める）。"""
     code = [f for f in files if is_code(f)]
     tree = _tree(code)
     tops = sorted(
@@ -188,7 +196,8 @@ def build(
         for t in tops[:ROOT_MAX]
         for c in sorted((_collapse(c) for c in t.children.values()), key=lambda d: (-d.files, d.path))
     ]
-    entries = _entry_modules(root, files, code)
+    if entries is None:
+        entries = _entry_modules(root, files, code)
 
     roots: list[_Dir] = []
     chosen_entries: list[str] = []

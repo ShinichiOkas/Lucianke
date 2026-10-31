@@ -140,18 +140,24 @@ def _eligible(s: SymbolRecord) -> bool:
     return "priv" not in mods and "prot" not in mods and s.kind.value not in rank.MINOR_KINDS
 
 
-def _hidden_by_ancestor(symbols: list[SymbolRecord], parents: dict[str, str | None]) -> set[str]:
+def _hidden_by_ancestor(
+    symbols: list[SymbolRecord], parents: dict[str, str | None], urns: Sequence[str] | None = None
+) -> set[str]:
     """祖先に ``priv`` / ``prot`` のシンボルがある（モジュールの外から使う API ではない）シンボルの urn（BUG-0124）。
 
-    ``_DbLock`` の ``hold``・export されていない TS のクラスのメンバーのように、自分の修飾子は ``pub`` でも親が外に出ていない。"""
-    closed = {str(s.urn) for s in symbols if {"priv", "prot"} & set(s.modifiers)}
+    ``_DbLock`` の ``hold``・export されていない TS のクラスのメンバーのように、自分の修飾子は ``pub`` でも親が外に出ていない。
+    ``urns`` は ``symbols`` の ``str(urn)``（呼ぶ側が作ってあれば渡す）。"""
+    keys = urns if urns is not None else [str(s.urn) for s in symbols]
+    closed = {u for s, u in zip(symbols, keys, strict=True) if {"priv", "prot"} & set(s.modifiers)}
     hidden: set[str] = set()
-    for s in symbols:
+    if not closed:
+        return hidden
+    for u in keys:
         seen: set[str] = set()
-        parent = parents.get(str(s.urn))
+        parent = parents.get(u)
         while parent is not None and parent not in seen:
             if parent in closed:
-                hidden.add(str(s.urn))
+                hidden.add(u)
                 break
             seen.add(parent)
             parent = parents.get(parent)
@@ -165,42 +171,51 @@ class _Shown:
     name: str
 
 
-def _select(
+def _ranked_pool(
     symbols: list[SymbolRecord],
     parents: dict[str, str | None],
     ranks: dict[str, tuple[float, int]],
     ranking: Ranking,
-    limit: int,
-) -> list[_Shown]:
-    """公開シンボルを指標の上位 ``limit`` 件に絞り、行の順・入れ子（選んだ祖先の下）に並べる。"""
-    hidden = _hidden_by_ancestor(symbols, parents)
-    pool = [s for s in symbols if _eligible(s) and str(s.urn) not in hidden]
+) -> list[tuple[SymbolRecord, str]]:
+    """選ぶ候補（公開で、隠れた祖先の無いシンボルと ``str(urn)``）を指標の順に並べたもの。
 
-    def key(s: SymbolRecord) -> tuple[float, int, str]:
-        score, fan_in = ranks.get(str(s.urn), (0.0, 0))
+    ファイルごとに 1 度だけ作り、``_select_top`` が上位 ``limit`` 件を取る（予算に合わせて件数を減らす ``reselect`` は 1 ファイルで
+    何度も呼ばれる。以前は呼ぶたびに隠れた祖先・候補・並べ替えを作り直し、``str(urn)`` を 1 回の T-01 で 4,000 回以上作っていた。BUG-0128）。
+    """
+    urns = [str(s.urn) for s in symbols]
+    hidden = _hidden_by_ancestor(symbols, parents, urns)
+    pool = [(s, u) for s, u in zip(symbols, urns, strict=True) if _eligible(s) and u not in hidden]
+
+    def key(item: tuple[SymbolRecord, str]) -> tuple[float, int, str]:
+        s, u = item
+        score, fan_in = ranks.get(u, (0.0, 0))
         primary = {"pagerank": -score, "fan_in": -float(fan_in), "alpha": 0.0}[ranking]
-        return (primary, s.range.start.line, str(s.urn))
+        return (primary, s.range.start.line, u)
 
-    chosen = sorted(pool, key=key)[:limit]
-    chosen.sort(key=lambda s: (s.range.start.line, -s.range.end.line, str(s.urn)))
-    by_urn = {str(s.urn): s for s in chosen}
+    pool.sort(key=key)
+    return pool
+
+
+def _select_top(pool: list[tuple[SymbolRecord, str]], parents: dict[str, str | None], limit: int) -> list[_Shown]:
+    """``_ranked_pool`` の上位 ``limit`` 件を、行の順・入れ子（選んだ祖先の下）に並べる。"""
+    chosen = sorted(pool[:limit], key=lambda item: (item[0].range.start.line, -item[0].range.end.line, item[1]))
+    by_urn = {u: s for s, u in chosen}
     shown: list[_Shown] = []
     depth: dict[str, int] = {}
-    for s in chosen:
-        urn = str(s.urn)
+    for s, urn in chosen:
         parent = parents.get(urn)
-        anchor: SymbolRecord | None = None
+        anchor: str | None = None
         while parent is not None:
             if parent in by_urn:
-                anchor = by_urn[parent]
+                anchor = parent
                 break
             parent = parents.get(parent)
         if anchor is None:
             depth[urn] = 0
             shown.append(_Shown(s, 0, s.qualified_name))
             continue
-        depth[urn] = depth[str(anchor.urn)] + 1
-        prefix = anchor.qualified_name + "."
+        depth[urn] = depth[anchor] + 1
+        prefix = by_urn[anchor].qualified_name + "."
         name = s.qualified_name[len(prefix) :] if s.qualified_name.startswith(prefix) else s.qualified_name
         shown.append(_Shown(s, depth[urn], name))
     return shown
@@ -414,11 +429,12 @@ def _build(
         def rank_of(f: rank.RepoMapFile) -> float:
             return _metric(f, ranking) / top if top > 0 else 0.0
 
-        overview = _overview.build(ordered, ws.root, _tree_note(ordered), _EST.count)
+        entries = _overview.entry_modules(ordered, ws.root)  # pyproject.toml を読むのは 1 度だけ（BUG-0128）
+        overview = _overview.build(ordered, ws.root, _tree_note(ordered), _EST.count, entries=entries)
         budget = ctx.call.max_tokens
         json_overview = _overview.build(
             ordered, ws.root, None, _EST.count,
-            max_tokens=min(_overview.OVERVIEW_MAX_TOKENS, budget // JSON_OVERVIEW_SHARE),
+            max_tokens=min(_overview.OVERVIEW_MAX_TOKENS, budget // JSON_OVERVIEW_SHARE), entries=entries,
         )  # fmt: skip
         records: list[Record] = []
         spent = 0
@@ -449,9 +465,10 @@ def _build(
                 if symbols:
                     parents = queries.symbol_parents(conn, ws.workspace_id, f.path)
                     ranks = rank.file_symbol_ranks(conn, ws.workspace_id, f.path)
+                    pool = _ranked_pool(symbols, parents, ranks, ranking)
 
-                    def reselect(k: int, symbols=symbols, parents=parents, ranks=ranks) -> list[_Shown]:
-                        return _select(symbols, parents, ranks, ranking, k)
+                    def reselect(k: int, pool=pool, parents=parents) -> list[_Shown]:
+                        return _select_top(pool, parents, k)
 
                     shown = reselect(args.max_symbols_per_file)
             rec = _make_record(
