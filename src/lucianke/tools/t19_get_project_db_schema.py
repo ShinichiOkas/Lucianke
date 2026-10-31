@@ -13,10 +13,13 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
+import math
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
@@ -234,22 +237,74 @@ def _indexes(con: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
     return out
 
 
+class _Interrupter:
+    """期限を過ぎた接続に ``interrupt()`` を送る見張り。プロセスで 1 本のスレッドを共有する（BUG-0128）。
+
+    以前は ``COUNT(*)`` のたびに ``threading.Timer`` を作って ``join`` していた（1 回の呼び出しで 10 本）。CPU が混んでいると
+    スレッドの起動と終わりの待ちのたびに順番待ちになり、16 ms の呼び出しが 120 ms〜1 秒に延びた（14 論理 CPU を 16 本の
+    計算で埋めた実測: p50 14→122 ms・p95 1028 ms。Timer なしなら 8→16 ms）。
+
+    * ``arm`` は期限を登録するだけ。見張りを起こすのは、見張りがいま眠っている期限より早い期限を登録したとき
+      （待つものが無く無期限に眠っているときを含む）だけで、続けて登録する同じ長さの期限では起こさない。
+    * 送るのは錠の中で、まだ登録されている期限だけ。``disarm`` が返った後に、その期限の ``interrupt()`` は届かない
+      （遅れて届いた ``interrupt()`` が次の文を巻き込まない）。
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._armed: dict[int, tuple[float, sqlite3.Connection]] = {}
+        self._seq = itertools.count()
+        self._wake_at = math.inf  # 見張りが次に目を覚ます時刻（無期限に眠っているときは inf）
+        self._thread: threading.Thread | None = None
+
+    def arm(self, con: sqlite3.Connection, budget_s: float) -> int:
+        deadline = time.monotonic() + budget_s
+        with self._cond:
+            token = next(self._seq)
+            self._armed[token] = (deadline, con)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="lucianke-count-interrupter", daemon=True)
+                self._wake_at = deadline
+                self._thread.start()
+            elif deadline < self._wake_at:
+                self._wake_at = deadline
+                self._cond.notify()
+        return token
+
+    def disarm(self, token: int) -> None:
+        with self._cond:
+            self._armed.pop(token, None)
+
+    def _run(self) -> None:
+        with self._cond:
+            while True:
+                now = time.monotonic()
+                for token, (deadline, con) in list(self._armed.items()):
+                    if deadline <= now:
+                        del self._armed[token]
+                        con.interrupt()
+                self._wake_at = min((d for d, _ in self._armed.values()), default=math.inf)
+                self._cond.wait(None if self._wake_at == math.inf else self._wake_at - now)
+
+
+_INTERRUPTER = _Interrupter()
+
+
 def _count_rows(
     con: sqlite3.Connection, table: str, budget_s: float = COUNT_BUDGET_S
 ) -> tuple[int | None, bool]:
     """``COUNT(*)`` が ``budget_s`` 以内に終わればその値と True。超えたら ``MAX(rowid)``（上限の目安）と False。
 
-    ``count(*)`` は 1 命令で B 木を歩くので progress handler では止まらない。別スレッドの ``interrupt()`` で止める。
+    ``count(*)`` は 1 命令で B 木を歩くので progress handler では止まらない。共有の見張り（``_Interrupter``）の
+    ``interrupt()`` で止める。
     """
-    timer = threading.Timer(budget_s, con.interrupt)
-    timer.start()
+    token = _INTERRUPTER.arm(con, budget_s)
     try:
         return int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]), True
     except sqlite3.OperationalError:
         pass  # interrupted
     finally:
-        timer.cancel()
-        timer.join()  # 遅れて発火した interrupt が次の文を巻き込まないようにする
+        _INTERRUPTER.disarm(token)
     try:
         row = con.execute(f'SELECT max(rowid) FROM "{table}"').fetchone()
         return (int(row[0]) if row and row[0] is not None else 0), False
