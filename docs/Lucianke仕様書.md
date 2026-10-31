@@ -357,6 +357,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 
 - Lucianke は MCP サーバーとして `tools/list` と `tools/call` を提供する。トランスポートは **`stdio` のみ**（MUST）。ホストが Lucianke をコマンドとして子プロセス起動し、標準入出力で JSON-RPC をやり取りする。HTTP 系トランスポートは提供しない（師匠 2026-10-29「stdio のコマンド実行型。HTTP 型はあまり望ましくない」。必要が生じたら §17 OD-22 として改めて決める）。
 - 各ツールは `tools/list` で JSON Schema（入力スキーマ）を公開する。入力スキーマには第 5.2 節の共通パラメータを含めなければならない（MUST）。
+- 各ツールは `tools/list` で注記（annotations）を宣言する（MUST）: 書き込まないツールは `readOnlyHint: true`、**全ツール** `openWorldHint: false`（Lucianke は手元の解析とファイルの読み書きだけで外部へ送らない）。宣言が無いと、ホストは read 系のツールにも外部送信の権限を求め、読むだけの周や不在のセッションで使えない（利用者のコーディングエージェントからのフィードバック 2026-10-31）。
 - ツール実行の結果は `tools/call` の `content[0]` に `type: "text"` として本章のエンベロープ（第 5.4 節）を格納する。`format: "json"` のときは、同じ JSON を `structuredContent` にも格納してもよい（MAY）。
 - ツール実行中の失敗（対象が見つからない、前提条件不一致など）は JSON-RPC エラーではなく、`isError: true` を伴う通常の結果として返す（MUST）。**JSON-RPC エラーにするのは未知のツール名だけ**とする（プロトコル違反）。スキーマに違反する引数（未知のプロパティ・型違反・必須の欠落）は JSON-RPC エラーにせず、`isError: true` の通常の結果で `E_INVALID_ARGUMENT` を返す（エージェントが結果を読んで自己修正できる。設計書 §7.1.2。MCP SDK は引数を検証しないので、検証は Lucianke のパイプラインが行う。S-1 で確認）。
 - サーバーは、ホストが roots 能力を宣言していれば、`notifications/initialized` の後に MCP の `roots/list` を要求し（タイムアウト 5 s）、`notifications/roots/list_changed` が来たら取り直す（SHOULD）。**取れなくても動く**こと（MUST）: ホストが roots 能力を宣言しない場合、および roots の `list_changed` とサーバー起点の `roots/list` が仕様から消えた 2026-07-28 版の MCP では、カレントディレクトリをルート候補にし、`configure_workspace set_roots`（T-00）で登録できる（S-1 で確認。設計書 §6.5）。

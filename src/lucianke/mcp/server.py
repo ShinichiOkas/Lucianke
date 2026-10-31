@@ -136,7 +136,9 @@ def build_server(
                     name=d.name,
                     description=d.description,
                     input_schema=d.input_schema,
-                    annotations=types.ToolAnnotations(read_only_hint=d.read_only),
+                    # Lucianke のツールはどれも手元の解析とファイルの読み書きだけで、外部へは送らない（openWorldHint: false）。
+                    # 宣言が無いとホストは read 系にも外部送信の権限を求める（利用者のエージェントからのフィードバック 2026-10-31）
+                    annotations=types.ToolAnnotations(read_only_hint=d.read_only, open_world_hint=False),
                 )
                 for d in registry.descriptors(
                     include_planned=list_planned, current_milestone=pipeline.current_milestone

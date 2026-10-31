@@ -44,6 +44,9 @@ async def test_stdio_vertical_slice() -> None:
         assert {"get_file_skeleton", "get_symbol_bodies"} <= set(tools)
         assert "ping" not in tools  # 開発用ツールは通常の tools/list に出ない
         assert tools["get_file_skeleton"].input_schema["additionalProperties"] is False
+        # 全ツールが外部へ送らない（openWorldHint: false）。read 系は readOnlyHint: true
+        assert all(t.annotations is not None and t.annotations.open_world_hint is False for t in tools.values())
+        assert tools["get_file_skeleton"].annotations.read_only_hint is True
 
         # 既定の予算（2000）では 1 ファイル目が縮退してそのページの最後になり、2 ファイル目は次ページ（仕様書 §5.6-5、BUG-0067）。
         # エージェントと同じくカーソルを辿って全ページを集める
