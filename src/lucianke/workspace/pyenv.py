@@ -57,6 +57,7 @@ __all__ = [
     "detect_extra_paths",
     "detect_pytest_imports",
     "detect_python_env",
+    "touches_lsp_command_candidates",
     "workspace_venv_dirs",
 ]
 
@@ -152,6 +153,28 @@ def workspace_venv_dirs(root: Path | str) -> tuple[Path, ...]:
         except OSError:
             continue
     return tuple(out)
+
+
+def touches_lsp_command_candidates(rel: str, *, fold: bool = False) -> bool:
+    """``rel``（根からの ``/`` 区切りの相対パス）の変更が、LSP の起動コマンドの探索の結果（``lsp/servers.find_command`` /
+    ``find_tsserver``）を変えうるか。字句だけの判定（ファイルを引かない。監視の全イベントから呼ぶ）。
+
+    見る場所は探索が stat する所だけ: 根の直下の仮想環境の候補（``WORKSPACE_VENV_NAMES``）の根・``pyvenv.cfg``・``Scripts`` / ``bin`` の
+    実行ファイル（深さ 3 まで）、``node_modules`` と ``node_modules/.bin`` の実行ファイル・``node_modules/typescript/lib/tsserver.js``
+    （深さ 4 まで）。仮想環境の中の深い所（site-packages）の変更は変えない。``fold`` は大文字小文字を区別しない比較。
+    """
+    parts = [p for p in rel.replace("\\", "/").split("/") if p]
+    if not parts:
+        return False
+    head = parts[0].casefold() if fold else parts[0]
+    if head in WORKSPACE_VENV_NAMES:
+        return len(parts) <= 3
+    if head == "node_modules":
+        if len(parts) <= 2:
+            return True
+        second = parts[1].casefold() if fold else parts[1]
+        return len(parts) <= 4 and second in (".bin", "typescript")
+    return False
 
 
 def _manager_beside(venv_dir: Path, root: Path) -> str:

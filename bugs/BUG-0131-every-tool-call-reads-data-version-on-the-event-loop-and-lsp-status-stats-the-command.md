@@ -41,7 +41,7 @@ standby のときの「次に起こす名前」のために優先順で `find_co
   ツールの読み取りの中で行と同じ断面の値が要るときは、これまでどおり借りた接続で `read_data_version(conn)`。
 - `LspPool.state_of(language_id, ws, role)` を足した（`status(...).status` と同じ値。起動コマンドを探さない）。`_runtime.py` の編集用の
   `lsp_status` はこれを使う（`state_of` を持たない偽のプールは今までどおり `status`）。名前が要る `status`（T-00・T-08 など）は変えていない。
-  `find_command` の結果の覚えは作っていない（編集の経路から呼ばなくなったので不要。覚えにすると venv の作り直しの無効化が要る）。
+  `find_command` の結果の覚えは、このときは作らなかった（下の「残ったこと」で作った）。
 
 確認（同じプロセスの中で繰り返し。`perf_counter`、5 組の最小）:
 ```
@@ -55,3 +55,34 @@ busy 3 本 41 / 59。stat（WAL）0.006・1.9 / 7.4・31 / 42。メモリの値�
 取り消しは進めない、閉じた後の例外、並行して読んでも単調、`state_of` が resolver を呼ばず `status` と同じ値。足した 4 件: 同じ DB を別々に開いた 2 つの `IndexWriter` で、片方のコミットがもう片方の `data_version()` に出る〈間隔 0 で即・既定の間隔で待てば〉、間隔の間は DB を読まない、閉じたら -wal が消える）。関係する unit（index_core・
 lsp_pool・tools_runtime・leak_guard・mcp_pipeline・budget_cursor・engine_indexer・tools_index_building）・contract（T-03/T-04・T-10・T-11）・見張り 4 本が
 green、`uv run ruff check` クリーン。
+
+## 残ったこと（名前が要る `status`）を直した（2026-10-31）
+
+残っていたこと: `LspPool.status`（T-00・T-08 など、名前が要る経路）は、standby のときの「次に起こすサーバーの名前」のために、呼び出しのたびに
+`servers.find_command`（`workspace_venv_dirs`・`venv_root_of`・`_probe`・`find_tsserver` の stat）を走らせていた。
+
+直し（`src/lucianke/lsp/pool.py`・`workspace/pyenv.py`・`workspace/watcher.py`・`tools/_runtime.py`）:
+- `LspPool._expected_name` が結果を（言語・ワークスペース・役・根・Python 環境のインタープリタ・`LUCIANKE_LSP_*_CMD` の値〈定義ごとのサーバー名単位・言語単位〉・`PATH`）
+  ごとに覚える。環境変数・Python 環境・`PATH` は鍵に入れたので、変わると別の鍵になり、通知は要らない（辞書を引くだけで stat しない）。
+- 捨てる（`LspPool.invalidate_commands`＝世代を 1 つ進める。どのスレッドからでもよい。覚えは書いたときの世代と同じときだけ使うので、
+  stat と書き込みの間に割り込んだ無効化も取りこぼさない）:
+  - 監視のイベント: `Watcher._accept`（`watch_filter`）が、`pyenv.touches_lsp_command_candidates`（`.venv` / `venv` / `env` / `.env` の根・`pyvenv.cfg`・
+    `Scripts` / `bin` の実行ファイル〈深さ 3 まで〉、`node_modules` ・`node_modules/.bin`・`node_modules/typescript/lib/tsserver.js`。site-packages の中は含めない）に
+    当たるパスのイベントでフックを呼ぶ。**`.venv` などの除外される場所でも**呼ぶ（`_skip` の前。除外されるとイベントは sink に来ないため）。
+    `WorkspaceRuntime.open` が `lsp_pool.invalidate_commands` をフックに渡す。
+  - `LspPool.reset`（`configure_workspace` の `reindex_scope: "lsp"`）・`LspPool.rebind`（`set_python_env` など）・`notify_watched` に探索の候補のパスが来たとき。
+  - 保険: `COMMAND_NAME_TTL_S`（30 秒）。監視が動いていない（polling）・イベントを落としたときの取りこぼし用。普段は効かない（30 秒に 1 回だけ引く）。
+- 起動（`_pick` → `_run_once`）は覚えを使わない（実際に起こすコマンドは毎回引く）。
+
+確認（同じプロセスの中。standby の `status` 1 回、300 回の最小 / 中央値 ms、`.venv/Scripts` と `node_modules/.bin` のある根、既定の resolver）:
+```
+python      (basedpyright)               0.3062 / 0.3184 ms  ->  0.0069 / 0.0074 ms
+typescript  (typescript-language-server) 1.7128 / 1.8361 ms  ->  0.0073 / 0.0079 ms
+```
+試験: 新しい `tests/unit/test_lsp_command_memo_bug0131.py`（31 件）。2 回目から探さない・言語 / 役 / ワークスペースごとの覚え・venv を作った直後の
+`status` が新しい名前を言う〈無効化の前後〉・探している間の無効化を取りこぼさない・環境変数 / `PATH` / Python 環境の変更は別の鍵・`reset` / `rebind` /
+`notify_watched`・TTL・起こした後は覚えに触らない・`touches_lsp_command_candidates` の表・`Watcher._accept` が除外される `.venv` でもフックを呼ぶ・
+**実際の `watchfiles` で `.venv` を作ったら次の `status` が新しい名前を言う**。関係する unit（lsp_pool・workspace_watcher・polling_watcher・tools_runtime・
+index_building・mcp_pipeline・T-00 の再起動・BUG-0131・BUG-0135）・contract（T-00・T-08）・見張り 5 本が green、`uv run ruff check` クリーン。
+
+残ったこと: なし（`doctor` の `find_command` は診断コマンドの 1 回きりで、呼び出しごとではないので覚えない）。

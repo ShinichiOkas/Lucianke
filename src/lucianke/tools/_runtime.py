@@ -240,7 +240,10 @@ class WorkspaceRuntime:
             pool = lsp_pool
             indexer.on_listed = lambda listing: warm_type_server(pool, indexer.workspace, listing)
         sink = IndexerSink(ws, indexer, readers, lsp_pool)
-        watcher = Watcher(ws, sink)
+        # 仮想環境・node_modules のイベントで、LSP の起動コマンドの探索の覚えを捨てる（BUG-0131。偽のプールは持たない）
+        watcher = Watcher(
+            ws, sink, on_command_candidates_changed=getattr(lsp_pool, "invalidate_commands", None)
+        )
         _log.info(
             "index opened: ws=%s db=%s schema=%s", ws.workspace_id, db_path, writer.schema_action,
             extra={"event": "index_open"},

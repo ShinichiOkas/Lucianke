@@ -44,6 +44,7 @@ from lucianke.core.limits import (
 )
 from lucianke.core.model import RelPath
 from lucianke.workspace.paths import confine, is_excluded, to_abs
+from lucianke.workspace.pyenv import touches_lsp_command_candidates
 from lucianke.workspace.types import Workspace
 
 __all__ = ["TMP_PREFIX", "IngestSink", "Watcher"]
@@ -113,9 +114,13 @@ class Watcher:
         *,
         step_ms: int = WATCH_STEP_MS,
         debounce_ms: int = WATCH_DEBOUNCE_MS,
+        on_command_candidates_changed: Callable[[], None] | None = None,
     ) -> None:
         self._ws = ws
         self._sink = sink
+        self._on_command_candidates_changed = on_command_candidates_changed
+        """LSP の起動コマンドの探索の結果を変えうる場所（仮想環境・``node_modules``）のイベントが届くたびに呼ぶ（BUG-0131）。
+        除外・``.gitignore`` の対象（``.venv`` など）でも呼ぶ。監視のスレッドから呼ばれるので、軽く・スレッドを選ばずに済ませること。"""
         self._step_ms = step_ms
         self._debounce_ms = debounce_ms
         self.mode: Literal["native", "polling"] = "native"
@@ -256,6 +261,9 @@ class Watcher:
         else:
             rel = os.path.relpath(path, root)
         rel = rel.replace("\\", "/")
+        hook = self._on_command_candidates_changed
+        if hook is not None and touches_lsp_command_candidates(rel, fold=self._fold_names):
+            hook()  # 除外される場所（``.venv``）のイベントでも、起動コマンドの探索の覚えは捨てる
         return rel not in ("", ".", "..") and not rel.startswith("../") and not self._skip(rel)
 
     def _skip(self, rel: str) -> bool:

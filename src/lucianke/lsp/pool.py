@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -76,6 +77,7 @@ from lucianke.lsp.servers import (
     servers_for,
 )
 from lucianke.workspace.paths import to_file_uri
+from lucianke.workspace.pyenv import touches_lsp_command_candidates
 from lucianke.workspace.types import Workspace
 
 _log = logging.getLogger("lucianke.lsp.pool")
@@ -476,6 +478,12 @@ class LspHandle:
         self._become_ready()
 
 
+COMMAND_NAME_TTL_S = 30.0
+"""``LspPool.status`` が standby のときの「次に起こすサーバーの名前」を覚えておく長さ（秒。BUG-0131）。覚えは監視のイベント・
+``reset`` / ``rebind``・環境変数と Python 環境の変更で捨てる。これは、イベントを取りこぼしたとき（監視が動いていない・
+イベントが落ちた）の保険で、普段は効かない。"""
+
+
 class LspPool:
     """言語 × ワークスペース × 役ごとの ``LspHandle`` の表と、その生涯の管理。"""
 
@@ -516,6 +524,10 @@ class LspPool:
         self._clock = clock
         self._wall_clock = wall_clock
         self._handles: dict[tuple[str, str, Role], LspHandle] = {}
+        self._command_gen = 0
+        """起動コマンドの探索の結果が変わりうる出来事（``invalidate_commands``）の数。``_name_memo`` の覚えは、書いたときの値と
+        同じときだけ使う（監視のスレッドが数を進める。取りこぼしなく捨てるため、覚えを消さずに世代で見る）。"""
+        self._name_memo: dict[tuple[Any, ...], tuple[str, int, float]] = {}
         self._routers: dict[str, DocumentRouter] = {}
         self._bg: set[asyncio.Task[Any]] = set()
         self._closed = False
@@ -707,17 +719,53 @@ class LspPool:
             "Lucianke Python environments, node_modules/.bin and PATH",
         )
 
+    def invalidate_commands(self) -> None:
+        """起動コマンドの探索の覚え（``_expected_name``）を捨てる。仮想環境・``node_modules`` の作り直し、設定の変更のとき。
+
+        どのスレッドから呼んでもよい（世代を 1 つ進めるだけ。覚えは次の ``status`` が引き直す）。"""
+        self._command_gen += 1
+
+    def _command_memo_key(
+        self, language_id: str, ws: Workspace, role: Role, defs: tuple[LspServerDef, ...]
+    ) -> tuple[Any, ...]:
+        """``_expected_name`` の覚えの鍵: ワークスペース・言語・役と、探索の入力（環境変数による上書き・``PATH``・Python 環境・根）。
+
+        環境変数・Python 環境は鍵に入れておく（変わったら別の鍵になる）ので、変更の通知は要らない。引くのは辞書だけ（stat しない）。"""
+        env = ws.python_env
+        overrides = tuple(os.environ.get(v) for d in defs for v in (d.server_env_var, d.env_var))
+        return (
+            language_id,
+            ws.workspace_id,
+            role,
+            str(ws.root),
+            env.interpreter if env is not None else None,
+            overrides,
+            os.environ.get("PATH"),
+        )
+
     def _expected_name(
         self, language_id: str, ws: Workspace, role: Role, defs: tuple[LspServerDef, ...]
     ) -> str:
         """起こすサーバーの名前: 優先順で最初に見つかる定義。どれも見つからなければ既定（先頭）の名前。
 
-        ブロックしない（ファイルの有無を引くだけ）。まだ起こしていない（standby）ときの ``status`` が、起こした後に出る名前と
-        食い違わないようにする（既定が見つからず代替に落ちるのに、起こす前は既定の名前を返していた。BUG-0037）。"""
+        ブロックしない。まだ起こしていない（standby）ときの ``status`` が、起こした後に出る名前と
+        食い違わないようにする（既定が見つからず代替に落ちるのに、起こす前は既定の名前を返していた。BUG-0037）。
+
+        探すには venv などを stat する（約 0.3〜2 ms）ので、（ワークスペース・言語・役・探索の入力）ごとに結果を覚え、
+        呼び出しのたびには引かない（BUG-0131）。捨てるのは ``invalidate_commands``（監視の ``.venv`` / ``venv`` /
+        ``node_modules`` のイベント・``reset`` / ``rebind``）と ``COMMAND_NAME_TTL_S`` の経過。"""
+        key = self._command_memo_key(language_id, ws, role, defs)
+        now = self._clock()
+        hit = self._name_memo.get(key)
+        if hit is not None and hit[1] == self._command_gen and now - hit[2] < COMMAND_NAME_TTL_S:
+            return hit[0]
+        gen = self._command_gen  # 引いている間に起きた出来事を取りこぼさないよう、引く前の世代で書く
         try:
-            return self._pick_for(language_id, ws, role)[0].name
+            name = self._pick_for(language_id, ws, role)[0].name
         except _Unavailable:
-            return defs[0].name
+            name = defs[0].name
+        self._name_memo[key] = (name, gen, now)
+        return name
 
     async def _run_once(self, h: LspHandle) -> str | None:
         """1 回起動して、切断されるまで見張る。戻り値は失敗の種類（``init_failed`` / ``crashed``）。止めている最中は ``None``。"""
@@ -836,6 +884,7 @@ class LspPool:
 
     async def reset(self, language_id: str | None, ws: Workspace) -> None:
         """``reindex_scope: "lsp"``: 該当のハンドルを止めて ``standby`` に戻す（``unavailable`` も解く。次の要求で再起動）。"""
+        self.invalidate_commands()  # venv にサーバーを入れ直した後の ``reset`` で、古い名前を言い続けない
         for h in self.handles(ws, language_id):
             await self.reset_handle(h)
 
@@ -854,6 +903,7 @@ class LspPool:
         ハンドルは作られる時点の ``Workspace`` を持つので、呼び手は更新後の ``Workspace`` を渡し続ければよい。
         """
         restarted: list[LspHandle] = []
+        self.invalidate_commands()  # 根・Python 環境が変わった（探索の入力が変わる）
         for h in self.handles(ws):
             if await h.rebind(ws):
                 restarted.append(h)
@@ -913,6 +963,8 @@ class LspPool:
         changes = [(rel, int(kind)) for rel, kind in changes]
         if not changes:
             return sent_at
+        if any(touches_lsp_command_candidates(str(rel), fold=ws.case_insensitive) for rel, _ in changes):
+            self.invalidate_commands()  # 監視が除外する場所のイベントはここに来ない（``Watcher`` が直接呼ぶ）。来たものは念のため
         configs = {rel for rel, _ in changes if is_pyright_root_config(str(rel), case_insensitive=ws.case_insensitive)}
         repinned = await self._reload_pyright_config(ws) if configs else set()
         items = [{"uri": to_file_uri(ws, rel), "type": kind} for rel, kind in changes]
