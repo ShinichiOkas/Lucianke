@@ -39,6 +39,12 @@ def _typescript_package() -> Path | None:
     candidates = []
     if _TSLS_CMD:
         candidates.append(Path(_TSLS_CMD[0]).resolve().parent.parent / "typescript")
+        # ``bun --bun <...>/node_modules/typescript-language-server/lib/cli.mjs --stdio`` のように、引数が ``node_modules`` の中の
+        # スクリプトを指すとき（この PC のように node が無く bun 経由で起こすとき）は、その ``node_modules`` の ``typescript``
+        for arg in _TSLS_CMD[1:]:
+            parts = Path(arg).parts
+            if "node_modules" in parts:
+                candidates.append(Path(*parts[: parts.index("node_modules") + 1]) / "typescript")
     candidates.append(KY / "node_modules" / "typescript")
     return next((c for c in candidates if (c / "lib" / "tsserver.js").is_file()), None)
 

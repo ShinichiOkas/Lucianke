@@ -69,7 +69,7 @@ LSP が動いている間に、利用者（または AI）が `pyrightconfig.jso
   知らせる（起動の後の最初の変更は前を知らないので知らせる）。バーストの差分索引の後は根の Python の設定も見て回る。
 - **TypeScript**: `tsconfig.json` の変更は索引の経路で TS の LSP にも `didChangeWatchedFiles` が届いていた（`.gitignore` の対象も上で
   届く）。Lucianke は `tsconfig` から覚えるもの（解析の対象など）を持たない（tsserver 系は `tsconfig` の外も含めて名前を含むファイルを
-  開かせる。BUG-0047）ので、読み直すものは無い。この PC に TS の LSP が無く、実機では確かめていない。
+  開かせる。BUG-0047）ので、読み直すものは無い。実機の確かめは下の「TypeScript の `tsconfig.json` の変更を実機で確かめた」。
 - 仕様書: §12.3「Python の設定の根」の行（起動のときだけ読むの文を、根の設定の変更の扱いに置き換えた）、§12.4 に 7（索引に載らない
   設定ファイル）。設計書: §7.3.6 の 5、§7.5.1（Python の備考）、§7.5.6（対象の覚え方）、`notify_watched` の API の注記。
 
@@ -127,7 +127,37 @@ LSP が動いている間に、利用者（または AI）が `pyrightconfig.jso
 ### 残ったこと
 
 - `extends` の先を、`rescan`（バースト）の後に見て回ってはいない（根の 2 つの設定だけ見て回る）。根の下の先が索引に載らないとき、バーストの間の変更は次に T-06・T-07 が聞いたとき `sync_config_chain` が拾う。
-- TypeScript の `tsconfig.json` の変更が TS の LSP に効くことは、この PC に TS の LSP が無く実機で確かめていない（Lucianke の側に読み直す
-  状態は無い）。
 - Lucianke の編集ツールが TOML / JSON を書けるようになったら（Tier 3 の編集は M2）、その書き込みは監視のこだまとして捨てられ、TOML / JSON の
   LSP が無いので basedpyright に届かない。そのときは編集トランザクションからも `notify_watched` を送ること。
+
+### TypeScript の `tsconfig.json` の変更を実機で確かめた（2026-10-31 追記。残ったことの 2 つ目）
+
+#### 起こし方
+- この PC に node は無い。`bun add --ignore-scripts typescript-language-server@4.3.3 typescript@5.6.3` で作業用のディレクトリに入れ、
+  `LUCIANKE_LSP_TYPESCRIPT_LANGUAGE_SERVER_CMD="bun --bun <dir>/node_modules/typescript-language-server/lib/cli.mjs --stdio"` を環境変数に置いて
+  既存の TS の試験（`tests/contract/test_T06_ts_outside_tsconfig.py` ほか。`find_command` が環境変数をそのまま argv にする）を走らせた。
+  `typescript` パッケージの場所の探索（`_typescript_package`）は argv の `node_modules` の中のスクリプトも辿るようにした（bun 経由だと
+  `argv[0]` が bun で、`../typescript` が見つからず skip になっていたため）。
+
+#### 見たこと（実機。typescript-language-server 4.3.3 / TypeScript 5.6.3、bun 経由）
+- **tsserver は `tsconfig.json` の変更に、Lucianke が何も送らなくても 1 秒以内に従う**（`include` を `[source]` → `[source, test]` に広げると
+  `isThing` の直接の references に `test/` が入り、`[source/guard.ts]` に狭めるか tsconfig を消すと `source/use.ts` が消え、作り直すとまた入る。
+  届けても届けなくても同じ）。typescript-language-server 4.3.3 は `workspace/didChangeWatchedFiles` を実装していない（`cli.mjs` にはプロトコルの
+  定義があるだけ）。tsserver 自身のファイル監視が読み直す。したがって Lucianke が `notify_watched` で送る `tsconfig.json` の変更は TS の LSP には
+  害も益も無い（basedpyright などほかのサーバーのため・協調のために送る形のまま）。組み直させる別の手段（`reloadProjects`）は tsls の
+  `executeCommandProvider` に無い。
+- 直接の references はサーバーのプロジェクトの形に従って変わる（狭めると `source/use.ts` を落とす）が、T-06・T-07 は対象の名前を含む tsserver 系の
+  ファイルを先に開かせる（BUG-0047）ので、変更の後も答えは変わらず正しい: 変更の後の T-06 は本文から数えた参照の全部（`source/index.ts`・`source/use.ts`・
+  `test-d/types.ts`・`test/*.test.ts`）を `exact` で、T-07 incoming はモジュール直下の呼び元 4 つを `exact` で返す。
+
+#### 試験
+- 新しい `tests/contract/test_ts_tsconfig_change_bug0135.py`（実機。TS の LSP が無ければ skip。5 本、約 15 秒）: `include` を広げた・狭めた・
+  tsconfig を消した・消して作り直した・無い所に作った、のそれぞれで、(1) 変更を `IndexerSink` に渡すと `notify_watched` が `tsconfig.json` を受ける、
+  (2) サーバーの直接の references が変更に従う（従わなければ落ちる。T-06・T-07 が開かせる前に見る）、(3) その後の T-06・T-07 が全部 `exact` で完全。
+  Lucianke の側に直すものは見つからなかった（コードの変更は無し）。
+
+#### 残ったこと
+- tsserver の自前のファイル監視に頼っている。bun / Windows では効くのを確かめたが、node / Linux・macOS、ネットワークドライブなど監視が効きにくい場所は
+  確かめていない（tsls からは組み直させる手段が無い）。効かない場所が見つかったら、T-06・T-07 の準備の前に `tsconfig.json` の刻みを見て、
+  変わっていたら TS の LSP を起動し直す（`reindex_scope: "lsp"` 相当）案がある。
+
