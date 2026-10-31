@@ -37,6 +37,15 @@
   持つ構成がちょうど 1 つのときだけ。別名自身の型リテラルのメンバーはシンボルがあればそれ、無ければ結ばない。中身の分からない構成が
   あって決まらなければ名前だけ（``_name_calls``）。C3 の線形化の途中の別名（``interface Options extends KyOptions``）も構成から探す。
   別名のファイル・構成の型のファイルを整えるたびに結び直す（再帰 CTE が ``_type_aliases`` を逆にたどる）。
+  別名自身の型リテラルのメンバーはシンボル（``KyOptions.retry``。BUG-0114）で、交差ではほかの構成より先に見る。
+
+* **メンバーの型の受け手**（BUG-0113）: ``r: Opts['retry']`` の ``r.limit``・``o.retry.limit`` の先は ``types.ts#Opts.retry.limit``
+  （抽出器が注釈を先頭の名前 ``Opts`` に縮めず、受け手の型をメンバー ``Opts.retry`` の型とした）。シンボル（型リテラルの入れ子の
+  メンバー）ならそのまま、無ければ「クラスの部分」のメンバー ``Opts.retry`` を受け手に退避し、メンバーの型注釈の構成（``_type_aliases``
+  の ``alias_urn`` がメンバー。抽出器が書く）から別名と同じく探す。メンバーがシンボルでない（``Options.hooks`` の ``hooks`` が基底から
+  継承した）ときは、受け手を途中のシンボル ``Options`` にし、名前を点つきの道 ``hooks.beforeRequest`` にしてたどる。型の分からない
+  メンバー（``limit: number``・メソッド）・決まらない道は名前だけ（``_name_calls``。名前は道の最後）。メンバー・その型のファイルの
+  整えで結び直す（再帰 CTE が ``_type_aliases`` を逆にたどり、型の変わったメンバーの持ち主〈``parent_urn``〉も足す）。
 
 ``_member_refs`` はファイルの取り込み（``ingest_file``）で全置換され、ファイルの削除で CASCADE で消える。
 """
@@ -75,9 +84,18 @@ VAR_KINDS: Final = frozenset({Kind.VARIABLE.value, Kind.CONSTANT.value})
 ALIAS_KIND: Final = Kind.TYPE.value
 """受け手になれる型の別名の種別（構成は ``_type_aliases``。BUG-0108）。"""
 
+TYPED_MEMBER_KINDS: Final = frozenset({Kind.PROPERTY.value, Kind.FIELD.value})
+"""型注釈の構成（``_type_aliases`` の ``alias_urn`` がメンバー）から型の分かるメンバーの種別（受け手 ``r: Opts['retry']``・
+``o.retry.limit`` の ``Opts.retry``。BUG-0113）。"""
+
+MEMBER_RECEIVER_KINDS: Final = TYPED_MEMBER_KINDS | {Kind.METHOD.value}
+"""受け手の型がメンバーの型であるときの、そのメンバーの種別（メソッドの型〈関数〉のメンバーは分からないので名前だけ。BUG-0113）。"""
+
 _EXTERNAL_PREFIX: Final = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
 _PARKED_KINDS: Final = ("CALLS", "REFERENCES")
-_RECEIVER_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(CLASS_KINDS | {ALIAS_KIND}))
+_RECEIVER_KINDS: Final = CLASS_KINDS | VAR_KINDS | {ALIAS_KIND} | MEMBER_RECEIVER_KINDS
+_RECEIVER_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(CLASS_KINDS | {ALIAS_KIND} | TYPED_MEMBER_KINDS))
+_TYPED_MEMBER_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(TYPED_MEMBER_KINDS))
 _MAX_ALIAS_DEPTH: Final = 8  # 別名の構成をたどる深さ（循環した別名は止める）
 _VAR_KIND_LIST: Final = ", ".join(f"'{k}'" for k in sorted(VAR_KINDS))
 
@@ -130,7 +148,8 @@ def park_member_refs(conn: sqlite3.Connection, file_id: int) -> int:
         " AND target_urn NOT IN (SELECT urn FROM symbols)",
         (file_id, *_PARKED_KINDS),
     ).fetchall()
-    receivers: dict[str, str] = {}  # 目標のクラスの部分 → "member"（退避）/ "name"（名前だけ）/ ""（触らない）
+    # 目標のクラスの部分 → ("member"〈退避〉/ "name"〈名前だけ〉/ ""〈触らない〉, 受け手, 受け手からメンバーまでの途中の名前)
+    receivers: dict[str, tuple[str, str, str]] = {}
     parked: list[tuple[object, ...]] = []
     named: list[tuple[object, ...]] = []
     ids: list[tuple[int]] = []
@@ -141,9 +160,13 @@ def park_member_refs(conn: sqlite3.Connection, file_id: int) -> int:
         owner, name = split
         if owner not in receivers:
             receivers[owner] = _receiver_class(conn, owner)
-        if receivers[owner] == "member":
-            parked.append((file_id, source, owner, name, kind, use_kind, line, col, guard, confidence))
-        elif receivers[owner] == "name":
+        verdict, anchor, rest = receivers[owner]
+        if verdict == "member":
+            # 受け手がメンバーの型の途中（``Options.hooks.beforeRequest`` で ``Options.hooks`` がシンボルでない）なら、名前は
+            # 点つきの道（``hooks.beforeRequest``）にし、受け手はシンボルの ``Options``（BUG-0113）
+            member = f"{rest}.{name}" if rest else name
+            parked.append((file_id, source, anchor, member, kind, use_kind, line, col, guard, confidence))
+        elif verdict == "name":
             named.append((file_id, source, name, line, col, guard, use_kind or ("call" if kind == "CALLS" else "r")))
         else:
             continue
@@ -165,20 +188,54 @@ def park_member_refs(conn: sqlite3.Connection, file_id: int) -> int:
     return len(parked)
 
 
-def _receiver_class(conn: sqlite3.Connection, owner: str) -> str:
-    """目標のクラスの部分 ``owner`` の扱い: ワークスペースのクラス・モジュール直下の変数なら ``"member"``、シンボルでないが
-    そのファイルが索引にある（再び公開した名前など）なら ``"name"``、それ以外（中身の分からないファイル・関数など）は ``""``。"""
-    hit = conn.execute("SELECT kind FROM symbols WHERE urn = ? AND file_id IS NOT NULL", (owner,)).fetchone()
+def _receiver_class(conn: sqlite3.Connection, owner: str) -> tuple[str, str, str]:
+    """目標のクラスの部分 ``owner`` の扱い ``(判定, 受け手, 途中の名前)``: ワークスペースのクラス・モジュール直下の変数・型の別名・
+    メンバー（メンバーの型の受け手。BUG-0113）なら ``"member"``、シンボルでないがそのファイルが索引にある（再び公開した名前など）
+    なら ``"name"``、それ以外（中身の分からないファイル・関数など）は ``""``。
+
+    ``owner`` がシンボルでなく、その途中（``Options.hooks`` の ``Options``）が受け手になれるシンボルなら、受け手をそれにし、残りを
+    途中の名前（``hooks``）にする（``o.hooks.beforeRequest`` の ``hooks`` が基底から継承したメンバー。BUG-0113）。"""
+    hit = _workspace_kind(conn, owner)
     if hit is not None:
-        return "member" if hit[0] in CLASS_KINDS or hit[0] in VAR_KINDS or hit[0] == ALIAS_KIND else ""
+        return ("member", owner, "") if hit in _RECEIVER_KINDS else ("", owner, "")
+    split = _anchor(conn, owner)
+    if split is not None:
+        return ("member", *split)
     try:
         urn = parse(owner)
     except ValueError:
-        return ""
+        return ("", owner, "")
     indexed = conn.execute(
         "SELECT 1 FROM files WHERE workspace_id = ? AND path = ? LIMIT 1", (urn.workspace_id, urn.path)
     ).fetchone()
-    return "name" if indexed is not None else ""
+    return ("name" if indexed is not None else "", owner, "")
+
+
+def _workspace_kind(conn: sqlite3.Connection, urn: str) -> str | None:
+    row = conn.execute("SELECT kind FROM symbols WHERE urn = ? AND file_id IS NOT NULL", (urn,)).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _anchor(conn: sqlite3.Connection, path_urn: str) -> tuple[str, str] | None:
+    """シンボルでないメンバーの道 ``P#A.b.c`` の、いちばん長い受け手になれるシンボルの途中 ``P#A.b`` と残り ``c``（BUG-0113）。
+    途中に受け手になれないシンボル（関数・名前空間など）が先に見つかる・どれもシンボルでなければ ``None``。"""
+    try:
+        urn = parse(path_urn)
+    except ValueError:
+        return None
+    sel = urn.selector
+    if urn.is_external or not isinstance(sel, CodeSel) or sel.arity is not None or sel.sighash is not None:
+        return None
+    parts = sel.qualified.split(".")
+    for i in range(len(parts) - 1, 0, -1):
+        try:
+            prefix = str(urn.with_selector(CodeSel(".".join(parts[:i]))))
+        except ValueError:
+            return None
+        kind = _workspace_kind(conn, prefix)
+        if kind is not None:
+            return (prefix, ".".join(parts[i:])) if kind in _RECEIVER_KINDS else None
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +284,21 @@ class _Resolver:
     def is_alias(self, urn: str) -> bool:
         """``urn`` がワークスペースの型の別名か（受け手の型は ``_type_aliases`` の構成。BUG-0108）。"""
         return not urn.startswith(_EXTERNAL_PREFIX) and self._kind(urn) == ALIAS_KIND
+
+    def is_member(self, urn: str) -> bool:
+        """``urn`` がワークスペースのメンバー（プロパティ・フィールド・メソッド）か（受け手の型はそのメンバーの型。BUG-0113）。"""
+        return not urn.startswith(_EXTERNAL_PREFIX) and self._kind(urn) in MEMBER_RECEIVER_KINDS
+
+    def by_name(self, cls: str, name: str) -> bool:
+        """受け手 ``cls`` のメンバー ``name`` が決まらないとき、名前だけの呼び出し・参照にするか（変数・型の別名・メンバーの型・
+        メンバーの道の受け手。BUG-0094・BUG-0108・BUG-0113）。"""
+        return "." in name or self.is_var(cls) or self.is_alias(cls) or self.is_member(cls)
+
+    def anchor(self, urn: str) -> tuple[str, str] | None:
+        """シンボルでないメンバーの道 ``P#A.b.c`` の受け手になれる途中と残り（``_anchor``）。シンボルなら ``None``。"""
+        if urn.startswith(_EXTERNAL_PREFIX) or self._kind(urn) is not None:
+            return None
+        return _anchor(self._conn, urn)
 
     def alias_parts(self, urn: str) -> tuple[str, list[list[tuple[str, str]]]] | None:
         """型の別名 ``urn`` の ``(op, 構成ごとの (kind, target_urn) の列)``。構成が書かれていなければ ``None``。"""
@@ -299,13 +371,54 @@ class _Resolver:
     def lookup(self, cls: str, name: str, *, after: bool = False) -> _Lookup:
         key = (cls, name, after)
         if key not in self._found:
-            if self.is_var(cls):
+            self._found[key] = _Lookup(None, None, (cls,), untyped=True)  # 循環の見張り（メンバーの型が自分の道を指す）
+            if "." in name:
+                self._found[key] = self._lookup_path(cls, name)
+            elif self.is_var(cls):
                 self._found[key] = self._lookup_var(cls, name)
             elif self.is_alias(cls):
                 self._found[key] = self.lookup_alias(cls, name)
+            elif self.is_member(cls):
+                self._found[key] = self._lookup_member(cls, name)
             else:
                 self._found[key] = self._lookup(cls, name, after)
         return self._found[key]
+
+    def _lookup_member(self, member: str, name: str) -> _Lookup:
+        """受け手の型がメンバー ``member`` の型（``r: Opts['retry']`` の ``Opts.retry``）: メンバーの型注釈の構成（``_type_aliases`` の
+        ``alias_urn`` がメンバー）から別名と同じく探す（BUG-0113）。構成が無い（``limit: number``・注釈が無い）・メソッドは ``untyped``。"""
+        if self._kind(member) not in TYPED_MEMBER_KINDS:
+            return _Lookup(None, None, (member,), untyped=True)
+        return self.lookup_alias(member, name)
+
+    def _lookup_path(self, anchor: str, path: str) -> _Lookup:
+        """受け手 ``anchor`` からメンバーの道 ``a.b.name`` をたどる（``o.hooks.beforeRequest`` の ``hooks`` が ``anchor`` のシンボルに
+        無い〈基底から継承した〉とき。BUG-0113）。途中のメンバーが決まらない・型の分かるメンバーでなければ ``untyped``。"""
+        *heads, last = path.split(".")
+        cur = anchor
+        for seg in heads:
+            found = self.lookup(cur, seg).found
+            if found is None or found.startswith(_EXTERNAL_PREFIX) or self._kind(found) not in TYPED_MEMBER_KINDS:
+                return _Lookup(None, None, (anchor,), untyped=True)
+            cur = found
+        sub = self.lookup(cur, last)
+        return _Lookup(sub.found, None, (anchor,), untyped=sub.untyped or sub.blocker is not None, inline=sub.inline)
+
+    def _in_type(self, tp: str, name: str, depth: int = 0) -> _Lookup:
+        """型 ``tp``（別名の構成・変数の型）のメンバー ``name``。クラスは C3、別名・型の分かるメンバーは構成、シンボルでないメンバーの
+        道（``Options.hooks``）はたどる（BUG-0113）。それ以外は ``untyped``。"""
+        if tp.startswith(_EXTERNAL_PREFIX):
+            return _Lookup(_external_member(tp, name), None, (tp,))
+        kind = self._kind(tp)
+        if kind == ALIAS_KIND or kind in TYPED_MEMBER_KINDS:
+            return self.lookup_alias(tp, name, depth + 1)
+        if kind in CLASS_KINDS:
+            return self._lookup(tp, name, False)
+        split = self.anchor(tp) if kind is None else None
+        if split is not None:
+            anchor, rest = split
+            return self.lookup(anchor, f"{rest}.{name}")
+        return _Lookup(None, None, (tp,), untyped=True)
 
     def _lookup_var(self, var: str, name: str) -> _Lookup:
         """受け手がモジュール直下の変数: その型の線形化で探す。型が外部なら外部のメンバー、分からなければ ``untyped``。"""
@@ -316,14 +429,18 @@ class _Resolver:
             return _Lookup(_external_member(tp, name), None, (tp,))
         if self.is_alias(tp):
             return self.lookup_alias(tp, name)
+        if self._kind(tp) in TYPED_MEMBER_KINDS or self.anchor(tp) is not None:
+            return self._in_type(tp, name)  # ``const r: Opts['retry'] = ...``（型がメンバーの型。BUG-0113）
         return self._lookup(tp, name, False)
 
     def lookup_alias(self, alias: str, name: str, depth: int = 0) -> _Lookup:
-        """受け手が型の別名 ``alias``: 構成（``_type_aliases``）からメンバー ``name`` を探す（BUG-0108）。
+        """受け手が型の別名 ``alias``（型注釈の構成を書いたメンバーも同じ。BUG-0113）: 構成（``_type_aliases``）からメンバー ``name`` を
+        探す（BUG-0108）。
 
-        * ``and``（別名そのもの・交差）: 書いた順に、最初にメンバーを持つ構成のもの（ワークスペースのクラス・インターフェースは C3 の順、
-          別名はさらにその構成、別名自身の型リテラルのメンバーはシンボルがあればそれ、無ければ ``inline``）。どれにも無ければ、外部の
-          型の構成があれば最初のもののメンバー、中身の分からない構成があれば ``untyped``（名前の一致に任せる）、無ければ見つからない。
+        * ``and``（別名そのもの・交差）: 別名自身の型リテラルのメンバー（シンボル。v13 から。BUG-0114。無ければ ``inline``）が先、
+          無ければ書いた順に、最初にメンバーを持つ構成のもの（ワークスペースのクラス・インターフェースは C3 の順、別名はさらにその
+          構成）。どれにも無ければ、外部の型の構成があれば最初のもののメンバー、中身の分からない構成があれば ``untyped``（名前の一致に
+          任せる）、無ければ見つからない。
         * ``or``（合併）: メンバーを持つ構成がちょうど 1 つで、中身の分からない構成（外部の型を含む）が無いときだけそれ。持つ構成が
           2 つ以上・中身の分からない構成があれば ``untyped``。
         * 構成が書かれていない（Python の別名・v12 より前の取り込み）・深すぎる・循環は ``untyped``。
@@ -340,14 +457,24 @@ class _Resolver:
         order = (alias,)
         result = _Lookup(None, None, order)
         if op == "or":
-            holders = [st for st in states if st[0] in ("found", "inline")]
+            # 同じシンボルは 1 つに数える（合併の別々の型リテラルの同名のメンバー ``{ kind: 'a' } | { kind: 'b' }`` の ``<別名>.kind`` は
+            # どの構成からも素の URN〈最後の構成のもの〉を指す。抽出器がそれに直接結ぶのと揃える。BUG-0114）
+            distinct = {
+                st[1] if st[0] == "found" else str(i): st for i, st in enumerate(states) if st[0] in ("found", "inline")
+            }
+            holders = list(distinct.values())
             if any(st[0] in ("unknown", "external") for st in states) or len(holders) > 1:
                 result = _Lookup(None, None, order, untyped=True)
             elif holders:
                 state, urn = holders[0]
                 result = _Lookup(urn, None, order) if state == "found" else _Lookup(None, None, order, inline=True)
         else:
-            hit = next((st for st in states if st[0] in ("found", "inline")), None)
+            # 別名自身の型リテラルのメンバー（シンボル。BUG-0114）を先に（抽出器が ``o.headers`` を ``InternalOptions.headers`` に直接
+            # 結ぶのと揃える。クラス自身のメンバーが基底より先なのと同じ）、無ければ書いた順に最初に持つ構成
+            own = (st for st, group in zip(states, groups, strict=True) if any(k == "member" for k, _ in group))
+            hit = next((st for st in own if st[0] in ("found", "inline")), None) or next(
+                (st for st in states if st[0] in ("found", "inline")), None
+            )
             external = next((st[1] for st in states if st[0] == "external" and st[1] is not None), None)
             if hit is not None:
                 result = _Lookup(hit[1], None, order) if hit[0] == "found" else _Lookup(None, None, order, inline=True)
@@ -371,13 +498,9 @@ class _Resolver:
             return ("absent", None)
         if tp.startswith(_EXTERNAL_PREFIX):
             return ("external", _external_member(tp, name))
-        kind = self._kind(tp)
-        if kind == ALIAS_KIND:
-            sub = self.lookup_alias(tp, name, depth + 1)
-        elif kind in CLASS_KINDS:
-            sub = self._lookup(tp, name, False)
-        else:
-            return ("unknown", None)  # 型でないシンボル・索引に無い型（たどれなかった再び公開した名前など）
+        # 別名はさらにその構成、クラスは C3、型の分かるメンバー（添字の型 ``B['k']`` の ``B.k``）はその型の構成（BUG-0113）。型でない
+        # シンボル・索引に無い型（たどれなかった再び公開した名前など）は分からない
+        sub = self._in_type(tp, name, depth)
         if sub.found is not None:
             return ("external", sub.found) if sub.found.startswith(_EXTERNAL_PREFIX) else ("found", sub.found)
         if sub.inline:
@@ -431,13 +554,17 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
     if not file_ids:
         return 0
     ids = json.dumps(sorted({int(i) for i in file_ids}))
+    # 結び直す受け手: 整えるファイルのクラス・別名・型の分かるメンバーから、派生クラス（INHERITS を逆に）、構成にそれを持つ別名・
+    # メンバー（_type_aliases を逆に）、型の変わったメンバーの持ち主（メンバーの道 ``hooks.beforeRequest`` の受け手。BUG-0113）
     rows = conn.execute(
         "WITH RECURSIVE"
         "  seed(urn) AS (SELECT urn FROM symbols WHERE file_id IN (SELECT value FROM json_each(:ids))"
         f"   AND kind IN ({_RECEIVER_KIND_LIST})),"
         "  sub(urn) AS (SELECT urn FROM seed UNION"
         "   SELECT r.source_urn FROM relations r JOIN sub ON r.target_urn = sub.urn WHERE r.relation_kind = 'INHERITS'"
-        "   UNION SELECT a.alias_urn FROM _type_aliases a JOIN sub ON a.target_urn = sub.urn WHERE a.kind = 'type'),"
+        "   UNION SELECT a.alias_urn FROM _type_aliases a JOIN sub ON a.target_urn = sub.urn WHERE a.kind = 'type'"
+        "   UNION SELECT s.parent_urn FROM symbols s JOIN sub ON s.urn = sub.urn"
+        f"    WHERE s.parent_urn IS NOT NULL AND s.kind IN ({_TYPED_MEMBER_KIND_LIST})),"
         "  vars(urn) AS (SELECT urn FROM symbols WHERE file_id IN (SELECT value FROM json_each(:ids))"
         f"   AND kind IN ({_VAR_KIND_LIST})"
         "   UNION SELECT var_urn FROM _var_types WHERE type_urn IN (SELECT urn FROM sub))"
@@ -454,19 +581,20 @@ def resolve_member_refs(conn: sqlite3.Connection, file_ids: Sequence[int]) -> in
         new = lk.found
         site = (file_id, source, kind, line, col)
         touched = False
-        if resolver.is_var(str(cls)) or resolver.is_alias(str(cls)):
-            # 型の分からない変数の受け手・構成からメンバーの決まらない型の別名の受け手（BUG-0108）は名前だけの呼び出し・参照にする
-            # （前に書いた行は位置で消して書き直す。BUG-0094）
+        if resolver.by_name(str(cls), str(name)):
+            # 型の分からない変数の受け手・構成からメンバーの決まらない型の別名の受け手（BUG-0108）・型の分からないメンバーの型の
+            # 受け手（BUG-0113）は名前だけの呼び出し・参照にする（前に書いた行は位置で消して書き直す。BUG-0094）
+            leaf = str(name).rpartition(".")[2]
             had = conn.execute(
                 "DELETE FROM _name_calls WHERE file_id = ? AND source_urn = ? AND name = ?"
                 " AND call_site_line = ? AND call_site_col = ?",
-                (file_id, source, name, line, col),
+                (file_id, source, leaf, line, col),
             ).rowcount
             if lk.untyped:
                 conn.execute(
                     "INSERT INTO _name_calls (file_id, source_urn, name, call_site_line, call_site_col, guard_condition,"
                     " use_kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (file_id, source, name, line, col, guard, use_kind or ("call" if kind == "CALLS" else "r")),
+                    (file_id, source, leaf, line, col, guard, use_kind or ("call" if kind == "CALLS" else "r")),
                 )
             touched = bool(had) != lk.untyped
         if new is not None and new.startswith(_EXTERNAL_PREFIX):

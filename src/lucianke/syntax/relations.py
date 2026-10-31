@@ -20,6 +20,11 @@
      ``INHERITS`` 行をファイルをまたいでたどって基底のメンバーに結ぶ（BUG-0075）。
      ``a.b.name`` の受け手は ``a.b`` で、その型は ``a`` が同じファイルのクラスのときの属性 ``b`` の型（注釈・``self.b: T = ...``・
      dataclass のフィールド・``self.b = T()``・戻り値の注釈つきの property / getter。同じファイルの基底も C3 の順）だけから決める（BUG-0079）。
+     TS / JS では、``a`` の型が別ファイルの型・同じファイルのインターフェースなら ``a.b`` の型をメンバーの型 ``<型>.b`` とし（URN は
+     ``<型>.b.name``）、整えがメンバーの型注釈の構成から決める（決まらなければ名前だけ。BUG-0113）。
+     TS の注釈は先頭の名前に縮めずに読む（BUG-0113。``_TsType``）: 添字の型 ``Opts['retry']`` はメンバー ``Opts.retry`` の型、
+     配列 ``Opts[]``・タプルは標準の ``Array``、``Foo | null`` は ``Foo``、構成が 2 つ以上の合併・交差・型リテラル・型引数は分からない、
+     ``Promise<T>`` は ``await`` で ``T``、``Partial<Foo>`` などメンバーを持ち越す標準の型は ``Foo``、``x as Foo`` は ``Foo``。
      ``super().name``・``super(C, self).name``・TS / JS の ``super.name`` は ``super_of``（``C`` の URN）にし、先は整えが ``C`` の
      線形化の次のクラスから決める（BUG-0081）。
   2. 受け手の型が構文から分からなければ（受け手が式〈``a.b``・``f()``・``x[0]`` など。BUG-0079〉でも、名前〈注釈の無い引数・
@@ -72,6 +77,7 @@
 from __future__ import annotations
 
 import functools
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from importlib import resources
@@ -180,6 +186,31 @@ _ATTRIBUTE_NODES = frozenset({"attribute", "member_expression"})
 # 外したメンバーを読むのは型エラー）。ワークスペース・import に同名があれば素通りしない
 _TS_TRANSPARENT_GENERICS = frozenset({"Partial", "Required", "Readonly", "NonNullable", "Pick", "Omit"})
 _TS_MEMBERLESS = frozenset({"null", "undefined", "void", "never"})  # 合併に混ざってもメンバーを持たない構成
+_TS_MEMBER_SCOPES = frozenset({Kind.PROPERTY, Kind.FIELD})  # 型リテラルのメンバーを持つメンバー（``retry: { limit: number }``）
+_TS_TYPE_MEMBERS = frozenset({Kind.PROPERTY, Kind.METHOD})  # 型リテラルのメンバーの種別（BUG-0114）
+# TS の受け手の注釈の読み方（BUG-0113）: ``Promise<T>`` は await で ``T``、添字の型 ``T['k']`` の鍵（識別子の形の文字列だけ）
+_TS_PROMISES = frozenset({"Promise", "PromiseLike"})
+_TS_KEY = re.compile(r"[A-Za-z_$][\w$]*")
+# 型引数を宣言できるノード（注釈の中の ``T`` が型引数なら型は分からない）
+_TS_GENERIC_HOLDERS = frozenset(
+    {
+        "type_alias_declaration",
+        "interface_declaration",
+        "class_declaration",
+        "abstract_class_declaration",
+        "class",
+        "function_declaration",
+        "generator_function_declaration",
+        "function_expression",
+        "function_signature",
+        "arrow_function",
+        "method_definition",
+        "method_signature",
+        "abstract_method_signature",
+        "call_signature",
+        "construct_signature",
+    }
+)
 
 
 # --- 公開型 -----------------------------------------------------------------------------
@@ -377,6 +408,27 @@ class _Import:
     module: bool = False  # ``import a.b.c`` の形（名前でなくモジュール）
 
 
+@dataclass(frozen=True, slots=True)
+class _TsType:
+    """TS の注釈から読んだ受け手の型（BUG-0113）。注釈の綴りの先頭の名前に縮めない。
+
+    * ``name``: 型の名前（``Foo``・``ns.Foo``）。総称の型 ``Foo<T>`` は基底 ``Foo``、メンバーを持ち越す標準の型 ``Partial<Foo>`` は ``Foo``。
+    * ``path``: 添字の型 ``Foo['a']['b']`` のメンバーの列（受け手は ``Foo`` のメンバー ``a`` の型のメンバー ``b`` の型。URN は
+      ``<Foo>.a.b`` で、型は索引の整え〈``index/inherited.py``〉がメンバーの型の構成から決める）。
+    * ``builtin``: 配列 ``T[]``・タプル（標準の ``Array``。同じファイル・import の同名に隠されない）。``Array<T>`` は名前のまま。
+    * ``promised``: ``Promise<T>`` / ``PromiseLike<T>`` の ``T``（``await`` で外す）。
+    """
+
+    name: str
+    path: tuple[str, ...] = ()
+    builtin: bool = False
+    promised: _TsType | None = None
+
+
+type _TypeName = str | _TsType
+"""走査で控える型: Python と構築（``new Foo()``）は名前の綴り、TS の注釈は ``_TsType``。"""
+
+
 @dataclass(slots=True)
 class _Scan:
     """構文木 1 回の走査で集める、束縛と型の表。"""
@@ -384,8 +436,8 @@ class _Scan:
     binders: set[int] = field(default_factory=set)  # 束縛位置の名前ノード（参照に数えない）
     locals: dict[int, set[str]] = field(default_factory=dict)  # 関数ノード → その関数で束縛した名前
     globals: dict[int, set[str]] = field(default_factory=dict)
-    var_types: dict[int, dict[str, str]] = field(default_factory=dict)  # スコープノード → 変数名 → 型名
-    attr_types: dict[int, dict[str, str]] = field(default_factory=dict)  # クラスノード → 属性名 → 型名
+    var_types: dict[int, dict[str, _TypeName]] = field(default_factory=dict)  # スコープノード → 変数名 → 型
+    attr_types: dict[int, dict[str, _TypeName]] = field(default_factory=dict)  # クラスノード → 属性名 → 型
     # 関数・クラスノード → import で束縛した名前 → 文の位置
     imports: dict[int, dict[str, ImportKey]] = field(default_factory=dict)
     nested_imports: set[ImportKey] = field(default_factory=set)  # def / class の中の import 文の位置
@@ -442,6 +494,9 @@ class _Extractor:
         self.class_bases: dict[str, list[str]] = {}  # クラスの修飾名 → 基底クラス名（同じファイルでの解決用）
         self.class_ids: dict[str, int] = {}  # クラスの修飾名 → クラスノードの id（``scan.attr_types`` を引く。BUG-0079）
         self.alias_nodes: list[Node] = []  # TS の ``type A = ...``（走査で文書順に集める。``type_aliases`` が読む。BUG-0108）
+        # TS の型注釈つきのメンバー（インターフェース・型リテラルのプロパティ、クラスのフィールド）。``type_aliases`` がメンバーの
+        # 型の構成を書く（受け手 ``r: Opts['retry']`` ・``o.retry.limit`` の型。BUG-0113）
+        self.member_nodes: list[Node] = []
 
     # --- 名前解決の窓口 ---
 
@@ -558,7 +613,7 @@ class _Extractor:
             sym = self.by_qualified.get(name)
             if sym is None or sym.kind not in _VAR_KINDS:
                 continue
-            ref = self._name_ref(tname, [])
+            ref = self._tname_ref(tname, [])
             if ref is None:
                 continue
             kind, value = ref
@@ -577,11 +632,20 @@ class _Extractor:
         値が名前の型（``B``・``ns.B``・``B<T>``）なら ``and`` の構成 1 つ、交差（``B & {...} & C``）は ``and``、合併（``B | C``）は ``or`` で、
         書いた順に並べる（左に入れ子の二項を平らにする。括弧の中の同じ演算子も）。型リテラル ``{ a: T; m(): void }`` のメンバーは
         別名自身のメンバー（``member``）。``Partial<B>`` などメンバーを持ち越す標準の型は ``B``。それ以外（関数型・条件型・``string``・
-        添字のシグネチャ・別名の型引数・合併の中の交差など）は ``opaque``。
+        添字のシグネチャ・別名の型引数・合併の中の交差など）は ``opaque``。配列・タプルは標準の ``Array``、添字の型 ``B['k']`` は
+        ``<B>.k``（メンバーの型。BUG-0113）。
+
+        型注釈つきのメンバー（インターフェース・型リテラルのプロパティ ``retry?: RetryOptions | number``、クラスのフィールド。シンボルに
+        なったもの）の型も同じ形で書く（``alias_urn`` はメンバーの URN。型リテラル ``retry: { limit: number }`` は ``member`` の
+        ``<メンバー>.limit``。BUG-0113・BUG-0114）。受け手 ``r: Opts['retry']``・``o.retry.limit`` の型を整えが構成から決める。中身の
+        分からない構成しか無いメンバー（``limit: number``）は書かない（行が無ければ型が分からないのと同じ。量を抑える）。
         """
         if self.family != _JS:
             return []
-        return [part for node in self.alias_nodes for part in self._alias_parts(node)]
+        out = [part for node in self.alias_nodes for part in self._alias_parts(node)]
+        for node in self.member_nodes:
+            out.extend(self._member_parts(node))
+        return out
 
     def _alias_parts(self, decl: Node) -> list[TypeAliasCandidate]:
         name = decl.child_by_field_name("name")
@@ -592,21 +656,46 @@ class _Extractor:
         sym = self.by_selection.get((p.line, p.col))
         if sym is None or sym.kind is not Kind.TYPE:
             return []
-        alias_urn = str(sym.urn)
-        params = decl.child_by_field_name("type_parameters")
-        hidden = {
-            self._text(n)
-            for tp in (params.named_children if params is not None else ())
-            if tp.type == "type_parameter" and (n := tp.child_by_field_name("name")) is not None
-        }
+        return self._type_parts(str(sym.urn), value, self._type_params(decl))
+
+    def _member_parts(self, member: Node) -> list[TypeAliasCandidate]:
+        """型注釈つきのメンバー（``property_signature``・``public_field_definition``）の型の構成（BUG-0113）。"""
+        name = member.child_by_field_name("name")
+        annotation = member.child_by_field_name("type")
+        value = next((c for c in annotation.named_children if c.type != "comment"), None) if annotation else None
+        if name is None or value is None:
+            return []
+        p = self.pos(name)
+        sym = self.by_selection.get((p.line, p.col))
+        if sym is None or sym.kind not in (Kind.PROPERTY, Kind.FIELD):
+            return []
+        parts = self._type_parts(str(sym.urn), value, self._type_params(member))
+        return parts if any(part.kind != "opaque" for part in parts) else []
+
+    def _type_parts(self, owner_urn: str, value: Node, hidden: frozenset[str]) -> list[TypeAliasCandidate]:
+        """型 ``value`` の構成（``owner_urn`` は別名・メンバー。型リテラルのメンバーは ``<owner_urn>.<名前>``）。"""
         value = self._unparen(value)
         op = "or" if value.type == "union_type" else "and"
         parts = self._flatten(value, value.type) if value.type in ("union_type", "intersection_type") else [value]
         out: list[TypeAliasCandidate] = []
         for ord_, part in enumerate(parts):
-            for kind, target in self._alias_part(part, alias_urn, hidden, op):
-                out.append(TypeAliasCandidate(alias_urn=alias_urn, op=op, ord=ord_, kind=kind, target_urn=target))
+            for kind, target in self._alias_part(part, owner_urn, hidden, op):
+                out.append(TypeAliasCandidate(alias_urn=owner_urn, op=op, ord=ord_, kind=kind, target_urn=target))
         return out
+
+    def _type_params(self, node: Node) -> frozenset[str]:
+        """``node`` から見える型引数の名前（自身と囲みの別名・インターフェース・クラス・関数・メソッドの ``<T>``）。"""
+        names: set[str] = set()
+        cur: Node | None = node
+        while cur is not None:
+            if cur.type in _TS_GENERIC_HOLDERS:
+                params = cur.child_by_field_name("type_parameters")
+                for tp in params.named_children if params is not None else ():
+                    n = tp.child_by_field_name("name") if tp.type == "type_parameter" else None
+                    if n is not None:
+                        names.add(self._text(n))
+            cur = cur.parent
+        return frozenset(names)
 
     def _unparen(self, node: Node) -> Node:
         while node.type == "parenthesized_type" and node.named_children:
@@ -624,13 +713,18 @@ class _Extractor:
                 out.append(inner)
         return out
 
-    def _alias_part(self, node: Node, alias_urn: str, hidden: set[str], op: str) -> list[tuple[str, str]]:
+    def _alias_part(self, node: Node, alias_urn: str, hidden: frozenset[str], op: str) -> list[tuple[str, str]]:
         """構成 1 つ → ``(kind, target_urn)`` の列（空ならメンバーを持たない構成）。"""
         node = self._unparen(node)
         t = node.type
         if t == "literal_type" or (t == "predefined_type" and self._text(node) in _TS_MEMBERLESS):
             text = self._text(node)
             return [] if text in _TS_MEMBERLESS else [("opaque", "")]
+        if t in ("array_type", "tuple_type", "readonly_type", "lookup_type"):
+            # 配列・タプルは標準の Array（ReadonlyArray）、添字の型 ``B['k']`` はメンバーの型 ``<B>.k``（BUG-0113）
+            ref = self._ts_ref(self._ts_type(node, hidden), [])
+            urn = ref[1] if ref is not None and ref[0] == "urn" and "#" in ref[1] else None
+            return [("type", urn)] if urn is not None else [("opaque", "")]
         if t == "object_type":
             out: list[tuple[str, str]] = []
             for member in node.named_children:
@@ -691,6 +785,156 @@ class _Extractor:
     def _is_global_type(self, name: str) -> bool:
         """``name`` が標準のグローバルの型か（同じファイルの定義・import した同名に隠されていない）。"""
         return name not in self.by_qualified and self.resolve(name) is None and self.resolve_builtin(name) is not None
+
+    # --- TS の注釈の読み方（BUG-0113） ---
+
+    def _ts_type(self, node: Node | None, hidden: frozenset[str] = frozenset()) -> _TsType | None:
+        """TS の型注釈（``type_annotation`` かその中の型）を受け手の型に読む。決まらなければ ``None``（型の分からない受け手）。
+
+        先頭の名前に縮めない（``Opts['retry']`` は ``Opts`` ではなく ``Opts`` のメンバー ``retry`` の型、``Opts[]`` は配列）:
+
+        * 名前の型 ``Foo``・``ns.Foo``（型引数 ``T`` は分からない）。総称の型 ``Foo<T>`` は ``Foo``（``Array<T>`` は ``Array``）。
+        * ``null`` / ``undefined`` / ``void`` / ``never`` を除いて構成が 1 つの合併（``Foo | null``）はその構成。2 つ以上は分からない。
+        * メンバーを持ち越す標準の型（``Partial<Foo>``・``Readonly<Foo>`` など）は ``Foo``。``Promise<T>`` は ``Promise``（``await`` で ``T``）、
+          ``Awaited<Promise<T>>`` は ``T``。
+        * 配列 ``T[]``・タプル ``[A, B]`` は標準の ``Array``、``readonly T[]`` は ``ReadonlyArray``（要素の型にしない）。
+        * 添字の型 ``Foo['k']``（鍵が識別子の形の文字列のときだけ）は ``Foo`` のメンバー ``k`` の型。
+        * それ以外（型リテラル・交差・関数型・条件型・``keyof``・``typeof``・``string`` など）は分からない。
+        """
+        if node is None:
+            return None
+        if node.type == "type_annotation":
+            node = next((c for c in node.named_children if c.type != "comment"), None)
+            if node is None:
+                return None
+        node = self._unparen(node)
+        t = node.type
+        if t == "union_type":
+            keep = [p for p in self._flatten(node, t) if not self._memberless(p)]
+            return self._ts_type(keep[0], hidden) if len(keep) == 1 else None
+        if t == "type_identifier":
+            text = self._text(node)
+            return None if text in hidden else _TsType(text)
+        if t == "nested_type_identifier":
+            return _TsType("".join(self._text(node).split()))
+        if t in ("array_type", "tuple_type"):
+            return _TsType("Array", builtin=True)
+        if t == "readonly_type":
+            inner = next((c for c in node.named_children if c.type != "comment"), None)
+            spec = self._ts_type(inner, hidden) if inner is not None else None
+            return _TsType("ReadonlyArray", builtin=True) if spec is not None and spec.builtin else None
+        if t == "generic_type":
+            base = node.child_by_field_name("name")
+            if base is None:
+                return None
+            args_node = node.child_by_field_name("type_arguments")
+            args = [c for c in args_node.named_children if c.type != "comment"] if args_node is not None else []
+            text = self._text(base)
+            if base.type == "type_identifier" and text not in hidden and self._is_global_type(text):
+                if text in _TS_TRANSPARENT_GENERICS:
+                    return self._ts_type(args[0], hidden) if args else None
+                if text in _TS_PROMISES:
+                    return _TsType(text, promised=self._ts_type(args[0], hidden) if args else None)
+                if text == "Awaited":
+                    inner = self._ts_type(args[0], hidden) if args else None
+                    return inner.promised if inner is not None and inner.name in _TS_PROMISES else inner
+            return self._ts_type(base, hidden)
+        if t == "lookup_type":
+            parts = [c for c in node.named_children if c.type != "comment"]
+            if len(parts) != 2:
+                return None
+            obj = self._ts_type(parts[0], hidden)
+            key = self._string_key(parts[1])
+            if obj is None or key is None or obj.builtin or obj.promised is not None or obj.name in _TS_PROMISES:
+                return None
+            return _TsType(obj.name, (*obj.path, key))
+        return None
+
+    def _memberless(self, node: Node) -> bool:
+        node = self._unparen(node)
+        return node.type in ("literal_type", "predefined_type") and self._text(node) in _TS_MEMBERLESS
+
+    def _string_key(self, node: Node) -> str | None:
+        """添字の型の鍵 ``'retry'``（識別子の形の文字列リテラルの型だけ）。"""
+        if node.type != "literal_type" or node.named_child_count != 1:
+            return None
+        lit = node.named_children[0]
+        if lit.type != "string":
+            return None
+        frags = [c for c in lit.named_children if c.type == "string_fragment"]
+        text = self._text(frags[0]) if len(frags) == 1 and lit.named_child_count == 1 else ""
+        return text if _TS_KEY.fullmatch(text) else None
+
+    def _tname_ref(self, tname: _TypeName, chain: list[SymbolRecord], node: Node | None = None) -> tuple[str, str] | None:
+        """走査で控えた型（名前の綴り・``_TsType``）→ ``("local", 修飾名)`` / ``("urn", URN)``。"""
+        if isinstance(tname, str):
+            return self._name_ref(tname, chain, node)
+        return self._ts_ref(tname, chain, node)
+
+    def _ts_ref(self, spec: _TsType | None, chain: list[SymbolRecord], node: Node | None = None) -> tuple[str, str] | None:
+        """``_TsType`` → ``("local", 修飾名)`` / ``("urn", URN)``。添字の型はメンバーの URN ``<型>.k``（ワークスペースの型だけ。
+        外部の型のメンバーの型は分からない）。"""
+        if spec is None:
+            return None
+        if spec.builtin:
+            urn = self.resolve_builtin(spec.name)
+            return ("urn", urn) if urn is not None else None
+        base = self._dotted_type_ref(spec.name, chain, node)
+        if base is None or not spec.path:
+            return base
+        kind, value = base
+        urn = self._local_urn(value) if kind == "local" else value
+        if urn is None or urn.startswith(_EXTERNAL_PREFIX) or "#" not in urn:
+            return None
+        for key in spec.path:
+            urn = _append_member(urn, key)
+            if urn is None:
+                return None
+        return ("urn", urn)
+
+    def _dotted_type_ref(self, name: str, chain: list[SymbolRecord], node: Node | None) -> tuple[str, str] | None:
+        """型の名前（``Foo``・``ns.Foo``・``a.b.Foo``）→ ``_name_ref`` の形。点つきは先頭の名前（名前空間・``import * as ns``）から
+        たどる（``express.Request`` を同名の標準のグローバル ``Request`` にしない）。"""
+        head, _, rest = name.partition(".")
+        if not rest:
+            return self._name_ref(name, chain, node)
+        ref = self._name_ref(head, chain, node)
+        if ref is None:
+            return None
+        kind, value = ref
+        if kind == "local":
+            hit = self.by_qualified.get(f"{value}.{rest}")
+            if hit is None:
+                return None
+            if hit.kind in _CLASS_KINDS:
+                return ("local", hit.qualified_name)
+            return ("urn", str(hit.urn)) if hit.kind is Kind.TYPE else None
+        urn: str | None = value
+        for seg in rest.split("."):
+            urn = _append_member(urn, seg) if urn is not None else None
+        return ("urn", urn) if urn is not None else None
+
+    def _member_type(self, annotation: Node | None, owner: str | None, name: str) -> _TsType | None:
+        """クラスのメンバー（フィールド・getter）の型。名前の型に読めない注釈（型リテラル・合併・交差）は、メンバー自身の型
+        ``<クラス>['name']``（整えがメンバーの型の構成〈``_type_aliases``〉から決める。``this.opts.z`` の ``opts: { z: number }``）。"""
+        if annotation is None or self.family != _JS:
+            return None
+        spec = self._ts_type(annotation, self._type_params(annotation))
+        if spec is not None or owner is None:
+            return spec
+        inner = next((c for c in annotation.named_children if c.type != "comment"), None)
+        inner = self._unparen(inner) if inner is not None else None
+        if inner is not None and inner.type in ("object_type", "union_type", "intersection_type"):
+            return _TsType(owner, (name,))
+        return None
+
+    def _class_qualified(self, cls: Node | None) -> str | None:
+        """クラスノードの修飾名（シンボルにならなかったクラスは ``None``）。"""
+        name = cls.child_by_field_name("name") if cls is not None else None
+        if name is None:
+            return None
+        sym = self.by_selection.get((self.pos(name).line, self.pos(name).col))
+        return sym.qualified_name if sym is not None else None
 
     # --- 候補の収集 ---
 
@@ -927,12 +1171,17 @@ class _Extractor:
 
     def _resolve_bare(self, name: str, node: Node, chain: list[SymbolRecord]) -> tuple[bool, str | None]:
         """``(ローカルか, URN)``。ローカルに束縛された名前は ``(True, None)``。"""
-        # 囲みの定義を内側から外へ（クラスは、参照がそのクラスの直下にあるときだけ）
+        # 囲みの定義を内側から外へ（クラスは、参照がそのクラスの直下にあるときだけ）。TS の型の別名と、型のメンバーの中の型リテラルの
+        # メンバーは素の名前の範囲ではない（``readonly stop: typeof stop`` の ``stop`` は import した値で、メンバー自身ではない。BUG-0114）
         for i in range(len(chain) - 1, -1, -1):
             s = chain[i]
             if s.kind in _CLASS_KINDS and i != len(chain) - 1:
                 continue
+            if self.family == _JS and s.kind is Kind.TYPE:
+                continue
             hit = self.by_qualified.get(f"{s.qualified_name}.{name}")
+            if hit is not None and self.family == _JS and s.kind in _TS_MEMBER_SCOPES and hit.kind in _TS_TYPE_MEMBERS:
+                continue
             if hit is not None:
                 return False, str(hit.urn)
         kind, key = self._binding(name, node)
@@ -1038,6 +1287,11 @@ class _Extractor:
             return None
         return value
 
+    def _member_path(self, owner_urn: str | None, name: str) -> tuple[str, str] | None:
+        """型 ``owner_urn`` のメンバー ``name`` の型を表す ``("urn", <型>.name)``（BUG-0113。整えが決める）。"""
+        joined = _append_member(owner_urn, name) if owner_urn is not None else None
+        return ("urn", joined) if joined is not None else None
+
     def _local_urn(self, qualified: str) -> str | None:
         try:
             return str(Urn(self.workspace_id, str(self.rel), CodeSel(qualified)))
@@ -1092,7 +1346,7 @@ class _Extractor:
                 out.append(("other", base))
         return out
 
-    def _attr_type(self, class_qualified: str, attr: str) -> str | None:
+    def _attr_type(self, class_qualified: str, attr: str) -> _TypeName | None:
         """同じファイルのクラス ``class_qualified`` の属性 ``attr`` の型名（注釈・property の戻り値・構築の呼び出し）。
 
         クラス自身 → 同じファイルの基底を C3 の順に見る。別ファイルの基底・この場で解決できない基底・中身の分からない外部の基底
@@ -1128,7 +1382,7 @@ class _Extractor:
                 return self._class_ref(cls)
             tname = self._variable_type(text, node)
             if tname is not None:
-                return self._name_ref(tname, chain, node)
+                return self._tname_ref(tname, chain, node)
             if self._is_local(text, node):
                 return None  # 型の分からないローカル変数（同名の import を隠す）
             return self._name_ref(
@@ -1152,13 +1406,23 @@ class _Extractor:
                 # 同じファイルのクラス（``self`` の囲みのクラスを含む）の注釈つきの属性・``self.b: T = ...``・dataclass の
                 # フィールド・戻り値の注釈つきの property（``self.b = T()`` もここに入る）。同じファイルの基底も C3 の順に見る
                 tname = self._attr_type(inner[1], self._text(prop))
-                return self._name_ref(tname, chain, node) if tname is not None else None
+                if tname is not None:
+                    return self._tname_ref(tname, chain, node)
+                if self.family == _JS and inner[1] not in self.class_ids:
+                    # TS: 同じファイルのインターフェースのプロパティ ``b`` の型は、メンバーの型 ``<型>.b``（整えがメンバーの型の構成
+                    # から決める。決まらなければ名前だけ。BUG-0113）。クラスは上の属性の型で決まらなければ分からない（今までどおり）
+                    return self._member_path(self._local_urn(inner[1]), self._text(prop))
+                return None
             if inner[1].startswith(_EXTERNAL_PREFIX) or "#" not in inner[1]:
                 # 外部モジュール・クラスの属性の連鎖（``os.path``、``Decimal.ROUND_HALF_UP``）と、ワークスペースのモジュールの名前
                 # （``model.Capability.DEFINITION`` の ``model.Capability`` は ``model.py#Capability``。それが変数なら整えが型で結び、
                 # シンボルでない〈再び公開した名前〉なら名前だけにする。BUG-0093・BUG-0094）
                 joined = _append_member(inner[1], self._text(prop))
                 return ("urn", joined) if joined is not None else None
+            if self.family == _JS:
+                # TS / JS: 別ファイルの型（クラス・インターフェース・型の別名・メンバーの型）の属性 ``b`` の型は、メンバーの型
+                # ``<型>.b``（``o.retry.limit`` の ``o.retry``。整えがメンバーの型の構成から決め、決まらなければ名前だけ。BUG-0113）
+                return self._member_path(inner[1], self._text(prop))
             return None  # 別ファイルのクラスの属性の型はこの場では分からない
         if t in ("call", "new_expression"):
             fn = recv.child_by_field_name("constructor" if t == "new_expression" else "function")
@@ -1243,7 +1507,7 @@ class _Extractor:
         sym = self.by_selection.get((self.pos(name).line, self.pos(name).col))
         return ("local", sym.qualified_name) if sym is not None else None
 
-    def _variable_type(self, name: str, node: Node) -> str | None:
+    def _variable_type(self, name: str, node: Node) -> _TypeName | None:
         anc: Node | None = node.parent
         while anc is not None:
             if anc.type in self.functions or anc.type in self.classes or anc.parent is None:
@@ -1273,11 +1537,11 @@ class _Extractor:
         if fn is not None:
             self.scan.locals.setdefault(fn.id, set()).add(name)
 
-    def _set_var_type(self, scope: Node, name: str, tname: str | None) -> None:
+    def _set_var_type(self, scope: Node, name: str, tname: _TypeName | None) -> None:
         if tname:
             self.scan.var_types.setdefault(scope.id, {}).setdefault(name, tname)
 
-    def _set_attr_type(self, cls: Node | None, name: str, tname: str | None) -> None:
+    def _set_attr_type(self, cls: Node | None, name: str, tname: _TypeName | None) -> None:
         if cls is not None and tname:
             self.scan.attr_types.setdefault(cls.id, {}).setdefault(name, tname)
 
@@ -1324,7 +1588,7 @@ class _Extractor:
                 return name
         return None
 
-    def _py_value_type(self, value: Node | None, scope: Node | None) -> str | None:
+    def _py_value_type(self, value: Node | None, scope: Node | None) -> _TypeName | None:
         if value is None:
             return None
         if value.type == "await":
@@ -1547,21 +1811,20 @@ class _Extractor:
         elif t in ("assignment_pattern", "object_assignment_pattern"):  # 後者は ``{ foo = 1 }`` の ``foo``
             yield from self._js_targets(node.child_by_field_name("left"))
 
-    def _js_ann_name(self, node: Node | None) -> str | None:
-        if node is None:
-            return None
-        stack = [node]
-        while stack:
-            n = stack.pop()
-            if n.type == "type_identifier":
-                return self._text(n)
-            stack.extend(reversed(n.children))
-        return None
+    def _js_ann(self, node: Node | None) -> _TsType | None:
+        """TS の型注釈 → 受け手の型（``_ts_type``。前は最初の型の名前に縮めていた: ``Opts['retry']`` も ``Opts[]`` も ``Opts``。BUG-0113）。"""
+        return self._ts_type(node, self._type_params(node)) if node is not None else None
 
-    def _js_value_type(self, value: Node | None, fn: Node | None) -> str | None:
+    def _js_value_type(self, value: Node | None, fn: Node | None) -> _TypeName | None:
         if value is None:
             return None
-        if value.type in ("await_expression", "parenthesized_expression", "as_expression"):
+        if value.type == "await_expression":
+            inner = value.named_children[0] if value.named_children else None
+            return _awaited(self._js_value_type(inner, fn))  # ``await p``（``p: Promise<T>``）は T（BUG-0113）
+        if value.type == "as_expression" and value.named_child_count >= 2:
+            # ``x as Foo`` は Foo（``as const`` は型の子を持たない）
+            return self._ts_type(value.named_children[-1], self._type_params(value))
+        if value.type in ("parenthesized_expression", "as_expression", "satisfies_expression"):
             inner = value.named_children[0] if value.named_children else None
             return self._js_value_type(inner, fn)
         if value.type == "new_expression":
@@ -1588,7 +1851,11 @@ class _Extractor:
                     name = node.child_by_field_name("name")
                     if name is not None:
                         self._set_attr_type(
-                            cls, self._text(name), self._js_ann_name(node.child_by_field_name("return_type"))
+                            cls,
+                            self._text(name),
+                            self._member_type(
+                                node.child_by_field_name("return_type"), self._class_qualified(cls), self._text(name)
+                            ),
                         )
                 child_fn = child_scope = node
                 params = node.child_by_field_name("parameters")
@@ -1611,6 +1878,9 @@ class _Extractor:
                     self._record_bases(name, self._ts_interface_base_names(node))
             elif t == "type_alias_declaration":
                 self.alias_nodes.append(node)
+            elif t == "property_signature":
+                if node.child_by_field_name("type") is not None:
+                    self.member_nodes.append(node)  # メンバーの型の構成（BUG-0113）
             elif t == "variable_declarator":
                 name = node.child_by_field_name("name")
                 if name is not None:
@@ -1623,15 +1893,23 @@ class _Extractor:
                         else:
                             self._bind(n, fn)
                     if name.type == "identifier":
-                        tname = self._js_ann_name(node.child_by_field_name("type")) or self._js_value_type(
-                            node.child_by_field_name("value"), fn
+                        annotation = node.child_by_field_name("type")
+                        tname = (
+                            self._js_ann(annotation)
+                            if annotation is not None
+                            else self._js_value_type(node.child_by_field_name("value"), fn)
                         )
                         self._set_var_type(scope, self._text(name), tname)
             elif t in ("public_field_definition", "field_definition"):
                 name = node.child_by_field_name("name") or node.child_by_field_name("property")
+                annotation = node.child_by_field_name("type")
+                if annotation is not None and t == "public_field_definition":
+                    self.member_nodes.append(node)  # メンバーの型の構成（BUG-0113）
                 if name is not None and cls is not None:
-                    tname = self._js_ann_name(node.child_by_field_name("type")) or self._js_value_type(
-                        node.child_by_field_name("value"), fn
+                    tname = (
+                        self._member_type(annotation, self._class_qualified(cls), self._text(name))
+                        if annotation is not None
+                        else self._js_value_type(node.child_by_field_name("value"), fn)
                     )
                     self._set_attr_type(cls, self._text(name), tname)
             elif t == "assignment_expression":
@@ -1671,7 +1949,7 @@ class _Extractor:
                 names = list(self._js_targets(pattern))
                 for n in names:
                     self._bind(n, fn)
-                tname = self._js_ann_name(p.child_by_field_name("type"))
+                tname = self._js_ann(p.child_by_field_name("type"))
                 if pattern is not None and pattern.type == "identifier":
                     self._set_var_type(fn, self._text(pattern), tname)
                     if any(
@@ -1687,6 +1965,13 @@ class _Extractor:
 
 def _neg_pos(p: Position) -> tuple[int, int]:
     return (-p.line, -p.col)
+
+
+def _awaited(tname: _TypeName | None) -> _TypeName | None:
+    """``await`` した値の型: ``Promise<T>`` / ``PromiseLike<T>`` は ``T``（型引数の無い Promise は分からない）、それ以外はそのまま。"""
+    if isinstance(tname, _TsType) and (tname.promised is not None or (tname.name in _TS_PROMISES and not tname.path)):
+        return tname.promised
+    return tname
 
 
 def _append_member(urn_text: str, member: str) -> str | None:

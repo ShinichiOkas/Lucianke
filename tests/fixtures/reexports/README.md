@@ -1,7 +1,7 @@
 # reexports
 
 BUG-0100（再び公開した名前を定義元までたどる）・BUG-0101（名前空間パッケージを外部にしない）・BUG-0104（TS / JS のバレル）・
-BUG-0105（import する側の `from x import *`）・BUG-0109（TS / JS の既定の import。`web/defaults/`）・BUG-0108（TS の型の別名を注釈にした受け手。`web/aliases/`）のフィクスチャ
+BUG-0105（import する側の `from x import *`）・BUG-0109（TS / JS の既定の import。`web/defaults/`）・BUG-0108（TS の型の別名を注釈にした受け手。`web/aliases/`）・BUG-0113 / BUG-0114（TS の受け手の注釈〈添字の型・配列〉と型リテラルのメンバー。`web/members/`）のフィクスチャ
 （`tests/unit/test_engine_indexer_reexports.py`・`tests/contract/test_T06_T07_reexports.py`）。LSP なしの `structural` の索引。
 
 | 箇所 | 書き方 | 期待 |
@@ -40,6 +40,15 @@ BUG-0105（import する側の `from x import *`）・BUG-0109（TS / JS の既�
 | `web/defaults/use.ts` | import 文の行 | 既定の export の定義（無名ならモジュール） |
 | `web/aliases/use.ts` `readAll` | `o: Options`（`type Options = Base & { extra: string; tick(): void }`）の `o.retry`・`b: Box<number>`・`l: Loose`（`Partial<Base>`）・`c: Chain`（別名の別名）・`m: MaybeBase`（`Base \| null \| undefined`）・`d: Derived`（`interface Derived extends Options`）の `.retry` | `web/aliases/base.ts#Base.retry` に `structural`（BUG-0108） |
 | `web/aliases/use.ts` `readAll` | `e.onlyOther`（`type Either = Base \| Other`。持つのは `Other` だけ）・`g.start()`（`type EngineAlias = Engine`）・`d.own` | `base.ts#Other.onlyOther`・`base.ts#Engine.start`・`types.ts#Derived.own` |
-| `web/aliases/use.ts` `readAll` | `o.extra`・`o.tick()`（別名自身の型リテラルのメンバー。シンボルが無い） | 行も名前だけの行も作らない |
+| `web/aliases/use.ts` `readAll` | `o.extra`・`o.tick()`（別名自身の型リテラルのメンバー） | v13 からシンボル `types.ts#Options.extra`・`#Options.tick` に `structural`（BUG-0114。前は行も名前だけの行も作らなかった）。`o.extra.length` の `length` は名前だけ（`extra: string`） |
 | `web/aliases/use.ts` `readAll` | `e.shared`（合併で持つ構成が 2 つ）・`f.length` / `f.arity`（`type Fn = (x: number) => number`）・`bag.anything`（添字のシグネチャ） | 名前だけ（`_name_calls`） |
 | `web/aliases/local.ts` `same` | 同じファイルの `type Mine = Base & { tag: string }` の `m.retry` | `base.ts#Base.retry` |
+| `web/aliases/local.ts` `same` | `m.tag`（別名自身の型リテラルのメンバー） | `local.ts#Mine.tag`（BUG-0114） |
+| `web/members/types.ts` | `type KyOptions = { retry?: Retry \| number; hooks: Hooks; inline: { before: string[]; after(): void }; timeout; readonly stop: typeof stop }`・`interface Opts { nested: { depth; inner: { leaf } } }`・`type Shape = { kind: 'a'; a } \| { kind: 'b'; b }` | 型リテラルのメンバーはシンボル（`KyOptions.retry`・入れ子の `KyOptions.inline.before`・`Opts.nested.inner.leaf`・`Shape.a`。合併の同名の `kind` は最後が素の URN）。T-02 では別名の子。`typeof stop` の `stop` は `consts.ts#stop`（メンバー自身にしない） |
+| `web/members/use.ts` `readAll` | `r: Opts['retry']` の `r.limit`・`r.delay(1)` | `retry.ts#Retry.limit`・`#Retry.delay`（`Opts.limit` に結ばない。BUG-0113） |
+| `web/members/use.ts` `readAll` | `xs: Opts[]` の `xs.length`・`xs.map()`、`ro: readonly Retry[]` の `ro.length` | `lk://_ext/globals#Array.length`・`#Array.map`・`#ReadonlyArray.length`（`Opts` のメンバーにしない） |
+| `web/members/use.ts` `readAll` | `leafy: Opts['nested']['inner']` の `leafy.leaf`、`k: KyOptions` の `k.timeout`・`k.retry`、`o: Options`（`extends KyOptions`）の `o.timeout`・`s: Shape` の `s.a` | `types.ts#Opts.nested.inner.leaf`・`#KyOptions.timeout`・`#KyOptions.retry`・`#Shape.a` |
+| `web/members/use.ts` `readAll` | `o.hooks.before.length`（`hooks: Hooks` は別ファイル）・`o.inline.before.length`・`o.inline.after()`（入れ子の型リテラル） | `KyOptions.hooks` → `retry.ts#Hooks.before` → `Array.length`、`KyOptions.inline` → `#KyOptions.inline.before` → `Array.length`、`#KyOptions.inline.after` |
+| `web/members/use.ts` `readAll` | `s.kind.length`（合併の両方の構成にある `kind`）・`u: Opts['count']` の `u.toFixed()` | `s.kind` は素の URN `#Shape.kind`、`length`・`toFixed` は名前だけ（型が分からない） |
+| `web/members/use.ts` `others` | `await p`（`Promise<Retry>`）の `got.limit`、`idx: Opts[keyof Opts]`・`gone: Opts['missing']`・`gen: T['retry']`（型引数）の `.limit` | `retry.ts#Retry.limit`、ほかの 3 つは名前だけ |
+| `web/members/local.ts` `Server.run` | 同じファイルの `interface Cfg { db: { host; port } }` の `c.db.host`・`h: Cfg['db']` の `h.port`、フィールド `opts: { z: number }` の `this.opts.z` | `local.ts#Cfg.db.host`・`#Cfg.db.port`・`#Server.opts.z` |

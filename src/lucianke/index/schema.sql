@@ -1,4 +1,4 @@
--- schema_version: 12
+-- schema_version: 13
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -303,9 +303,13 @@ CREATE INDEX _reexport_deps_path ON _reexport_deps(path, name);
 -- 関係を整える段がメンバーを構成から探す: and（別名そのもの・交差。書いた順に最初に持つ構成）/ or（合併。持つ構成がちょうど 1 つの
 -- ときだけ）。kind: type（構成の型の URN）/ member（別名自身の型リテラルのメンバー `<別名>.<名前>`）/ opaque（中身の分からない構成。
 -- target_urn は空）。null / undefined / void / never は書かない。取り込みがファイルごとに全置換する。
+-- v13（BUG-0113・BUG-0114）: 型注釈つきのメンバー（インターフェース・型リテラルのプロパティ、クラスのフィールド）の型も同じ形で書く
+-- （alias_urn がメンバー。`r: Opts['retry']`・`o.retry.limit` の受け手の型）。型リテラルのメンバーはシンボル（`KyOptions.retry`・
+-- `KyOptions.retry.limit`）で、member の先はそれを指す。配列は標準の Array、添字の型 `B['k']` は type の `<B>.k`。中身の分からない
+-- 構成しか無いメンバーは書かない。
 CREATE TABLE _type_aliases (
   file_id    INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-  alias_urn  TEXT NOT NULL,                  -- 別名のシンボル
+  alias_urn  TEXT NOT NULL,                  -- 別名・型注釈つきのメンバーのシンボル
   op         TEXT NOT NULL,                  -- and / or
   ord        INTEGER NOT NULL,               -- 構成の順（同じ型リテラルのメンバーは同じ ord）
   kind       TEXT NOT NULL,                  -- type / member / opaque
@@ -320,6 +324,9 @@ CREATE INDEX _type_aliases_file ON _type_aliases(file_id);
 -- 基底のメンバー・基底の並びが変わったら、そのクラスのファイルを整えるときに結び直す（resolved_urn は前に結んだ先）。
 -- `super().save()`（BUG-0081）は取り込みが via_super = 1 で直接入れ、class_urn の C3 線形化の次のクラスから探す。
 -- import した変数の `settings.reload()`（BUG-0094）は class_urn が変数で、_var_types の型の線形化で探す（型が分からなければ _name_calls）。
+-- TS のメンバーの型の受け手（`r: Opts['retry']` の `r.limit`・`o.retry.limit`。BUG-0113）は class_urn がメンバー（`Opts.retry`）で、
+-- その型の構成（_type_aliases）で探す。メンバーがシンボルでない（基底から継承した）ときは class_urn をその持ち主にし、name を点つきの
+-- 道（`retry.limit`）にする。決まらなければ _name_calls（名前は道の最後）。
 CREATE TABLE _member_refs (
   file_id          INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,  -- 参照箇所のファイル（relations.source_file_id）
   source_urn       TEXT NOT NULL,

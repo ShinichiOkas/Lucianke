@@ -460,6 +460,66 @@ def test_ts_ranges_include_export_and_declare() -> None:
     assert _one(result, "N.x").modifiers == ("pub", "export")
 
 
+_TS_TYPE_MEMBERS = b"""\
+/** Options. */
+export type KyOptions = {
+  /** Retry. */
+  retry?: Retry | number;
+  inner: { a: number; b?: { c: string } };
+  fn: (o: { notMe: number }) => void;
+  list: { el: number }[];
+  box: Promise<{ wrapped: number }>;
+  tick(x: number): void;
+};
+export type U = { kind: 'a'; x: number } | { kind: 'b'; y: string };
+export type I = Partial<{ p: number }> & ({ q: string });
+export interface Face { nested: { deep: string; m(): void } }
+export class C { opts: { z: number } = { z: 1 }; get view(): { w: number } { return { w: 1 }; } }
+function f(o: { local: number }): { ret: number } { return { ret: o.local }; }
+"""
+
+
+def test_ts_type_literal_members_are_symbols() -> None:
+    """BUG-0114: 型の別名・メンバーの型注釈に書いた型リテラルのメンバーは Property（メソッドのシグネチャは Method）で、修飾名は持ち主の下
+    （入れ子は ``KyOptions.inner.b.c``）、修飾子は ``pub``。交差・括弧・``Partial<{...}>`` の第 1 型引数・クラスのフィールド・getter の
+    戻り値・インターフェースの入れ子も同じ。関数型の引数・配列の要素・ほかの総称の型引数・関数の引数と戻り値の型リテラルは拾わない。
+    合併の別々の型リテラルの同名のメンバーは衝突の規則で最後が素の URN（再定義の警告は出さない）。"""
+    result = _extract_source("typescript", _TS_TYPE_MEMBERS, "t.ts")
+    got = {s.record.qualified_name: (s.record.kind, s.record.modifiers) for s in result.symbols}
+    prop, method = (Kind.PROPERTY, ("pub",)), (Kind.METHOD, ("pub",))
+    for name in (
+        "KyOptions.retry",
+        "KyOptions.inner",
+        "KyOptions.inner.a",
+        "KyOptions.inner.b",
+        "KyOptions.inner.b.c",
+        "KyOptions.fn",
+        "KyOptions.list",
+        "KyOptions.box",
+        "U.x",
+        "U.y",
+        "I.p",
+        "I.q",
+        "Face.nested",
+        "Face.nested.deep",
+        "C.opts.z",
+        "C.view.w",
+    ):
+        assert got[name] == prop, name
+    assert got["KyOptions.tick"] == method
+    assert got["Face.nested.m"] == method
+    for hidden in ("KyOptions.fn.notMe", "KyOptions.list.el", "KyOptions.box.wrapped", "f.local", "f.ret", "notMe", "el"):
+        assert hidden not in got, hidden
+    retry = _one(result, "KyOptions.retry")
+    assert retry.doc_summary == "Retry."
+    assert str(retry.urn) == "lk://poly/t.ts#KyOptions.retry"
+    assert _one(result, "KyOptions.tick").signature == "(x: number): void"
+    kinds = sorted(str(r.urn) for r in _by_qualified(result)["U.kind"])
+    assert kinds[0] == "lk://poly/t.ts#U.kind"
+    assert len(kinds) == 2 and kinds[1].startswith("lk://poly/t.ts#U.kind~")
+    assert result.warnings == ()
+
+
 def test_tsx_uses_the_typescript_queries() -> None:
     source = b'export function App(): JSX.Element { return <div id="x"/>; }\n'
     result = _extract_source("tsx", source, "App.tsx")

@@ -599,6 +599,42 @@ def test_truncated_containers_are_capped_and_top_level_is_named() -> None:
     assert first.data["truncated_by_container"][-1] == {"container": "(top level)", "omitted": 1}
 
 
+def test_type_literal_members_are_children_of_the_alias() -> None:
+    """BUG-0114: TS の型リテラルのメンバーは別名・メンバーの子（複数行の別名も、1 行の別名・入れ子も）。1 行に書いたものも最上位に
+    並べない（最上位の公開シンボルは縮退で落とせない）ので、縮退ではほかの入れ子のメンバーと同じく落とせる。"""
+    source = (
+        b"export type KyOptions = {\n  /** Retry. */\n  retry?: number;\n  inner: { a: number; b?: { c: string } };\n};\n"
+        b"export type U = { kind: 'a'; x: number } | { kind: 'b'; y: string };\n"
+    )
+    parsed, symbols = parse(source, "typescript", "t.ts")
+    rec = build_file_record(parsed, symbols, rel="t.ts", opts=SkeletonOptions())
+    assert list(rec.lines[1:]) == [
+        "[Type] pub export KyOptions @L1-5",
+        "  [Property] pub retry @L3",
+        "    doc: Retry.",
+        "  [Property] pub inner @L4",
+        "    [Property] pub a @L4",
+        "    [Property] pub b @L4",
+        "      [Property] pub c @L4",
+        "[Type] pub export U @L6",
+        "  [Property] pub kind @L6",
+        f"    urn: {_urn_of(symbols, 'U.kind', first=True)}",
+        "  [Property] pub x @L6",
+        "  [Property] pub kind @L6",
+        "  [Property] pub y @L6",
+    ]
+    [ky] = [s for s in rec.data["symbols"] if s["qualified_name"] == "KyOptions"]
+    assert [c["name"] for c in ky["children"]] == ["retry", "inner"]
+    assert [c["name"] for c in ky["children"][1]["children"]] == ["a", "b"]
+    tiny = _chain(rec)[-1][1]
+    assert _names(tiny) == ["KyOptions", "U"]  # 入れ子のメンバーはすべて落とせる
+
+
+def _urn_of(symbols: list[SymbolRecord], qualified: str, *, first: bool) -> str:
+    found = sorted((s for s in symbols if s.qualified_name == qualified), key=lambda s: s.range.start)
+    return str(found[0 if first else -1].urn)
+
+
 def test_shrink_returns_none_when_nothing_fits() -> None:
     rec = py()
     assert rec.shrink is not None

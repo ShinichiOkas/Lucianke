@@ -756,18 +756,21 @@ async def test_ts_type_alias_receivers_bind_through_the_alias(env: Env) -> None:
     """型の別名を注釈にした受け手のメンバー（BUG-0108）: 交差 ``Base & {...}`` の ``o.retry`` は ``Base.retry`` へ ``structural``。
     別名 = クラス（``g.start()``）・総称の別名（``Box<number>``）・``Partial<Base>``・別名の別名（``Chain``）・別名を継承した
     インターフェース（``d.retry``。``d.own`` はそのインターフェース自身）・``Base | null | undefined``・合併で持つ構成が 1 つ
-    （``e.onlyOther``）・同じファイルの別名（``local.ts`` の ``Mine``）も同じ。別名自身の型リテラルのメンバー（``o.extra``・``o.tick()``）は
-    シンボルが無いので行も名前だけの行も作らない。合併で持つ構成が 2 つ（``e.shared``）・中身の分からない別名（関数型 ``Fn``・
-    添字のシグネチャ ``Bag``）は名前の一致に任せる（``_name_calls``）。"""
+    （``e.onlyOther``）・同じファイルの別名（``local.ts`` の ``Mine``）も同じ。別名自身の型リテラルのメンバー（``o.extra``・``o.tick()``・
+    ``m.tag``）は v13 からシンボル（``types.ts#Options.extra`` など。BUG-0114）なので、それに ``structural`` で結ぶ（``o.extra.length`` の
+    受け手 ``o.extra`` の型 ``string`` は分からないので ``length`` は名前だけ）。合併で持つ構成が 2 つ（``e.shared``）・中身の分からない別名
+    （関数型 ``Fn``・添字のシグネチャ ``Bag``）は名前の一致に任せる（``_name_calls``）。"""
     for needle in ("o.retry;", "b.retry;", "m.retry", "l.retry", "c.retry;", "d.retry;"):
         assert _reads_at(env, AU, A(needle)) == {RETRY}, needle
     assert _reads_at(env, AU, A("e.onlyOther")) == {"web/aliases/base.ts#Other.onlyOther"}
     assert _reads_at(env, AU, A("d.own;")) == {"web/aliases/types.ts#Derived.own"}
     assert env.calls_at(AU, A("g.start();")) == {"web/aliases/base.ts#Engine.start"}
-    assert _reads_at(env, "web/aliases/local.ts#same", line_of("web/aliases/local.ts", "m.retry")) == {RETRY}
-    for needle in ("o.extra.length", "e.shared", "f.length", "f.arity", "bag.anything"):
+    local_line = line_of("web/aliases/local.ts", "m.retry")
+    assert _reads_at(env, "web/aliases/local.ts#same", local_line) == {RETRY, "web/aliases/local.ts#Mine.tag"}
+    assert _reads_at(env, AU, A("o.extra.length")) == {"web/aliases/types.ts#Options.extra"}
+    for needle in ("e.shared", "f.length", "f.arity", "bag.anything"):
         assert _reads_at(env, AU, A(needle)) == set(), needle
-    assert env.calls_at(AU, A("o.tick();")) == set()
+    assert env.calls_at(AU, A("o.tick();")) == {"web/aliases/types.ts#Options.tick"}
     assert env.name_rows(AU) == [
         ("length", A("o.extra.length"), "r"),  # 受け手 o.extra（別名のメンバーの型）は分からない
         ("shared", A("e.shared"), "r"),
@@ -841,6 +844,149 @@ async def test_ts_type_alias_edits_rebind_receivers(env: Env) -> None:
     await env.indexer.index_file("web/aliases/base.ts")
     assert _reads_at(env, AU, A("e.shared")) == set()
     assert ("shared", A("e.shared"), "r") in env.name_rows(AU)
+
+
+# --- BUG-0113・BUG-0114: TS の受け手の注釈（添字の型・配列）と型リテラルのメンバー ----------------------------------
+
+
+MU = "web/members/use.ts#readAll"
+MO = "web/members/use.ts#others"
+MT, MR = "web/members/types.ts#", "web/members/retry.ts#"
+ARRAY_LENGTH = "lk://_ext/globals#Array.length"
+
+
+def M(needle: str) -> int:  # noqa: N802 - 読みやすさのため
+    return line_of("web/members/use.ts", needle)
+
+
+def _targets_at(env: Env, source: str, line: int, kind: str = "REFERENCES") -> set[str]:
+    return {t for t, k, ln, _ in env.rels(source) if k == kind and ln == line}
+
+
+async def test_ts_indexed_access_and_array_receivers(env: Env) -> None:
+    """BUG-0113: ``r: Opts['retry']`` の ``r.limit``・``r.delay()`` はメンバー ``Opts.retry`` の型 ``Retry`` のメンバー（``Opts.limit`` に
+    結ばない）。``xs: Opts[]`` の ``xs.length``・``xs.map()`` は標準の ``Array``、``ro: readonly Retry[]`` は ``ReadonlyArray``（``Opts`` の
+    メンバーにしない）。``Opts['nested']['inner']`` は入れ子の型リテラルのメンバー、``await p``（``Promise<Retry>``）は ``Retry``。
+    型の分からないメンバー（``u: Opts['count']``〈``number``〉）・鍵が文字列でない添字（``Opts[keyof Opts]``）・無いメンバー
+    （``Opts['missing']``）・型引数（``T['retry']``）は名前の一致に任せる（``_name_calls``）。"""
+    assert _targets_at(env, MU, M("r.limit;")) == {MR + "Retry.limit"}
+    assert env.calls_at(MU, M("r.delay(1)")) == {MR + "Retry.delay"}
+    assert _targets_at(env, MU, M("xs.length;")) == {ARRAY_LENGTH}
+    assert env.calls_at(MU, M("xs.map(")) == {"lk://_ext/globals#Array.map"}
+    assert _targets_at(env, MU, M("ro.length;")) == {"lk://_ext/globals#ReadonlyArray.length"}
+    assert _targets_at(env, MU, M("leafy.leaf")) == {MT + "Opts.nested.inner.leaf"}
+    assert not any(t.startswith(MT + "Opts.") and t.count(".") == 1 for t, *_ in env.rels(MU))  # Opts.limit などに結ばない
+    assert _targets_at(env, MO, M("got.limit")) == {MR + "Retry.limit"}
+    assert ("toFixed", M("u.toFixed()"), "call") in env.name_rows(MU)
+    assert [n for n in env.name_rows(MO) if n[0] == "limit"] == [("limit", M("got.limit"), "r")] * 3  # idx・gone・gen
+
+
+async def test_ts_type_literal_members_are_symbols_and_bind(env: Env) -> None:
+    """BUG-0114: 型リテラルのメンバー（``type KyOptions = {...}`` の ``KyOptions.retry``・入れ子の ``KyOptions.inline.before``・合併の
+    ``Shape.a``・インターフェースの入れ子 ``Opts.nested.inner.leaf``・同じファイルの ``Cfg.db.host``・クラスのフィールドの ``Server.opts.z``）は
+    シンボル（Property / Method。``parent_urn`` は持ち主）。受け手 ``k: KyOptions``・``o: Options``（``interface Options extends KyOptions``）
+    の読みはそれに ``structural`` で結び、連鎖 ``o.hooks.before``（``hooks: Hooks``。別ファイル）・``o.inline.before``（入れ子の型リテラル）・
+    ``o.inline.after()`` もメンバーの型から決める。``readonly stop: typeof stop`` の ``stop`` は import した値（メンバー自身にしない）。"""
+    syms = dict(env.rows("SELECT qualified_name, kind FROM symbols WHERE urn LIKE ?", P + "web/members/%"))
+    for name in ("KyOptions.retry", "KyOptions.hooks", "KyOptions.inline", "KyOptions.inline.before", "KyOptions.timeout",
+                 "KyOptions.stop", "Opts.nested", "Opts.nested.inner", "Opts.nested.inner.leaf", "Shape.a", "Shape.b",
+                 "Shape.kind", "Cfg.db.host", "Cfg.db.port", "Server.opts.z"):  # fmt: skip
+        assert syms.get(name) == "Property", name
+    assert syms.get("KyOptions.inline.after") == "Method"
+    parents = dict(env.rows("SELECT qualified_name, parent_urn FROM symbols WHERE urn LIKE ?", P + "web/members/%"))
+    assert parents["KyOptions.inline.before"] == P + MT + "KyOptions.inline"
+    assert parents["KyOptions.retry"] == P + MT + "KyOptions"
+    assert _targets_at(env, MU, M("k.timeout")) == {MT + "KyOptions.timeout"}
+    assert _targets_at(env, MU, M("o.timeout")) == {MT + "KyOptions.timeout"}
+    assert _targets_at(env, MU, M("k.retry")) == {MT + "KyOptions.retry"}
+    assert _targets_at(env, MU, M("o.hooks.before")) == {MT + "KyOptions.hooks", MR + "Hooks.before", ARRAY_LENGTH}
+    assert _targets_at(env, MU, M("o.inline.before")) == {MT + "KyOptions.inline", MT + "KyOptions.inline.before", ARRAY_LENGTH}
+    assert env.calls_at(MU, M("o.inline.after()")) == {MT + "KyOptions.inline.after"}
+    assert _targets_at(env, MU, M("s.a;")) == {MT + "Shape.a"}
+    # 合併の別々の型リテラルの同名のメンバーは素の URN（最後の構成のもの）に結ぶ。その型（文字列リテラル）は分からない
+    assert _targets_at(env, MU, M("s.kind.length")) == {MT + "Shape.kind"}
+    assert ("length", M("s.kind.length"), "r") in env.name_rows(MU)
+    run = "web/members/local.ts#Server.run"
+    loc = "web/members/local.ts#"
+    assert _targets_at(env, run, line_of("web/members/local.ts", "c.db.host")) == {
+        loc + "Cfg.db", loc + "Cfg.db.host", loc + "Cfg.db.port", loc + "Server.opts", loc + "Server.opts.z"
+    }
+    stop_line = line_of("web/members/types.ts", "typeof stop")
+    assert _targets_at(env, "web/members/types.ts#KyOptions.stop", stop_line) == {"web/members/consts.ts#stop"}
+    rows = {
+        (str(a).removeprefix(P), str(op), str(k), str(t).removeprefix(P))
+        for a, op, k, t in env.rows(
+            "SELECT a.alias_urn, a.op, a.kind, a.target_urn FROM _type_aliases a JOIN files f ON f.file_id = a.file_id"
+            " WHERE f.path = 'web/members/types.ts'"
+        )
+    }
+    assert (MT + "Opts.retry", "and", "type", MR + "Retry") in rows
+    assert (MT + "KyOptions.retry", "or", "type", MR + "Retry") in rows
+    assert (MT + "KyOptions.inline", "and", "member", MT + "KyOptions.inline.before") in rows
+    assert (MT + "KyOptions.inline.before", "and", "type", "lk://_ext/globals#Array") in rows
+    assert not any(a in (MT + "Opts.count", MT + "KyOptions.timeout") for a, *_ in rows)  # 中身の分からない構成だけは書かない
+
+
+async def test_ts_member_type_edits_rebind_receivers(env: Env) -> None:
+    """BUG-0113: メンバーの型・その型の編集で受け手が結び直る。``retry.ts`` の ``Retry`` から ``limit`` を消すと ``r.limit``・``got.limit``
+    の行が消え、戻すと戻る（別のファイルの型）。``Hooks`` から ``before`` を消すと、基底の別名から継承したメンバーの道
+    ``o.hooks.before`` の行が消えて戻る。``Opts.retry`` の型を ``Hooks`` にすると ``r.limit`` の行が消える（メンバーの型の編集）。"""
+    retry = env.text("web/members/retry.ts")
+    env.write("web/members/retry.ts", retry.replace("  limit: number;\n", ""))
+    await env.indexer.index_file("web/members/retry.ts")
+    assert _targets_at(env, MU, M("r.limit;")) == set()
+    assert _targets_at(env, MO, M("got.limit")) == set()
+    env.write("web/members/retry.ts", retry)
+    await env.indexer.index_file("web/members/retry.ts")
+    assert _targets_at(env, MU, M("r.limit;")) == {MR + "Retry.limit"}
+    assert _targets_at(env, MO, M("got.limit")) == {MR + "Retry.limit"}
+    env.write("web/members/retry.ts", retry.replace("  before: string[];\n", ""))
+    await env.indexer.index_file("web/members/retry.ts")
+    assert MR + "Hooks.before" not in _targets_at(env, MU, M("o.hooks.before"))
+    env.write("web/members/retry.ts", retry)
+    await env.indexer.index_file("web/members/retry.ts")
+    assert MR + "Hooks.before" in _targets_at(env, MU, M("o.hooks.before"))
+    # シンボルの集合が変わらない編集（メンバーの型だけ。import している側は取り込み直さない）でも、メンバーの型の持ち主をたどって
+    # 道の受け手 ``o.hooks.before`` の ``.length`` が結び直る（配列 → ``number`` で名前だけに。戻すと戻る）
+    env.write("web/members/retry.ts", retry.replace("  before: string[];\n", "  before: number;\n"))
+    await env.indexer.index_file("web/members/retry.ts")
+    assert _targets_at(env, MU, M("o.hooks.before")) == {MT + "KyOptions.hooks", MR + "Hooks.before"}
+    assert ("length", M("o.hooks.before"), "r") in env.name_rows(MU)
+    env.write("web/members/retry.ts", retry)
+    await env.indexer.index_file("web/members/retry.ts")
+    assert ARRAY_LENGTH in _targets_at(env, MU, M("o.hooks.before"))
+    assert ("length", M("o.hooks.before"), "r") not in env.name_rows(MU)
+    types = env.text("web/members/types.ts")
+    env.write("web/members/types.ts", types.replace("  retry: Retry;\n", "  retry: Hooks;\n"))
+    await env.indexer.index_file("web/members/types.ts")
+    assert _targets_at(env, MU, M("r.limit;")) == set()
+    env.write("web/members/types.ts", types)
+    await env.indexer.index_file("web/members/types.ts")
+    assert _targets_at(env, MU, M("r.limit;")) == {MR + "Retry.limit"}
+
+
+def test_migration_12_to_13_reingests_ts_js_files(tmp_path: Path) -> None:
+    """v12 の DB は表を変えず、TS / JS のファイルの ``sha256`` を空にする（型リテラルのメンバーのシンボル・メンバーの型の構成は取り込み
+    直さないと作れない。BUG-0113・BUG-0114）。Python と他の言語は取り込み直さない。"""
+    conn = open_writer(tmp_path / "paad.sqlite")
+    try:
+        ensure_schema(conn)
+        _tx(conn, lambda c: upsert_workspace(c, {"workspace_id": WS_ID, "root_path": "/ws"}))
+        files = (("a.py", "python"), ("b.ts", "typescript"), ("c.tsx", "tsx"), ("d.js", "javascript"), ("R.md", "markdown"))
+        for path, language in files:
+            _tx(conn, lambda c, p=path, lang=language: ingest_file(c, _facts(p, lang)))
+        conn.execute("UPDATE _meta SET schema_version = 12")
+        assert ensure_schema(conn) is SchemaAction.MIGRATED
+        assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 13
+        assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
+            "a.py": "a" * 64,
+            "b.ts": "",
+            "c.tsx": "",
+            "d.js": "",
+            "R.md": "a" * 64,
+        }
+    finally:
+        conn.close()
 
 
 def test_migration_11_to_12_adds_type_aliases_and_reingests_ts_js_files(tmp_path: Path) -> None:

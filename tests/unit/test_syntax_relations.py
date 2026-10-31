@@ -730,6 +730,96 @@ def test_unsupported_language_and_queries():
         load_refs_source("rust")
 
 
+_TS_ANNOTATIONS = b"""\
+import type { Opts, Retry } from './types';
+import * as express from 'express';
+
+export async function f(r: Opts['retry'], xs: Opts[], t: [Opts, Retry], ro: readonly Opts[], u: Opts | null | undefined, w: Opts | Retry, p: Promise<Opts>, q: Partial<Opts>, e: express.Request, g: Opts['a']['b'], k: Opts[keyof Opts], a: Array<Opts>, i: Opts & Retry, o: { limit: number }) {
+  r.limit;
+  xs.length;
+  t.length;
+  ro.length;
+  u.limit;
+  w.limit;
+  p.then;
+  const got = await p;
+  got.limit;
+  q.limit;
+  e.body;
+  g.x;
+  k.x;
+  a.length;
+  i.limit;
+  o.limit;
+  const c = r as unknown as Retry;
+  c.limit;
+}
+
+function gen<T extends Opts>(v: T, m: T['retry']) {
+  v.limit;
+  m.limit;
+}
+"""
+
+
+def test_ts_receiver_annotations_are_read_precisely() -> None:
+    """BUG-0113: TS の受け手の注釈を先頭の名前に縮めない。添字の型 ``Opts['retry']`` はメンバー ``Opts.retry`` の型（URN は
+    ``Opts.retry.limit``。型は整えが決める）、``Opts[]``・タプル・``Array<Opts>`` は標準の ``Array``、``readonly Opts[]`` は
+    ``ReadonlyArray``（``Opts`` のメンバーにしない）。``Opts | null | undefined`` は ``Opts``、構成が 2 つの合併・交差・型リテラル・
+    鍵が文字列でない添字・型引数は分からない（名前だけ）。``Promise<Opts>`` は ``Promise``・``await`` で ``Opts``、``Partial<Opts>`` は
+    ``Opts``、``express.Request`` は import した ``express`` の ``Request``（標準のグローバルの ``Request`` にしない）、``x as Retry`` は
+    ``Retry``。"""
+    names = {"Opts": f"lk://{WS}/types.ts#Opts", "Retry": f"lk://{WS}/types.ts#Retry", "express": "lk://_ext/express"}
+    parsed = _parsed("typescript", _TS_ANNOTATIONS)
+    language = _language("typescript")
+    symbols = extract(
+        parsed,
+        language_id="typescript",
+        language=language,
+        query_source=load_query_source("typescript"),
+        workspace_id=WS,
+        rel=RelPath("use.ts"),
+    )
+    rels = extract_relations(
+        parsed,
+        language_id="typescript",
+        language=language,
+        symbols=symbols,
+        workspace_id=WS,
+        rel=RelPath("use.ts"),
+        resolve_name=names.get,
+        builtins_package="globals",
+    )
+    lines = _TS_ANNOTATIONS.decode().splitlines()
+
+    def at(needle: str) -> RelationCandidate:
+        line = next(i for i, text in enumerate(lines) if text.strip() == needle)
+        name = needle.rstrip(";").rsplit(".", 1)[1]
+        [hit] = [r for r in rels if r.call_site_line == line and r.target_name == name]
+        return hit
+
+    t = f"lk://{WS}/types.ts#"
+    expected = {
+        "r.limit;": t + "Opts.retry.limit",
+        "xs.length;": "lk://_ext/globals#Array.length",
+        "t.length;": "lk://_ext/globals#Array.length",
+        "ro.length;": "lk://_ext/globals#ReadonlyArray.length",
+        "u.limit;": t + "Opts.limit",
+        "p.then;": "lk://_ext/globals#Promise.then",
+        "got.limit;": t + "Opts.limit",
+        "q.limit;": t + "Opts.limit",
+        "e.body;": "lk://_ext/express#Request.body",
+        "g.x;": t + "Opts.a.b.x",
+        "a.length;": "lk://_ext/globals#Array.length",
+        "c.limit;": t + "Retry.limit",
+    }
+    for needle, target in expected.items():
+        assert at(needle).target_urn == target, needle
+    for needle in ("w.limit;", "k.x;", "i.limit;", "o.limit;", "v.limit;", "m.limit;"):
+        hit = at(needle)
+        assert hit.target_urn is None and hit.name_only, needle
+
+
 def _relations_unsupported() -> None:
     extract_relations(
         _parsed("python", b"x = 1\n"),

@@ -4,7 +4,11 @@
 定義ノードごとに次を決める（S-2: ``captures()`` では ``@name`` と ``@definition.*`` の対応が失われるので ``matches()``）。
 
 * 種別: タグ + 囲みの定義（クラスの中の関数は Method、``__init__`` / ``constructor`` は Constructor、
-  全大文字の名前は Constant、関数の中の変数は捨てる、など）。
+  全大文字の名前は Constant、関数の中の変数は捨てる、など）。TS の型リテラルのメンバー（``type KyOptions = { retry?: …; m(): void }``）は、
+  型の別名・メンバーの型注釈（``retry: { limit: number }``・クラスのフィールド・getter）に書いたもの（括弧・合併・交差・``Partial<{…}>`` など
+  メンバーを持ち越す標準の型の第 1 型引数を通る）だけ Property / Method にする。修飾名は持ち主の下（``KyOptions.retry``・入れ子は
+  ``KyOptions.retry.limit``）、修飾子は ``pub``（BUG-0114）。関数型の引数・配列の要素などの型リテラルは持ち主のメンバーではないので拾わない。
+  合併の別々の型リテラルの同名のメンバー（``{ kind: 'a' } | { kind: 'b' }``）は衝突の規則で最後が素の URN（再定義の警告は出さない）。
 * 修飾名: 囲みの定義の修飾名 + ``.`` + 名前。モジュールパスは入れない（URN の path が持つ。仕様書 §7.2）。
 * range: 定義ノード。Python では ``decorated_definition``、TS / JS では ``export_statement`` /
   ``ambient_declaration`` / 単一宣言の ``lexical_declaration`` まで広げる。Doc コメントやデコレータ（TS のクラスメンバー）を
@@ -76,6 +80,11 @@ _JS_FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "funct
 _JS_DECLARATIONS = frozenset({"lexical_declaration", "variable_declaration"})
 _CALLABLE_KINDS = frozenset({Kind.FUNCTION, Kind.METHOD, Kind.CONSTRUCTOR, Kind.PROPERTY})
 _MEMBER_PARENTS = frozenset({Kind.CLASS, Kind.INTERFACE})
+# TS の型リテラルのメンバー（BUG-0114）: 持ち主（型の別名・メンバー）から型リテラルまでに通ってよいノード。メンバーを持ち越す
+# 標準の型は第 1 型引数だけ（``syntax/relations._TS_TRANSPARENT_GENERICS`` と同じ集合。別名の構成 ``_type_aliases`` の member と揃える）
+_TS_TYPE_WRAPPERS = frozenset({"parenthesized_type", "union_type", "intersection_type"})
+_TS_TRANSPARENT_GENERICS = frozenset({"Partial", "Required", "Readonly", "NonNullable", "Pick", "Omit"})
+_TYPE_MEMBER_OWNERS = frozenset({Kind.TYPE, Kind.PROPERTY, Kind.FIELD})
 _PY_PROPERTY_DECORATORS = frozenset({"property", "cached_property", "abstractproperty"})
 _PY_ACCESSOR_DECORATOR = re.compile(r"^[\w.]+\.(setter|deleter|getter)$")
 _JSDOC_PREFIX = re.compile(r"^\s*\*+\s?")
@@ -160,6 +169,7 @@ class _Def:
     accessor: str | None = None  # TS の get / set
     selector: CodeSel | None = None
     index: int = field(default=0)
+    type_member: bool = False  # TS の型リテラル ``{ a: T }`` のメンバー（BUG-0114）
 
 
 def extract_detailed(
@@ -309,6 +319,7 @@ class _Ctx:
         sig_node = self._signature_node(node, kind)
         signature, return_type, arity = self._signature(sig_node)
         qualified = f"{parent.qualified}.{name_full}" if parent is not None else name_full
+        type_member = self.family == _JS and node.parent is not None and node.parent.type == "object_type"
         return _Def(
             node=node,
             name_node=name_node,
@@ -317,13 +328,14 @@ class _Ctx:
             parent=parent,
             qualified=qualified,
             outer=outer,
-            modifiers=self._modifiers(node, name, parent, crossed, exported, decorators, sig_node),
+            modifiers=self._modifiers(node, name, parent, crossed, exported, decorators, sig_node, type_member),
             signature=signature,
             return_type=return_type,
             arity=arity,
             doc_summary=self._doc(node, outer),
             body_sha256=self._body_sha(node),
             accessor=accessor,
+            type_member=type_member,
         )
 
     # --- 種別 ---
@@ -371,9 +383,15 @@ class _Ctx:
         if tag in fixed:
             return fixed[tag], None, []
         container = node.parent.type if node.parent is not None else ""
+        if container == "object_type" and tag in ("method", "property"):
+            # 型リテラルのメンバー（BUG-0114）: 型の別名・メンバーの型に書いたものだけ（関数型の引数・配列の要素などの型リテラルは
+            # 持ち主の型のメンバーではない）。メソッドのシグネチャは Method、それ以外は Property
+            if crossed or not self._type_member_position(node, parent):
+                return None
+            return (Kind.METHOD if tag == "method" else Kind.PROPERTY), None, []
         if tag == "method":
             if container not in ("class_body", "interface_body") or pk not in _MEMBER_PARENTS:
-                return None  # オブジェクトリテラルのメソッド・型リテラルのメンバー
+                return None  # オブジェクトリテラルのメソッド
             if name == "constructor" and pk is Kind.CLASS:
                 return Kind.CONSTRUCTOR, None, []
             keywords = {c.type for c in node.children}
@@ -401,6 +419,45 @@ class _Ctx:
                 return Kind.CLASS, None, []
             return (Kind.CONSTANT if name.isupper() else Kind.VARIABLE), None, []
         return None
+
+    def _type_member_position(self, member: Node, parent: _Def | None) -> bool:
+        """型リテラルのメンバー ``member`` が、持ち主 ``parent`` の型のメンバーか（BUG-0114）。
+
+        型リテラルから上へ、括弧・合併・交差と、メンバーを持ち越す標準の型（``Partial<{...}>`` など）の第 1 型引数だけを通って、
+        ``type A = ...`` の値（持ち主は別名）か、メンバーの型注釈 ``retry: {...}``（持ち主はインターフェース・型リテラルのプロパティ・
+        クラスのフィールド・getter）に着くこと。関数型の引数・配列の要素・ほかの総称の型引数の型リテラルは持ち主のメンバーではない。
+        """
+        if parent is None or parent.kind not in _TYPE_MEMBER_OWNERS:
+            return False
+        cur = member.parent
+        while cur is not None:
+            up = cur.parent
+            if up is None:
+                return False
+            if up.type in _TS_TYPE_WRAPPERS:
+                cur = up
+                continue
+            if up.type == "type_arguments":
+                generic = up.parent
+                base = generic.child_by_field_name("name") if generic is not None else None
+                first = next((c for c in up.named_children if c.type != "comment"), None)
+                if (
+                    generic is None
+                    or generic.type != "generic_type"
+                    or base is None
+                    or base.type != "type_identifier"
+                    or self.text(base) not in _TS_TRANSPARENT_GENERICS
+                    or first is None
+                    or first.id != cur.id
+                ):
+                    return False
+                cur = generic
+                continue
+            if parent.kind is Kind.TYPE:
+                value = up.child_by_field_name("value")
+                return up.id == parent.node.id and value is not None and value.id == cur.id
+            return up.type == "type_annotation" and up.parent is not None and up.parent.id == parent.node.id
+        return False
 
     # --- 範囲・export ---
 
@@ -502,6 +559,7 @@ class _Ctx:
         exported: bool,
         decorators: list[str],
         sig_node: Node | None,
+        type_member: bool = False,
     ) -> tuple[str, ...]:
         mods: list[str] = []
         if self.family == _PYTHON:
@@ -519,7 +577,9 @@ class _Ctx:
         keywords = {c.type for c in node.children}
         accessibility = next((self.text(c) for c in node.children if c.type == "accessibility_modifier"), "")
         pk = parent.kind if parent is not None else None
-        if pk in _MEMBER_PARENTS:
+        if type_member:
+            mods.append("pub")  # 型リテラルのメンバーは型の公開メンバー（BUG-0114）
+        elif pk in _MEMBER_PARENTS:
             if name.startswith("#") or accessibility == "private":
                 mods.append("priv")
             elif accessibility == "protected":
@@ -718,9 +778,15 @@ def _assign_selectors(defs: Iterable[_Def], ctx: _Ctx, rel: RelPath) -> list[str
                     continue
                 same_sig.sort(key=lambda d: d.node.start_byte)
                 same_sig[-1].selector = CodeSel(qualified, base_arity)
+                # 合併の別々の型リテラルの同名のメンバー（``{ kind: 'a' } | { kind: 'b' }``）は再定義ではない（BUG-0114）
+                branches = all(d.type_member for d in same_sig) and len(
+                    {d.node.parent.id for d in same_sig if d.node.parent is not None}
+                ) == len(same_sig)
                 for d in same_sig[:-1]:
                     line = ctx.range_of(d.outer).start.line + 1
                     d.selector = CodeSel(qualified, base_arity, sighash(sig, start_line=line))
+                    if branches:
+                        continue
                     warnings.append(
                         f"{rel}:{line}: duplicate definition of {qualified} with an identical signature; "
                         f"the last definition keeps the plain URN, this one is #{_selector_text(d.selector)}"

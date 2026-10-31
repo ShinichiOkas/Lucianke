@@ -366,10 +366,9 @@ def _build_tree(
     stack: list[_Entry] = []
     for i in order:
         sym, span = symbols[i], spans[i]
-        # 親 = 範囲をちょうど含む最も内側のシンボル。同じ範囲は兄弟（親子にしない）
-        while stack and not (
-            stack[-1].span[0] <= span[0] and span[1] <= stack[-1].span[1] and stack[-1].span != span
-        ):
+        # 親 = 範囲をちょうど含む最も内側のシンボル。同じ範囲は兄弟（親子にしない）。ただし同じ範囲でも修飾名が「親の修飾名 + .」で
+        # 始まるものは子（1 行に書いた型リテラルのメンバー ``type U = { a: string }`` の ``U.a``。最上位に並べると縮退で落とせない。BUG-0114）
+        while stack and not _encloses(stack[-1], sym, span):
             stack.pop()
         parent = stack[-1] if stack else None
         private = _is_private(sym, top_level=parent is None, language_id=parsed.language_id)
@@ -385,6 +384,13 @@ def _build_tree(
             (parent.children if parent is not None else roots).append(entry)
         stack.append(entry)
     return roots
+
+
+def _encloses(parent: _Entry, sym: SymbolRecord, span: tuple[int, int]) -> bool:
+    """``parent`` が ``sym``（行の範囲 ``span``）の親になれるか（``_build_tree``）。"""
+    if not (parent.span[0] <= span[0] and span[1] <= parent.span[1]):
+        return False
+    return parent.span != span or sym.qualified_name.startswith(parent.sym.qualified_name + ".")
 
 
 def _count(entries: Sequence[_Entry]) -> int:

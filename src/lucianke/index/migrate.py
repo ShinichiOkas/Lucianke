@@ -232,6 +232,17 @@ def _migrate_11_to_12(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE files SET sha256 = '' WHERE language IN ('typescript', 'tsx', 'javascript', 'jsx')")
 
 
+def _migrate_12_to_13(conn: sqlite3.Connection) -> None:
+    """v13: TS の型リテラルのメンバー（``type KyOptions = { retry?: … }`` の ``KyOptions.retry``・入れ子の ``KyOptions.retry.limit``）を
+    シンボルにし（BUG-0114）、受け手の注釈を先頭の名前に縮めずに読む（``r: Opts['retry']`` はメンバー ``Opts.retry`` の型、``Opts[]`` は
+    配列。BUG-0113）。型注釈つきのメンバーの型の構成を ``_type_aliases`` に書く（表は変えない）。
+
+    どれも取り込みのときにしか作れないので、TS / JS のファイルの ``sha256`` を空にして、次の差分走査で取り込み直させる（Python のファイルは
+    変わらない）。
+    """
+    conn.execute("UPDATE files SET sha256 = '' WHERE language IN ('typescript', 'tsx', 'javascript', 'jsx')")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -244,6 +255,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     9: _migrate_9_to_10,
     10: _migrate_10_to_11,
     11: _migrate_11_to_12,
+    12: _migrate_12_to_13,
 }
 
 

@@ -24,6 +24,7 @@ from lucianke.index.writer import IndexWriter
 from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
 from lucianke.syntax.parsers import TreeCache
+from lucianke.tools import register_tools
 from lucianke.tools import t06_find_references_and_implementations as t06
 from lucianke.tools import t07_query_call_hierarchy as t07
 from lucianke.tools._services import ToolServices
@@ -77,6 +78,16 @@ def pipeline(db: Path) -> Pipeline:
     registry = ToolRegistry()
     registry.register(t06.TOOL_SPEC)
     registry.register(t07.TOOL_SPEC)
+    return Pipeline(registry, services=services)
+
+
+@pytest.fixture
+def all_tools(db: Path) -> Pipeline:
+    """T-02 / T-03 / T-04 / T-06 をまとめて呼ぶパイプライン（型リテラルのメンバーのシンボル。BUG-0114）。"""
+    base = build_services(lambda: [str(db.parent.parent / WS)])
+    services = _Services(roots=base.roots, trees=base.trees, lines=base.lines, db_path=db)
+    registry = ToolRegistry()
+    register_tools(registry)
     return Pipeline(registry, services=services)
 
 
@@ -248,3 +259,40 @@ async def test_t06_ts_type_alias_receiver_reads(pipeline: Pipeline) -> None:
     assert ("web/aliases/local.ts", line_of("web/aliases/local.ts", "m.retry"), "r", "structural") in retry
     shared = sites(await refs(pipeline, {"path": "web/aliases/base.ts", "symbol_name": "Base.shared"}))
     assert (use, line_of(use, "e.shared"), "r", "structural") not in shared
+
+
+async def test_t02_t03_t04_t06_ts_type_literal_members(all_tools: Pipeline) -> None:
+    """PC:T-02#1 PC:T-06#2 TS の型リテラルのメンバー（``type KyOptions = {...}``）はシンボル（BUG-0114）: T-02 の骨格では別名の子
+    （入れ子は ``inline`` の子）、T-03 で名前で見つかり、T-04 で ``KyOptions.inline.before`` が解決でき、T-06 の対象にでき、受け手
+    ``k: KyOptions``・``o: Options``（別名を継承したインターフェース）の読みが ``structural`` で出る。受け手の注釈 ``r: Opts['retry']`` の
+    ``r.limit`` は ``Retry.limit`` の参照に出て、``Opts.limit`` の参照には出ない（BUG-0113）。"""
+    types, use = "web/members/types.ts", "web/members/use.ts"
+    sk = await all_tools.call_tool("get_file_skeleton", {"format": "json", "paths": [types], "max_tokens": 8000})
+    assert not sk.is_error, sk.text
+    assert sk.structured["data"]["items"][0]["truncated_members"] == 0
+    [ky] = [s for s in sk.structured["data"]["items"][0]["symbols"] if s["qualified_name"] == "KyOptions"]
+    assert [c["name"] for c in ky["children"]] == ["retry", "hooks", "inline", "timeout", "stop"]
+    assert [c["qualified_name"] for c in ky["children"][2]["children"]] == ["KyOptions.inline.before", "KyOptions.inline.after"]
+    found = await all_tools.call_tool(
+        "search_workspace_symbols", {"format": "json", "query": "retry", "match": "exact", "scope_paths": ["web/members"]}
+    )
+    assert not found.is_error, found.text
+    assert {(s["qualified_name"], s["kind"]) for s in found.structured["data"]["symbols"]} >= {
+        ("KyOptions.retry", "Property"),
+        ("Opts.retry", "Property"),
+    }
+    resolved = await all_tools.call_tool(
+        "resolve_symbols", {"format": "json", "targets": [{"path": types, "symbol_name": "KyOptions.inline.before"}]}
+    )
+    assert not resolved.is_error, resolved.text
+    assert resolved.structured["data"]["items"][0]["symbol"]["urn"] == U(types, "KyOptions.inline.before")
+    timeout = sites(await refs(all_tools, {"path": types, "symbol_name": "KyOptions.timeout"}))
+    for needle in ("k.timeout", "o.timeout"):
+        assert (use, line_of(use, needle), "r", "structural") in timeout, (needle, timeout)
+    before = sites(await refs(all_tools, {"urn": U(types, "KyOptions.inline.before")}))
+    assert (use, line_of(use, "o.inline.before"), "r", "structural") in before
+    limit = sites(await refs(all_tools, {"path": "web/members/retry.ts", "symbol_name": "Retry.limit"}))
+    assert (use, line_of(use, "r.limit;"), "r", "structural") in limit
+    assert (use, line_of(use, "got.limit"), "r", "structural") in limit
+    wrong = sites(await refs(all_tools, {"path": types, "symbol_name": "Opts.limit"}))
+    assert not any(p == use and ln == line_of(use, "r.limit;") for p, ln, *_ in wrong), wrong
