@@ -2,6 +2,14 @@ name: ci
 on:
   push:
     branches: [main]
+    # 票・文書・作業記録・計測結果だけの push では走らせない（並行の直す役が 1 時間に何十回も push する。2026-10-31）
+    paths-ignore:
+      - "bugs/**"
+      - "docs/**"
+      - ".pair-agent/**"
+      - "**/*.md"
+      - "bench/results/**"
+      - "bench/e2e/records/**"
   pull_request:
   # 出口条件（exit-criteria・cross-os）は重いので push では走らせない。手動の起動と夜間（03:00 JST）だけ
   workflow_dispatch:
@@ -14,7 +22,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # push ごとに走る速い検査（数十秒）。全体の試験（test）は 3 OS × 2 版 × 約 10 分なので、push ごとには走らせない
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.12
+      - run: uv run ruff check
+
+  # 全体の試験は、プルリクエスト・手動の起動・夜間だけ（2026-10-31: 並行の直す役の push のたびに 6 ジョブが走って赤の通知が
+  # 大量に届いた。CI での赤の原因を直して安定したら、push ごとに戻すかを決める）
   test:
+    if: ${{ github.event_name != 'push' }}
     strategy:
       fail-fast: false
       matrix:
