@@ -3,7 +3,7 @@
 この文書は、セッションが中断した（トークンクォータ等）ときに、**別の PC・別のエージェントが続きを拾うため**の現在地。
 作業が進んだらこの文書を更新してコミットする（履歴は git に残る）。
 
-最終更新: 2026-10-31 19 時台 / 対象: `main` / このセッションで BUG-0062〜0135 を処理し、exe 配布・能力測定の基準（Mnemo）・競合比較（Serena）・試しのリリース（`v0.0.1-rc1`）を入れた（§2・§6・§7）
+最終更新: 2026-10-31 19 時台 / 対象: `main` / このセッションで BUG-0062〜0136 を処理し、exe 配布・能力測定の基準（Mnemo）・競合比較（Serena）・試しのリリース（`v0.0.1-rc1`）を入れた（§2・§6・§7）
 
 ---
 
@@ -11,7 +11,7 @@
 
 ```powershell
 git pull
-uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `d3c676e` で 4402 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
+uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `4932bc8` で 4407 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
@@ -28,7 +28,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `4402 passed, 30 skipped, 0 failed`（2026-10-31・`d3c676e` に固定した作業ツリー・13 分 47 秒。`13535ff` も同じ。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
+| 全体テスト | `4407 passed, 30 skipped, 0 failed`（2026-10-31・`4932bc8` に固定した作業ツリー・13 分 4 秒。`d3c676e`・`13535ff` も 0 failed。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
 | 索引 DB のスキーマ | **v15**（v5 `_name_calls`=BUG-0071、v6 `_member_refs`=BUG-0075、v7 `via_super`=BUG-0081、v8=BUG-0085、v9 `_attr_defs`・`_var_types`=BUG-0093〜0095、v10 `_reexports`=BUG-0100、v11=BUG-0104/0105、v12 `_type_aliases`=BUG-0108/0109、v13=BUG-0113/0114、v14=BUG-0117、v15=BUG-0122）。古い索引は移行で再取り込みする |
 | 配布 | exe（PyInstaller onedir）。`.\build.ps1`（§6） |
 
@@ -56,7 +56,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   - BUG-0072/0073（`8536a5f`）: 依存方向の見張り・CI と同じ引数なしの `ruff check`
 - その他: `.mcp.json` の `--directory` を「.」に（別 PC の絶対パスで MCP がつながらなかった。`cf4497c`）、exe 配布（§6）
 
-### 2026-10-31 夕方に入ったもの（追記。BUG-0124〜0135）
+### 2026-10-31 夕方に入ったもの（追記。BUG-0124〜0136）
 
 - 速さ
   - BUG-0127（`e90ec54`・`ef5eb80`・`417ce34`）: 初回の索引の解析を spawn の子プロセスに並べる（`engine/analysis_pool.py`。`LUCIANKE_INDEX_WORKERS`、既定は論理 CPU の半分・最大 8・64 ファイル超の走査だけ）・書き手のページキャッシュ 128 MiB・取り込みの文をまとめ書き・200 ファイル以上なら型サーバーを走査と並べて起こす。Mnemo の準備 243 秒 → 62 秒（§7）。exe でも動く（`tools/smoke_exe.py` の 6 段目で確かめる。`8753573`）
@@ -68,6 +68,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
   - BUG-0135（`3f8eba2`・`23c63a8`・`3ac4488`）: 根の設定の変更で解析の対象と明示を読み直し、変われば `didChangeConfiguration`。`.gitignore` の対象の設定ファイルも LSP に知らせる
   - BUG-0133（`ee7586d`・`d45d42d`）: T-07 の exact でモジュール直下の呼び元を捨てない・TS の incoming は references で別のプロジェクト（test/）の呼び出しを足す。BUG-0134（`d45d42d`）: T-06 は references を待つ間に分類を進める
 - 出力・その他
+  - BUG-0136（`4932bc8`）: T-07 の json の辺をノードのレコードに付けて予算に数える（辺が前置きで予算を食い、ノード 0 件・予算超過だった）。箇所の多いノードは落とさず call_sites を縮めて注に丸ごとの `max_tokens`
   - BUG-0124（`c0cd165`）: 地図は祖先が非公開のメンバーを公開に数えない。BUG-0084（`d6c9c89`・`b1304d7`）: データファイルの骨格の縮退を 1 件ずつに（予算の 99% を使う）。BUG-0096（`31051ba`）: 監視が polling のとき要求の対象を sha256 で照合し、T-00 に `watcher` を出す
   - BUG-0126: `.mcp.json` の失敗は別 PC の絶対パスだった頃のもの（`cf4497c` で直っていた）。README に「clone 直後は先に `uv sync`」（`23def4a`）
   - BUG-0130: `ruff format` は使わない（親の指示の誤り）。見張り `tests/invariants/test_unique_test_module_names.py`（試験ファイルの名前の重なりで全体の収集が落ちる。`31232d9`）
