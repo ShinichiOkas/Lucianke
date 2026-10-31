@@ -1366,7 +1366,7 @@ class CallEdgeSource:
         """``jobs`` を聞く。根のファイルの最初の診断の待ちを先に始め、要求は ``EXACT_LANES`` 本ずつ。予算を使い切ったら残りを取り消す。"""
         for job in jobs:
             if self._needs_settle(job):
-                self._settle_task(job.sym.path)  # 根のファイルを開いて、最初の診断の待ちを始める
+                self._settle_task(self._settle_path(job))  # 根のファイルを開いて、最初の診断の待ちを始める
         lane = asyncio.Semaphore(max(1, EXACT_LANES))
         out: dict[tuple[str, str], Any] = {}
 
@@ -1580,15 +1580,26 @@ class CallEdgeSource:
         return {"timeout_ms": limit_ms, "strike": limit_ms >= self._request_limit_ms()}
 
     def _needs_settle(self, job: _Job) -> bool:
-        """このノードを聞く前に、そのファイルの最初の診断を待つか。
+        """このノードを聞く前に、根のファイルの最初の診断を待つか（待つファイルは ``_settle_path``）。
 
         待つのは根の子を聞くとき（根のファイル）だけ。最初の診断は「LSP が解析を済ませた」合図で、起動直後の部分的な答えを
         目印にしないためのもの（BUG-0012・20e）。LSP 全体の状態なので、根のファイルで 1 度確かめれば足りる（T-06 も対象の
         ファイルだけを待つ）。深いノードのファイルごとに待つと、LSP がそのファイルを検査するあいだ要求が遅れ、冷えた LSP では
         1 問い合わせの予算の 3 割ほどを使っていた（BUG-0091 の実測）。根の子が PaaD から来てまだ確かめていない
-        （``_analysed`` が ``None``）ときは、そのノードのファイルで確かめる。
+        （``_analysed`` が ``None``）ときも、根のファイルで 1 度だけ確かめる（BUG-0123）。
         """
         return job.depth <= 1 or self._analysed is None
+
+    def _settle_path(self, job: _Job) -> RelPath:
+        """最初の診断を待つファイル。根の子を聞くときはそのノード（根）のファイル、それ以外は問い合わせの根のファイル。
+
+        以前は根の子が PaaD から来たとき（呼び直し）、深いノードのファイルごとに ``didOpen`` して最初の診断を待っていた。
+        1 ノード 0.7〜1.6 秒の待ちに加え、basedpyright がそのファイルを検査するあいだ他の要求も遅れた（BUG-0123 の親の計測の
+        T12 の 2 回目）。合図は LSP 全体の状態なので、根のファイル（前の問い合わせで開いて診断を受けていれば待たない）で足りる。
+        """
+        if job.depth <= 1:
+            return job.sym.path
+        return self.route.file.path
 
     async def _ask(
         self, job: _Job, lane: asyncio.Semaphore
@@ -1613,7 +1624,7 @@ class CallEdgeSource:
                 self.warnings.append(note)
         spans["prime"], t = time.monotonic() - t, time.monotonic()
         if self._needs_settle(job):
-            self._memo_ok[job.key] = await self._settle(sym.path)
+            self._memo_ok[job.key] = await self._settle(self._settle_path(job))
         else:
             self._memo_ok[job.key] = bool(self._analysed)
         spans["settle"], t = time.monotonic() - t, time.monotonic()

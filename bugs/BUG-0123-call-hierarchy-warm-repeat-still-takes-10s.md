@@ -80,3 +80,14 @@
   - 上限（`INFLIGHT_MAX = 0`）では今までどおり取り消し、呼び直しは聞き直す。
   - BUG-0091 の試験: 打ち切った要求を取り消す経路は `INFLIGHT_MAX = 0` で確かめる。根が答えない回の数えは、裏の待ちの上限
     （0.5 秒に縮めた）を過ぎてから 1 回。
+
+### 追記（2026-10-31）: 呼び直しの深いノードも最初の診断は根のファイルで待つ
+
+- 親の計測の T12 の 2 回目（根の子は PaaD から、深いノードを LSP に聞く）では、深いノードごとに `settle` が 0.7〜1.6 秒あった
+  （`MnemoServer._log_early_exit settle=719ms`・`acquire_or_exit settle=1562ms`・`_acquire_base_dir_lock settle=1578ms`）。
+  根の子が PaaD から来て解析の合図をまだ確かめていない（`_analysed` が `None`）とき、深いノードのファイルごとに `didOpen` して
+  最初の診断を待っていた（BUG-0091 の規則の残り）。合図は LSP 全体の状態なので 1 度で足りる。
+- 直し方: `CallEdgeSource._settle_path`。根の子を聞くときはそのノード（根）のファイル、それ以外は問い合わせの根のファイル
+  （`route.file`。前の問い合わせで開いて診断を受けていれば待たない）で待つ。設計書 §7.5.6 に書いた。
+- 試験: `test_a_repeat_from_paad_waits_for_the_root_file_diagnostics_only`（偽 LSP が caller のファイルの最初の診断を 4 秒遅らせる。
+  2 回目の depth 2 が 3 秒未満で全部 exact）。直す前のコードでは 4.4 秒で赤。

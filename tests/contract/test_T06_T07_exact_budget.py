@@ -1,6 +1,7 @@
 """BUG-0091: T-06・T-07 の exact 経路が LSP の時間の上限で切れたときの答えと警告、連続時間切れの数え（偽 LSP で遅れを決めて起こす）。
 
-* 偽サーバー（``SCRIPTED_SERVER``）は呼び出し階層と references だけに答える（references の遅れは ``refs_<名前>``）。遅れはノードの名前ごとに設定ファイル（要求のたびに読み直す）で決める。
+* 偽サーバー（``SCRIPTED_SERVER``）は呼び出し階層と references だけに答える（references の遅れは ``refs_<名前>``、
+  ``didOpen`` への最初の診断の遅れは ``diag_<そのファイルのノードの名前>``）。遅れはノードの名前ごとに設定ファイル（要求のたびに読み直す）で決める。
   遅い答えは別のスレッドで返すので、待っている間も次の要求を受ける（取り消された要求の遅い答えはクライアントが捨てる）。
   ``didOpen`` にはすぐ空の診断を返す（最初の診断の待ちは一瞬）。予算・期限は負荷があっても根の要求が切れない大きさにし、
   遅いノードはそれより十分遅くする（``SLOW_S``）。
@@ -106,8 +107,17 @@ while True:
     elif method == "exit":
         break
     elif method == "textDocument/didOpen":
-        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
-              "params": {"uri": params["textDocument"]["uri"], "diagnostics": []}})
+        uri = params["textDocument"]["uri"]
+        cfg = config()
+        name = next((n for n, it in cfg["items"].items() if it["uri"] == uri), "")
+        log("open " + name)
+        note = {"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                "params": {"uri": uri, "diagnostics": []}}
+        delay = cfg["delay"].get("diag_" + name, 0.0)
+        if delay:
+            threading.Thread(target=lambda: (time.sleep(delay), send(note)), daemon=True).start()
+        else:
+            send(note)
     elif method == "textDocument/prepareCallHierarchy":
         cfg = config()
         uri, line = params["textDocument"]["uri"], params["position"]["line"]
@@ -544,6 +554,25 @@ async def test_no_late_wait_beyond_the_cap(scripted: Scripted, monkeypatch: pyte
     again = await scripted.tree(depth=1)
     assert again["_resolution_meta"]["confidence_level"] == "exact"
     assert scripted.requests("incoming", "target") == 2
+
+
+async def test_a_repeat_from_paad_waits_for_the_root_file_diagnostics_only(scripted: Scripted) -> None:
+    """根の子が PaaD から来た呼び直しで深いノード（caller）を聞くとき、最初の診断はそのノードのファイルではなく根のファイルで待つ。
+
+    caller のファイル（pkg/b.py）の最初の診断を 4 秒遅らせる。以前は 2 回目（depth 2）がその 4 秒を待った（BUG-0123）。"""
+    # 根の子を LSP から取って目印を置く（根のファイル pkg/a.py は開いて診断を受けた）
+    first = await scripted.tree(depth=1)
+    assert first["_resolution_meta"]["confidence_level"] == "exact"
+    assert scripted.requests("open", "caller") == 0
+    scripted.delay(diag_caller=4.0)
+    started = time.monotonic()
+    again = await scripted.tree(depth=2)
+    elapsed = time.monotonic() - started
+    meta = again["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["accuracy_warning"] is None, meta
+    assert levels(again) == {"caller": "exact", "top": "exact", "other": "exact"}
+    assert elapsed < 3.0, elapsed  # caller のファイルの診断（4 秒）を待っていない
+    assert scripted.requests("incoming", "target") == 1  # 根の子は PaaD から
 
 
 # --- T-06: references も 1 問い合わせの予算（BUG-0091） ------------------------------------------------------------
