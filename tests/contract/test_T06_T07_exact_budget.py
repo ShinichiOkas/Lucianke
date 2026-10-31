@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -42,6 +43,7 @@ READY_WAIT_MS = 60_000
 BUDGET_S = 3.0  # 試験の 1 問い合わせの予算（根の要求は負荷があってもこの内に答える）
 REQUEST_MS = 1500  # 試験の要求 1 つの期限（同上）
 SLOW_S = 30.0  # 遅いノードの答えの遅れ（予算・期限より十分長い）
+LATE_S = 4.5  # 予算（3 秒）の後、要求 1 つの期限（5000 ms）の内に届く答えの遅れ（BUG-0123）
 
 SCRIPTED_SERVER = r"""
 import json
@@ -86,6 +88,12 @@ def config():
         return json.load(f)
 
 
+def log(line):
+    with LOCK:
+        with open(CONFIG + ".log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+
 while True:
     msg = read()
     if msg is None:
@@ -105,6 +113,7 @@ while True:
         uri, line = params["textDocument"]["uri"], params["position"]["line"]
         found = [it for it in cfg["items"].values()
                  if it["uri"] == uri and it["range"]["start"]["line"] <= line <= it["range"]["end"]["line"]]
+        log("prepare " + ",".join(it["name"] for it in found))
         send({"jsonrpc": "2.0", "id": mid, "result": found})
     elif method == "textDocument/references":
         cfg = config()
@@ -120,6 +129,7 @@ while True:
     elif method == "callHierarchy/incomingCalls":
         cfg = config()
         name = params["item"]["name"]
+        log("incoming " + name)
         calls = [{"from": cfg["items"][c["from"]], "fromRanges": c["ranges"]} for c in cfg["incoming"].get(name, [])]
         delay = cfg["delay"].get(name, 0.0)
         if delay:
@@ -204,6 +214,13 @@ class Scripted:
         assert handle is not None
         return handle.timeouts
 
+    def requests(self, kind: str, name: str) -> int:
+        """偽サーバーが受けた要求の数（``kind`` は ``prepare`` / ``incoming``、``name`` はノードの名前）。"""
+        log = Path(str(self.config) + ".log")
+        if not log.is_file():
+            return 0
+        return log.read_text(encoding="utf-8").splitlines().count(f"{kind} {name}")
+
 
 @pytest.fixture
 async def registry():
@@ -239,6 +256,15 @@ async def scripted(registry: ProcessRegistry, tmp_path: Path):
         yield Scripted(env, config)
 
 
+async def wait_until(cond: Any, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        await asyncio.sleep(0.05)
+    return bool(cond())
+
+
 def levels(r: dict[str, Any]) -> dict[str, str]:
     return {n["name"]: n["confidence_level"] for n in r["data"]["nodes"]}
 
@@ -263,8 +289,12 @@ async def test_fake_lsp_answers_the_whole_tree_exact_without_limits(scripted: Sc
 async def test_budget_cut_keeps_answered_nodes_exact_and_names_the_budget(
     scripted: Scripted, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """1: caller の incomingCalls が予算（3 秒）の内に答えない → caller（depth 1）は exact、その子は構文木で補う。"""
+    """1: caller の incomingCalls が予算（3 秒）の内に答えない → caller（depth 1）は exact、その子は構文木で補う。
+
+    予算の後に裏で答えを待つ仕組み（BUG-0123）は止めて（``INFLIGHT_MAX = 0``）、打ち切った要求を取り消す経路を確かめる。
+    裏で待つ経路は ``test_a_deep_node_answer_after_the_budget_completes_the_partial_tree``。"""
     monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    monkeypatch.setattr(_lsp_exact, "INFLIGHT_MAX", 0)
     scripted.delay(caller=SLOW_S)
     r = await scripted.tree()
     meta = r["_resolution_meta"]
@@ -380,6 +410,7 @@ async def test_a_root_hanging_past_the_budget_still_counts_as_a_strike(
     木ごと structural、警告は予算 3 秒。"""
     monkeypatch.setattr(features, "LSP_TIMEOUT_CALL_HIERARCHY_MS", REQUEST_MS)
     monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    monkeypatch.setattr(_lsp_exact, "EXACT_BACKGROUND_S", 0.5)  # 予算の後に裏で待つのは 0.5 秒（BUG-0123）
     scripted.delay(target=SLOW_S)
     r = await scripted.tree()
     meta = r["_resolution_meta"]
@@ -389,7 +420,130 @@ async def test_a_root_hanging_past_the_budget_still_counts_as_a_strike(
     assert "予算 3 秒（この問い合わせで LSP に使える時間の合計）を使い切りました" in warning, warning
     assert "（target を聞いている途中）" in warning and "木全体を構文木" in warning, warning
     assert "1500 ms" not in warning, warning  # 根は要求の期限で切っていない
-    assert scripted.timeouts() == 1
+    # 裏で待つ上限（予算の残り＋0.5 秒）まで答えないと、本当の無応答として 1 回数える
+    assert await wait_until(lambda: scripted.timeouts() == 1, 5.0), scripted.timeouts()
+
+
+# --- BUG-0123: 予算で打ち切った要求の答えを裏で待って書き戻し、呼び直しは LSP に聞き直さない --------------------------
+
+
+def target_key(scripted: Scripted) -> tuple[str, str, str, str]:
+    urn = str(Urn("fk", "pkg/a.py", CodeSel("target")))
+    return (str(scripted.env.db), "fk", "calls_in", urn)
+
+
+def late_saved(scripted: Scripted) -> bool:
+    """根（target）の incoming の答えが裏で書き戻され、目印が置かれた。"""
+    return (
+        _lsp_exact.MEMO.get(_lsp_exact.memo_key(scripted.env.db, "fk", "calls_in", target_key(scripted)[3]))
+        is not None
+    )
+
+
+async def test_a_root_answer_after_the_budget_is_saved_and_the_repeat_is_served_from_it(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """根の incomingCalls が予算（3 秒）の後に答える → 1 回目は木ごと structural（警告に「裏で待ち続け」）。答えは裏で書き戻され、
+    同じ問い合わせの 2 回目は LSP に 1 本も送らず PaaD の exact 行で答える（lsp-cache・1 秒未満）。連続時間切れに数えない。"""
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    scripted.delay(target=LATE_S)
+    r = await scripted.tree(depth=1)
+    meta = r["_resolution_meta"]
+    assert levels(r) == {"caller": "structural"} and meta["is_degraded"] is True, meta
+    warning = meta["accuracy_warning"] or ""
+    assert "1 ノード（target）は LSP の答えを裏で待ち続け" in warning and "呼び直す" in warning, warning
+    assert "still awaited in the background" in note(r, "exact call hierarchy unavailable")
+    assert await wait_until(lambda: late_saved(scripted), 10.0)
+    assert target_key(scripted) not in _lsp_exact._INFLIGHT
+
+    asked = scripted.requests("incoming", "target"), scripted.requests("prepare", "target")
+    assert asked == (1, 1), asked
+    started = time.monotonic()
+    again = await scripted.tree(depth=1)
+    elapsed = time.monotonic() - started
+    meta2 = again["_resolution_meta"]
+    assert meta2["confidence_level"] == "exact" and meta2["engine_used"].startswith("lsp-cache"), meta2
+    assert levels(again) == {"caller": "exact"}
+    assert (scripted.requests("incoming", "target"), scripted.requests("prepare", "target")) == asked
+    assert elapsed < 1.0, elapsed
+    assert scripted.timeouts() == 0
+
+
+async def test_a_repeat_while_the_answer_is_still_awaited_waits_for_it_instead_of_asking_again(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1 回目が予算（3 秒）で返った直後に呼び直す → 2 回目は新しい要求を送らず、裏で待っている根の答え（4.5 秒）を待って exact。"""
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    scripted.delay(target=LATE_S)
+    first = await scripted.tree(depth=1)
+    assert first["_resolution_meta"]["is_degraded"] is True
+    assert target_key(scripted) in _lsp_exact._INFLIGHT
+    started = time.monotonic()
+    again = await scripted.tree(depth=1)
+    elapsed = time.monotonic() - started
+    meta = again["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["accuracy_warning"] is None, meta
+    assert levels(again) == {"caller": "exact"}
+    assert elapsed < BUDGET_S, elapsed  # 残りの約 1.5 秒だけ待った（新しい要求なら 4.5 秒）
+    assert scripted.requests("incoming", "target") == 1 and scripted.requests("prepare", "target") == 1
+    assert scripted.timeouts() == 0
+
+
+async def test_a_deep_node_answer_after_the_budget_completes_the_partial_tree(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """深いノード（caller）の答えが予算の後に届く → 1 回目は部分 exact。裏で書き戻すので、2 回目は LSP に送らず木全体が exact。"""
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    scripted.delay(caller=LATE_S)
+    r = await scripted.tree()
+    assert levels(r) == {"caller": "exact", "top": "structural", "other": "structural"}
+    assert "1 ノード（caller）は LSP の答えを裏で待ち続け" in (
+        r["_resolution_meta"]["accuracy_warning"] or ""
+    )
+    caller_urn = str(Urn("fk", "pkg/b.py", CodeSel("caller")))
+    key = _lsp_exact.memo_key(scripted.env.db, "fk", "calls_in", caller_urn)
+    assert await wait_until(lambda: _lsp_exact.MEMO.get(key) is not None, 10.0)
+    asked = scripted.requests("incoming", "caller")
+    again = await scripted.tree()
+    meta = again["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["engine_used"].startswith("lsp-cache"), meta
+    assert levels(again) == {"caller": "exact", "top": "exact", "other": "exact"}
+    assert scripted.requests("incoming", "caller") == asked == 1
+    assert scripted.timeouts() == 0
+
+
+async def test_a_late_answer_is_not_reused_after_a_file_changed(
+    scripted: Scripted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """裏で待っている間にファイルが変わる（索引の指紋が変わる）→ 遅れて届いた答えに目印を置かず、次の問い合わせは待たずに聞き直す。"""
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    scripted.delay(target=LATE_S)
+    await scripted.tree(depth=1)
+    assert target_key(scripted) in _lsp_exact._INFLIGHT
+    path = scripted.env.ws.root / "pkg" / "d.py"
+    extra = "\n\ndef more():\n    return caller()\n"
+    path.write_text(FILES["pkg/d.py"] + extra, encoding="utf-8", newline="\n")
+    await scripted.env.indexer.scan()
+    assert await wait_until(lambda: target_key(scripted) not in _lsp_exact._INFLIGHT, 10.0)
+    assert not late_saved(scripted)  # 指紋が変わった: 目印は置かない
+    scripted.delay()
+    again = await scripted.tree(depth=1)
+    assert again["_resolution_meta"]["confidence_level"] == "exact"
+    assert scripted.requests("incoming", "target") == 2  # 聞き直した
+
+
+async def test_no_late_wait_beyond_the_cap(scripted: Scripted, monkeypatch: pytest.MonkeyPatch) -> None:
+    """裏で待つノードの上限（``INFLIGHT_MAX``）に達しているときは今までどおり取り消し、呼び直しは LSP に聞き直す。"""
+    monkeypatch.setattr(_lsp_exact, "EXACT_BUDGET_S", BUDGET_S)
+    monkeypatch.setattr(_lsp_exact, "INFLIGHT_MAX", 0)
+    scripted.delay(target=LATE_S)
+    r = await scripted.tree(depth=1)
+    assert "裏で待ち続け" not in (r["_resolution_meta"]["accuracy_warning"] or "")
+    assert target_key(scripted) not in _lsp_exact._INFLIGHT
+    scripted.delay()
+    again = await scripted.tree(depth=1)
+    assert again["_resolution_meta"]["confidence_level"] == "exact"
+    assert scripted.requests("incoming", "target") == 2
 
 
 # --- T-06: references も 1 問い合わせの予算（BUG-0091） ------------------------------------------------------------

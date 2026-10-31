@@ -70,7 +70,9 @@ from lucianke.workspace.types import Workspace
 _log = logging.getLogger("lucianke.tools.lsp_exact")
 
 __all__ = [
+    "EXACT_BACKGROUND_S",
     "EXACT_BUDGET_S",
+    "INFLIGHT_MAX",
     "ExactBudget",
     "budget_timeout_note",
     "budget_timeout_warning",
@@ -685,9 +687,18 @@ EXACT_LANES = 1
 _ASK_SLOW_S = 0.5
 """BUG-0058: 1 ノードの LSP 呼び出し（``_ask``）がこの秒数を超えたら、各段の内訳をログに落とす（閾値ガード付きの計時）。"""
 
-_ROOT_GRACE_S = 0.5
-"""根の子を聞く段だけ、ループ側の打ち切りを予算より少し遅らせる。根の要求は予算の残りを自分の期限にするので、要求の時間切れ
-（連続時間切れに数えるかの判断つき）が打ち切りより先に起きるようにする（BUG-0091）。"""
+EXACT_BACKGROUND_S = 60.0
+"""1 問い合わせの予算で打ち切ったとき、すでに LSP に送っていた要求の答えを裏で待ち続ける上限（秒。根の要求の期限は予算の残り
+＋この値。深いノードの要求は要求 1 つの期限のまま）。届いた答えは PaaD に書き戻して目印を置き、同じノードを聞く次の問い合わせは
+LSP に聞き直さずその答えを待つ（``_INFLIGHT``。BUG-0123）。
+
+basedpyright は ``$/cancelRequest`` を受けても計算中の要求を止めない（同期の処理の間はメッセージを読まない）。以前は予算で
+取り消して遅れて届いた答えを捨てていたので、冷えた LSP で 17〜27 秒かかる根の ``incomingCalls`` は毎回やり直しになり、
+呼び直しの要求もその後ろに並んで予算を使い切っていた（Mnemo の能力ベンチ T11・T12）。"""
+
+INFLIGHT_MAX = 8
+"""裏で答えを待つノードの上限（プロセス全体）。超えた分は今までどおり取り消して答えを捨てる。待つ時間も要求の期限で区切られる
+（根は予算の残り＋``EXACT_BACKGROUND_S``、深いノードは要求 1 つの期限）。LSP が落ちる・起動し直すと要求は切断で終わる。"""
 
 _BACKSTOP_S = 2.0
 """ワーカースレッドがイベントループの答えを待つ上限の上乗せ（ループ側が予算で打ち切るので、通常は使わない歯止め）。"""
@@ -706,6 +717,29 @@ class ExactBudgetExceeded(TimeoutError):
 
 class _NotAsked(Exception):
     """この問い合わせが LSP に聞くのをやめた後のノード（聞かずに構文木で補う）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class _Joined:
+    """前の問い合わせが LSP に送っていた要求の答え（裏で届いて書き戻した行。``_INFLIGHT``）。"""
+
+    rows: list[queries.ReferenceRow]
+    analysed: bool
+
+
+@dataclass(slots=True)
+class _Pending:
+    """予算で打ち切った後も答えを待っているノード 1 つ。``done`` は書き戻した行と解析済みの合図（届かなければ ``None``）。"""
+
+    token: str
+    done: asyncio.Future[tuple[list[queries.ReferenceRow], bool] | None]
+
+
+_INFLIGHT: dict[tuple[str, str, str, str], _Pending] = {}
+"""``(db, ws, kind, urn)`` → 裏で答えを待っているノード。イベントループからだけ触る（BUG-0123）。"""
+
+_BACKGROUND: set[asyncio.Future[Any]] = set()
+"""裏で答えを待つタスク（終わるまで参照を持つ。``asyncio`` はタスクを弱い参照でしか持たない）。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,6 +878,10 @@ class CallEdgeSource:
         self._items: dict[str, features.CallItem] = {}
         """URN → 親の答えにあったその項目（incoming の ``from`` / outgoing の ``to``）。"""
         self._stop = False
+        self._sent: set[tuple[str, str]] = set()
+        """イベントループ側: LSP に要求を送ったノード（予算で打ち切ったとき、裏で答えを待つのはこれだけ。BUG-0123）。"""
+        self.background: list[str] = []
+        """予算で打ち切った後も裏で LSP の答えを待っているノードの修飾名（この問い合わせが送った要求か、前の問い合わせの要求）。"""
         self._asking: str | None = None
         """イベントループ側: いま LSP に聞いているノードの修飾名（予算が切れたときの警告に書く）。"""
         """イベントループ側: 新しい要求を送らない（``cut`` が決まった）。"""
@@ -892,6 +930,11 @@ class CallEdgeSource:
             res = results.get(job.key)
             if res is None:
                 res = ExactBudgetExceeded(self.budget_s)
+            if isinstance(res, _Joined):  # 前の問い合わせが送った要求の答え（裏で届いて書き戻し済み）
+                self.from_lsp += 1
+                level.answered += 1
+                self._rows[job.key] = res.rows
+                continue
             if isinstance(res, tuple):
                 urn, direction = job.key
                 rows = self._assemble(urn, direction, *res)
@@ -1044,14 +1087,23 @@ class CallEdgeSource:
         if cut is None:
             return ""  # ノード固有の失敗だけ（LSP がそのノードの項目を返さない）。呼び直しても変わらない
         saved = "LSP が答えた分は PaaD に書き戻したので、" if self.wrote else ""
+        late = self._background_ja()
         if whole_tree:
             return (
                 "LSP は動いています（起動直後で解析が冷えているか、負荷が高い）。今の要求で解析が進んだので、"
-                f"{saved}同じ問い合わせを呼び直すと exact になる見込みです。"
+                f"{late}{saved}同じ問い合わせを呼び直すと exact になる見込みです。"
             )
         return (
             "LSP は動いています（起動直後で解析が冷えているか、負荷が高い）。"
-            f"{saved}同じ問い合わせを呼び直すと残りのノードだけを LSP に聞き、exact で答えきれる見込みです。"
+            f"{late}{saved}同じ問い合わせを呼び直すと残りのノードだけを LSP に聞き、exact で答えきれる見込みです。"
+        )
+
+    def _background_ja(self) -> str:
+        if not self.background:
+            return ""
+        return (
+            f"送った要求のうち {len(self.background)} ノード（{_names_text(self.background)}）は LSP の答えを裏で待ち続け、"
+            f"届けば PaaD に保存します（最大 {EXACT_BACKGROUND_S:g} 秒。呼び直すとその答えを待ち、LSP に聞き直しません）。"
         )
 
     def _next_step_en(self, whole_tree: bool) -> str:
@@ -1063,6 +1115,11 @@ class CallEdgeSource:
         if cut is None:
             return ""
         saved = " and the answered nodes are saved" if self.wrote else ""
+        if self.background:
+            saved += (
+                f"; the LSP answer for {len(self.background)} node(s) ({_names_text_en(self.background)}) is still"
+                f" awaited in the background and will be saved (up to {EXACT_BACKGROUND_S:g} s)"
+            )
         if whole_tree:
             return f"; the LSP is up and warmer now{saved} - call again for an exact tree"
         return f"; the LSP is up and warmer now{saved} - call again to finish the rest exact"
@@ -1106,9 +1163,9 @@ class CallEdgeSource:
             return lambda c: queries.references_to(c, urn, ("CALLS",))
         return lambda c: queries.references_from(c, urn, ("CALLS",))
 
-    def _is_test(self, path: str) -> bool:
+    def _is_test(self, path: str, conn: Any = None) -> bool:
         if path not in self._test:
-            info = queries.file_by_path(self.conn, self.ws.workspace_id, path)
+            info = queries.file_by_path(self.conn if conn is None else conn, self.ws.workspace_id, path)
             self._test[path] = bool(info and info.is_test)
         return self._test[path]
 
@@ -1197,13 +1254,15 @@ class CallEdgeSource:
             limit=PRIME_MAX,
         )
 
-    def _structural_count(self, urn: str, direction: str) -> int:
-        return len(self._loader(urn, direction)(self.conn))
+    def _structural_count(self, urn: str, direction: str, conn: Any = None) -> int:
+        return len(self._loader(urn, direction)(self.conn if conn is None else conn))
 
-    def _urn_at(self, rel: Any, pos: Position) -> str | None:
+    def _urn_at(self, rel: Any, pos: Position, conn: Any = None) -> str | None:
         if rel is None:
             return None
-        sym = queries.symbol_at(self.conn, self.ws.workspace_id, str(rel), pos.line, pos.col)
+        sym = queries.symbol_at(
+            self.conn if conn is None else conn, self.ws.workspace_id, str(rel), pos.line, pos.col
+        )
         return None if sym is None else str(sym.urn)
 
     def _assemble(
@@ -1213,6 +1272,22 @@ class CallEdgeSource:
         edges: Sequence[features.CallEdge],
         infos: dict[str, dict[tuple[int, int], SiteInfo]],
     ) -> list[queries.ReferenceRow]:
+        facts, rows = self._build(self.conn, urn, direction, edges, infos, items=self._items)
+        self.staged.extend(facts)
+        self.staged_rows[(self._kind(direction), urn)] = rows
+        return rows
+
+    def _build(
+        self,
+        conn: Any,
+        urn: str,
+        direction: str,
+        edges: Sequence[features.CallEdge],
+        infos: dict[str, dict[tuple[int, int], SiteInfo]],
+        *,
+        items: dict[str, features.CallItem] | None = None,
+    ) -> tuple[list[RelationFact], list[queries.ReferenceRow]]:
+        """LSP の辺 → ``exact`` の事実と、``references_to`` / ``references_from`` と同じ形の行（``conn`` で索引を引く）。"""
         incoming = direction == "incoming"
         facts: list[RelationFact] = []
         rows: list[queries.ReferenceRow] = []
@@ -1224,12 +1299,12 @@ class CallEdgeSource:
             if not incoming and other.rel is None:
                 other_urn: str | None = _external_urn(other)
             else:
-                other_urn = self._urn_at(other.rel, other.selection_range.start)
+                other_urn = self._urn_at(other.rel, other.selection_range.start, conn)
             if other_urn is None:
                 self.skipped += 1
                 continue
-            if other.rel is not None:
-                self._items.setdefault(other_urn, other)  # 子のノードを聞くときに prepare を省く
+            if other.rel is not None and items is not None:
+                items.setdefault(other_urn, other)  # 子のノードを聞くときに prepare を省く
             for rng in edge.from_ranges:
                 info = infos.get(str(home), {}).get((rng.start.line, rng.start.col))
                 if incoming:
@@ -1256,10 +1331,8 @@ class CallEdgeSource:
                 if info is not None and info.guard and info.relation_kind == "CALLS":
                     fact = replace(fact, guard_condition=info.guard)
                 facts.append(fact)
-                rows.append(row_of(fact, str(home), is_test=self._is_test(str(home))))
-        self.staged.extend(facts)
-        self.staged_rows[(self._kind(direction), urn)] = rows
-        return rows
+                rows.append(row_of(fact, str(home), is_test=self._is_test(str(home), conn)))
+        return facts, rows
 
     def _confirm_all(self) -> list[tuple[str, str]]:
         """読み戻して一致したノードに目印を置き、置いた ``(kind, urn)`` を返す。最初の診断が出ていないファイルのノードは置かない。"""
@@ -1296,39 +1369,160 @@ class CallEdgeSource:
                 self._settle_task(job.sym.path)  # 根のファイルを開いて、最初の診断の待ちを始める
         lane = asyncio.Semaphore(max(1, EXACT_LANES))
         out: dict[tuple[str, str], Any] = {}
-        grace = _ROOT_GRACE_S if any(job.depth <= 1 for job in jobs) else 0.0
 
-        async def run(job: _Job) -> None:
+        async def run(job: _Job) -> Any:
             try:
-                out[job.key] = await self._ask(job, lane)
+                res: Any = await self._ask(job, lane)
             except _NotAsked as exc:
-                out[job.key] = exc
+                res = exc
             except LSP_FAILURES as exc:
-                out[job.key] = exc
+                res = exc
                 if _stops_lsp(exc) and is_lsp_failure(exc):
                     self._stop = True
                     if self.cut is None:
                         self.cut = self._cut_of(exc, job)
+            out[job.key] = res
+            return res
 
         tasks = {asyncio.ensure_future(run(job)): job for job in jobs}
-        done, pending = await asyncio.wait(tasks, timeout=max(self.deadline - time.monotonic(), 0.0) + grace)
+        done, pending = await asyncio.wait(tasks, timeout=max(self.deadline - time.monotonic(), 0.0))
         if pending:
             self._stop = True
             if self.cut is None:
                 first = next(job for task, job in tasks.items() if task in pending)
                 node = self._asking or str(first.sym.qualified_name)
                 self.cut = ExactCut("budget", time.monotonic() - self.started, node=node)
-            for task in pending:
+            # LSP に送った要求は取り消さず、答えを裏で待って書き戻す（basedpyright は取り消しても計算を止めない。BUG-0123）
+            sent = [
+                task for task in pending if tasks[task].key in self._sent and self._detach(tasks[task], task)
+            ]
+            dropped = [task for task in pending if task not in sent]
+            for task in dropped:
                 task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*dropped, return_exceptions=True)
             for task in pending:
-                out.setdefault(tasks[task].key, ExactBudgetExceeded(self.budget_s))
+                out[tasks[task].key] = ExactBudgetExceeded(self.budget_s)
         if self._stop:  # 以降は LSP に聞かない: 残っている最初の診断の待ちも止める
             for settle in self._settle_tasks.values():
                 settle.cancel()
         for task in done:
             task.result()  # 握らなかった例外（降格の合図でない誤り）はそのまま上げる
-        return out
+        return dict(out)  # 裏で答えを待つタスクは ``out`` に書き続けるので、写しを返す
+
+    def _inflight_key(self, key: tuple[str, str]) -> tuple[str, str, str, str]:
+        urn, direction = key
+        return (str(self.db_path), self.ws.workspace_id, self._kind(direction), urn)
+
+    def _detach(self, job: _Job, task: asyncio.Future[Any]) -> bool:
+        """予算で打ち切ったノードの要求を裏で待ち続ける（``_INFLIGHT`` に登録）。上限を超えるときは ``False``（取り消す）。"""
+        ikey = self._inflight_key(job.key)
+        for stale in [k for k, p in _INFLIGHT.items() if p.done.get_loop().is_closed()]:
+            del _INFLIGHT[stale]  # 閉じたイベントループの残り（試験の後など）は数えない
+        if ikey in _INFLIGHT or len(_INFLIGHT) >= INFLIGHT_MAX:
+            return False
+        pending = _Pending(self.token, asyncio.get_running_loop().create_future())
+        _INFLIGHT[ikey] = pending
+        self.background.append(str(job.sym.qualified_name))
+        late = asyncio.ensure_future(self._late(job, task, pending, ikey))
+        _BACKGROUND.add(late)
+        late.add_done_callback(_BACKGROUND.discard)
+        return True
+
+    async def _late(
+        self, job: _Job, task: asyncio.Future[Any], pending: _Pending, ikey: tuple[str, str, str, str]
+    ) -> None:
+        """裏で待った答えを書き戻し、目印を置く（``flush`` と同じ規則）。待っていた次の問い合わせには行を渡す。"""
+        result: tuple[list[queries.ReferenceRow], bool] | None = None
+        try:
+            res = await task
+            if isinstance(res, tuple):
+                analysed = bool(self._memo_ok.get(job.key, False))
+                rows = await self._save_late(job, res[0], res[1], analysed)
+                if rows is not None:
+                    result = (rows, analysed)
+                    _log.info(
+                        "late LSP call hierarchy answer saved: %s %s (%d calls)",
+                        job.sym.qualified_name,
+                        job.key[1],
+                        len(rows),
+                        extra={"event": "lsp_call_hierarchy_late"},
+                    )
+        except Exception:  # noqa: BLE001  裏の書き戻しの失敗は答えを止めない（次の問い合わせがまた LSP に聞く）
+            _log.debug("could not save a late call hierarchy answer", exc_info=True)
+        finally:
+            if not pending.done.done():
+                pending.done.set_result(result)
+            if _INFLIGHT.get(ikey) is pending:
+                del _INFLIGHT[ikey]
+
+    async def _save_late(
+        self,
+        job: _Job,
+        edges: Sequence[features.CallEdge],
+        infos: dict[str, dict[tuple[int, int], SiteInfo]],
+        analysed: bool,
+    ) -> list[queries.ReferenceRow] | None:
+        """裏で届いた 1 ノードの答えを ``relations`` に書き、読み戻して一致すれば目印を置く。信用しない答えは ``None``。"""
+        from lucianke.index.connection import open_reader  # このスレッドで開く
+
+        urn, direction = job.key
+        kind = self._kind(direction)
+
+        def build() -> tuple[list[RelationFact], list[queries.ReferenceRow]] | None:
+            conn = open_reader(self.db_path)
+            try:
+                facts, rows = self._build(conn, urn, direction, edges, infos)
+                if not rows and urn in self.roots and self._structural_count(urn, direction, conn):
+                    return None  # 解析前の 0 件かもしれない（prefetch と同じ規則）
+                return facts, rows
+            finally:
+                conn.close()
+
+        built = await asyncio.to_thread(build)
+        if built is None:
+            return None
+        facts, rows = built
+        if facts and not await write_facts(self.services, facts, label="lsp:call_hierarchy:late"):
+            return rows
+        if not analysed:
+            return rows  # 解析前の部分的な答えかもしれない: exact で答えるが覚えない
+
+        def confirm() -> bool:
+            conn = open_reader(self.db_path)
+            try:
+                loader = self._loader(urn, direction)
+                return confirm_marker(
+                    conn, self.db_path, self.ws.workspace_id, kind, urn, loader, rows, token=self.token
+                )
+            finally:
+                conn.close()
+
+        if await asyncio.to_thread(confirm):
+            await persist_marks(
+                self.services,
+                self.db_path,
+                self.ws.workspace_id,
+                [(kind, urn)],
+                label="lsp:call_hierarchy:late",
+            )
+        return rows
+
+    async def _join(self, job: _Job) -> _Joined | None:
+        """前の問い合わせが送ったこのノードの要求が裏で待たれていれば、その答えを待つ（同じファイルの状態のときだけ）。"""
+        pending = _INFLIGHT.get(self._inflight_key(job.key))
+        if pending is None or pending.token != self.token:
+            return None
+        if pending.done.get_loop() is not asyncio.get_running_loop():
+            return None
+        name = str(job.sym.qualified_name)
+        self.background.append(name)  # 予算の内に届かなければ、警告に「裏で待っている」と書く
+        result = await asyncio.shield(pending.done)
+        self.background.remove(name)
+        if result is None:
+            return None
+        rows, analysed = result
+        self._memo_ok[job.key] = analysed
+        return _Joined(rows, analysed)
 
     def _cut_of(self, exc: BaseException, job: _Job) -> ExactCut:
         elapsed = time.monotonic() - self.started
@@ -1375,14 +1569,15 @@ class CallEdgeSource:
         """根の要求（根の子を求める prepare と incoming / outgoing）の期限と、時間切れを連続時間切れに数えるか（BUG-0091）。
 
         根の要求は要求 1 つの期限（``LSP_TIMEOUT_CALL_HIERARCHY_MS``）ではなく、1 問い合わせの予算の残りまで待つ（冷えた LSP の
-        最初の要求は 5 秒を超えることがあり、そこで切ると予算を残したまま木ごと降格していた）。時間切れを数えるのは、要求 1 つの
-        期限以上待っても答えなかったときだけ（本当の無応答）。予算の残りが期限より短くて切れたのは数えない。予算の内に遅れて
-        答えた要求は ``record_ok``（数えない）。深いノードの要求は今までどおり（省略 = 要求 1 つの期限・数える）。
+        最初の要求は 5 秒を超えることがあり、そこで切ると予算を残したまま木ごと降格していた）。予算で打ち切った後も
+        ``EXACT_BACKGROUND_S`` まで裏で答えを待つ（BUG-0123）ので、期限は予算の残り＋その値。時間切れを数えるのは、要求 1 つの
+        期限以上待っても答えなかったときだけ（本当の無応答）。遅れて答えた要求は ``record_ok``（数えない）。深いノードの要求は
+        今までどおり（省略 = 要求 1 つの期限・数える）。
         """
         if job.depth > 1:
             return {}
-        left_ms = max(self.deadline - time.monotonic(), 0.0) * 1000
-        return {"timeout_ms": left_ms, "strike": left_ms >= self._request_limit_ms()}
+        limit_ms = (max(self.deadline - time.monotonic(), 0.0) + EXACT_BACKGROUND_S) * 1000
+        return {"timeout_ms": limit_ms, "strike": limit_ms >= self._request_limit_ms()}
 
     def _needs_settle(self, job: _Job) -> bool:
         """このノードを聞く前に、そのファイルの最初の診断を待つか。
@@ -1397,9 +1592,15 @@ class CallEdgeSource:
 
     async def _ask(
         self, job: _Job, lane: asyncio.Semaphore
-    ) -> tuple[list[features.CallEdge], dict[str, dict[tuple[int, int], SiteInfo]]]:
+    ) -> tuple[list[features.CallEdge], dict[str, dict[tuple[int, int], SiteInfo]]] | _Joined:
         handle = self.route.handle
         if handle is None or self._stop:
+            raise _NotAsked
+        # 前の問い合わせの要求の答えを待つ（同じ要求を LSP に送り直さない。BUG-0123）
+        joined = await self._join(job)
+        if joined is not None:
+            return joined
+        if self._stop:
             raise _NotAsked
         sym, direction, prime = job.sym, job.key[1], job.prime
         # BUG-0058: LSP 経路の各段の所要（秒）。合計が閾値を超えた呼び出しだけ内訳をログに落とす（閾値ガード付き）。
@@ -1421,6 +1622,7 @@ class CallEdgeSource:
                 raise _NotAsked
             spans["queue"], t = time.monotonic() - t, time.monotonic()
             self._asking = str(sym.qualified_name)
+            self._sent.add(job.key)
             item = job.item
             if item is None:
                 start = (sym.selection or sym.range).start
