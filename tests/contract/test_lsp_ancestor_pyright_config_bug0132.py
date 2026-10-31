@@ -9,16 +9,21 @@ Lucianke は根に ``pyrightconfig.json`` が無く ``pyproject.toml`` がある
 * 実機: ``.venv`` の basedpyright に、``include`` が自分の下の別のディレクトリだけの ``pyrightconfig.json`` を持つ親の下に置いた
   F-POLY の複製（``pyrightconfig.json`` を外す。``pyproject.toml`` には ``[tool.pyright]`` が無い）を読ませる。見つからなければ skip。
 * 設定の組み立て（根の設定の有無で ``configFilePath`` を返すか）は ``tests/unit/test_lsp_pyright_config_pin_bug0132.py``。
+* 利用者の設定が対象を絞る（根の ``pyrightconfig.json`` が ``include: ["src"]``）と、basedpyright は ``tests/`` の呼び出しを探さない。
+  T-06・T-07 は対象の外で名前を含むファイルを先に開かせてから聞き、``tests/`` の呼び出しも ``exact`` で返す（解析の対象の求め方と
+  候補は ``tests/unit/test_pyright_scope_bug0132.py``）。
 """
 
 # ruff: noqa: F811  (フィクスチャ registry を引数で受ける)
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import sys
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -26,6 +31,7 @@ from _lsp_settle import first_analysis
 from test_T06_T07_lsp import (  # noqa: F401  (フィクスチャ registry)
     _BASEDPYRIGHT,
     _BASEDPYRIGHT_CMD,
+    PC,
     POLY,
     READY_WAIT_MS,
     Env,
@@ -60,10 +66,9 @@ def _monorepo(tmp: Path) -> Path:
     return root.resolve()
 
 
-@pytest.fixture
-async def nested(registry: ProcessRegistry, tmp_path: Path):
+@contextlib.asynccontextmanager
+async def _opened(registry: ProcessRegistry, tmp_path: Path, root: Path, first: str) -> AsyncIterator[Env]:
     _lsp_exact.MEMO.clear()
-    root = _monorepo(tmp_path)
     ws = Workspace(workspace_id=WS, root=root, python_env=detect_python_env(root, sys.executable))
     pool = LspPool(
         registry,
@@ -80,7 +85,23 @@ async def nested(registry: ProcessRegistry, tmp_path: Path):
         assert await pool.wait_ready("python", ws, READY_WAIT_MS), pool.status("python", ws)
         handle = pool.get("python", ws)
         assert handle is not None
-        await first_analysis(handle, [LIM])
+        await first_analysis(handle, [first])
+        yield env
+
+
+@pytest.fixture
+async def nested(registry: ProcessRegistry, tmp_path: Path):
+    async with _opened(registry, tmp_path, _monorepo(tmp_path), LIM) as env:
+        yield env
+
+
+@pytest.fixture
+async def narrowed(registry: ProcessRegistry, tmp_path: Path):
+    """根の ``pyrightconfig.json`` が ``include: ["src"]`` の F-POLY（``tests/`` は basedpyright の解析の対象の外）。"""
+    root = tmp_path / "poly"
+    shutil.copytree(POLY, root, ignore=shutil.ignore_patterns("__pycache__"))
+    (root / "pyrightconfig.json").write_text(json.dumps({"include": ["src"]}), encoding="utf-8")
+    async with _opened(registry, tmp_path, root.resolve(), PAY) as env:
         yield env
 
 
@@ -111,3 +132,30 @@ async def test_t06_references_under_an_ancestor_pyright_config_include_the_works
     text = (nested.root / PAY).read_text(encoding="utf-8").splitlines()
     line = next(i + 1 for i, t in enumerate(text) if "self._limits.get(" in t)
     assert [(x["path"], x["line"]) for x in refs] == [(PAY, line)], refs
+
+
+@needs_basedpyright
+async def test_t06_references_outside_a_narrowed_include_are_exact(narrowed: Env) -> None:
+    """``include: ["src"]`` でも、``tests/test_payment.py`` の呼び出しを ``exact`` の答えに含める（以前は routes.py の 2 箇所だけを
+    ``exact`` で返し、テストの呼び出しが黙って落ちていた）。"""
+    r = await narrowed.refs(PC)
+    assert not r.is_error, r.text
+    meta = r.structured["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["is_degraded"] is False, meta
+    assert "basedpyright" in meta["engine_used"], meta
+    refs = r.structured["data"]["references"]
+    assert sorted({x["path"] for x in refs}) == ["src/shop/api/routes.py", "tests/test_payment.py"], refs
+    assert r.structured["data"]["totals"] == {"files": 2, "sites": 3, "tests": 1}
+
+
+@needs_basedpyright
+async def test_t07_incoming_outside_a_narrowed_include_is_exact(narrowed: Env) -> None:
+    r = await narrowed.calls(PC, "incoming", depth=1)
+    assert not r.is_error, r.text
+    meta = r.structured["_resolution_meta"]
+    assert meta["confidence_level"] == "exact" and meta["is_degraded"] is False, meta
+    assert "basedpyright" in meta["engine_used"], meta
+    nodes = {n["name"]: n for n in r.structured["data"]["nodes"]}
+    assert set(nodes) == {"create_order", "retry_order", "test_charge_ok"}, nodes
+    assert nodes["test_charge_ok"]["call_site_path"] == "tests/test_payment.py"
+    assert {n["confidence_level"] for n in nodes.values()} == {"exact"}

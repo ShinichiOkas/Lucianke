@@ -103,9 +103,10 @@ def test_candidates_are_capped_and_the_overflow_is_reported(ws: Workspace, listi
     assert "2 more file(s) mention 'isThing'" in (got.warning("isThing") or "")
 
 
-def test_priming_applies_to_the_ts_family_only() -> None:
-    assert all(lx.needs_priming(lang) for lang in ("typescript", "tsx", "javascript"))
-    assert not any(lx.needs_priming(lang) for lang in ("python", "rust", "go", "c_sharp"))
+def test_priming_applies_to_the_ts_family_and_python() -> None:
+    """Python は basedpyright の解析の対象の外のファイルだけを開かせる（BUG-0132。``test_lsp_prime_python_bug0132.py``）。"""
+    assert all(lx.needs_priming(lang) for lang in ("typescript", "tsx", "javascript", "python"))
+    assert not any(lx.needs_priming(lang) for lang in ("rust", "go", "c_sharp"))
 
 
 class FakeDocs:

@@ -61,6 +61,7 @@ from lucianke.index.exact_marks import ExactMark
 from lucianke.index.ingest import RelationFact, upsert_exact_relations
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle
+from lucianke.lsp.pyright_scope import pyright_scope
 from lucianke.lsp.servers import servers_for
 from lucianke.syntax.relations import extract_relations
 from lucianke.syntax.support import get_support
@@ -85,6 +86,7 @@ __all__ = [
     "ExactBudgetExceeded",
     "ExactCut",
     "PRIME_LANGUAGES",
+    "TS_FAMILY",
     "PRIME_MAX",
     "LspRoute",
     "PrimeSet",
@@ -99,6 +101,7 @@ __all__ = [
     "persist_marks",
     "prime_candidates",
     "prime_documents",
+    "prime_set",
     "degraded_choice",
     "is_lsp_failure",
     "log_slow_spans",
@@ -240,9 +243,14 @@ def degraded_choice(route: LspRoute, exc: BaseException) -> EngineChoice:
 
 # --- 参照元になりうるファイルを LSP に開かせる（BUG-0047） ------------------------------------------
 
-PRIME_LANGUAGES = frozenset({"typescript", "tsx", "javascript"})
+TS_FAMILY = frozenset({"typescript", "tsx", "javascript"})
 """tsserver 系の言語 ID。``tsconfig.json`` / ``jsconfig.json`` の ``include`` に入らないファイル（``test/`` など）は、開くまで
-どのプロジェクトにも入らず ``references`` / ``callHierarchy`` に出ない。Python（basedpyright）は未オープンの文書も探すので要らない。"""
+どのプロジェクトにも入らず ``references`` / ``callHierarchy`` に出ない（BUG-0047）。"""
+
+PRIME_LANGUAGES = TS_FAMILY | {"python"}
+"""参照元になりうるファイルを先に LSP へ開かせる言語。Python（basedpyright）は解析の対象（``include`` / ``exclude``。
+``lsp/pyright_scope``）の内なら未オープンの文書も探すが、対象の外は開いた文書しか探さない（利用者の設定が ``include: ["src"]``
+なら ``tests/`` の呼び出しが答えに入らないまま ``exact`` で返っていた。BUG-0132）。Python は対象の外のファイルだけを開かせる。"""
 
 PRIME_MAX = 100
 """1 回の問い合わせで新しく開く上限（``didOpen`` の LRU 上限 200 の半分。``get_diagnostics`` のワークスペース全体の呼び出しと同じ）。"""
@@ -276,10 +284,13 @@ def prime_candidates(
     exclude: str,
     is_open: Callable[[RelPath], bool],
     limit: int = PRIME_MAX,
+    languages: frozenset[str] = TS_FAMILY,
+    outside: Callable[[RelPath], bool] | None = None,
 ) -> PrimeSet:
-    """``name`` を単語境界で含む tsserver 系のファイル（索引にある Tier 1〜2）のうち、LSP がまだ開いていないもの。
+    """``name`` を単語境界で含む ``languages`` のファイル（索引にある Tier 1〜2）のうち、LSP がまだ開いていないもの。
 
     参照の探す側を LSP に教えるための候補（``features.open_documents`` に渡す）。``exclude``（対象自身のファイル）は除く。
+    ``outside`` を渡すと、それが真のファイル（LSP の解析の対象の外）だけ（中身を読む前に絞る）。
     テストを先に、次にパス順。``limit`` を超えた分は ``skipped`` に数える。読めないファイルは飛ばす。
     """
     try:
@@ -289,7 +300,10 @@ def prime_candidates(
     infos = [
         f
         for f in queries.files_in_scope(conn, ws.workspace_id, ())
-        if f.language in PRIME_LANGUAGES and f.tier in (Tier.T1, Tier.T2) and str(f.path) != exclude
+        if f.language in languages
+        and f.tier in (Tier.T1, Tier.T2)
+        and str(f.path) != exclude
+        and (outside is None or outside(RelPath(str(f.path))))
     ]
     infos.sort(key=lambda f: (not f.is_test, str(f.path)))
     hits: list[tuple[RelPath, str]] = []
@@ -310,6 +324,43 @@ def prime_candidates(
         defs = servers_for(info.language, "types")
         hits.append((rel, defs[0].document_language_id if defs else info.language))
     return PrimeSet(tuple(hits), skipped)
+
+
+def prime_set(
+    conn: sqlite3.Connection,
+    ws: Workspace,
+    language: str,
+    *,
+    name: str,
+    exclude: str,
+    is_open: Callable[[RelPath], bool],
+    limit: int = PRIME_MAX,
+) -> PrimeSet:
+    """対象の言語 ``language`` で、参照元になりうるのに LSP が探さないファイル（``prime_candidates``）。ブロックする。
+
+    * tsserver 系: 名前を含む tsserver 系のファイルすべて（``tsconfig`` の外かどうかは見ない。BUG-0047）。
+    * Python: 名前を含む Python のファイルのうち、basedpyright の解析の対象（``lsp/pyright_scope``）の外のもの（BUG-0132）。
+      利用者の設定が ``include`` / ``exclude`` を書いていない（既定の除外だけ）とき・設定が読めない（判断できない）ときは
+      開かせない（ファイルの一覧も引かない。今までどおり）。
+    * ほかの言語: 空。
+    """
+    if language in TS_FAMILY:
+        return prime_candidates(conn, ws, name=name, exclude=exclude, is_open=is_open, limit=limit)
+    if language != "python":
+        return PrimeSet()
+    scope = pyright_scope(ws.root)
+    if scope is None or not scope.narrowed:
+        return PrimeSet()
+    return prime_candidates(
+        conn,
+        ws,
+        name=name,
+        exclude=exclude,
+        is_open=is_open,
+        limit=limit,
+        languages=frozenset({"python"}),
+        outside=lambda rel: not scope.contains(to_abs(ws, rel)),
+    )
 
 
 async def prime_documents(handle: LspHandle, prime: PrimeSet) -> int:
@@ -1355,17 +1406,18 @@ class CallEdgeSource:
             return {}
 
     def _prime_set(self, sym: Any) -> PrimeSet | None:
-        """incoming の呼び元になりうるファイル（tsserver 系で、対象の名前を含み、LSP がまだ開いていないもの）。ワーカースレッドで引く。
+        """incoming の呼び元になりうるファイル（対象の名前を含み、LSP がまだ開いていないもの。``prime_set``）。ワーカースレッドで引く。
 
-        tsserver は ``tsconfig.json`` の ``include`` に入らないファイル（``test/`` など）を、開かれるまで ``callHierarchy`` の
-        呼び元に出さない（T-06 の BUG-0047 と同じ）。
+        tsserver は ``tsconfig.json`` の ``include`` に入らないファイル（``test/`` など）を、basedpyright は解析の対象（``include`` /
+        ``exclude``）の外のファイルを、開かれるまで ``callHierarchy`` の呼び元に出さない（T-06 の BUG-0047・BUG-0132 と同じ）。
         """
         handle = self.route.handle
         if handle is None or not needs_priming(self.route.file.language):
             return None
-        return prime_candidates(
+        return prime_set(
             self.conn,
             self.ws,
+            self.route.file.language,
             name=sym.name,
             exclude=str(sym.path),
             is_open=handle.documents.is_open,

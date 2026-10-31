@@ -736,10 +736,10 @@ def _confirm(db_path: Any, ws_id: str, urn: str, rows: Sequence[queries.Referenc
         return lx.confirm_marker(conn, db_path, ws_id, "refs", urn, _load_refs(urn), rows, token=token)
 
 
-def _prime_set(db_path: Any, ws: Workspace, handle: Any, sym: SymbolRecord) -> lx.PrimeSet:
+def _prime_set(db_path: Any, ws: Workspace, handle: Any, sym: SymbolRecord, language: str) -> lx.PrimeSet:
     with reader(db_path) as conn:
-        return lx.prime_candidates(
-            conn, ws, name=sym.name, exclude=str(sym.path), is_open=handle.documents.is_open
+        return lx.prime_set(
+            conn, ws, language, name=sym.name, exclude=str(sym.path), is_open=handle.documents.is_open
         )
 
 
@@ -762,9 +762,10 @@ async def _exact_references(
     spans: dict[str, float] = {}
     t = time.monotonic()
     if lx.needs_priming(route.file.language):
-        # tsserver は tsconfig の include に入らないファイル（test/ など）を、開かれるまで探さない（BUG-0047）。
-        # 対象の名前を含むファイルを先に開いてから聞くので、結果は「LSP が見たものそのまま」のまま（exact）。
-        prime = await asyncio.to_thread(_prime_set, db_path, ws, route.handle, sym)
+        # tsserver は tsconfig の include に入らないファイル（test/ など）を、basedpyright は解析の対象（include / exclude）の
+        # 外のファイルを、開かれるまで探さない（BUG-0047・BUG-0132）。対象の名前を含むそのファイルを先に開いてから聞くので、
+        # 結果は「LSP が見たものそのまま」のまま（exact）。
+        prime = await asyncio.to_thread(_prime_set, db_path, ws, route.handle, sym, route.file.language)
         await lx.prime_documents(route.handle, prime)
         note = prime.warning(sym.name)
         if note:
