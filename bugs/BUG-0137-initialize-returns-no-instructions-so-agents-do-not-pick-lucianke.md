@@ -44,3 +44,11 @@
 - `.\build.ps1`（`-Force` なし）で exe を作り直して `~/.local/bin/lucianke.exe` に入れ、実機の JSON-RPC ハンドシェイクで
   `initialize` の結果に `instructions` が載ることを見た。smoke PASSED。
 - コミット: dcde056（コード・試験・仕様書・設計書・本票）。
+
+### 訂正（2026-11-01・親）
+- dcde056 の文面は `query_project_db` を「プロジェクトの DB ファイルを調べる」と書いていた。実際は Lucianke 自身の索引（PaaD・§9）への
+  読み取り SQL なので、そう書き直し、プロジェクトの DB ファイルは開かないと明記した。
+- 「exact references」を「symbol-resolved references」に（T-06 は構文木の解決では同名を区別しない。言い過ぎをやめる）。
+- docstring が存在しない試験のパスを指していたのを `tests/e2e/test_initialize_instructions_bug0137.py` に。
+- 確認: 同じ試験 1 件 passed・ruff クリーン・1,525 文字。新しい Claude Code のセッション（`claude -p`、別プロジェクト）の
+  システムプロンプトに lucianke の instructions が載ることを見た（dcde056 の exe で）。
