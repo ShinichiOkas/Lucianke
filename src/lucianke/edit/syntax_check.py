@@ -31,6 +31,7 @@ import tree_sitter
 from lucianke.core.errors import ErrorCode, LuciankeError
 from lucianke.core.model import Position, Range
 from lucianke.core.textpos import LineIndex, strip_bom
+from lucianke.syntax.memo import BoundedMemo, content_key
 from lucianke.syntax.parsers import ERROR_RANGES_MAX, parse_source
 from lucianke.syntax.support import get_support
 from lucianke.syntax.types import ParsedFile
@@ -141,17 +142,32 @@ def _has_grammar(language_id: str) -> bool:
     return spec is not None and callable(getattr(spec, "grammar", None))
 
 
+_ANALYSIS_MEMO = BoundedMemo(max_entries=32, max_weight=16 * 1024 * 1024)
+"""内容（指紋）と言語ごとの ``_Analysis``。重みは内容のバイト数（BUG-0128）。
+
+``check_after`` は編集の前と後の両方を解析する。前の内容は、同じファイルの前の編集の後の内容（続けて編集する）か、同じファイルへの
+前の呼び出しの前の内容（``dry_run`` の繰り返し）であることが多く、毎回解析し直していた（T-10 の 1 回の手元の処理の 3 割前後）。
+期限で打ち切った解析は負荷で変わるので覚えない。結果は読むだけ（木・エラーの並びを書き換えない）。"""
+
+
 def _analyze(language_id: str, source: bytes) -> _Analysis | None:
-    """``source`` を解析してエラーノードを集める。文法が無ければ ``None``。"""
+    """``source`` を解析してエラーノードを集める。文法が無ければ ``None``。同じ内容・言語の結果は覚えから返す。"""
     if not _has_grammar(language_id):
         return None
+    key = (content_key(source), language_id)
+    cached = _ANALYSIS_MEMO.get(key)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     try:
         parsed, timed_out = parse_source(source, language_id, "")
     except LuciankeError as e:
         if e.code is ErrorCode.E_UNSUPPORTED:
             return None
         raise
-    return _Analysis(parsed, _collect(parsed), timed_out)
+    analysis = _Analysis(parsed, _collect(parsed), timed_out)
+    if not timed_out:
+        _ANALYSIS_MEMO.put(key, analysis, weight=max(1, len(source)))
+    return analysis
 
 
 # --- check_after ---------------------------------------------------------------------------
