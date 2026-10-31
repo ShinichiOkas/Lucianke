@@ -91,3 +91,18 @@
   （`route.file`。前の問い合わせで開いて診断を受けていれば待たない）で待つ。設計書 §7.5.6 に書いた。
 - 試験: `test_a_repeat_from_paad_waits_for_the_root_file_diagnostics_only`（偽 LSP が caller のファイルの最初の診断を 4 秒遅らせる。
   2 回目の depth 2 が 3 秒未満で全部 exact）。直す前のコードでは 4.4 秒で赤。
+
+### 確認（追記: 2 つの修正を載せた後、Mnemo の固定の写しで同じ手順）
+
+| 課題 | 1 回目 | 2 回目 | 3 回目 | 30 秒後 |
+|---|---|---|---|---|
+| T11 | 10,067 ms（木ごと structural） | 10,105 ms（要求を送らず 1 回目の答えを待った） | 10,077 ms（同じ） | 32 ms |
+| T12 | 10,097 ms（8/9 ノード exact、残り 1 ノードは裏で待った） | 372 ms（その答えで exact） | 28 ms | 29 ms |
+
+- この回は T11 の 1 回目の incomingCalls に basedpyright が約 32 秒かかった（14:36:35 に送り、14:37:07 に届いて書き戻した。
+  `late LSP call hierarchy answer saved: canonical_url incoming (43 calls)`）。3 回の呼び出しの間 LSP に送った要求はその 1 本だけ。
+  T12 の根の prepare は 3 秒だけその後ろで待った（直す前は捨てた要求と呼び直しの要求の後ろで 7.5 秒）。
+- 残ること: basedpyright が冷えた状態で T11 の要求に 17〜32 秒かかる間（同じ PC の負荷で変わる）、呼び直しは予算の 10 秒まで
+  その答えを待ってから構文木で答える（新しい要求で LSP の待ち行列を伸ばさない）。答えが届いた後の呼び直しは 25〜50 ms。
+  1 回目の所要は LSP の計算そのものなので、Lucianke の側では縮められない。
+- 2 つの修正を載せた後: `tests/contract_fixtures/test_fx_read_T00_T08.py` 29 passed, 4 skipped（TypeScript の LSP が無い 3 件と F-TS に当てはまらない BUG-0079 の 1 件）。`uv run ruff check`: All checks passed。
