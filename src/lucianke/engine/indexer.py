@@ -793,10 +793,15 @@ class Indexer:
             return None
 
     def _is_skipped(self, rel: RelPath, ignore: object | None) -> bool:
-        """``rel``（ファイル）が索引の対象外か。上位ディレクトリの除外・無視も含める。"""
+        """``rel``（ファイル）が索引の対象外か。上位ディレクトリの除外・無視・入れ子の Git の作業ツリー（BUG-0118）も含める。"""
         parts = str(rel).split("/")
         if ".git" in parts or is_excluded(self._ws, rel):
             return True
+        if len(parts) > 1:
+            submodules = _submodule_paths(self._ws.root)
+            for k in range(1, len(parts)):
+                if _nested_repo(self._ws.root, "/".join(parts[:k]), submodules):
+                    return True
         if ignore is None:
             return False
         try:
@@ -808,8 +813,14 @@ class Indexer:
             return False
 
     def _walk(self) -> tuple[list[RelPath], bool]:
-        """ワークスペースのファイルを列挙する（昇順）。シンボリックリンクと ``.git`` は辿らない。"""
+        """ワークスペースのファイルを列挙する（昇順）。シンボリックリンクと ``.git`` は辿らない。
+
+        入れ子の Git の作業ツリー・リポジトリ（``.git`` のファイルかディレクトリを持つ根以外のディレクトリ。``.claude/worktrees/*``
+        など）には降りない（BUG-0118。Git もそれを親の作業ツリーの一部として扱わない）。根の ``.gitmodules`` が挙げるサブモジュールは
+        今までどおり辿る（プロジェクトのソースとして取り込んでいたもの）。
+        """
         ignore = self._make_ignore()
+        submodules = _submodule_paths(self._ws.root)
         root = str(self._ws.root)
         out: list[RelPath] = []
         stack: list[str] = [""]
@@ -836,6 +847,8 @@ class Indexer:
                     if is_excluded(self._ws, RelPath(rel + "/.")):
                         continue
                     if ignore is not None and _safe_ignored(ignore, rel + "/"):
+                        continue
+                    if _nested_repo(self._ws.root, rel, submodules):
                         continue
                     stack.append(rel)
                 elif is_file:
@@ -1404,6 +1417,25 @@ class _BatchFailure(Exception):
 def _chunks[T](items: Sequence[T], size: int) -> Iterable[list[T]]:
     for i in range(0, len(items), size):
         yield list(items[i : i + size])
+
+
+def _nested_repo(root: Path, rel_dir: str, submodules: frozenset[str]) -> bool:
+    """ワークスペースの中のディレクトリ ``rel_dir`` が入れ子の Git の作業ツリー・リポジトリか（``.git`` を持つ。サブモジュールは除く）。"""
+    return rel_dir not in submodules and os.path.lexists(os.path.join(root, rel_dir, ".git"))
+
+
+def _submodule_paths(root: Path) -> frozenset[str]:
+    """根の ``.gitmodules`` が挙げるサブモジュールのパス（``path = ...``。``/`` 区切り）。無い・読めなければ空。"""
+    try:
+        text = (root / ".gitmodules").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset()
+    out: set[str] = set()
+    for line in text.splitlines():
+        key, eq, value = line.strip().partition("=")
+        if eq and key.strip() == "path" and value.strip():
+            out.add(value.strip().replace("\\", "/").strip("/"))
+    return frozenset(out)
 
 
 def _safe_ignored(ignore: object, path: str) -> bool:
