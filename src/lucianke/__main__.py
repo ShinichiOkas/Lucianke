@@ -15,6 +15,12 @@ _SELFTEST_SUBCOMMAND = "_doctor-selftest"
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None and getattr(sys, "frozen", False):
+        # exe（PyInstaller）: 走査の解析の子プロセス（spawn。engine/analysis_pool.py。BUG-0127）はこの exe 自身を
+        # ``--multiprocessing-fork`` で起こす。子ならここで子の仕事をして終わる（親では何もしない）
+        from multiprocessing.spawn import freeze_support
+
+        freeze_support()
     args = sys.argv[1:] if argv is None else argv
     if args[:1] in (["--version"], ["-V"]):
         print(f"lucianke {__version__}", file=sys.stderr)

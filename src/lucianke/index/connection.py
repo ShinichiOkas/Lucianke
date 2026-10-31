@@ -37,6 +37,10 @@ _log = logging.getLogger("lucianke.index.connection")
 DB_FILENAME: Final = "paad.sqlite"  # 仕様書 §4.5: <cache_root>/<workspace_hash>/paad.sqlite
 WRITER_BUSY_TIMEOUT_MS: Final = 5000  # 設計書 §6.2
 READER_BUSY_TIMEOUT_MS: Final = 1000  # 設計書 §6.2
+WRITER_CACHE_KIB: Final = 131072
+"""書き手のページキャッシュの上限（KiB。``PRAGMA cache_size = -N``）。既定の 2 MiB では、長い URN の索引（``symbols`` の ``urn``・``name``、
+``relations`` の ``target_urn``）へばらばらの位置に差し込む初回の索引でページの読み直しが続き、4,000 ファイル級で書き込みが倍かかった
+（BUG-0127）。上限なので、小さな DB では使った分しか取らない。"""
 DEFAULT_ACQUIRE_TIMEOUT_S: Final = (
     READ_REQUEST_TIMEOUT_MS / 1000
 )  # プールの空きを待つ上限（1 要求の読み取り上限と同じ）
@@ -68,7 +72,7 @@ def ensure_dir_writable(directory: Path) -> None:
 def open_writer(path: Path | str, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """書き込み接続を開く。``IndexWriter`` の専用スレッドの中で呼んで、そのスレッドだけで使うこと。
 
-    ``journal_mode=WAL``、``synchronous=NORMAL``、``foreign_keys=ON``、``busy_timeout=5000``。
+    ``journal_mode=WAL``、``synchronous=NORMAL``、``foreign_keys=ON``、``busy_timeout=5000``、``cache_size``（``WRITER_CACHE_KIB``）。
     ``isolation_level=None``（自動コミット）にして、トランザクションは呼び出し側が ``BEGIN IMMEDIATE`` で
     明示する（Python の暗黙の ``BEGIN`` と衝突させない）。親ディレクトリが無ければ作る。
 
@@ -91,6 +95,7 @@ def open_writer(path: Path | str, *, check_same_thread: bool = True) -> sqlite3.
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute(f"PRAGMA busy_timeout={WRITER_BUSY_TIMEOUT_MS}")
+        conn.execute(f"PRAGMA cache_size=-{WRITER_CACHE_KIB}")
     except BaseException:
         conn.close()
         raise

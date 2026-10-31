@@ -422,12 +422,37 @@ def _ensure_external(conn: sqlite3.Connection, target_urn: str, relation_kinds: 
     ``kind`` は ``external_kind`` の規則。すでに行があるときは、より強い証拠（``Class`` > ``Function`` / ``Method`` >
     ``Constant`` / ``Property`` > ``Variable`` > ``Module``）が来たときだけ昇格する（ファイルの取り込み順に依らない）。
     """
-    if not target_urn.startswith(f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"):
+    row = _external_row(target_urn, relation_kinds)
+    if row is None:
         return 0
+    cur = conn.execute(_INSERT_EXTERNAL_SQL, row)
+    if cur.rowcount > 0:
+        return 1
+    found = conn.execute(
+        "SELECT kind FROM symbols WHERE urn = ? AND is_external = 1", (target_urn,)
+    ).fetchone()
+    kind = row[3]
+    if found is not None and _EXTERNAL_KIND_RANK.get(kind, 0) > _EXTERNAL_KIND_RANK.get(found[0], 0):
+        conn.execute("UPDATE symbols SET kind = ? WHERE urn = ? AND is_external = 1", (kind, target_urn))
+    return 0
+
+
+_EXTERNAL_URN_PREFIX: Final = f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"
+_IN_CHUNK: Final = 500  # ``IN (?, ...)`` 1 文に載せる値の数（SQLite の変数の上限より十分小さく）
+_INSERT_EXTERNAL_SQL: Final = (
+    "INSERT OR IGNORE INTO symbols (urn, file_id, is_external, parent_urn, name, qualified_name, kind,"
+    " start_line, end_line, confidence_level) VALUES (?, NULL, 1, NULL, ?, ?, ?, 1, 1, 'heuristic')"
+)
+
+
+def _external_row(target_urn: str, relation_kinds: Iterable[str]) -> tuple[str, str, str, str] | None:
+    """外部シンボルの最小の行 ``(urn, name, qualified_name, kind)``。``lk://_ext/`` でない・読めない URN は ``None``。"""
+    if not target_urn.startswith(_EXTERNAL_URN_PREFIX):
+        return None
     try:
         urn = parse(target_urn)
     except ValueError:
-        return 0
+        return None
     selector = urn.selector
     qualified = getattr(selector, "qualified", None)
     if isinstance(qualified, str):
@@ -436,19 +461,35 @@ def _ensure_external(conn: sqlite3.Connection, target_urn: str, relation_kinds: 
         name = qualified = urn.path
         selector = None
     kind = external_kind(qualified if selector is not None else None, relation_kinds)
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO symbols (urn, file_id, is_external, parent_urn, name, qualified_name, kind,"
-        " start_line, end_line, confidence_level) VALUES (?, NULL, 1, NULL, ?, ?, ?, 1, 1, 'heuristic')",
-        (target_urn, name, qualified, kind.value),
-    )
-    if cur.rowcount > 0:
-        return 1
-    row = conn.execute("SELECT kind FROM symbols WHERE urn = ? AND is_external = 1", (target_urn,)).fetchone()
-    if row is not None and _EXTERNAL_KIND_RANK.get(kind.value, 0) > _EXTERNAL_KIND_RANK.get(row[0], 0):
-        conn.execute(
-            "UPDATE symbols SET kind = ? WHERE urn = ? AND is_external = 1", (kind.value, target_urn)
-        )
-    return 0
+    return (target_urn, name, qualified, kind.value)
+
+
+def _ensure_externals(conn: sqlite3.Connection, wanted: Mapping[str, Iterable[str]]) -> int:
+    """``_ensure_external`` を URN ごとに呼ぶのと同じ結果を、まとめて書く（既にある行は 1 文で引く。BUG-0127）。作った行数。"""
+    rows = [r for r in (_external_row(u, kinds) for u, kinds in wanted.items()) if r is not None]
+    if not rows:
+        return 0
+    existing: dict[str, tuple[str, int]] = {}
+    for i in range(0, len(rows), _IN_CHUNK):
+        chunk = [r[0] for r in rows[i : i + _IN_CHUNK]]
+        marks = ", ".join("?" * len(chunk))
+        for urn, kind, is_external in conn.execute(
+            f"SELECT urn, kind, is_external FROM symbols WHERE urn IN ({marks})",  # noqa: S608 - 値は束縛
+            chunk,
+        ):
+            existing[str(urn)] = (str(kind), int(is_external))
+    new = [r for r in rows if r[0] not in existing]
+    if new:
+        conn.executemany(_INSERT_EXTERNAL_SQL, new)
+    for urn, _name, _qualified, kind in rows:
+        found = existing.get(urn)
+        if (
+            found is not None
+            and found[1] == 1
+            and _EXTERNAL_KIND_RANK.get(kind, 0) > _EXTERNAL_KIND_RANK.get(found[0], 0)
+        ):
+            conn.execute("UPDATE symbols SET kind = ? WHERE urn = ? AND is_external = 1", (kind, urn))
+    return len(new)
 
 
 # --- relations --------------------------------------------------------------------------
@@ -474,6 +515,8 @@ def _insert_relations(
         tgt_text = _urn_str(fact.target_urn)
         if tgt_text.startswith(f"{SCHEME}{EXTERNAL_WORKSPACE_ID}/"):
             kinds_of_target.setdefault(tgt_text, set()).add(fact.relation_kind)
+    # 外部シンボルの行と目標の持ち主のファイルは、目標ごとに 1 文ずつではなく、ファイルごとにまとめて引く（BUG-0127）
+    external = _ensure_externals(conn, kinds_of_target)
     for fact in facts:
         src, tgt = _urn_str(fact.source_urn), _urn_str(fact.target_urn)
         conf = force_confidence or fact.confidence
@@ -482,10 +525,7 @@ def _insert_relations(
         if key in seen:
             continue
         seen.add(key)
-        if tgt not in target_files:
-            external += _ensure_external(conn, tgt, kinds_of_target.get(tgt, (fact.relation_kind,)))
-            row = conn.execute("SELECT file_id FROM symbols WHERE urn = ?", (tgt,)).fetchone()
-            target_files[tgt] = None if row is None else row[0]
+        target_files.setdefault(tgt, None)
         sfid = source_file_id
         if resolve_source_file:
             if src not in source_files:
@@ -497,7 +537,7 @@ def _insert_relations(
                 tgt,
                 fact.relation_kind,
                 sfid,
-                target_files[tgt],
+                None,  # 下で target_file_id を埋める
                 line,
                 col,
                 fact.use_kind,
@@ -505,13 +545,24 @@ def _insert_relations(
                 conf.value,
             )
         )
+    _fill_symbol_files(conn, target_files)
     conn.executemany(
         "INSERT INTO relations (source_urn, target_urn, relation_kind, source_file_id, target_file_id,"
         " call_site_line, call_site_col, use_kind, guard_condition, confidence_level)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        rows,
+        [(*r[:4], target_files[str(r[1])], *r[5:]) for r in rows],
     )
     return len(rows), external
+
+
+def _fill_symbol_files(conn: sqlite3.Connection, files: dict[str, int | None]) -> None:
+    """``files`` の各 URN の値を、その ``symbols`` 行の ``file_id`` にする（行が無い・外部シンボルなら ``None`` のまま）。"""
+    urns = [u for u in files if not u.startswith(_EXTERNAL_URN_PREFIX)]  # 外部シンボルの file_id は常に NULL
+    for i in range(0, len(urns), _IN_CHUNK):
+        chunk = urns[i : i + _IN_CHUNK]
+        marks = ", ".join("?" * len(chunk))
+        for urn, file_id in conn.execute(f"SELECT urn, file_id FROM symbols WHERE urn IN ({marks})", chunk):  # noqa: S608 - 値は束縛
+            files[str(urn)] = file_id
 
 
 def _file_of_urn(conn: sqlite3.Connection, urn: str) -> int | None:
@@ -721,12 +772,13 @@ def _sync_symbols(conn: sqlite3.Connection, file_id: int, facts: FileFacts) -> t
         f"INSERT INTO symbols (urn, file_id, is_external, {select_cols})"
         f" VALUES (?, ?, 0, {', '.join('?' * len(_SYMBOL_COLUMNS))})"
     )
-    for urn in added_urns:  # 親が先（修飾名の '.' が少ない順）。parent_urn の FK を満たす
-        conn.execute(insert_sql, (urn, file_id, *new_rows[urn]))
+    if added_urns:  # まとめ書き（1 文ずつ発行すると、初回の索引で文の数が数十万になる。BUG-0127）
+        # 親が先（修飾名の '.' が少ない順）。parent_urn の FK を満たす（executemany は行の順に入れる）
+        conn.executemany(insert_sql, [(urn, file_id, *new_rows[urn]) for urn in added_urns])
         # 先に取り込まれていた他ファイルからの関係の target_file_id を埋める
-        conn.execute(
+        conn.executemany(
             "UPDATE relations SET target_file_id = ? WHERE target_urn = ? AND target_file_id IS NOT ?",
-            (file_id, urn, file_id),
+            [(file_id, urn, file_id) for urn in added_urns],
         )
 
     update_sql = "UPDATE symbols SET " + ", ".join(f"{c} = ?" for c in _SYMBOL_COLUMNS) + " WHERE urn = ?"

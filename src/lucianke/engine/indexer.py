@@ -43,12 +43,13 @@ import logging
 import os
 import stat
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from lucianke.core.foreground import FOREGROUND, background
 from lucianke.core.limits import MAX_FILE_BYTES
@@ -56,6 +57,7 @@ from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
 from lucianke.engine import reresolve
+from lucianke.engine.analysis_pool import POOL_MIN_FILES, AnalysisPool, default_workers
 from lucianke.engine.rank_scheduler import RANK_DEBOUNCE_S, RankScheduler
 from lucianke.index import inherited, queries, rank, reexports
 from lucianke.index.connection import ReaderPool
@@ -283,6 +285,9 @@ class Indexer:
         reader_pool: 既存の ``files`` を引く読み取り接続のプール。
         tree_cache: 構文木のキャッシュ（ツール側の読み取りと共有する）。
         max_file_bytes: これを超えるファイルは構文木を作らず ``files`` 行だけにする（仕様書 §12.4）。
+        analysis_workers: 走査の解析に使う子プロセスの数（0 は同じプロセスで解析する）。``None`` は ``default_workers()``
+            （``LUCIANKE_INDEX_WORKERS``、無ければ論理 CPU の半分。BUG-0127。engine/analysis_pool.py）。
+        pool_min_files: 走査で解析の要るファイルがこの数を超えたら、残りを子プロセスに渡す（小さな差分の走査では起こさない）。
     """
 
     def __init__(
@@ -295,12 +300,17 @@ class Indexer:
         max_file_bytes: int = MAX_FILE_BYTES,
         rank_delay_s: float = RANK_DEBOUNCE_S,
         rank_sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+        analysis_workers: int | None = None,
+        pool_min_files: int = POOL_MIN_FILES,
     ) -> None:
         self._ws = ws
         self._writer = writer
         self._readers = reader_pool
         self._trees = tree_cache
         self._max = max_file_bytes
+        self._workers = default_workers() if analysis_workers is None else max(0, analysis_workers)
+        self._pool_min_files = pool_min_files
+        self.pooled_files = 0  # 最後の走査で子プロセスが解析したファイル数（観測・試験用）
         self._ws_ready = False
         self._ws_lock = asyncio.Lock()
         self._scan_lock = asyncio.Lock()
@@ -323,6 +333,18 @@ class Indexer:
         # プロジェクトのディレクトリ（ワークスペースのルート ``""``・テストフィクスチャのルート）→ pytest の設定のうち import の根に
         # 効くもの（BUG-0082）。設定ファイルの取り込み・削除（engine/reresolve.py）と走査の始まりで捨てる（``forget_pytest_imports``）
         self._pytest_imports: dict[str, PytestImports] = {}
+
+    @classmethod
+    def for_analysis(cls, ws: Workspace, *, max_file_bytes: int = MAX_FILE_BYTES) -> Indexer:
+        """解析だけをする索引器（走査の子プロセスの中で使う。書き手・読み手を持たないので ``_analyze_sync`` 以外は呼ばない）。"""
+        return cls(
+            ws,
+            cast("IndexWriter", None),
+            cast("ReaderPool", None),
+            TreeCache(max_files=_WORKER_TREE_CACHE_FILES),
+            max_file_bytes=max_file_bytes,
+            analysis_workers=0,
+        )
 
     @property
     def workspace(self) -> Workspace:
@@ -566,10 +588,29 @@ class Indexer:
                 report.transactions += 1
                 batch = []
 
-        for i, rel in enumerate(listing, 1):
-            await FOREGROUND.apause()  # 前景のツールの呼び出しの間は、次のファイルの解析を始めない（BUG-0112）
+        # 解析の要るファイルが ``pool_min_files`` を超えたら、残りは子プロセスで解析する（BUG-0127。engine/analysis_pool.py）。
+        # 結果は列挙の順に受け取って取り込む（file_id の振り方・バッチの切れ目は同じプロセスで解析したときと同じ）
+        pool = (
+            AnalysisPool(self._workers, _analysis_worker_init, (self._ws, self._max))
+            if self._workers
+            else None
+        )
+        in_flight: deque[tuple[RelPath, asyncio.Future[_Prepared | None | Literal["gone"]]]] = deque()
+        analysed = done = 0
+        self.pooled_files = 0
+
+        def pool_for_next() -> AnalysisPool | None:
+            nonlocal analysed
+            analysed += 1
+            if pool is None or pool.broken or analysed <= self._pool_min_files:
+                return None
+            return pool
+
+        async def take() -> None:
+            nonlocal done
+            rel, future = in_flight.popleft()
             try:
-                prepared = await self._prepare(rel, known.get(rel))
+                prepared = await future
             except Exception as exc:  # 1 ファイルの失敗で走査全体を止めない
                 _log.warning("scan: could not prepare %s", rel, exc_info=True)
                 report.errors.append((str(rel), f"{type(exc).__name__}: {exc}"))
@@ -584,8 +625,28 @@ class Indexer:
                 batch.append(prepared.facts)
                 if len(batch) >= INGEST_BATCH_FILES:
                     await flush()
-            progress(5 + (i * 90) // total)
-            self._scan_done = i
+            done += 1
+            progress(5 + (done * 90) // total)
+            self._scan_done = done
+
+        try:
+            for rel in listing:
+                # 前景のツールの呼び出しの間は、次のファイルの解析を始めない（BUG-0112）
+                await FOREGROUND.apause()
+                in_flight.append((rel, await self._start_prepare(rel, known.get(rel), pool_for_next)))
+                limit = pool.window if pool is not None and pool.submitted else 0
+                while len(in_flight) > limit:
+                    await take()
+            while in_flight:
+                await take()
+        finally:
+            for _, future in in_flight:  # 取り消された走査: 渡したままの解析を捨てる
+                future.cancel()
+            if in_flight:
+                await asyncio.gather(*(f for _, f in in_flight), return_exceptions=True)
+            if pool is not None:
+                self.pooled_files = pool.submitted
+                await pool.aclose()
         await flush()
         await flush()  # 最後に積んだバッチの完了を待つ
         self._scan_ingested |= ingested
@@ -913,49 +974,109 @@ class Indexer:
         if loaded == "gone":
             return "gone"
         assert isinstance(loaded, _Loaded)
+        return await self._analyze_loaded(rel, loaded)
+
+    async def _start_prepare(
+        self, rel: RelPath, known_sha: str | None, pool_for_next: Callable[[], AnalysisPool | None]
+    ) -> asyncio.Future[_Prepared | None | Literal["gone"]]:
+        """走査の 1 ファイル（``_prepare`` と同じ結果）。読み込みはここで済ませ、解析は ``pool_for_next()`` が子プロセスの組を返せば
+        そこへ渡す（返す Future は子の結果を待つ）。そうでなければ同じプロセスで解析し終えた Future を返す。失敗も Future に載せる。"""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[_Prepared | None | Literal["gone"]] = loop.create_future()
+        try:
+            loaded = await asyncio.to_thread(self._load, rel, known_sha)
+            if not isinstance(loaded, _Loaded):
+                future.set_result(None if loaded == "unchanged" else "gone")
+                return future
+            pool = pool_for_next()
+            remote = pool.submit(_analysis_worker_run, rel, loaded) if pool is not None else None
+            if pool is not None and remote is not None:
+                return asyncio.ensure_future(self._finish_remote(rel, loaded, remote, pool))
+            future.set_result(await self._analyze_loaded(rel, loaded))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+    async def _finish_remote(
+        self, rel: RelPath, loaded: _Loaded, remote: asyncio.Future[_Prepared | None], pool: AnalysisPool
+    ) -> _Prepared:
+        """子プロセスの解析の結果を待つ。子が落ちた・結果を渡せなかったときは、そのファイルを同じプロセスで解析し直す（結果は同じ）。"""
+        try:
+            prepared = await remote
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            pool.failed(exc)
+            _log.warning("analysis worker failed for %s; analysing it in-process", rel, exc_info=True)
+            return await self._analyze_loaded(rel, loaded)
+        return prepared if prepared is not None else await self._outline(rel, loaded)
+
+    async def _analyze_loaded(self, rel: RelPath, loaded: _Loaded) -> _Prepared:
+        """読み込んだファイルを同じプロセスで解析する（構文解析はスレッドで。ctags の外形はイベントループで）。"""
+        prepared = await asyncio.to_thread(self._analyze_sync, rel, loaded)
+        return prepared if prepared is not None else await self._outline(rel, loaded)
+
+    def _analyze_sync(self, rel: RelPath, loaded: _Loaded) -> _Prepared | None:
+        """読み込んだファイルの ``FileFacts``（スレッド・走査の子プロセスで走る。DB に触れない）。
+
+        ``None`` は ctags の外形が要る（Tier 4 と、タグクエリの無い Tier 1〜2。子プロセスを起こすので ``_outline`` が
+        イベントループで作る）。解析に失敗したら ``files`` 行だけ（``degraded`` に理由）。
+        """
         detected = detect(rel, loaded.head)
-        ws_id = self._ws.workspace_id
-
-        def files_only(*, degraded: str | None = None) -> _Prepared:
-            lines = 0
-            if detected.index_content:
-                lines = (
-                    loaded.line_count if loaded.data is None else LineIndex(loaded.data).content_line_count
-                )
-            return _Prepared(
-                FileFacts(
-                    workspace_id=ws_id,
-                    path=rel,
-                    language=detected.language_id,
-                    tier=detected.tier,
-                    line_count=lines,
-                    byte_size=loaded.size,
-                    sha256=loaded.sha256,
-                    is_test=is_test(rel),
-                    confidence=Confidence.LEXICAL_FALLBACK,
-                ),
-                degraded,
-            )
-
         # 秘密・バイナリ・大きすぎるファイルは files 行だけ（仕様書 §12.4、§13.5）
         if not detected.index_content or loaded.data is None:
-            return files_only()
+            return self._files_only(rel, loaded, detected)
         if _is_minified(rel, detected.language_id, loaded.data):
             # 圧縮済みの JS（``*.min.js``・1 行 数 MB の束）は読む必要が無く、1〜2 文字の名前のシンボル・関係を数千作り、1 本に
             # 数十秒かかる。``files`` 行だけにする（行数・大きさ・``sha256`` は残す。BUG-0119）
-            return files_only()
+            return self._files_only(rel, loaded, detected)
         data = loaded.data
         lang = detected.language_id
         try:
             if detected.tier <= Tier.T2 and _grammar_support(lang) is not None and _has_symbol_queries(lang):
-                facts = await asyncio.to_thread(self._analyze_code, rel, loaded, data, detected)
-                return _Prepared(facts)
+                return _Prepared(self._analyze_code(rel, loaded, data, detected))
             if detected.tier == Tier.T3 or get_adapter(lang) is not None:  # .ipynb（Tier 2）もアダプタの言語
-                return _Prepared(await asyncio.to_thread(self._analyze_adapter, rel, loaded, data, detected))
-            return _Prepared(await self._analyze_outline(rel, loaded, data, detected))
+                return _Prepared(self._analyze_adapter(rel, loaded, data, detected))
         except Exception as exc:
             _log.warning("analysis failed for %s (%s); indexing the file row only", rel, lang, exc_info=True)
-            return files_only(degraded=f"{type(exc).__name__}: {exc}")
+            return self._files_only(rel, loaded, detected, degraded=f"{type(exc).__name__}: {exc}")
+        return None
+
+    async def _outline(self, rel: RelPath, loaded: _Loaded) -> _Prepared:
+        """``_analyze_sync`` が ``None`` を返したファイルの外形（ctags、無ければブロック走査）。"""
+        detected = detect(rel, loaded.head)
+        assert loaded.data is not None
+        try:
+            return _Prepared(await self._analyze_outline(rel, loaded, loaded.data, detected))
+        except Exception as exc:
+            _log.warning(
+                "analysis failed for %s (%s); indexing the file row only",
+                rel,
+                detected.language_id,
+                exc_info=True,
+            )
+            return self._files_only(rel, loaded, detected, degraded=f"{type(exc).__name__}: {exc}")
+
+    def _files_only(
+        self, rel: RelPath, loaded: _Loaded, detected: Detected, *, degraded: str | None = None
+    ) -> _Prepared:
+        lines = 0
+        if detected.index_content:
+            lines = loaded.line_count if loaded.data is None else LineIndex(loaded.data).content_line_count
+        return _Prepared(
+            FileFacts(
+                workspace_id=self._ws.workspace_id,
+                path=rel,
+                language=detected.language_id,
+                tier=detected.tier,
+                line_count=lines,
+                byte_size=loaded.size,
+                sha256=loaded.sha256,
+                is_test=is_test(rel),
+                confidence=Confidence.LEXICAL_FALLBACK,
+            ),
+            degraded,
+        )
 
     def _base_facts(
         self,
@@ -1419,6 +1540,26 @@ class _BatchFailure(Exception):
         super().__init__(f"{len(failures)} file(s) failed")
         self.stats = stats
         self.failures = failures
+
+
+# --- 走査の子プロセス（BUG-0127。engine/analysis_pool.py） ------------------------------
+
+_WORKER_TREE_CACHE_FILES: Final = 8
+"""子プロセスの構文木のキャッシュ（解析した木は使い回さない。ツールの読み取りは親の ``TreeCache`` が受け持つ）。"""
+_WORKER: Indexer | None = None
+
+
+def _analysis_worker_init(ws: Workspace, max_file_bytes: int) -> None:
+    """子プロセスの起動時に 1 回: 解析だけをする索引器を作る（pytest の設定の覚えは、走査ごとに起こす子の中で新しい）。"""
+    global _WORKER
+    _WORKER = Indexer.for_analysis(ws, max_file_bytes=max_file_bytes)
+
+
+def _analysis_worker_run(rel: RelPath, loaded: _Loaded) -> _Prepared | None:
+    """子プロセスで 1 ファイルを解析する（``Indexer._analyze_sync``。``None`` は親が ctags の外形を作る）。"""
+    if _WORKER is None:
+        raise RuntimeError("analysis worker is not initialised")
+    return _WORKER._analyze_sync(rel, loaded)  # noqa: SLF001  同じモジュールの子の入口
 
 
 # --- 補助 -------------------------------------------------------------------------------
