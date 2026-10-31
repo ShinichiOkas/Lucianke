@@ -121,6 +121,12 @@ _CHUNK: Final = 1024 * 1024
 _HEAD_BYTES: Final = 8 * 1024
 _SYNTAX_ERROR_MESSAGE: Final = "syntax error"
 _JS_LANGUAGES: Final = frozenset({"typescript", "tsx", "javascript", "jsx"})  # バレルの公開する名前を書く言語（BUG-0104）
+MINIFIED_SUFFIXES: Final = (".min.js", ".min.mjs", ".min.cjs")
+"""この名前の JS は圧縮済みとみなし、構文木を作らず ``files`` 行だけにする（BUG-0119）。"""
+MINIFIED_MIN_BYTES: Final = 32 * 1024
+MINIFIED_AVG_LINE_BYTES: Final = 300
+"""名前で分からない JS / TS でも、``MINIFIED_MIN_BYTES`` 以上で 1 行の平均がこのバイト数以上なら圧縮済み・束ねた生成物とみなす
+（手で書いたコードの行の平均は 30〜50 バイト）。"""
 
 JobState = Literal["queued", "running", "done", "failed"]
 
@@ -934,6 +940,10 @@ class Indexer:
         # 秘密・バイナリ・大きすぎるファイルは files 行だけ（仕様書 §12.4、§13.5）
         if not detected.index_content or loaded.data is None:
             return files_only()
+        if _is_minified(rel, detected.language_id, loaded.data):
+            # 圧縮済みの JS（``*.min.js``・1 行 数 MB の束）は読む必要が無く、1〜2 文字の名前のシンボル・関係を数千作り、1 本に
+            # 数十秒かかる。``files`` 行だけにする（行数・大きさ・``sha256`` は残す。BUG-0119）
+            return files_only()
         data = loaded.data
         lang = detected.language_id
         try:
@@ -1417,6 +1427,17 @@ class _BatchFailure(Exception):
 def _chunks[T](items: Sequence[T], size: int) -> Iterable[list[T]]:
     for i in range(0, len(items), size):
         yield list(items[i : i + size])
+
+
+def _is_minified(rel: RelPath, language_id: str, data: bytes) -> bool:
+    """圧縮済み・束ねた生成物の JS / TS か（``MINIFIED_SUFFIXES`` の名前、または大きくて 1 行の平均が長い。BUG-0119）。"""
+    if language_id not in _JS_LANGUAGES:
+        return False
+    if str(rel).rsplit("/", 1)[-1].lower().endswith(MINIFIED_SUFFIXES):
+        return True
+    if len(data) < MINIFIED_MIN_BYTES:
+        return False
+    return len(data) // (data.count(b"\n") + 1) >= MINIFIED_AVG_LINE_BYTES
 
 
 def _nested_repo(root: Path, rel_dir: str, submodules: frozenset[str]) -> bool:

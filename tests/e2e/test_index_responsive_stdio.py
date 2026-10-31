@@ -1,8 +1,9 @@
 """索引の途中でも呼び出しが待たされない（BUG-0112）: 実プロセスの ``lucianke`` を stdio でつなぎ、初回の索引の間ずっと
 ``configure_workspace status`` と読むツールを呼び、どの呼び出しも数秒で答えることを確かめる。
 
-ワークスペースは tmp に作る: Python のモジュール 250 本（クラスの継承と呼び出し・import）と、圧縮した JS の 1 行 約 1 MB
-（非 ASCII の文字列と入れ子の即時関数。大きなワークスペースで索引を数十分止めていた形）。Git の作業ツリーにして（dulwich）、
+ワークスペースは tmp に作る: Python のモジュール 250 本（クラスの継承と呼び出し・import）と、関数 24,000 本・約 1 MB の JS
+（非 ASCII の文字列・入れ子の即時関数・約 100 KB の 1 行。大きなワークスペースで索引を数十分止めていた形。1 行に 1 関数なので
+圧縮済み〈BUG-0119〉とはみなされず解析される）。Git の作業ツリーにして（dulwich）、
 ``status`` が実際に Git の状態を調べるようにする。
 
 * 走査の間の ``status`` は、どれも ``STATUS_LIMIT_S`` 以内に答える（修正前は、同じ形のワークスペースで 2 分を超えた）。
@@ -31,7 +32,7 @@ from _server_cmd import server_argv  # noqa: E402
 STATUS_LIMIT_S = 5.0
 SCAN_LIMIT_S = 300.0  # 走査が終わるまでの上限（修正後は 30 秒前後）
 MODULES = 250
-BUNDLE_FUNCTIONS = 24_000  # 圧縮した JS の 1 行 約 1 MB
+BUNDLE_FUNCTIONS = 24_000  # 約 1 MB の JS
 
 
 def _module(i: int) -> str:
@@ -53,10 +54,11 @@ def _bundle() -> str:
     for i in range(BUNDLE_FUNCTIONS):
         if i % 200 == 0:
             out.append("(function(){")
-        out.append(f"function a{i}(n){{return n+t.length+a{(i * 7) % BUNDLE_FUNCTIONS}.length}}")
+        out.append(f"\nfunction a{i}(n){{return n+t.length+a{(i * 7) % BUNDLE_FUNCTIONS}.length}}")
         if i % 200 == 199:
             out.append("})();")
-    out.append("}(this);\n")
+    out.append("\nvar long=[" + ",".join(f'"é{i}"' for i in range(12_000)) + "];")  # 約 100 KB の 1 行（非 ASCII）
+    out.append("\n}(this);\n")
     return "".join(out)
 
 
@@ -67,7 +69,7 @@ def _make_workspace(root: Path) -> None:
     for i in range(MODULES):
         (pkg / f"m{i:03d}.py").write_text(_module(i), encoding="utf-8", newline="\n")
     (root / "vendor").mkdir()
-    (root / "vendor" / "bundle.min.js").write_text(_bundle(), encoding="utf-8", newline="\n")
+    (root / "vendor" / "bundle.js").write_text(_bundle(), encoding="utf-8", newline="\n")
     (root / "pyproject.toml").write_text('[project]\nname = "responsive"\nversion = "0"\n', encoding="utf-8", newline="\n")
     from dulwich import porcelain
 
