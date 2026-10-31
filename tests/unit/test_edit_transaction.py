@@ -32,6 +32,7 @@ from lucianke.edit.writer import TMP_PREFIX
 from lucianke.index.queries import DiagnosticRow
 from lucianke.index.writer import IndexWriter
 from lucianke.lsp.diagnostics import DiagnosticsHub
+from lucianke.lsp.documents import DocumentRouter, DocumentSync
 from lucianke.syntax.parsers import parse_source
 from lucianke.workspace.paths import to_file_uri
 from lucianke.workspace.types import Workspace
@@ -112,21 +113,26 @@ class FakeDocuments:
 
 @dataclass
 class FakeHub:
-    """``wait_for`` が ``gate`` を待つ。``stale`` に入れたパスは揃わない（タイムアウトで偽）。"""
+    """``wait_for`` が ``gate`` を待つ（待ち始めたら ``blocked``）。``stale`` に入れたパスは揃わない（タイムアウトで偽）。
+    ``stale_first`` に入れたパスは最初の 1 回（編集前の基準の待ち）だけ揃わない（BUG-0098）。"""
 
     gate: asyncio.Event | None = None
     stale: set[str] = field(default_factory=set)
+    stale_first: set[str] = field(default_factory=set)
     waits: list[tuple[str, int | None]] = field(default_factory=list)
     entered: asyncio.Event = field(default_factory=asyncio.Event)
+    blocked: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def wait_for(
         self, path: RelPath, *, min_version: int | None, sent_at: float, timeout_ms: float, **_: Any
     ) -> bool:
+        first = all(p != str(path) for p, _v in self.waits)
         self.waits.append((str(path), min_version))
         self.entered.set()
         if self.gate is not None:
+            self.blocked.set()
             await self.gate.wait()
-        return str(path) not in self.stale
+        return str(path) not in self.stale and not (first and str(path) in self.stale_first)
 
 
 def diag(path: RelPath, message: str, *, line: int = 0, source: str = "pyright", code: str | None = "X1",
@@ -766,11 +772,18 @@ async def test_lock_is_free_while_waiting_for_diagnostics_so_another_edit_procee
 ):
     rig = make_rig(ws, index_writer, tmp_path, lsp=True)
     assert rig.hub is not None
-    rig.hub.gate = asyncio.Event()
+    hub, gate = rig.hub, asyncio.Event()
+
+    def gate_after_write(name: str) -> None:
+        # 編集前の基準の待ち（BUG-0098）は即座に揃えて、書き込み後の診断の待ちだけを止める
+        if name == "Written" and hub.gate is None:
+            hub.gate = gate
+
+    rig.tx.stage_hook = gate_after_write
     first = asyncio.create_task(
         rig.tx.run(replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=2000)
     )
-    await asyncio.wait_for(rig.hub.entered.wait(), 5)
+    await asyncio.wait_for(hub.blocked.wait(), 5)
     assert rig.locks.is_locked("poly") is False  # 診断待ちはロックの外
 
     other = TargetRef(path=str(PAYMENT), symbol_name="PaymentProcessor.apply_discount")
@@ -781,7 +794,7 @@ async def test_lock_is_free_while_waiting_for_diagnostics_so_another_edit_procee
     assert second.applied is True and "Written" in second.stages
     assert not first.done()
 
-    rig.hub.gate.set()
+    gate.set()
     done = await asyncio.wait_for(first, 5)
     assert done.applied is True and done.new_diagnostics.status == "complete"
     assert b"return price\n" in read(rig, PAYMENT) and b"return amount < limit" in read(rig, PAYMENT)
@@ -876,10 +889,15 @@ async def test_ep7_complete_delta_matches_the_diagnostics_table(
     assert {key_of(o) for o in delta.added} <= current
     assert not ({key_of(o) for o in delta.resolved} & current)
     assert calls[0] == [PAYMENT, ROUTES] and sorted(calls[1]) == sorted([PAYMENT, ROUTES])
-    # LSP には編集したファイルの新しい版と、参照元の本文が渡る
-    assert rig.documents is not None and rig.documents.versions[str(PAYMENT)] == 1
+    # LSP には、編集の前にいまの本文（版 1。基準の待ち。BUG-0098）、編集の後に新しい版（版 2）と参照元の本文が渡る
+    assert rig.documents is not None and rig.documents.versions[str(PAYMENT)] == 2
     assert str(ROUTES) in rig.documents.versions
-    assert rig.hub is not None and {w[0] for w in rig.hub.waits} == {str(PAYMENT), str(ROUTES)}
+    assert rig.hub is not None and rig.hub.waits == [
+        (str(PAYMENT), 1),
+        (str(ROUTES), 1),
+        (str(PAYMENT), 2),
+        (str(ROUTES), None),
+    ]
     assert delta.added[0]["start_line"] == 13 and delta.added[0]["severity"] == "error"
 
 
@@ -897,20 +915,30 @@ async def test_ep7_delta_waits_for_the_diagnostics_write_without_a_barrier(
         assert gate.wait(10)
         db[PAYMENT] = [new]  # 書き込みのコミット（のつもり）
 
+    armed = False
     hub = DiagnosticsHub(
         ws,
-        on_diagnostics=lambda *_: index_writer.submit(write_job, bumps_version=False, label="diag"),
+        on_diagnostics=lambda *_: (
+            index_writer.submit(write_job, bumps_version=False, label="diag") if armed else None
+        ),
     )
     rig.tx._hub = hub
 
     sync = rig.documents.sync
 
     def sync_and_publish(path: RelPath, text: str, language_id: str) -> int:
+        old = rig.documents.versions.get(str(path)) if rig.documents is not None else None
         version = sync(path, text, language_id)
-        hub.on_publish({"uri": to_file_uri(ws, path), "version": version, "diagnostics": [{"message": "x"}]})
+        if version != old:  # 送ったとき（新しい版）だけ LSP が発行する
+            hub.on_publish(
+                {"uri": to_file_uri(ws, path), "version": version, "diagnostics": [{"message": "x"}]}
+            )
         return version
 
     monkeypatch.setattr(rig.documents, "sync", sync_and_publish)
+    # 編集の前に LSP はいまの内容（版 1）の診断を出し終えている（表は ``old``）。基準の待ち（BUG-0098）は即座に揃う
+    sync_and_publish(PAYMENT, read(rig, PAYMENT).decode("utf-8"), "python")
+    armed = True
 
     async def read_diagnostics(paths):
         return {p: list(db.get(p, [])) for p in paths}
@@ -925,7 +953,8 @@ async def test_ep7_delta_waits_for_the_diagnostics_write_without_a_barrier(
     real_wait_for = hub.wait_for
 
     async def wait_for(*args: Any, **kwargs: Any) -> bool:
-        waiting.set()
+        if kwargs.get("min_version") != 1:  # 書き込み後の待ち（版 2）。編集前の基準の待ちでは放さない
+            waiting.set()
         return await real_wait_for(*args, **kwargs)
 
     monkeypatch.setattr(hub, "wait_for", wait_for)
@@ -1030,3 +1059,285 @@ def test_verify_structural_delta_counts_error_nodes():
     assert broke.status == "complete" and len(broke.added) == 1 and broke.resolved == ()
     assert len(fixed.resolved) == 1 and fixed.added == ()
     assert isinstance(broke, DiagDelta)
+
+
+# --- 編集前の基準（BUG-0098） ------------------------------------------------------------------------
+#
+# 2 つの「サーバー」（プロセスを持たないハンドル）を本物の ``DocumentRouter`` / ``DocumentSync`` / ``DiagnosticsHub`` で
+# 結ぶ。サーバーは ``didOpen`` / ``didChange`` の本文から診断を作って ``publishDiagnostics`` を返し、表（``db``）に
+# サーバー名の行として書く。``hold_until`` の版になるまでは発行を溜める（負荷で最初の解析が遅れ、編集の前に診断が届かない
+# ときの代わり。順序は保つ）。時間に頼らない（溜めた発行は編集の ``didChange`` で出る）。
+
+UNUSED = RelPath("src/shop/unused_imports.py")
+UNUSED_TEXT = "import missing_mod_x\nimport os\n\n\ndef main() -> int:\n    return 1\n"
+
+
+def pyright_rules(text: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if line == "import missing_mod_x":
+            out += [
+                ("reportMissingImports", 'Import "missing_mod_x" could not be resolved'),
+                ("reportUnusedImport", 'Import "missing_mod_x" is not accessed'),
+            ]
+        elif line == "import os":
+            out.append(("reportUnusedImport", 'Import "os" is not accessed'))
+    return out
+
+
+def ruff_rules(text: str) -> list[tuple[str, str]]:
+    return [
+        ("F401", f"`{line.split()[1]}` imported but unused")
+        for line in text.splitlines()
+        if line.startswith("import ")
+    ]
+
+
+class StubServer:
+    """``DocumentRouter`` が見るハンドルの形をした LSP（プロセスなし）。本文から ``rules`` で診断を作って発行する。"""
+
+    def __init__(
+        self, ws: Workspace, name: str, role: str, rules: Any, db: dict[Any, list[DiagnosticRow]],
+        *, hold_until: int | None = None,
+    ) -> None:  # fmt: skip
+        self.ws, self.server_name, self.role, self.language_id, self.defn = ws, name, role, "python", None
+        self.rules, self.db, self.hold_until = rules, db, hold_until
+        self.held: list[dict[str, Any]] = []
+        self.published: list[int] = []
+        self.documents = DocumentSync(ws, self._notify)
+        self.diagnostics = DiagnosticsHub(ws, source=name, on_diagnostics=self._write)
+        self.documents.on_close = self.diagnostics.forget
+
+    @property
+    def is_ready(self) -> bool:
+        return True
+
+    def _notify(self, method: str, params: Any) -> None:
+        if method not in ("textDocument/didOpen", "textDocument/didChange"):
+            return
+        doc = params["textDocument"]
+        text = doc["text"] if method == "textDocument/didOpen" else params["contentChanges"][0]["text"]
+        line = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+        diags = [{"range": line, "code": c, "message": m, "severity": 2} for c, m in self.rules(text)]
+        self.held.append({"uri": doc["uri"], "version": doc["version"], "diagnostics": diags})
+        if self.hold_until is None or doc["version"] >= self.hold_until:
+            self.flush()
+
+    def flush(self) -> None:
+        held, self.held = self.held, []
+        for params in held:
+            self.published.append(params["version"])
+            self.diagnostics.on_publish(params)
+
+    def _write(self, path: RelPath, diags: list[dict[str, Any]], version: int | None) -> None:
+        self.db[(path, self.server_name)] = [
+            diag(path, d["message"], source=self.server_name, code=d["code"]) for d in diags
+        ]
+
+
+class StubPool:
+    def __init__(self, *handles: StubServer) -> None:
+        self._handles = list(handles)
+
+    def handles(self, ws: Workspace | None = None, language_id: str | None = None) -> list[StubServer]:
+        return [h for h in self._handles if language_id is None or h.language_id == language_id]
+
+
+@dataclass
+class TwoServers:
+    tx: EditTransaction
+    types: StubServer
+    lint: StubServer
+    db: dict[Any, list[DiagnosticRow]]
+
+
+def two_servers(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, *, types_hold_until: int | None = None
+):
+    (ws.root / UNUSED).write_bytes(UNUSED_TEXT.encode("utf-8"))
+    db: dict[Any, list[DiagnosticRow]] = {}
+    types = StubServer(ws, "basedpyright", "types", pyright_rules, db, hold_until=types_hold_until)
+    lint = StubServer(ws, "ruff", "lint", ruff_rules, db)
+    router = DocumentRouter(StubPool(types, lint), ws)
+    tx = EditTransaction(
+        ws,
+        locks=WorkspaceLocks(),
+        writer_index=index_writer,
+        journal_dir=tmp_path / "cache" / "journal",
+        indexer=FakeIndexer(),
+        watcher=FakeWatcher(),
+        documents=router,
+        diagnostics_hub=router.diagnostics_hub,
+    )
+
+    async def read_db(
+        paths: Any,
+    ) -> dict[RelPath, list[DiagnosticRow]]:  # 表の現在の行（サーバー名の source）
+        return {p: [r for (q, _src), rows in db.items() if q == p for r in rows] for p in paths}
+
+    tx._read_diagnostics = read_db  # type: ignore[method-assign]
+    return TwoServers(tx, types, lint, db)
+
+
+async def remove_import_os(ctx: PlanContext) -> Plan:
+    """2 行目の ``import os`` を消す（1 行目の ``import missing_mod_x`` は残す。票の再現と同じ編集）。"""
+    return Plan(
+        hunks=(Hunk(ctx.path, Range(Position(1, 0), Position(2, 0)), ""),),
+        resolved_shas={ctx.path: ctx.sha256},
+    )
+
+
+def keys(objs: Any) -> set[tuple[str, str | None]]:
+    return {(o["source"], o["code"]) for o in objs}
+
+
+async def test_baseline_that_never_arrived_is_not_reported_as_added(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    """BUG-0098: basedpyright が編集の前にいまの内容の診断を出していない（待っても届かない）と、編集後の basedpyright の診断
+    （前からある 1 行目の 2 件）を ``added`` と言わない。``present_after`` に入れ、``partial`` にし、警告でサーバーを名指しする。"""
+    rig = two_servers(
+        ws, index_writer, tmp_path, types_hold_until=2
+    )  # 版 1 の発行は編集の didChange（版 2）まで溜まる
+    result = await rig.tx.run(remove_import_os, target=TargetRef(path=str(UNUSED)), diagnostics_wait_ms=300)
+
+    assert (ws.root / UNUSED).read_text(encoding="utf-8").startswith("import missing_mod_x\n\n")
+    delta = result.new_diagnostics
+    assert delta.status == "partial", delta
+    assert delta.added == (), (
+        delta.added
+    )  # 直す前: basedpyright の reportMissingImports・reportUnusedImport が added
+    assert keys(delta.resolved) == {("ruff", "F401")} and "`os`" in delta.resolved[0]["message"]
+    assert keys(delta.present_after) == {
+        ("basedpyright", "reportMissingImports"),
+        ("basedpyright", "reportUnusedImport"),
+    }
+    assert all("missing_mod_x" in o["message"] for o in delta.present_after)
+    assert [dict(c) for c in delta.checked_files] == [
+        {"path": str(UNUSED), "fresh": True, "unknown_baseline": ["basedpyright"]}
+    ]
+    [note] = [w for w in delta.warnings if "basedpyright" in w]
+    assert "present_after" in note and "get_diagnostics" in note and str(UNUSED) in note
+    assert rig.types.published == [1, 2]  # 版 1 は編集の後に届いた（その間、基準の待ちは時間切れ）
+
+
+async def test_baseline_that_arrives_within_the_wait_gives_the_normal_delta(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    """BUG-0098: 編集の前の基準の待ちの間に basedpyright の診断が届けば、通常どおり ``added`` / ``resolved``（``complete``）。"""
+    rig = two_servers(ws, index_writer, tmp_path, types_hold_until=1_000)  # 自分では出さない（試験が出す）
+    real_sync = rig.types.documents.sync
+
+    def sync_then_publish_soon(path: RelPath, text: str, language_id: str) -> int:
+        version = real_sync(path, text, language_id)
+        asyncio.get_running_loop().call_later(0.05, rig.types.flush)  # 少し遅れて届く（待ちの上限 10 秒の内）
+        return version
+
+    rig.types.documents.sync = sync_then_publish_soon  # type: ignore[method-assign]
+    result = await rig.tx.run(
+        remove_import_os, target=TargetRef(path=str(UNUSED)), diagnostics_wait_ms=10_000
+    )
+
+    delta = result.new_diagnostics
+    assert delta.status == "complete", delta
+    assert delta.added == () and delta.present_after == ()
+    assert keys(delta.resolved) == {("ruff", "F401"), ("basedpyright", "reportUnusedImport")}
+    assert all("os" in o["message"] and "missing" not in o["message"] for o in delta.resolved)
+    assert [dict(c) for c in delta.checked_files] == [{"path": str(UNUSED), "fresh": True}]
+    assert not [w for w in delta.warnings if "present_after" in w]
+
+
+async def test_baseline_is_not_waited_for_without_a_write(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path
+):
+    """書かない呼び出し（``dry_run``）と ``diagnostics_wait_ms == 0`` は、編集前の基準を待たない（LSP にも見せない）。"""
+    rig = two_servers(ws, index_writer, tmp_path, types_hold_until=1_000)
+    started = time.perf_counter()
+    dry = await rig.tx.run(
+        remove_import_os, target=TargetRef(path=str(UNUSED)), dry_run=True, diagnostics_wait_ms=10_000
+    )
+    assert dry.new_diagnostics.status == "not_computed" and time.perf_counter() - started < 5
+    assert not rig.types.documents.is_open(UNUSED) and not rig.lint.documents.is_open(UNUSED)
+    quick = await rig.tx.run(remove_import_os, target=TargetRef(path=str(UNUSED)), diagnostics_wait_ms=0)
+    assert quick.applied and quick.new_diagnostics.status == "pending" and time.perf_counter() - started < 5
+
+
+async def test_a_hub_without_per_server_waits_marks_every_lsp_source_unknown(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``wait_sources`` を持たない口（1 サーバー分のハブ・偽物）: 基準の待ちが揃わなければ、そのファイルの LSP の行はすべて
+    基準が不明（``"*"``）。索引の行（``tree-sitter``）は前後で必ず揃うので、ふつうに比べる。"""
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    assert rig.hub is not None
+    rig.hub.stale_first = {str(PAYMENT)}
+    ts_old = diag(PAYMENT, "syntax error near 'x'", source="tree-sitter", code=None)
+    patch_diagnostics(
+        rig,
+        monkeypatch,
+        {PAYMENT: [diag(PAYMENT, "old"), ts_old], ROUTES: [diag(ROUTES, "kept")]},
+        {PAYMENT: [diag(PAYMENT, "still here"), diag(PAYMENT, "new one")], ROUTES: [diag(ROUTES, "kept")]},
+    )
+    result = await rig.tx.run(
+        replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=100
+    )
+    delta = result.new_diagnostics
+    assert delta.status == "partial"
+    assert delta.added == () and {o["message"] for o in delta.present_after} == {"still here", "new one"}
+    assert [(o["source"], o["message"]) for o in delta.resolved] == [("tree-sitter", "syntax error near 'x'")]
+    assert [dict(c) for c in delta.checked_files] == [
+        {"path": str(PAYMENT), "fresh": True, "unknown_baseline": ["*"]},
+        {"path": str(ROUTES), "fresh": True},
+    ]
+    assert any(w.startswith(f"{PAYMENT}: LSP は編集前") for w in delta.warnings)
+
+
+async def test_a_failed_snapshot_reports_nothing_as_added(
+    ws: Workspace, index_writer: IndexWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """編集前の診断を取れなかった（表が読めない）ときも、編集後の診断を ``added`` と言わない（基準が不明）。"""
+    rig = make_rig(ws, index_writer, tmp_path, lsp=True)
+    now = {PAYMENT: [diag(PAYMENT, "was it there?")]}
+    calls = patch_diagnostics(rig, monkeypatch, now, now)  # 写しが取れないので、最初の読み出しが書き込み後のもの
+
+    async def broken_referrers(urns: Any, exclude: Any) -> Any:
+        raise RuntimeError("db is busy")
+
+    monkeypatch.setattr(rig.tx, "_direct_referrers", broken_referrers)
+    result = await rig.tx.run(
+        replace_body_builder(VALIDATE, NEW_VALIDATE), target=VALIDATE, diagnostics_wait_ms=100
+    )
+    delta = result.new_diagnostics
+    assert calls == [[PAYMENT]]  # 写しは取れず、書き込み後の 1 回だけ
+    assert delta.status == "partial" and delta.added == () and len(delta.present_after) == 1
+
+
+def test_verify_unknown_baseline_moves_rows_to_present_after_and_skips_resolved():
+    tsx = diag(PAYMENT, "syntax", source="tree-sitter", code=None)
+    before = Snapshot(
+        {PAYMENT: (diag(PAYMENT, "stale", source="basedpyright"), diag(PAYMENT, "gone", source="ruff"), tsx)}
+    )
+    after = {PAYMENT: [diag(PAYMENT, "now", source="basedpyright")]}
+    delta = compute_delta(before, after, {PAYMENT: True}, unknown_baseline={PAYMENT: {"basedpyright"}})
+    assert delta.status == "partial"
+    assert [o["message"] for o in delta.present_after] == ["now"] and delta.added == ()
+    assert sorted(o["message"] for o in delta.resolved) == [
+        "gone",
+        "syntax",
+    ]  # 古い basedpyright の行は「解消」と言わない
+    assert delta.checked_files[0]["unknown_baseline"] == ["basedpyright"]
+    star = compute_delta(before, after, {PAYMENT: True}, unknown_baseline={PAYMENT: {"*", "ruff"}})
+    assert star.checked_files[0]["unknown_baseline"] == ["*"]
+    assert [o["message"] for o in star.resolved] == ["syntax"]  # 索引の行だけ比べる
+
+
+def test_verify_pending_wins_over_partial_and_unknown_is_ignored_for_files_not_caught_up():
+    rows = {PAYMENT: [diag(PAYMENT, "a")], ROUTES: [diag(ROUTES, "b")]}
+    delta = compute_delta(
+        Snapshot(), rows, {PAYMENT: True, ROUTES: False}, unknown_baseline={PAYMENT: {"*"}, ROUTES: {"*"}}
+    )
+    assert delta.status == "pending"
+    assert [dict(c) for c in delta.checked_files] == [
+        {"path": str(PAYMENT), "fresh": True, "unknown_baseline": ["*"]},
+        {"path": str(ROUTES), "fresh": False},
+    ]
+    assert [o["message"] for o in delta.present_after] == ["a"]

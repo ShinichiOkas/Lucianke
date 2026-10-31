@@ -1547,21 +1547,25 @@ class Plan:
 仕様書 §10.7 の実装。
 
 1. **編集前スナップショット**（Resolved で取る）: 対象ファイルと **直接の参照元ファイル** について `diagnostics` を読む。参照元は `relations` で `target_urn ∈ Plan.target_urns` かつ `source_file_id ≠ 対象` の `source_file_id` を、関係行数の多い順に最大 20 ファイル。それぞれの行を同一性キー `(file, source, code, message, enclosing_urn)` で辞書にする。行番号は使わない。
+   **読む前に基準を待つ**（BUG-0098）: 書き込みをする呼び出し（`dry_run`・インターロックの強制 dry_run・`diagnostics_wait_ms == 0` を除く）では、各ファイルのいまの内容を LSP に見せ（`documents.sync`。同じ内容なら何も送らない。参照元もここで開く）、サーバーごとに「その版の診断を受信し、表に書き終えた」まで並べて待つ（上限は `diagnostics_wait_ms`。書き込み後の待ちとは別枠。出ていれば即戻る。ロックの外）。結果は `Snapshot.baseline = {path: {サーバー名: 揃ったか}}`。サーバー名は `diagnostics.source` と同じ `server_name` で、口が `wait_sources`（`lsp/documents.RoutedDiagnostics`。`wait_for` と同じ待ちをサーバーごとの結果で返す）を持てばサーバーごと、持たなければ `{"*": 揃ったか}`（`"*"` = そのファイルの LSP すべて）。LSP に見せられなかったファイルは `{"*": False}`、表を読めなかったら `Snapshot.failed`（どのファイルも基準が不明）。理由: 負荷や起動直後に LSP がまだ診断を出していないと、表にその行が無く、編集後の前からある診断を `added` と答えていた（`complete`・`exact`。呼び手の AI は自分の編集が壊したと読む）。
 2. **対象ファイルの開き直し**: Reindexed で `lsp/documents.py` が対象ファイルに `didChange`（版 `v_n`）を送り、`workspace/didChangeWatchedFiles`（`type: 2`）を送る。**`didChangeWatchedFiles` が必須**: basedpyright はディスクの書き換えだけでは依存元の診断を更新せず（3 秒待っても無し）、送ると 40 ms で再発行する（S-4 で確認）。参照元ファイルの診断を取りたいときは、LSP が開いていなければ `didOpen` する（`diagnosticMode: openFilesOnly` では開いた文書の診断しか来ない）。`references` / `rename` / `callHierarchy` のために参照元を開く必要は無い（未オープンの文書も対象になる）。**ただし TypeScript の 2 サーバー（tsserver）は例外**: `tsconfig.json` の `include` に入らないファイル（ky の `test/` など）は、開かれるまでどのプロジェクトにも入らず結果に出ない（BUG-0047）。T-06 の `exact` 経路は、対象の名前を単語境界で含む tsserver 系のファイル（索引の Tier 1〜2、LSP が未オープンのもの、テスト優先、1 回に 100 件まで）を先に `didOpen` してから `references` を聞く（`tools/_lsp_exact.prime_candidates` / `lsp/features.open_documents`）。上限を超えた分は `warnings[]` に書く。開いていないファイルの診断を TypeScript の 2 サーバーが再発行するかは未確認（S-5）。
 3. **待ち**: `DiagnosticsWaiter.wait(paths, min_versions, timeout_ms=diagnostics_wait_ms)`。各パスについて「版 ≥ `v_n` の `publishDiagnostics` を受信した」ことを条件とする。版が付かない LSP では「`didChange` 送信時刻より後の受信」を条件にする。参照元は `didChangeWatchedFiles` 送信後に受信した最初の診断＋ 300 ms の静止（§7.5.5 の 2 (b)。版が旧いまま届くため版では判定できない）。`diagnostics_wait_ms == 0` なら待たず 5 へ。
 4. **受信側**: `lsp/diagnostics.py` は受信のたびに `diagnostics` テーブルの当該ファイル行を全置換する（`IndexWriter`）。待ちの完了は、この書き込みが終わった後に通知する（EP-7: 直後の `get_diagnostics` と整合させるため）。
-5. **差分**: 揃ったファイルについて、現在の `diagnostics` 行を同じキーで辞書にし、`added = after − before`、`resolved = before − after`。`added[]` / `resolved[]` の要素は T-08 の診断オブジェクトと同形（行番号は現在値）。
-6. **状態**: 対象ファイルと参照元がすべて揃えば `"complete"`、1 つでも揃わなければ `"pending"`（揃った分だけ入れ、`checked_files[]` に `{path, fresh: bool}`）。`dry_run` で予測診断を行わなかったときは `"not_computed"`。
+5. **差分**: 揃ったファイルについて、現在の `diagnostics` 行を同じキーで辞書にし、`added = after − before`、`resolved = before − after`。`added[]` / `resolved[]` の要素は T-08 の診断オブジェクトと同形（行番号は現在値）。**基準が不明なサーバー**（編集の前後どちらかで待ったサーバーのうち、編集前に揃わなかったもの。`"*"` は索引の source〔`tree-sitter`・`lucianke-*`〕以外すべて）の行は比べず、編集後の行を `present_after[]` に入れる（`resolved` も判定しない）。前後どちらでも待たなかった source（索引の行・止まったサーバーの古い行）は前後で同じなので、ふつうに比べる。編集の前に無かったファイルの基準は空で確か。
+6. **状態**: 対象ファイルと参照元がすべて揃えば `"complete"`、1 つでも揃わなければ `"pending"`（揃った分だけ入れ、`checked_files[]` に `{path, fresh: bool}`）。揃っていても基準が不明なサーバーがあれば `"partial"`（`pending` が優先）で、そのファイルの `checked_files[]` に `unknown_baseline: [サーバー名]`、`warnings` にサーバー名と次にすること（`present_after` の位置と diff を見比べる・`get_diagnostics`）を書く（`edit/verify.compute_delta`・`edit/transaction._unknown_baseline`）。`dry_run` で予測診断を行わなかったときは `"not_computed"`。
 7. **LSP 不在**（`unavailable` / `standby` で起動不能 / Tier 2 の一部）: `tree-sitter` 由来の構文エラー診断（§7.7.4 の集合を T-08 の形にしたもの）だけで差分を取り、`checked_files` は対象ファイルのみ、`confidence = STRUCTURAL`。
 8. **予測診断**（`dry_run` の MAY）: M1 では行わず常に `"not_computed"`。M2 以降、LSP が書き込みなしのオーバーレイ（`didChange` のみ）に対応することを確かめたうえで足す。
 
 ```python
 @dataclass(frozen=True)
 class DiagDelta:
-    status: Literal["complete", "pending", "not_computed"]
+    status: Literal["complete", "partial", "pending", "not_computed"]
     added: tuple[Mapping[str, Any], ...]
     resolved: tuple[Mapping[str, Any], ...]
-    checked_files: tuple[Mapping[str, Any], ...]   # {path, fresh}
+    checked_files: tuple[Mapping[str, Any], ...]   # {path, fresh[, unknown_baseline]}
+    confidence: Confidence
+    warnings: tuple[str, ...]
+    present_after: tuple[Mapping[str, Any], ...]   # 基準が不明なサーバーの編集後の診断（BUG-0098）
 ```
 
 ### 7.7.7 編集ツールからの使い方（T-10〜T-13 の plan_builder）
@@ -1571,7 +1575,7 @@ class DiagDelta:
 | T-10 `edit_symbol_body` | `replace_body`: `syntax/boundaries.py` の定義範囲（デコレータ・属性・直前 Doc コメント込み）を 1 hunk で置換。`insert_before` / `insert_after`: 定義範囲の直前・直後（行頭 / 行末の改行後）に空の範囲で挿入。`insert_member`: 親の最後のメンバの定義範囲末尾（無ければ本体先頭。Python の `pass` / `...` だけの本体はその文を置換）。`delete_symbol`: 定義範囲 + 行末の改行 + 規定数を超える後続空行 | `new_code` を §7.7.3 で正規化。`insert_member` の対象が本体を持たなければ `E_INVALID_ARGUMENT`。降格ファイルで終了行の候補が 2 つ以上なら `E_MUTATION_BLOCKED` | 再索引後、hunk の適用後開始行（デコレータを除いた最初の行）から始まるシンボルを `symbols` で引き、その URN を `target_urn`、範囲を `new_range` にする。`delete_symbol` は `None` |
 | T-11 `rename_symbol` | `prepareRename` → `rename(newName)` → `WorkspaceEdit` → `plan.from_workspace_edit` | LSP が `ready` でなければ `E_LSP_UNAVAILABLE`。`new_name` が識別子でなければ `E_INVALID_ARGUMENT`。降格モード（字句置換）では対象ファイル内に `new_name` が単語として既出なら `E_MUTATION_BLOCKED` | Resolved で対象ファイル群の `symbols` を `(path, selection 開始位置)` つきで控え、再索引後に `LineIndex.shift`（前方 hunk の行・列ずれ）で位置を写像して突き合わせ、`qualified_name` が変わった全シンボルの旧 URN → 新 URN を `urn_map` にする |
 | T-12 `structural_search_replace` | `syntax/structural.py` の一致ごとに `(range, replacement)` → hunk。`rewrite` 無しなら計画を作らず読み取りのみ | `pattern` / `rewrite` の解析失敗は `E_SYNTAX_INVALID`。一致数が `max_matches` を超えたら計画を作らず `applied: false`。`dry_run` 既定 `true` | 不要（`matches[]` を返す） |
-| T-13 `apply_code_action` | `codeAction`（または保持中の ID）→ 必要なら `codeAction/resolve` → `edit` → `plan.from_workspace_edit` | ID の発行後に sha が変わっていれば `E_PRECONDITION_FAILED`（`code_action_id_expired`）。`command` だけのアクションは `E_UNSUPPORTED` | 不要。`target_diagnostic_resolved` は `DiagDelta.resolved` に ID の診断キーが含まれるかで決める |
+| T-13 `apply_code_action` | `codeAction`（または保持中の ID）→ 必要なら `codeAction/resolve` → `edit` → `plan.from_workspace_edit` | ID の発行後に sha が変わっていれば `E_PRECONDITION_FAILED`（`code_action_id_expired`）。`command` だけのアクションは `E_UNSUPPORTED`。種別 `quickfix` で、文脈の診断の待ち（`CONTEXT_DIAGNOSTICS_WAIT_MS` = 2,000 ms）の間にいまの内容の診断を出さなかったサーバーがあり候補が 1 件以下なら `E_TIMEOUT`（`diagnostics_pending`・`server` / `servers`・`retry_after_ms` = 1,000。1 件は ID つきで `candidates[]`、自動では適用しない）、2 件以上は `E_TARGET_AMBIGUOUS` に `details.diagnostics_pending`（BUG-0099。0 件・1 件は確かめられていない） | 不要。`target_diagnostic_resolved` は `DiagDelta.resolved` に ID の診断キーが含まれるかで決める |
 
 責務の線引き:
 

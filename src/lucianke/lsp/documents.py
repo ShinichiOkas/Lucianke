@@ -216,6 +216,7 @@ class RoutedHandle(Protocol):
 
     language_id: str
     role: str
+    server_name: str | None
     defn: Any  # LspServerDef | None（``document_language_id`` を持つ）
     documents: DocumentSync
     diagnostics: DiagnosticsHub
@@ -256,6 +257,9 @@ class DocumentRouter:
         代表の版なので、他のサーバーには使わない）。記録の無いサーバーは版なし（``sent_at`` 以降の受信）で待つ。
       - 版なしの待ち（``min_version=None``＝トランザクションが LSP に見せただけの依存元）は、``lint`` のサーバーを待たない
         （ruff は 1 ファイル内の検査で、依存元は内容が変わらないので再発行しない。待つと必ず時間切れになる）。``lint`` しか開いていなければ全部待つ。
+    * **``diagnostics_hub.wait_sources``**: ``wait_for`` と同じ待ちを、サーバーごとの結果 ``{サーバー名: 揃ったか}`` で返す（サーバー名は
+      ``diagnostics`` 表の ``source`` と同じ ``server_name``）。編集の前の基準の待ち（BUG-0098）で、どのサーバーの基準が分からないかを
+      トランザクションが知るため。開いているサーバーが無ければ空。
     * 文書の版の検査（``edit/workspace_edit.py`` の ``DocumentVersions``）は **``WorkspaceEdit`` を出したサーバーの** ``DocumentSync`` に対して
       行うこと（ルーターは ``version_of`` を持たない）。T-08 など個別のハンドルの診断を読む呼び手は ``handles_for`` / ``hubs_for``。
     """
@@ -331,11 +335,32 @@ class DocumentRouter:
         settle_ms: int | float,
         min_publishes: int,
     ) -> bool:
+        each = await self._wait_each(
+            path,
+            min_version=min_version,
+            sent_at=sent_at,
+            timeout_ms=timeout_ms,
+            settle_ms=settle_ms,
+            min_publishes=min_publishes,
+        )
+        return bool(each) and all(each.values())  # 開いているサーバーが無い: 診断は届かない
+
+    async def _wait_each(
+        self,
+        path: RelPath,
+        *,
+        min_version: int | None,
+        sent_at: float,
+        timeout_ms: int | float,
+        settle_ms: int | float,
+        min_publishes: int,
+    ) -> dict[str, bool]:
+        """``_wait_for`` の待ちを、サーバー名（``server_name``、無ければ言語 ID）ごとの結果で返す。"""
         handles = self._open_handles(path)
         if min_version is None:
             handles = [h for h in handles if h.role != "lint"] or handles
         if not handles:
-            return False  # 文書を開いているサーバーが無い: 診断は届かない
+            return {}
         record = self._synced.get(path, {})
         waits = []
         for h in handles:
@@ -360,7 +385,11 @@ class DocumentRouter:
                 )
             )
         results = await asyncio.gather(*waits, return_exceptions=True)
-        return all(r is True for r in results)
+        out: dict[str, bool] = {}
+        for h, r in zip(handles, results, strict=True):
+            name = getattr(h, "server_name", None) or h.language_id  # ``diagnostics`` 表の ``source`` と同じ
+            out[name] = out.get(name, True) and r is True
+        return out
 
 
 class RoutedDiagnostics:
@@ -380,6 +409,26 @@ class RoutedDiagnostics:
         min_publishes: int = 1,
     ) -> bool:
         return await self._router._wait_for(
+            path,
+            min_version=min_version,
+            sent_at=sent_at,
+            timeout_ms=timeout_ms,
+            settle_ms=settle_ms,
+            min_publishes=min_publishes,
+        )
+
+    async def wait_sources(
+        self,
+        path: RelPath,
+        *,
+        min_version: int | None,
+        sent_at: float,
+        timeout_ms: int | float,
+        settle_ms: int | float = 0,
+        min_publishes: int = 1,
+    ) -> dict[str, bool]:
+        """``wait_for`` と同じ待ちを ``{サーバー名: 揃ったか}`` で返す（開いているサーバーが無ければ空。BUG-0098）。"""
+        return await self._router._wait_each(
             path,
             min_version=min_version,
             sent_at=sent_at,

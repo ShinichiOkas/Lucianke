@@ -14,6 +14,10 @@ Python のワークスペースで ``basedpyright``（types）と ``ruff``（lin
 解析がそれを超えたとき、写しに basedpyright の行が無く ``resolved`` に入らない（票の赤）。製品の期限は変えない。
 製品が降格した答え（``new_diagnostics`` が ``pending``・``E_TIMEOUT``）は、新しい作業ツリーとサーバーで最初からやり直して
 聞き直す（最大 ``RETRIES`` 回。やり直したことは警告に書く。BUG-0080 と同じ考え）。検査そのものは緩めない。
+
+BUG-0098（編集の前に basedpyright がいまの内容の診断を出していないと、前からある診断を ``added`` と答えた）は、試験の側で
+basedpyright の発行をハブに渡す前に止めて／遅らせて（``_lsp_settle.HeldPublishes``。負荷で最初の解析が遅れたときの代わり）確かめる:
+待ちの間に届けば通常の差分（``complete``）、届かなければ ``partial`` で ``present_after`` に入れ、``added`` と言わない。
 """
 
 from __future__ import annotations
@@ -27,9 +31,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from _lsp_settle import diagnostics_published
+from _lsp_settle import HeldPublishes, diagnostics_published
 
+from lucianke.core.model import TargetRef
 from lucianke.core.procs import ProcessRegistry
+from lucianke.edit.builders import replace_body_builder
 from lucianke.lsp.pool import LspPool
 from lucianke.lsp.servers import LspServerDef, default_server, find_command
 from lucianke.mcp.pipeline import Pipeline
@@ -58,7 +64,9 @@ def _cmd(defn: LspServerDef | None) -> list[str] | None:
     return find_command(defn, workspace_root=REPO, venv=REPO / ".venv") if defn is not None else None
 
 
-needs_both = pytest.mark.skipif(_cmd(_TYPES) is None or _cmd(_LINT) is None, reason="basedpyright and ruff are required")
+needs_both = pytest.mark.skipif(
+    _cmd(_TYPES) is None or _cmd(_LINT) is None, reason="basedpyright and ruff are required"
+)
 
 
 @dataclass(slots=True)
@@ -75,12 +83,12 @@ class Rig:
 
 
 @asynccontextmanager
-async def open_rig(base: Path) -> AsyncIterator[Rig]:
+async def open_rig(base: Path, text: str = BEFORE) -> AsyncIterator[Rig]:
     root = Path(os.path.realpath(base / "proj"))
     (root / "pkg").mkdir(parents=True)
     (root / "pyproject.toml").write_text('[tool.ruff.lint]\nselect = ["F"]\n', encoding="utf-8")
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    (root / FILE).write_text(BEFORE, encoding="utf-8")
+    (root / FILE).write_text(text, encoding="utf-8")
     assert _TYPES is not None and _LINT is not None
     procs = ProcessRegistry()
     hub = RuntimeHub(base / "cache", TreeCache())
@@ -174,3 +182,147 @@ async def test_a_ruff_quickfix_reports_the_basedpyright_diagnostics_it_resolved(
     assert ("basedpyright", "reportMissingImports") in resolved, nd
     assert ("basedpyright", "reportUnusedImport") in resolved, nd
     assert nd["added"] == [], nd
+
+
+# --- BUG-0098: 編集の前の基準 -----------------------------------------------------------------------
+
+# 2 行目の ``import os`` を ruff の QuickFix で消す。1 行目の ``import missing_mod_x`` の basedpyright の 2 件は編集の前からある
+KEEP = "import missing_mod_x\nimport os\n\n\ndef main() -> int:\n    return 1\n"
+KEEP_AFTER = "import missing_mod_x\n\n\ndef main() -> int:\n    return 1\n"
+DELAY_S = 3.0  # 票の再現（basedpyright の配達を 3 秒遅らせる）。QuickFix の文脈の診断の待ち（2 秒）より長い
+
+
+def _handles(rig: Rig) -> dict[str, Any]:
+    return {h.role: h for h in rig.pool.handles(rig.ws, "python")}
+
+
+async def _ruff_remove_os(rig: Rig) -> str:
+    """両方 ready・ruff がいまの内容の F401 を出し終えてから、2 行目の QuickFix の候補から ruff の削除の ID を取る。"""
+    for role in ("types", "lint"):
+        assert await rig.pool.wait_ready("python", rig.ws, READY_WAIT_MS, role=role), role  # type: ignore[arg-type]
+    await diagnostics_published(_handles(rig)["lint"], FILE, {"F401"}, timeout_s=ANALYSIS_WAIT_S)
+    listed = await rig.call(path=FILE, line=2, action_kind_or_id="quickfix")
+    assert listed.is_error and listed.structured["error"]["code"] == "E_TARGET_AMBIGUOUS", listed.text
+    candidates = listed.structured["error"]["candidates"]
+    [fix_id] = [
+        c["id"]
+        for c in candidates
+        if c["server"] == "ruff" and "Remove unused import" in c["title"] and "os" in c["title"]
+    ]
+    return str(fix_id)
+
+
+@needs_both
+async def test_bug0098_a_baseline_that_never_arrived_is_not_reported_as_added(tmp_path: Path) -> None:
+    """basedpyright の発行を編集の ``didChange``（版 2）まで止める: 編集の前の基準の待ち（``diagnostics_wait_ms``）は必ず切れる。
+    前からある basedpyright の 2 件は ``added`` ではなく ``present_after``、``status`` は ``partial``、警告で basedpyright を名指し。"""
+    tries: list[str] = []
+    for attempt in range(1 + RETRIES):
+        async with open_rig(tmp_path / f"held{attempt}", KEEP) as rig:
+            for role in ("types", "lint"):
+                assert await rig.pool.wait_ready("python", rig.ws, READY_WAIT_MS, role=role), role  # type: ignore[arg-type]
+            with HeldPublishes(_handles(rig)["types"], FILE, until_version=2) as held:
+                fix_id = await _ruff_remove_os(rig)
+                # 編集の前の待ちは必ずこの長さで切れる。書き込み後は版 2 の解析を同じ長さまで待つ
+                applied = await rig.call(
+                    path=FILE, line=2, action_kind_or_id=fix_id, diagnostics_wait_ms=4000
+                )
+                after_text = (rig.root / FILE).read_text(encoding="utf-8")
+                received = list(held.received)
+        why = _degraded(applied)  # 版 2 の解析が待ちを超えた（負荷）なら pending: 新しい組み立てで聞き直す
+        if why is None:
+            break
+        tries.append(f"#{attempt + 1} {why} (received {received})")
+    else:
+        pytest.fail(f"the product degraded on every try: {'; '.join(tries)}", pytrace=False)
+    if tries:
+        warnings.warn(f"T-13 BUG-0098 held: answered only after a re-ask; {'; '.join(tries)}", stacklevel=1)
+
+    assert not applied.is_error, applied.text
+    assert after_text == KEEP_AFTER
+    nd = applied.structured["data"]["new_diagnostics"]
+    assert nd["status"] == "partial", (nd, received)
+    # 直す前: basedpyright の reportMissingImports・reportUnusedImport（missing_mod_x）が added に入った
+    assert nd["added"] == [], nd
+    assert {(d["source"], d["code"]) for d in nd["resolved"]} == {("ruff", "F401")}, nd
+    present = {(d["source"], d["code"]) for d in nd["present_after"]}
+    assert ("basedpyright", "reportMissingImports") in present, nd
+    assert all(
+        d["source"] == "basedpyright" and "missing_mod_x" in d["message"] for d in nd["present_after"]
+    ), nd
+    assert nd["checked_files"] == [{"path": FILE, "fresh": True, "unknown_baseline": ["basedpyright"]}], nd
+    warnings_ = applied.structured.get("warnings") or []
+    assert any("basedpyright" in w and "present_after" in w for w in warnings_), warnings_
+
+
+@needs_both
+async def test_bug0098_a_baseline_delayed_within_the_wait_gives_the_normal_delta(tmp_path: Path) -> None:
+    """票の再現: basedpyright の配達を 3 秒遅らせる（順序は保つ）。編集の前の基準の待ち（上限 10 秒）の間に届くので、
+    ``complete`` で ``added`` は空、``resolved`` に ruff の F401 と basedpyright の reportUnusedImport（``os``）。"""
+    tries: list[str] = []
+    for attempt in range(1 + RETRIES):
+        async with open_rig(tmp_path / f"delay{attempt}", KEEP) as rig:
+            for role in ("types", "lint"):
+                assert await rig.pool.wait_ready("python", rig.ws, READY_WAIT_MS, role=role), role  # type: ignore[arg-type]
+            with HeldPublishes(_handles(rig)["types"], FILE, delay_s=DELAY_S) as held:
+                fix_id = await _ruff_remove_os(rig)
+                applied = await rig.call(
+                    path=FILE, line=2, action_kind_or_id=fix_id, diagnostics_wait_ms=10_000
+                )
+                after_text = (rig.root / FILE).read_text(encoding="utf-8")
+                received = list(held.received)
+        why = _degraded(applied)
+        if why is None:
+            break
+        tries.append(f"#{attempt + 1} {why} (received {received})")
+    else:
+        pytest.fail(f"the product degraded on every try: {'; '.join(tries)}", pytrace=False)
+    if tries:
+        warnings.warn(f"T-13 BUG-0098 delay: answered only after a re-ask; {'; '.join(tries)}", stacklevel=1)
+
+    assert not applied.is_error, applied.text
+    assert after_text == KEEP_AFTER
+    nd = applied.structured["data"]["new_diagnostics"]
+    assert nd["status"] == "complete", (nd, received)
+    assert nd["added"] == [] and nd["present_after"] == [], nd  # 直す前（票）: basedpyright の 2 件が added
+    resolved = {(d["source"], d["code"]) for d in nd["resolved"]}
+    assert resolved == {("ruff", "F401"), ("basedpyright", "reportUnusedImport")}, nd
+    assert all("missing_mod_x" not in d["message"] for d in nd["resolved"]), nd
+
+
+REF_A = "def f() -> int:\n    return 1\n"
+REF_B = "from pkg.a import f\n\n\ndef g() -> int:\n    return f()\n"
+
+
+@needs_both
+async def test_bug0098_a_referrer_opened_for_the_baseline_is_rechecked_after_the_edit(tmp_path: Path) -> None:
+    """編集の前の基準の待ちは、まだ開いていない直接の参照元（``pkg/b.py``）もその場で LSP に開く。開いた参照元を basedpyright が
+    編集の後に診断し直すこと（書き込み後の待ちは「編集の didChange より後の発行」）を、編集トランザクション（T-10 の
+    replace_body と同じ口）で確かめる: ``complete``・``b.py`` は fresh・``added`` に ``b.py`` の reportReturnType。"""
+    async with open_rig(tmp_path / "ref") as rig:
+        (rig.root / "pkg" / "a.py").write_text(REF_A, encoding="utf-8")
+        (rig.root / "pkg" / "b.py").write_text(REF_B, encoding="utf-8")
+        runtime = rig.hub.runtime()
+        assert runtime is not None
+        for rel in ("pkg/a.py", "pkg/b.py"):
+            await runtime.indexer.index_file(rel)
+        for role in ("types", "lint"):
+            assert await rig.pool.wait_ready("python", rig.ws, READY_WAIT_MS, role=role), role  # type: ignore[arg-type]
+        assert not any(h.documents.is_open("pkg/b.py") for h in rig.pool.handles(rig.ws, "python"))  # type: ignore[arg-type]
+        tx = rig.pipeline.services.edit_transaction(rig.ws)  # type: ignore[attr-defined]
+        target = TargetRef(path="pkg/a.py", symbol_name="f")
+        result = await tx.run(
+            replace_body_builder(target, 'def f() -> str:\n    return "x"\n'),
+            target=target,
+            diagnostics_wait_ms=10_000,
+        )
+    nd = result.new_diagnostics
+    assert nd.status == "complete", nd
+    assert [dict(c) for c in nd.checked_files] == [
+        {"path": "pkg/a.py", "fresh": True},
+        {"path": "pkg/b.py", "fresh": True},
+    ], nd
+    assert {(o["path"], o["source"], o["code"]) for o in nd.added} == {
+        ("pkg/b.py", "basedpyright", "reportReturnType")
+    }
+    assert nd.present_after == () and nd.resolved == (), nd

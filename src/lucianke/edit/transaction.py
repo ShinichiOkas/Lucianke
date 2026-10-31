@@ -16,6 +16,9 @@
 * 恒等編集（適用後のバイト列が元と同一）は ``Journaled`` 以降を飛ばし、``applied: true``・``edit_id: null``（I-6, EP-6）。
 * 降格ファイル（``heuristic`` / ``lexical_fallback``）で ``allow_heuristic_mutation`` が無ければ ``dry_run`` を強制し、
   成功応答に警告を書く（仕様書 §10.5。エラーにはしない）。
+* 編集前の診断の写し（``Planned`` の直前。ロックの外）は、**LSP がそのファイルのいまの内容の診断を出し終えるのを待ってから** 取る
+  （上限 ``diagnostics_wait_ms``。書き込みをしない呼び出しと 0 では待たない）。待っても出なかったサーバーは「基準が不明」として
+  差分を ``partial`` にし、その診断を ``added`` と言わない（BUG-0098。設計書 §7.7.6-1）。
 
 依存はすべてコンストラクタ引数で注入する（テストで偽物に差し替える）。``indexer`` / ``watcher`` / ``documents`` の呼び出しは
 同期でも非同期でもよい。再索引（``Reindexed``）の失敗は応答を止めず ``warnings`` に残す。監視にこだまを捨てさせる
@@ -60,6 +63,7 @@ from lucianke.edit.lock import WorkspaceLocks
 from lucianke.edit.plan import Plan, apply_hunks, check_no_overlap, unified_diff
 from lucianke.edit.syntax_check import check_after, to_error_details
 from lucianke.edit.verify import (
+    ANY_LSP_SOURCE,
     DiagDelta,
     Snapshot,
     compute_delta,
@@ -151,6 +155,8 @@ class HubLike(Protocol):
     """``lsp.diagnostics.DiagnosticsHub`` の一部。
 
     ``wait_for`` が ``True`` で返ったとき、その診断の ``diagnostics`` 表への書き込みは終わっていること（EP-7）。
+    任意で ``wait_sources``（同じ引数で ``{サーバー名: 揃ったか}`` を返す。``lsp.documents.RoutedDiagnostics``）を持てば、
+    編集前の基準が分からないサーバーをサーバーごとに区別する（BUG-0098）。無ければファイルの LSP 全体（``"*"``）で扱う。
     """
 
     async def wait_for(
@@ -441,7 +447,9 @@ class EditTransaction:
         )
         plan = await plan_builder(ctx)
         plan = self._complete_plan(plan, loaded, symbol)
-        snapshot = await self._snapshot(plan)
+        # 書かない呼び出し（dry_run・インターロック）は診断を取らないので、編集前の基準も待たない
+        writes = not dry_run and (confidence >= Confidence.STRUCTURAL or allow_heuristic_mutation)
+        snapshot = await self._snapshot(plan, loaded, diagnostics_wait_ms if writes else 0)
         await self._enter(Stage.PLANNED, stages)
 
         async with self._locks.acquire(self._ws.workspace_id, timeout_ms=self._lock_wait_ms):
@@ -916,17 +924,82 @@ class EditTransaction:
 
         return await asyncio.to_thread(work)
 
-    async def _snapshot(self, plan: Plan) -> Snapshot:
-        """編集前の診断（対象ファイルと直接の参照元）。取れなければ空（編集は止めない）。"""
+    async def _snapshot(self, plan: Plan, loaded: LoadedFile, wait_ms: int) -> Snapshot:
+        """編集前の診断（対象ファイルと直接の参照元）。取れなければ空で ``failed``（編集は止めない。基準が不明として扱う）。
+
+        ``wait_ms > 0`` なら、表を読む前に各ファイルのいまの内容を LSP に見せ、その診断が出て表に書かれるのを待つ（BUG-0098）。
+        """
         if self._hub is None:
             return Snapshot()  # LSP 不在: 構文エラー差分は解析済みの木から作る
         try:
             referrers, omitted = await self._direct_referrers(plan.target_urns, plan.touched_paths)
-            rows = await self._read_diagnostics([*plan.touched_paths, *referrers])
-            return Snapshot({p: tuple(r) for p, r in rows.items()}, referrers, omitted)
+            paths = [*plan.touched_paths, *referrers]
+            baseline = (
+                await self._baseline(paths, loaded, wait_ms)
+                if wait_ms > 0 and self._documents is not None
+                else None
+            )
+            rows = await self._read_diagnostics(paths)
+            return Snapshot({p: tuple(r) for p, r in rows.items()}, referrers, omitted, baseline)
         except Exception as exc:
             _log.warning("could not take the diagnostics snapshot: %s", exc, exc_info=True)
-            return Snapshot()
+            return Snapshot(failed=True)
+
+    async def _baseline(
+        self, paths: Sequence[RelPath], loaded: LoadedFile, wait_ms: int
+    ) -> dict[RelPath, dict[str, bool]]:
+        """編集前の基準を待つ（BUG-0098）: ``paths`` のいまの内容を LSP に見せ（同じ内容なら何も送らない）、サーバーごとに
+        その版の診断が出て表に書き終わるのを待つ（並べて、各 ``wait_ms`` まで。出ていれば即戻る）。``{パス: {サーバー名: 揃ったか}}``。
+
+        まだ無いファイルは載せない（編集前の診断は無い＝基準は空で確か）。LSP に見せられなかった（動いているサーバーが無い）
+        ファイルは ``{"*": False}``。
+        """
+        assert self._documents is not None
+        docs = self._documents
+        out: dict[RelPath, dict[str, bool]] = {}
+        waits: dict[RelPath, tuple[int, float]] = {}
+        for path in dict.fromkeys(paths):
+            data = (
+                loaded.data
+                if path == loaded.rel
+                else await asyncio.to_thread(self._read_now, to_abs(self._ws, path))
+            )
+            if data is None:
+                continue
+            language_id = (
+                loaded.language_id if path == loaded.rel else detect(path, data[:HEAD_BYTES]).language_id
+            )
+            try:
+                text = data.removeprefix(b"\xef\xbb\xbf").decode("utf-8", "replace")
+                version = docs.sync(path, text, language_id)
+            except Exception as exc:  # ConnectionError: その言語の LSP が動いていない
+                _log.debug("baseline: could not show %s to the LSP: %s", path, exc)
+                out[path] = {ANY_LSP_SOURCE: False}
+                continue
+            sent_at = docs.sent_at_of(path)
+            waits[path] = (version, sent_at if sent_at is not None else 0.0)
+        results = await asyncio.gather(
+            *(
+                self._wait_sources(path, min_version=version, sent_at=sent_at, timeout_ms=wait_ms)
+                for path, (version, sent_at) in waits.items()
+            ),
+            return_exceptions=True,
+        )
+        for path, got in zip(waits, results, strict=True):
+            out[path] = got if isinstance(got, dict) else {ANY_LSP_SOURCE: False}
+        return out
+
+    async def _wait_sources(
+        self, path: RelPath, *, min_version: int | None, sent_at: float, timeout_ms: int
+    ) -> dict[str, bool]:
+        """``path`` の診断の待ちを ``{サーバー名: 揃ったか}`` で。口が ``wait_sources`` を持たなければ ``{"*": 揃ったか}``。"""
+        assert self._hub is not None
+        each: Callable[..., Awaitable[Mapping[str, bool]]] | None = getattr(self._hub, "wait_sources", None)
+        if callable(each):
+            got = await each(path, min_version=min_version, sent_at=sent_at, timeout_ms=timeout_ms)
+            return {str(k): v is True for k, v in got.items()}
+        ok = await self._hub.wait_for(path, min_version=min_version, sent_at=sent_at, timeout_ms=timeout_ms)
+        return {ANY_LSP_SOURCE: ok is True}
 
     async def _diagnose(
         self,
@@ -981,7 +1054,7 @@ class EditTransaction:
         confidence: Confidence,
     ) -> DiagDelta:
         assert self._hub is not None and self._documents is not None
-        hub, docs = self._hub, self._documents
+        docs = self._documents
         edit_times = [t for _v, t in sent.values() if t is not None]
         edit_sent_at = min(edit_times) if edit_times else 0.0
         waits: dict[RelPath, tuple[int | None, float]] = {}
@@ -1000,12 +1073,38 @@ class EditTransaction:
             waits[ref] = (None, opened_at if opened_at is not None else edit_sent_at)
         results = await asyncio.gather(
             *(
-                hub.wait_for(path, min_version=version, sent_at=sent_at, timeout_ms=wait_ms)
+                self._wait_sources(path, min_version=version, sent_at=sent_at, timeout_ms=wait_ms)
                 for path, (version, sent_at) in waits.items()
             ),
             return_exceptions=True,
         )
-        fresh = {path: ok is True for path, ok in zip(waits, results, strict=True)}
-        # ``wait_for`` が ``True`` を返した時点で、その診断の index への書き込みは済んでいる（設計書 §7.7.6-4、EP-7）。
+        each = {path: got if isinstance(got, dict) else {} for path, got in zip(waits, results, strict=True)}
+        fresh = {path: bool(got) and all(got.values()) for path, got in each.items()}
+        # 揃った（``True``）時点で、その診断の index への書き込みは済んでいる（設計書 §7.7.6-4、EP-7）。
         after = await self._read_diagnostics([p for p, ok in fresh.items() if ok])
-        return compute_delta(snapshot, after, fresh, confidence=confidence)
+        return compute_delta(
+            snapshot, after, fresh, confidence=confidence, unknown_baseline=_unknown_baseline(snapshot, each)
+        )
+
+
+def _unknown_baseline(
+    snapshot: Snapshot, after: Mapping[RelPath, Mapping[str, bool]]
+) -> dict[RelPath, frozenset[str]]:
+    """編集前の基準が分からないサーバー（BUG-0098）: 編集の前後どちらかで待ったサーバーのうち、編集前に揃わなかったもの。
+
+    編集前に揃ったサーバーと、どちらでも待たなかった source（索引の行・止まったサーバーの古い行。前後で同じ）は比べてよい。
+    編集の前に無かったファイル（基準は空で確か）と、基準を確かめなかった呼び出し（``baseline is None``）は空。
+    """
+    if snapshot.failed:
+        return {path: frozenset({ANY_LSP_SOURCE}) for path in after}
+    if snapshot.baseline is None:
+        return {}
+    out: dict[RelPath, frozenset[str]] = {}
+    for path, post in after.items():
+        pre = snapshot.baseline.get(path)
+        if pre is None:
+            continue
+        unknown = frozenset(s for s in (*pre, *post) if pre.get(s) is not True)
+        if unknown:
+            out[path] = unknown
+    return out

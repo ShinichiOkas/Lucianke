@@ -512,7 +512,7 @@ LSP は起動時には立ち上げない。該当言語への最初の要求で�
 | `E_MUTATION_BLOCKED` | 降格ファイルへの編集で、`allow_heuristic_mutation: true` があっても安全に確定できない（推定した境界が一意に決まらない、改名後の名前が対象ファイルに既出。第 10.5 節）、または Windows で対象が読み取り専用属性を持つ（`details.reason: "read_only_file"`。第 10.6 節）。許可フラグが無いだけならエラーにせず dry_run に切り替える | 範囲を `get_symbol_bodies` で確かめ、対象を絞って再実行 | `details.confidence_level`, `details.reason` |
 | `E_QUERY_REJECTED` | `query_project_db` に SELECT / WITH 以外、または禁止関数を含む文 | 文を直す | `details.reason` |
 | `E_CURSOR_EXPIRED` | `cursor` が無効または基データが更新済み | 先頭から呼び直す | |
-| `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる。待てば直る状態: 起動の最中で索引がまだ開いていない（`details.reason: "index_opening"`。BUG-0046）、索引の走査の途中で対象のファイルをその場で索引できなかった（`"index_building"`。§5.3 規則 6、BUG-0070） | 範囲を狭める。`index_opening` / `index_building` は `details.retry_after_ms` の後に同じ呼び出しを再試行する | `details.partial`、`details.reason`、`details.retry_after_ms` |
+| `E_TIMEOUT` | ツール固有の `timeout_ms` または既定の上限を超過。部分結果があれば `data` に入れる。待てば直る状態: 起動の最中で索引がまだ開いていない（`details.reason: "index_opening"`。BUG-0046）、索引の走査の途中で対象のファイルをその場で索引できなかった（`"index_building"`。§5.3 規則 6、BUG-0070）、`apply_code_action` の種別 `quickfix` で LSP がいまの内容の診断をまだ出しておらず候補が確かめられない（`"diagnostics_pending"`。`details.server` / `servers`。T-13 処理規約 3、BUG-0099） | 範囲を狭める。`index_opening` / `index_building` / `diagnostics_pending` は `details.retry_after_ms` の後に同じ呼び出しを再試行する | `details.partial`、`details.reason`、`details.retry_after_ms` |
 | `E_UNSUPPORTED` | 対象ティアではその操作を提供しない（例: Tier 3 への `rename_symbol`） | | `details.tier`、`details.reason`（`invalid_data_file`: 構文が壊れたデータファイル〔T-02〕、`revision_not_supported_until_M2`、`not_in_milestone`〔`details.milestone`〕、`file_too_large`、`secret_file`、`binary_file` など） |
 | `E_INTERNAL` | 上記以外の内部エラー。スタックはログにのみ出す | | `details.log_ref` |
 
@@ -1186,12 +1186,13 @@ CREATE INDEX idx_cochange_ratio ON git_co_changes(entity_a, coupling_ratio DESC)
 | 項目 | 規約 |
 |---|---|
 | 対象ファイル | 編集したファイルと、その **直接の参照元**（`relations.source_file_id` が編集したシンボルを `target_urn` に持つファイル）。上限 20 ファイル。超える分は `checked_files` に含めず `warnings[]` に件数を書く |
-| 比較の基準 | 段 1 の時点の `diagnostics` 行（編集前）と、段 8 で LSP から受けた最新の診断（編集後） |
+| 比較の基準 | 段 1 の時点の `diagnostics` 行（編集前）と、段 8 で LSP から受けた最新の診断（編集後）。編集前の行は、**各 LSP サーバーがそのファイルのいまの内容の診断を出し終えてから** 読む（書き込みをする呼び出しだけ。待つ上限は `diagnostics_wait_ms`〔書き込み後の待ちとは別枠〕、出ていれば待たない。BUG-0098） |
 | 同一性の判定 | `(file, source, code, message, enclosing_urn)` で突き合わせる。**行番号は使わない**（編集でずれるため） |
 | `added[]` | 編集後にあって編集前に無い診断 |
 | `resolved[]` | 編集前にあって編集後に無い診断 |
+| 基準が不明なサーバー | 上限まで待っても編集前の診断を出さなかったサーバー（負荷・起動直後）は、編集前の診断が分からない。そのサーバーの編集後の診断は `added[]` に入れず **`present_after[]`** に入れ、`resolved[]` も判定しない（表に残っていた古い行を「解消」と言わない）。`checked_files[]` の要素に `unknown_baseline: [サーバー名]`（区別できないときは `"*"` = そのファイルの LSP すべて）を足し、`warnings[]` にサーバー名と次にすること（`present_after` の位置と diff の変更箇所を見比べる、`get_diagnostics` で確かめる）を書く。理由: 前からある診断を `added` と答えると、呼び手の AI は自分の編集が壊したと読んで無い誤りを追ったり正しい編集を戻したりする（BUG-0098） |
 | 待ち時間 | `diagnostics_wait_ms`（既定 2000、最大 10000）。LSP の `publishDiagnostics` が編集後の版に追いつくまで待つ |
-| `status` | 待ち時間内に全対象ファイルの診断が揃えば `"complete"`。揃わなければ `"pending"` とし、揃った分だけ返す。エージェントは `get_diagnostics` で後追いできる。`dry_run` で診断予測を行わなかったときは `"not_computed"` |
+| `status` | 待ち時間内に全対象ファイルの診断が揃い、すべてのサーバーの基準が分かっていれば `"complete"`。揃わなければ `"pending"` とし、揃った分だけ返す。エージェントは `get_diagnostics` で後追いできる。揃っていても基準が不明なサーバーがあれば `"partial"`（`pending` が優先）。`dry_run` で診断予測を行わなかったときは `"not_computed"`。基準が分からないまま `"complete"` は返さない |
 | LSP 不在 | Tree-sitter の構文エラー差分だけを返し、`_resolution_meta.confidence_level = "structural"` |
 
 ## 10.8 シンボル境界の規則
@@ -2089,13 +2090,13 @@ json `data`:
 | `allow_heuristic_mutation` | boolean | `false` | 降格ファイル（`heuristic` / `lexical_fallback`）への実書き込みを許可する（§10.5） |
 | `expected_file_sha256` | string | なし | 単一ファイル系（T-10, T-13）。指定時、対象ファイルの現在の SHA-256 と一致しなければ `E_PRECONDITION_FAILED` |
 | `expected_file_sha256s` | object (path → sha256) | なし | 複数ファイル系（T-11, T-12）。列挙したファイルについて同上。列挙外のファイルは陳腐化検知（§10.4）のみ |
-| `diagnostics_wait_ms` | integer | 2000 | 書き込み後に LSP の診断更新を待つ上限。0〜10000。0 のときは待たずに `new_diagnostics.status: "pending"` で応答する（§14.4 のレイテンシ測定が用いる） |
+| `diagnostics_wait_ms` | integer | 2000 | 書き込み後に LSP の診断更新を待つ上限。0〜10000。0 のときは待たずに `new_diagnostics.status: "pending"` で応答する（§14.4 のレイテンシ測定が用いる）。書き込みをする呼び出しでは、編集前の診断（§10.7 の比較の基準）が出ていないサーバーを書き込みの前にも同じ上限まで待つ（別枠。出ていれば待たない） |
 
 **共通規約**
 
 1. `revision` が `"WORKING_TREE"` 以外なら、何もせず `E_INVALID_ARGUMENT`（`details.param: "revision"`）。
 2. 対象ファイルの水準が `heuristic` または `lexical_fallback` で `allow_heuristic_mutation` が `true` でないとき、サーバーは `dry_run: true` として処理し、`applied: false` の結果に `warnings` でブロック理由（「降格ファイルのため dry_run を強制した。実書き込みには `allow_heuristic_mutation: true` が必要」）を書いて **成功応答** とする（MUST）。`E_MUTATION_BLOCKED` は、許可フラグがあっても書き込みを安全に確定できない場合（各ツールのエラー欄）に限って返す。
-3. 書き込み後の診断差分は、編集したファイルと、その中で変更されたシンボルを参照している「直接の参照元ファイル」（`relations.source_urn` のファイル）に限る。LSP が `diagnostics_wait_ms` 内に該当ファイルの `publishDiagnostics` を返さなければ `new_diagnostics.status: "pending"` で応答し、エージェントは `get_diagnostics` で後追いする。
+3. 書き込み後の診断差分は、編集したファイルと、その中で変更されたシンボルを参照している「直接の参照元ファイル」（`relations.source_urn` のファイル）に限る。LSP が `diagnostics_wait_ms` 内に該当ファイルの `publishDiagnostics` を返さなければ `new_diagnostics.status: "pending"` で応答し、エージェントは `get_diagnostics` で後追いする。編集の前にあるサーバーがいまの内容の診断を出していなければ（基準が不明）、そのサーバーの編集後の診断は `added[]` ではなく `present_after[]` に入れ、`status: "partial"` とする（§10.7。BUG-0098）。
 4. `dry_run: true` のとき、サーバーは LSP への `didChange` を書き込みなしのオーバーレイとして送って診断を予測してもよい（MAY）。予測したときは `new_diagnostics.status: "complete"`、しなかったときは `"not_computed"` とし、オーバーレイは応答前に元に戻す。
 5. 書き込みはワークスペース単位の書き込みロック（§5.9）の下で行う。
 
@@ -2108,7 +2109,7 @@ json `data`:
 | `files_changed[]` | object[] | `{ path, sha256_before, sha256_after, hunks }`。`dry_run` では「書くはずのファイル」を `sha256_after` を予測値として列挙する |
 | `diff` | string | unified diff。予算を超える分は末尾のハンクを省略し `# summary:` にハンク数を書く |
 | `syntax_check` | enum | `"ok"`（適用後のすべての対象ファイルで新規の構文エラーノードがゼロ） \| `"skipped"`（Tier 4 など構文木が無い） |
-| `new_diagnostics` | object | `{ status: "complete" \| "pending" \| "not_computed", added[], resolved[], checked_files[] }`。`added[]` / `resolved[]` の要素は T-08 の診断オブジェクトと同形 |
+| `new_diagnostics` | object | `{ status: "complete" \| "partial" \| "pending" \| "not_computed", added[], resolved[], present_after[], checked_files[] }`。`added[]` / `resolved[]` / `present_after[]` の要素は T-08 の診断オブジェクトと同形。`present_after[]` は基準が不明なサーバーの編集後の診断（増えたかどうか分からない。§10.7）。`checked_files[]` の要素は `{ path, fresh }` と、基準が不明なら `unknown_baseline: [サーバー名]`。compact の `new_diagnostics:` 行は `partial (+0 -1 ?2) checked=1 files`（`?N` が `present_after` の件数。0 なら書かない）で、`present_after:` の見出しの下に診断行を並べる |
 
 compact では、これらを `applied:` 行、`files_changed:` 行、`syntax_check:` 行、`new_diagnostics:` 行とそれに続く `diag-line` で表す。差分は ```` ```diff ```` のコードブロックで出す。
 
@@ -2375,7 +2376,7 @@ json `data`（共通フィールドに加えて）:
 
 1. `path` を §5.3 規則 5 で正規化する。対象言語の LSP が `ready` でなければ `E_LSP_UNAVAILABLE`。
 2. **ID 指定**: サーバーが保持する ID → アクションの対応を引く。未知の ID は `E_TARGET_NOT_FOUND`。ID 発行後に対象ファイルの SHA-256 が変わっていれば `E_PRECONDITION_FAILED`（`details.reason: "code_action_id_expired"`）。
-3. **種別指定**: `textDocument/codeAction` を範囲 `line`〜`end_line`、`only: [種別]` で問い合わせる。候補 0 件は `E_TARGET_NOT_FOUND`、2 件以上は `E_TARGET_AMBIGUOUS` とし、`candidates[]` に新たに発番した `{ id, title, kind }` を入れる（エージェントはその ID で呼び直す）。
+3. **種別指定**: `textDocument/codeAction` を範囲 `line`〜`end_line`、`only: [種別]` で問い合わせる。候補 0 件は `E_TARGET_NOT_FOUND`、2 件以上は `E_TARGET_AMBIGUOUS` とし、`candidates[]` に新たに発番した `{ id, title, kind }` を入れる（エージェントはその ID で呼び直す）。`quickfix` は範囲に重なる診断を `context.diagnostics` で渡すため、問い合わせの前に各サーバーがいまの内容の診断を出すのを最大 2,000 ms 待つ。**待っても出さなかったサーバーがあり、候補が 1 件以下なら** `E_TARGET_NOT_FOUND` でも 1 件の自動適用でもなく `E_TIMEOUT`（`details.reason: "diagnostics_pending"`、`details.server`・`servers`、`details.retry_after_ms`。1 件あれば ID を付けて `candidates[]` に入れる。何も適用しない）とする。2 件以上なら `E_TARGET_AMBIGUOUS` のまま、`details.diagnostics_pending` に遅れたサーバーを書く。理由: 診断の無いサーバーは QuickFix を出さないので、その時点の 0 件・1 件は「無い」「これだけ」と確かめられていない。確定の形で答えると、呼び手の AI は直せる箇所を諦めるか、別のサーバーの抑止コメントだけを適用される（BUG-0099）。
 4. アクションに `edit` が無ければ `codeAction/resolve` で補う。それでも `edit` が無く `command` だけを持つアクションは `E_UNSUPPORTED`（サーバー側で任意コマンドを実行しない。MUST NOT）。
 5. `WorkspaceEdit` を T-11 と同じ規則でファイル別編集に変換し（作成・削除を含めば `E_UNSUPPORTED`）、§10 の前提検証・構文検証・原子的書き込み・再索引・診断を行う。
 6. `new_diagnostics.resolved[]` には、ID が付いていた診断が含まれるかどうかを `data.target_diagnostic_resolved` で明示する。
@@ -2406,12 +2407,12 @@ json `data`（共通フィールドに加えて）:
 
 - `E_INVALID_ARGUMENT`: `revision` が `WORKING_TREE` 以外、`line` がファイルの行数の外、`end_line < line`、ID の発行位置と `path` / `line` が一致しない。
 - `E_LSP_UNAVAILABLE`: 対象言語の LSP が起動できない・`ready` でない・Code Action 機能を公開していない。
-- `E_TARGET_NOT_FOUND`: 未知の ID、または種別に一致するアクションが 0 件。
-- `E_TARGET_AMBIGUOUS`: 種別指定で候補が 2 件以上。
+- `E_TARGET_NOT_FOUND`: 未知の ID、または種別に一致するアクションが 0 件（`quickfix` は、問い合わせたすべてのサーバーがいまの内容の診断を出したうえで 0 件のときだけ）。
+- `E_TARGET_AMBIGUOUS`: 種別指定で候補が 2 件以上（`quickfix` で診断がまだのサーバーがあれば `details.diagnostics_pending`）。
 - `E_PRECONDITION_FAILED`: ID の発行後にファイルが変更された、`expected_file_sha256` 不一致、書き込み直前の外部変更検知。
 - `E_SYNTAX_INVALID`: 適用後のいずれかのファイルに新規の構文エラーノードが生じる。
 - `E_UNSUPPORTED`: `command` のみのアクション、またはファイル作成・削除を含む `WorkspaceEdit`。
-- `E_TIMEOUT`: `codeAction` / `resolve` の応答が 5,000 ms を超えた、または書き込みロックの待機超過。
+- `E_TIMEOUT`: `codeAction` / `resolve` の応答が 5,000 ms を超えた、書き込みロックの待機超過、または種別 `quickfix` で文脈の診断が間に合わず候補が 1 件以下（`details.reason: "diagnostics_pending"`。処理規約 3。`details.retry_after_ms` の後に再試行する）。
 
 **精度と降格**:
 

@@ -10,6 +10,8 @@
   diff が前にあると、縮んだ diff の後ろの診断が次ページ（編集ツールでは辿れない）に回る。
 * ``diag_records``: ``added:`` / ``resolved:`` の見出しの後ろに診断の行を並べる ``diag`` レコード（0 件なら出さない）。
 * ``diag_line``: 診断 1 件の compact の行（T-11 は ``head_kv`` の値として使う）。
+* ``diagnostics_kv`` / ``diagnostics_json``: ``new_diagnostics:`` 行の値と json の ``data.new_diagnostics``。基準が不明なサーバーの
+  編集後の診断（``present_after``。BUG-0098）は件数を ``?N`` で書き、``present_after:`` の見出しの下に並べる。
 * ``short_sha``: 画面に出す sha256 の短縮（先頭 12 桁 + ``…``）。
 """
 
@@ -20,9 +22,18 @@ from typing import Any, Final
 
 from lucianke.core.model import Confidence
 from lucianke.core.records import Record
+from lucianke.edit.verify import DiagDelta
 from lucianke.tools._services import ToolServices, estimate_tokens
 
-__all__ = ["SHA_SHOWN", "diag_line", "diag_records", "diff_record", "short_sha"]
+__all__ = [
+    "SHA_SHOWN",
+    "diag_line",
+    "diag_records",
+    "diagnostics_json",
+    "diagnostics_kv",
+    "diff_record",
+    "short_sha",
+]
 
 SHA_SHOWN: Final = 12
 _SEVERITY_LETTER: Final = {"error": "E", "warning": "W", "information": "I", "info": "I", "hint": "H"}
@@ -47,6 +58,25 @@ def diag_line(svc: ToolServices, obj: Mapping[str, Any]) -> str:
         message=str(obj["message"]),
         **pair,
     )
+
+
+def diagnostics_kv(delta: DiagDelta) -> str:
+    """``new_diagnostics:`` 行の値。``partial (+0 -1 ?2) checked=1 files`` の ``?2`` は ``present_after`` の件数（無ければ書かない）。"""
+    if delta.status == "not_computed":
+        return "not_computed"
+    unknown = f" ?{len(delta.present_after)}" if delta.present_after else ""
+    return f"{delta.status} (+{len(delta.added)} -{len(delta.resolved)}{unknown}) checked={len(delta.checked_files)} files"
+
+
+def diagnostics_json(delta: DiagDelta) -> dict[str, Any]:
+    """json の ``data.new_diagnostics``（仕様書 §11.5.0 の共通出力）。"""
+    return {
+        "status": delta.status,
+        "added": [dict(o) for o in delta.added],
+        "resolved": [dict(o) for o in delta.resolved],
+        "present_after": [dict(o) for o in delta.present_after],
+        "checked_files": [dict(o) for o in delta.checked_files],
+    }
 
 
 def diff_record(svc: ToolServices, diff: str, confidence: Confidence, priority: int = 0) -> Record:

@@ -247,6 +247,30 @@ async def test_wait_for_waits_on_all_servers_at_once_with_the_same_timeout(ws: W
     assert [(kw["timeout_ms"], kw["settle_ms"]) for kw in started] == [(1000, 7), (1000, 7)]
 
 
+async def test_wait_sources_reports_each_server_by_its_name(ws: Workspace):
+    """BUG-0098: ``wait_sources`` は ``wait_for`` と同じ待ちを、サーバー名（``diagnostics`` 表の ``source``）ごとの結果で返す。"""
+    router, types, lint = make(ws)
+    types.server_name, lint.server_name = "basedpyright", "ruff"  # type: ignore[attr-defined]
+    version = router.sync(A, "x\n", "fake")
+    lint.publish(A, version)
+    start = time.perf_counter()
+    got = await router.diagnostics_hub.wait_sources(
+        A, min_version=version, sent_at=router.sent_at_of(A) or 0.0, timeout_ms=150
+    )
+    assert got == {"basedpyright": False, "ruff": True}
+    assert time.perf_counter() - start < 5
+    types.publish(A, version)
+    assert await router.diagnostics_hub.wait_sources(A, min_version=version, sent_at=0.0, timeout_ms=150) == {
+        "basedpyright": True,
+        "ruff": True,
+    }
+    # 依存元（版なし）は lint を待たない（``wait_for`` と同じ）。開いているサーバーが無ければ空
+    assert await router.diagnostics_hub.wait_sources(A, min_version=None, sent_at=0.0, timeout_ms=150) == {
+        "basedpyright": True
+    }
+    assert await router.diagnostics_hub.wait_sources(B, min_version=1, sent_at=0.0, timeout_ms=150) == {}
+
+
 async def test_wait_for_a_dependent_ignores_the_lint_server(ws: Workspace):
     """依存元（``min_version=None``）は ruff が再発行しない: types だけ待つ。"""
     router, types, lint = make(ws)

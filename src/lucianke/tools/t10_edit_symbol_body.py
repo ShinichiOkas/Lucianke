@@ -40,7 +40,7 @@ from lucianke.edit.builders_insert import INSERT_OPERATIONS, InsertOutcome, inse
 from lucianke.edit.normalize import default_indent
 from lucianke.edit.transaction import EditResult, EditTransaction, PlanBuilder, PlanContext
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._edit_output import diag_records, diff_record, short_sha
+from lucianke.tools._edit_output import diag_records, diagnostics_json, diagnostics_kv, diff_record, short_sha
 from lucianke.tools._services import ToolServices, services_of
 from lucianke.tools.t05_get_symbol_bodies import TargetRefArg
 
@@ -261,17 +261,12 @@ def _build_output(
             ("files_changed", f"{change}  sha256 {short_sha(c.sha256_before)}→{short_sha(c.sha256_after)}")
         )
     kv.append(("syntax_check", result.syntax_check))
-    if delta.status == "not_computed":
-        kv.append(("new_diagnostics", "not_computed"))
-    else:
-        kv.append(
-            ("new_diagnostics",
-             f"{delta.status} (+{len(delta.added)} -{len(delta.resolved)}) checked={len(delta.checked_files)} files")
-        )  # fmt: skip
+    kv.append(("new_diagnostics", diagnostics_kv(delta)))
 
     # 診断を先に、縮められる diff を最後に置く（縮んだ diff はページの最後の 1 件になる。仕様書 §5.6-5、BUG-0067）
     records: list[Record] = []
     records += diag_records(svc, "added", delta.added, 0, conf)
+    records += diag_records(svc, "present_after", delta.present_after, 1, conf)
     records += diag_records(svc, "resolved", delta.resolved, 1, conf)
     if result.diff:
         records.append(diff_record(svc, result.diff, conf, priority=2))
@@ -290,12 +285,7 @@ def _build_output(
             "files_changed": files,
             "diff": result.diff,
             "syntax_check": result.syntax_check,
-            "new_diagnostics": {
-                "status": delta.status,
-                "added": [dict(o) for o in delta.added],
-                "resolved": [dict(o) for o in delta.resolved],
-                "checked_files": [dict(o) for o in delta.checked_files],
-            },
+            "new_diagnostics": diagnostics_json(delta),
         },
         max_confidence=Confidence.STRUCTURAL,
         engine=EngineChoice(engine="tree-sitter", confidence=conf, lsp_status=lsp.value),

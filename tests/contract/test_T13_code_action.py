@@ -25,7 +25,7 @@ from typing import Any
 
 import compact_grammar as g
 import pytest
-from _lsp_settle import diagnostics_published
+from _lsp_settle import HeldPublishes, diagnostics_published
 
 from lucianke.app import build_services
 from lucianke.core.model import Confidence, RelPath
@@ -41,6 +41,7 @@ from lucianke.lsp.pool import LspHandle, LspPool
 from lucianke.lsp.servers import LspServerDef, default_server, find_command
 from lucianke.mcp.pipeline import Pipeline
 from lucianke.mcp.registry import ToolRegistry
+from lucianke.tools import t13_apply_code_action as t13
 from lucianke.tools._services import ToolServices
 from lucianke.tools.t13_apply_code_action import SPEC, _Chosen, _target_resolved  # pyright: ignore[reportPrivateUsage]
 from lucianke.workspace.types import Workspace
@@ -437,11 +438,43 @@ async def test_real_id_expires_when_the_file_changes(real: Rig) -> None:
 
 @needs_ruff
 async def test_real_no_candidate_is_not_found_and_changes_nothing(real: Rig) -> None:
-    """処理規約 3: 候補 0 件は E_TARGET_NOT_FOUND（事後条件 4）。"""
+    """処理規約 3: 候補 0 件は E_TARGET_NOT_FOUND（事後条件 4）。ruff がいまの内容の診断を出した後で聞く（BUG-0099: 出す前の
+    0 件は「無い」と確かめられていないので E_TIMEOUT になる）。"""
     real.write(FIXTURE, UNUSED_PY)
+    assert real.pool is not None
+    assert await real.pool.wait_ready("python", real.ws, READY_WAIT_MS, role="lint")
+    await diagnostics_published(real.handle(), FIXTURE, {"F401"})
     before = real.snapshot()
     err = error_of(await real.call(path=FIXTURE, line=6, action_kind_or_id="quickfix"), "E_TARGET_NOT_FOUND")
     assert err["details"]["reason"] == "no_code_action"
+    assert real.snapshot() == before
+
+
+@needs_ruff
+async def test_real_quickfix_before_ruff_published_is_a_retryable_timeout(real: Rig) -> None:
+    """BUG-0099: ruff がいまの内容の診断をまだ出していない（文脈の診断の待ち 2 秒が切れた）とき、種別指定の ``quickfix`` は
+    「QuickFix は無い」（E_TARGET_NOT_FOUND）ではなく、再試行できる E_TIMEOUT（``diagnostics_pending``）。届けば候補が出る。
+
+    負荷・起動直後で ruff の診断が遅れたときの代わりに、試験の側で ruff の発行をハブに渡す前に止める（順序は保つ）。"""
+    real.write(FIXTURE, UNUSED_PY)
+    assert real.pool is not None
+    assert await real.pool.wait_ready("python", real.ws, READY_WAIT_MS, role="lint")
+    before = real.snapshot()
+    with HeldPublishes(real.handle(), FIXTURE) as held:
+        err = error_of(await real.call(path=FIXTURE, line=1, action_kind_or_id="quickfix"), "E_TIMEOUT")
+        details = err["details"]
+        assert details["reason"] == "diagnostics_pending" and details["server"] == "ruff", err
+        assert (
+            details["servers"] == ["ruff"] and details["retry_after_ms"] > 0 and details["kind"] == "quickfix"
+        )
+        assert err["candidates"] == [], err  # ruff は文脈の診断が無いと QuickFix を出さない
+        assert held.received, "ruff did not publish at all (the hold saw nothing)"
+        assert real.snapshot() == before
+        text = (await real.call("compact", path=FIXTURE, line=1, action_kind_or_id="quickfix")).text
+        assert g.validate(text) == [] and text.startswith("# apply_code_action error E_TIMEOUT"), text
+    # 止めていた発行が届いた後は、同じ呼び出しで候補が出る（ambiguous_quickfix は診断を待ってから聞く）
+    err = await ambiguous_quickfix(real)
+    assert any("Remove unused import" in c["title"] for c in err["candidates"])
     assert real.snapshot() == before
 
 
@@ -586,7 +619,7 @@ while True:
     mid = msg.get("id")
     if method in ("textDocument/didOpen", "textDocument/didChange", "$/cancelRequest"):
         log(msg)
-        if method == "textDocument/didOpen":
+        if method == "textDocument/didOpen" and spec.get("publish", True):
             send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
                   "params": {"uri": msg["params"]["textDocument"]["uri"], "diagnostics": []}})
         continue
@@ -664,7 +697,7 @@ async def fake(
     script = tmp_path / "fake_lsp.py"
     script.write_text(FAKE_SERVER, encoding="utf-8")
 
-    async def make(responses: dict[str, Any]) -> Fake:
+    async def make(responses: dict[str, Any], *, publish: bool = True) -> Fake:
         counter[0] += 1
         n = counter[0]
         root = Path(os.path.realpath(tmp_path / f"fws{n}"))
@@ -673,7 +706,12 @@ async def fake(
         (root / "src" / "b.py").write_bytes(b"B = 1\n")
         log = tmp_path / f"requests{n}.jsonl"
         spec_text = json.dumps(
-            {"log": str(log), "capabilities": {"codeActionProvider": True}, "responses": responses}
+            {
+                "log": str(log),
+                "capabilities": {"codeActionProvider": True},
+                "responses": responses,
+                "publish": publish,
+            }
         ).replace("{ROOT}", root.as_uri())
         spec_path = tmp_path / f"spec{n}.json"
         spec_path.write_text(spec_text, encoding="utf-8")
@@ -752,6 +790,57 @@ async def test_fake_no_candidate_or_wrong_kind_is_not_found(fake: FakeFactory) -
         await call_fake(g2, action_kind_or_id="refactor.extract"), "E_TARGET_NOT_FOUND"
     )  # only を無視するサーバー
     assert f.rig.snapshot() == before
+
+
+async def test_fake_quickfix_with_published_diagnostics_and_no_action_is_not_found(fake: FakeFactory) -> None:
+    """BUG-0099: サーバーがいまの内容の診断を出した（偽サーバーは didOpen で空の診断を出す）うえで 0 件なら E_TARGET_NOT_FOUND。"""
+    f = await fake({"textDocument/codeAction": {"result": []}})
+    before = f.rig.snapshot()
+    err = error_of(await call_fake(f, action_kind_or_id="quickfix"), "E_TARGET_NOT_FOUND")
+    assert err["details"]["reason"] == "no_code_action" and err["details"]["kind"] == "quickfix"
+    assert f.rig.snapshot() == before
+
+
+@pytest.mark.parametrize("offered", [0, 1], ids=["none", "one"])
+async def test_fake_quickfix_before_the_server_published_is_a_retryable_timeout(
+    fake: FakeFactory, monkeypatch: pytest.MonkeyPatch, offered: int
+) -> None:
+    """BUG-0099: サーバーがいまの内容の診断を出さないまま文脈の診断の待ちが切れたら、候補 0 件を「無い」と言わず、1 件を
+    自動で適用もしない。E_TIMEOUT（``diagnostics_pending``・``server``・``retry_after_ms``）で、1 件なら ID を付けて候補に入れる。"""
+    monkeypatch.setattr(
+        t13, "CONTEXT_DIAGNOSTICS_WAIT_MS", 300
+    )  # 待ちの長さは問わない（偽サーバーは発行しない）
+    actions = [action("Fix it", replace_return("2"), kind="quickfix")][:offered]
+    f = await fake({"textDocument/codeAction": {"result": actions}}, publish=False)
+    before = f.rig.snapshot()
+    err = error_of(await call_fake(f, action_kind_or_id="quickfix"), "E_TIMEOUT")
+    details = err["details"]
+    assert (
+        details["reason"] == "diagnostics_pending"
+        and details["server"] == "fake"
+        and details["servers"] == ["fake"]
+    )
+    assert details["retry_after_ms"] == t13.DIAGNOSTICS_PENDING_RETRY_MS and details["path"] == "src/a.py"
+    assert "300 ms" in err["message"] and "retry after" in err["message"]
+    assert f.rig.snapshot() == before  # 何も適用していない
+    assert [c["title"] for c in err["candidates"]] == ["Fix it"][:offered]
+    if offered:  # 候補の ID で呼べば、その 1 件を（エージェントの判断で）適用できる
+        data_of(await call_fake(f, action_kind_or_id=err["candidates"][0]["id"]))
+        assert f.rig.path("src/a.py").read_bytes() == b"def a():\n    return 2\n"
+
+
+async def test_fake_two_quickfixes_before_the_server_published_stay_ambiguous_with_the_note(
+    fake: FakeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-0099: 候補が 2 件以上なら E_TARGET_AMBIGUOUS のまま（何も適用しない）。遅れたサーバーを ``details`` に書く。"""
+    monkeypatch.setattr(t13, "CONTEXT_DIAGNOSTICS_WAIT_MS", 300)
+    actions = [
+        action("Fix A", replace_return("2"), kind="quickfix"),
+        action("Fix B", replace_return("3"), kind="quickfix"),
+    ]
+    f = await fake({"textDocument/codeAction": {"result": actions}}, publish=False)
+    err = error_of(await call_fake(f, action_kind_or_id="quickfix"), "E_TARGET_AMBIGUOUS")
+    assert err["details"]["diagnostics_pending"] == ["fake"] and len(err["candidates"]) == 2
 
 
 async def test_fake_command_only_action_is_unsupported_and_no_command_runs(fake: FakeFactory) -> None:

@@ -623,7 +623,7 @@ async def test_json_data_has_every_documented_field(pipeline: Pipeline) -> None:
     for key in ("applied", "edit_id", "operation", "target_urn", "new_range", "indent_unit", "files_changed", "diff",
                 "syntax_check", "new_diagnostics"):  # fmt: skip
         assert key in data, key
-    assert set(data["new_diagnostics"]) == {"status", "added", "resolved", "checked_files"}
+    assert set(data["new_diagnostics"]) == {"status", "added", "resolved", "present_after", "checked_files"}
     assert data["new_diagnostics"]["status"] == "complete"
     assert set(data["files_changed"][0]) == {"path", "sha256_before", "sha256_after", "hunks"}
     assert set(data["new_range"]) == {"start_line", "end_line"}

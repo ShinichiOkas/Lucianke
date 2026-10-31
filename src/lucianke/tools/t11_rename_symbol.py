@@ -74,7 +74,7 @@ from lucianke.syntax.support import get_support
 from lucianke.syntax.symbols import extract, load_query_source
 from lucianke.tools import _t11_degrade
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._edit_output import diag_line
+from lucianke.tools._edit_output import diag_line, diagnostics_json, diagnostics_kv
 from lucianke.tools._nav import TargetRefArg
 from lucianke.tools._services import ToolServices, services_of
 from lucianke.workspace.languages import HEAD_BYTES, detect
@@ -607,16 +607,9 @@ def _build_output(svc: ToolServices, args: RenameSymbolArgs, result: EditResult,
     ]
     kv += [("urn_map", f"{old} -> {new}") for old, new in seen.urn_map.items()]
     kv.append(("syntax_check", result.syntax_check))
-    if delta.status == "not_computed":
-        kv.append(("new_diagnostics", "not_computed"))
-    else:
-        kv.append(
-            (
-                "new_diagnostics",
-                f"{delta.status} (+{len(delta.added)} -{len(delta.resolved)}) checked={len(delta.checked_files)} files",
-            )
-        )
+    kv.append(("new_diagnostics", diagnostics_kv(delta)))
     kv += [("added", diag_line(svc, o)) for o in delta.added]
+    kv += [("present_after", diag_line(svc, o)) for o in delta.present_after]
     kv += [("resolved", diag_line(svc, o)) for o in delta.resolved]
 
     return ToolOutput(
@@ -632,12 +625,7 @@ def _build_output(svc: ToolServices, args: RenameSymbolArgs, result: EditResult,
             "files_changed": files,
             "diff": result.diff,
             "syntax_check": result.syntax_check,
-            "new_diagnostics": {
-                "status": delta.status,
-                "added": [dict(o) for o in delta.added],
-                "resolved": [dict(o) for o in delta.resolved],
-                "checked_files": [dict(o) for o in delta.checked_files],
-            },
+            "new_diagnostics": diagnostics_json(delta),
         },
         max_confidence=Confidence.EXACT,
         engine=seen.engine or EngineChoice(engine="lsp", confidence=conf, lsp_status=LspStatus.READY.value),

@@ -11,17 +11,24 @@
   LSP が止まったりしないようにする。ツールの呼び出しをこの中に入れないこと（本番の期限を試験から変えない）。
 * ``settle``: 述語（LSP に直接聞いて期待どおりの答えが揃ったか）が真になるまで、``probe_timeouts`` の中で繰り返す。
 * ``diagnostics_published``: 編集の前提として、いまの内容の版について期待の診断が出て表に入るまで待つ（BUG-0097）。
+* ``HeldPublishes``: ある LSP の、ある文書の ``publishDiagnostics`` を、ハブ（``DiagnosticsHub.on_publish``）に渡す前に試験の側で
+  止める・遅らせる（負荷や起動直後で LSP の診断が遅れたときの代わり。BUG-0098・BUG-0099）。順序は保つ。製品のコードは変えない。
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from lucianke.core.model import RelPath
 from lucianke.lsp import features
+from lucianke.lsp.diagnostics import PUBLISH_DIAGNOSTICS
 from lucianke.lsp.pool import LspHandle
+from lucianke.workspace.paths import from_file_uri
 
 SETTLE_TIMEOUT_S = 240.0  # 解析の完了を待つ上限。条件待ちなので、CPU が飽和していても足りる長さにする
 PROBE_TIMEOUT_MS = 120_000  # 準備の問い合わせ 1 回の期限
@@ -107,3 +114,69 @@ async def diagnostics_published(
     raise AssertionError(
         f"{handle.server_name} did not publish {sorted(want)} for {rel} within {timeout_s} s (received: {seen})"
     )
+
+
+class HeldPublishes:
+    """``handle`` の ``rel`` の ``publishDiagnostics`` を、ハブに渡す前に止める・遅らせる（BUG-0098・BUG-0099）。
+
+    サーバーが ``ready`` になってから（``handle.client`` があるとき）作る。``with`` を抜けると元に戻す（止めている分は渡す）。
+    受けた順に渡す（追い越さない）。``rel`` 以外の文書の発行は素通し。
+
+    * 既定: 止めたまま。``release()`` で止めていた分を順に渡し、以後は素通し。
+    * ``delay_s``: 受けてから ``delay_s`` 秒後に渡す（負荷で解析が遅れたとき）。
+    * ``until_version``: その版以上の発行が届いたら、止めていた分とその発行を順に渡し、以後は素通し（編集の前の発行だけを遅らせる）。
+
+    ``received`` に ``(受けた時刻, 版, 件数)`` を残す（赤の報告に使う）。
+    """
+
+    def __init__(
+        self, handle: LspHandle, rel: str, *, delay_s: float | None = None, until_version: int | None = None
+    ) -> None:
+        client = handle.client
+        assert client is not None, "start the server (wait_ready) before holding its publishes"
+        self._handle = handle
+        self._rel = RelPath(rel)
+        self._delay_s = delay_s
+        self._until_version = until_version
+        self._handlers = client._notification_handlers[PUBLISH_DIAGNOSTICS]  # pyright: ignore[reportPrivateUsage]
+        self._target = handle.diagnostics.on_publish
+        self._queue: deque[Any] = deque()
+        self._passing = False
+        self.received: list[tuple[float, int | None, int]] = []
+        self._index = self._handlers.index(self._target)
+        self._handlers[self._index] = self._on_publish
+
+    def __enter__(self) -> HeldPublishes:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+        if self._index < len(self._handlers) and self._handlers[self._index] == self._on_publish:
+            self._handlers[self._index] = self._target
+
+    def _ours(self, params: Any) -> bool:
+        uri = params.get("uri") if isinstance(params, dict) else None
+        return isinstance(uri, str) and from_file_uri(self._handle.ws, uri) == self._rel
+
+    def _on_publish(self, params: Any) -> None:
+        if self._passing or not self._ours(params):
+            self._target(params)
+            return
+        version = params.get("version")
+        diags = params.get("diagnostics")
+        self.received.append((time.perf_counter(), version, len(diags) if isinstance(diags, list) else 0))
+        self._queue.append(params)
+        if self._delay_s is not None:
+            asyncio.get_running_loop().call_later(self._delay_s, self._deliver_one)
+        elif self._until_version is not None and isinstance(version, int) and version >= self._until_version:
+            self.release()
+
+    def _deliver_one(self) -> None:
+        if self._queue:
+            self._target(self._queue.popleft())
+
+    def release(self) -> None:
+        """止めていた分を受けた順に渡し、以後は素通し。"""
+        self._passing = True
+        while self._queue:
+            self._target(self._queue.popleft())

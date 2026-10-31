@@ -10,6 +10,11 @@
 3. **種別指定**: 言語の ``ready`` な LSP（Python は ``lint`` の ruff と ``types`` の basedpyright の両方）に ``textDocument/codeAction``
    （``only: [種別]``、範囲 ``line``〜``end_line``。QuickFix には範囲に重なる診断を ``context.diagnostics`` で渡す）を問い合わせる。
    0 件は ``E_TARGET_NOT_FOUND``、2 件以上は ``E_TARGET_AMBIGUOUS``（候補に新たに発番した ID を付ける。エージェントはその ID で呼び直す）。
+   **QuickFix の文脈の診断が間に合わなかったとき**（BUG-0099）: どれかのサーバーが ``CONTEXT_DIAGNOSTICS_WAIT_MS`` の間にいまの内容の
+   診断を出さず、候補が 1 件以下なら、``E_TARGET_NOT_FOUND`` でも 1 件の自動適用でもなく ``E_TIMEOUT``（``details.reason=
+   "diagnostics_pending"``・``server`` / ``servers``・``retry_after_ms``。1 件あれば ID を付けて ``candidates[]`` に入れる）。
+   診断の無いサーバーは QuickFix を出さないので、0 件・1 件は「無い」「これだけ」と確かめられていない。2 件以上は
+   ``E_TARGET_AMBIGUOUS`` のまま（何も適用しない）で、``details.diagnostics_pending`` に遅れたサーバーを書く。
    候補は ``isPreferred`` → 供給元（lint → types）→ 種別 → タイトル → 編集の順に決定的に並べ、同じ供給元・種別・タイトルのものは
    1 件にする（台帳は同じ範囲・種別・タイトルに同じ ID を返す。1 行に同じ規則の診断が複数あると、サーバーは同じアクションを診断の数だけ返す）。
 4. ``edit`` が無ければ ``codeAction/resolve``（``features.code_actions`` が行う）。それでも ``command`` しか無いアクションは
@@ -68,7 +73,7 @@ from lucianke.edit.workspace_edit import plan_from_workspace_edit
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle, LspState
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
-from lucianke.tools._edit_output import diag_records, diff_record, short_sha
+from lucianke.tools._edit_output import diag_records, diagnostics_json, diagnostics_kv, diff_record, short_sha
 from lucianke.tools._services import ToolServices, services_of
 from lucianke.workspace.languages import HEAD_BYTES, detect
 from lucianke.workspace.paths import confine, to_abs
@@ -83,6 +88,8 @@ LSP_READY_WAIT_MS = 2000
 """起動直後の LSP が ``ready`` になるのを待つ上限。"""
 CONTEXT_DIAGNOSTICS_WAIT_MS = 2000
 """QuickFix の問い合わせの前に、LSP が最新の内容の診断を出すのを待つ上限（診断が無いと QuickFix は返らない）。"""
+DIAGNOSTICS_PENDING_RETRY_MS = 1000
+"""文脈の診断が間に合わなかったときの ``E_TIMEOUT`` の ``retry_after_ms``（次の呼び出しも診断を最大 2 秒待つ。BUG-0099）。"""
 _ROLE_RANK = {"lint": 0, "types": 1}
 _REQUIRED_SERVICES = ("locks", "writer_index", "journal_dir")
 _OPTIONAL_SERVICES = ("indexer", "watcher", "reader_pool", "trees", "has_ctags", "lock_wait_ms")
@@ -251,17 +258,21 @@ async def _ready_handles(pool: Any, language_id: str, ws: Workspace) -> list[Lsp
 
 async def _context_diagnostics(
     handle: LspHandle, rel: RelPath, data: bytes, index: LineIndex, rng: Range
-) -> list[dict[str, Any]]:
-    """範囲に重なる LSP の診断（QuickFix の ``context.diagnostics``）。最新の内容を LSP に見せ、診断が追いつくのを待つ。"""
+) -> tuple[list[dict[str, Any]], bool]:
+    """範囲に重なる LSP の診断（QuickFix の ``context.diagnostics``）。最新の内容を LSP に見せ、診断が追いつくのを待つ。
+
+    2 つ目の値は「いまの内容の診断が届いた」（``False`` は待ちが切れた＝文脈が足りないかもしれない。BUG-0099）。
+    LSP に見せられなかった（切断）ときは ``True``（診断の遅れではない。問い合わせが ``E_LSP_UNAVAILABLE`` になる）。
+    """
     client = handle.client
     assert client is not None
     language_id = handle.defn.document_language_id if handle.defn is not None else handle.language_id
     try:
         version = handle.documents.sync(rel, _text_of(data), language_id)
     except ConnectionError:
-        return []
+        return [], True
     sent_at = handle.documents.sent_at_of(rel)
-    await handle.diagnostics.wait_for(
+    published = await handle.diagnostics.wait_for(
         rel,
         min_version=version,
         sent_at=sent_at if sent_at is not None else 0.0,
@@ -269,7 +280,7 @@ async def _context_diagnostics(
     )
     entry = handle.diagnostics.get(rel)
     if entry is None:
-        return []
+        return [], published
     out: list[dict[str, Any]] = []
     for raw in entry.diagnostics:
         raw_range = raw.get("range")
@@ -281,7 +292,7 @@ async def _context_diagnostics(
             continue
         if _overlaps(drange, rng):
             out.append(dict(raw))
-    return out
+    return out, published
 
 
 async def _query(
@@ -494,10 +505,12 @@ async def _choose_by_kind(
     found: list[_Chosen] = []
     last_error: LuciankeError | None = None
     answered = 0
+    pending: list[str] = []  # 文脈の診断が間に合わなかったサーバー（BUG-0099）
     for handle in handles:
-        context = (
-            await _context_diagnostics(handle, rel, data, index, rng) if wanted.startswith("quickfix") else []
-        )
+        context: list[dict[str, Any]] = []
+        published = True
+        if wanted.startswith("quickfix"):
+            context, published = await _context_diagnostics(handle, rel, data, index, rng)
         try:
             actions = await _query(handle, rel, rng, only=[wanted], diagnostics=context)
         except LuciankeError as exc:
@@ -506,6 +519,8 @@ async def _choose_by_kind(
             last_error = exc
             continue
         answered += 1
+        if not published:
+            pending.append(_server_of(handle))
         for action in actions:
             if (
                 action.get("disabled")
@@ -527,7 +542,7 @@ async def _choose_by_kind(
     if not answered and last_error is not None:
         raise last_error
     found = _unique_candidates(found)
-    if not found:
+    if not found and not pending:
         raise LuciankeError(
             ErrorCode.E_TARGET_NOT_FOUND,
             f"no code action of kind {wanted!r} is offered at {rel}:{args.line}",
@@ -538,18 +553,51 @@ async def _choose_by_kind(
             store, rel=rel, sha=sha, handle=c.handle, action=c.action, lsp_range=_lsp_range_of(c.handle, index, rng),
             diagnostic=c.diagnostic,
         )  # fmt: skip
+    if pending and len(found) <= 1:
+        raise _diagnostics_pending(wanted, rel, args.line, pending, found)
     if len(found) > 1:
+        details: dict[str, Any] = {"reason": "ambiguous_code_action", "kind": wanted}
+        if pending:
+            details["diagnostics_pending"] = pending  # 候補はまだ増えうる（何も適用していない）
         raise LuciankeError(
             ErrorCode.E_TARGET_AMBIGUOUS,
             f"{len(found)} code actions of kind {wanted!r} are offered at {rel}:{args.line}; "
             "call again with the id of one of the candidates",
-            details={"reason": "ambiguous_code_action", "kind": wanted},
+            details=details,
             candidates=[_candidate_json(c, rel, args.line) for c in found[:CANDIDATES_MAX]],
         )
     only = found[0]
     if only.action.get(features.COMMAND_ONLY_KEY) or only.action.get("edit") is None:
         raise _command_only(only.title, only.action)
     return only
+
+
+def _diagnostics_pending(
+    wanted: str, rel: RelPath, line: int, pending: Sequence[str], found: Sequence[_Chosen]
+) -> LuciankeError:
+    """文脈の診断が間に合わず、候補が 0〜1 件のとき（BUG-0099）。確定の「無い」「これだけ」にせず、再試行を促す。"""
+    servers = ", ".join(pending)
+    offered = (
+        f"; only {found[0].server} offered {found[0].title!r} so far (apply it by its id to take it anyway)"
+        if found
+        else ""
+    )
+    return LuciankeError(
+        ErrorCode.E_TIMEOUT,
+        f"{servers} has not published diagnostics for the current content of {rel} within "
+        f"{CONTEXT_DIAGNOSTICS_WAIT_MS} ms, so the {wanted!r} actions at line {line} are not known yet{offered}; "
+        f"retry after {DIAGNOSTICS_PENDING_RETRY_MS} ms",
+        details={
+            "reason": "diagnostics_pending",
+            "server": pending[0],
+            "servers": list(pending),
+            "kind": wanted,
+            "path": str(rel),
+            "line": line,
+            "retry_after_ms": DIAGNOSTICS_PENDING_RETRY_MS,
+        },
+        candidates=[_candidate_json(c, rel, line) for c in found],
+    )
 
 
 # --- トランザクション -----------------------------------------------------------------------
@@ -694,18 +742,13 @@ def _build_output(
     if not result.files_changed:
         kv.append(("files_changed", "none"))
     kv.append(("syntax_check", result.syntax_check))
-    if delta.status == "not_computed":
-        kv.append(("new_diagnostics", "not_computed"))
-    else:
-        tail = "" if target_resolved is None else f"  target_resolved={str(target_resolved).lower()}"
-        kv.append(
-            ("new_diagnostics",
-             f"{delta.status} (+{len(delta.added)} -{len(delta.resolved)}) checked={len(delta.checked_files)} files{tail}")
-        )  # fmt: skip
+    tail = "" if target_resolved is None else f"  target_resolved={str(target_resolved).lower()}"
+    kv.append(("new_diagnostics", diagnostics_kv(delta) + tail))
 
     # 診断を先に、縮められる diff を最後に置く（縮んだ diff はページの最後の 1 件になる。仕様書 §5.6-5、BUG-0067）
     records: list[Record] = []
     records += diag_records(svc, "added", delta.added, 0, conf)
+    records += diag_records(svc, "present_after", delta.present_after, 1, conf)
     records += diag_records(svc, "resolved", delta.resolved, 1, conf)
     if result.diff:
         records.append(diff_record(svc, result.diff, conf, priority=2))
@@ -729,12 +772,7 @@ def _build_output(
             ],
             "diff": result.diff,
             "syntax_check": result.syntax_check,
-            "new_diagnostics": {
-                "status": delta.status,
-                "added": [dict(o) for o in delta.added],
-                "resolved": [dict(o) for o in delta.resolved],
-                "checked_files": [dict(o) for o in delta.checked_files],
-            },
+            "new_diagnostics": diagnostics_json(delta),
         },
         max_confidence=Confidence.EXACT,
         engine=EngineChoice(engine=chosen.server, confidence=conf, lsp_status=LspStatus.READY.value),
