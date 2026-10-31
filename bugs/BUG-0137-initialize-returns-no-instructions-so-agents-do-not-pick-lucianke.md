@@ -43,4 +43,4 @@
   `uv run ruff check` クリーン。
 - `.\build.ps1`（`-Force` なし）で exe を作り直して `~/.local/bin/lucianke.exe` に入れ、実機の JSON-RPC ハンドシェイクで
   `initialize` の結果に `instructions` が載ることを見た。smoke PASSED。
-- コミット: 下記の 1 件（本票と同じコミット。ID は HANDOFF／git log を参照）。
+- コミット: dcde056（コード・試験・仕様書・設計書・本票）。
