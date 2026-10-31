@@ -53,3 +53,16 @@
   手がかり・上限での打ち切りは延ばせない）、`tests/contract/test_T19_T20.py` に 1 件（`data.timeout_ms`・`details`）。既存の
   範囲外の試験（5001）は 30001 に、`tests/unit/test_core_limits.py` の定数表は新しい値に直した。
 - 残り: 実機の Mnemo の索引での再測は親に託す（合成の索引は URN をランダムに引くので、実物より引き当てが散る側）。
+
+### 親の確かめ（実物の Mnemo の索引。2026-10-31 18:40）
+
+能力ベンチ（`8b39591`）が作った Mnemo `d419cf0b` の写しの索引（`paad.sqlite` 250 MB・4,221 ファイル・relations 約 40 万行）に、MCP の T-20 を
+`timeout_ms` を渡さずに投げた（既定は索引の大きさから 10,000 ms に決まった。`data.timeout_ms`）:
+
+| 集計 | 所要 | 行 |
+|---|---|---|
+| パッケージ間の依存（relations ⨝ files ⨝ files を GROUP BY） | 121 ms | 73 |
+| 被参照の上位 20（relations だけ GROUP BY target_urn） | 56 ms | 20 |
+| 名前つきの被参照の上位 20（relations ⨝ symbols を GROUP BY） | 225 ms | 20 |
+
+直す前は、既定（300 ms）でパッケージ間の集計が打ち切られ、名前つきの被参照は上限の 5 秒でも打ち切られていた。
