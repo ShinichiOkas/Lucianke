@@ -174,8 +174,10 @@ def summarize(res: dict[str, Any]) -> dict[str, Any]:
 
 def write_report(args: argparse.Namespace, spec: dict[str, Any]) -> Path:
     out = Path(args.out)
+    # every engine with a result for this date (so re-running one engine keeps the others in the table)
+    order = [*args.engines.split(","), *ADAPTERS]
     results = {}
-    for eng in args.engines.split(","):
+    for eng in dict.fromkeys(order):
         p = out / f"{args.date}-{eng}.json"
         if p.is_file():
             results[eng] = json.loads(p.read_text(encoding="utf-8"))
@@ -197,8 +199,12 @@ def write_report(args: argparse.Namespace, spec: dict[str, Any]) -> Path:
         r = results[e]
         v = r.get("version", {})
         extra = f", Lucianke commit `{(r.get('lucianke_commit') or '?')[:10]}`" if e == "lucianke" else ""
+        sv = (v.get("server_info") or {}).get("version")
+        ver = f" {sv}" if sv else ""
+        pending = f" — **{r.get('pending_note', 'pending')}**" if r.get("status") == "pending" else ""
         vers.append(
-            f"- **{e}**: {v.get('engine', e)} {v.get('detail', '') or ''}{extra} — run {r.get('started')}"
+            f"- **{e}**: {v.get('engine', e)}{ver} {v.get('detail', '') or ''}{extra} — run {r.get('started')}"
+            + pending
         )
     lines += vers + [""]
     head = "| Task | " + " | ".join(engines) + " |"
@@ -210,6 +216,9 @@ def write_report(args: argparse.Namespace, spec: dict[str, Any]) -> Path:
     for task in spec["task"]:
         row = [f"{task['id']} {task.get('title', '')}"]
         for e in engines:
+            if results[e].get("status") == "pending":  # a column measured later (e.g. waiting for a fix)
+                row.append("pending")
+                continue
             t = by_id.get(task["id"], {}).get(e)
             if t is None:
                 row.append("-")
@@ -246,8 +255,18 @@ def write_report(args: argparse.Namespace, spec: dict[str, Any]) -> Path:
         ("Median latency, warm", lambda s: _fmt_ms(s["median_warm_ms"])),
         ("Setup (ready to answer)", lambda s: _fmt_ms(s["setup_ms"])),
     ]
+
+    def cell(e: str, label: str, fn: Any) -> str:
+        if results[e].get("status") != "pending":
+            return fn(sums[e])
+        return (
+            str(results[e].get("setup", {}).get("summary", "pending"))
+            if label.startswith("Setup")
+            else "pending"
+        )
+
     for label, fn in rows:
-        lines.append(f"| {label} | " + " | ".join(fn(sums[e]) for e in engines) + " |")
+        lines.append(f"| {label} | " + " | ".join(cell(e, label, fn) for e in engines) + " |")
     lines += ["", "## Setup details", ""]
     for e in engines:
         lines.append(f"- **{e}**: `{json.dumps(results[e].get('setup', {}), ensure_ascii=False)[:600]}`")
@@ -267,6 +286,10 @@ def write_report(args: argparse.Namespace, spec: dict[str, Any]) -> Path:
                 bits.append(f"prod F1={sc['prod']['f1']}")
             if "tests" in sc and isinstance(sc["tests"], dict):
                 bits.append(f"tests F1={sc['tests']['f1']}")
+            if "location_ok" in sc:
+                bits.append(
+                    f"location_ok={sc['location_ok']} signature_ok={sc['signature_ok']} at {sc.get('reported')}"
+                )
             if sc.get("traps_reported"):
                 bits.append(f"traps={len(sc['traps_reported'])}")
             if sc.get("missed"):

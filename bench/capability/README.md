@@ -29,7 +29,11 @@ uv run python bench/capability/run.py --report --tasks <tasks.toml> --out <結�
 * `--only T06,T07` で課題を絞る。`--keep-text` で応答の全文を JSON に残す（既定は先頭 400 文字。全文は
   `--work-dir/<エンジン>/<課題>.txt`）。
 * 出力: `<out>/<日付>-<エンジン>.json`（課題ごとの呼び出し・時間・トークン・正規化した答え・採点）と
-  `<out>/<日付>.md`（課題 × エンジンの表と合計）。
+  `<out>/<日付>.md`（課題 × エンジンの表と合計）。表にはその日付の JSON があるエンジンがすべて並ぶので、
+  1 つのエンジンだけ走らせ直すときは `--engines lucianke --date <元の日付> --notes <考察.md>` とする（そのエンジンの
+  JSON だけが置き換わる）。`"status": "pending"` の JSON（測れなかった列。`setup.summary` に理由）は表で `pending` になる。
+* Lucianke の立ち上がりを待つ上限は `--ready-timeout`（既定 7,200 秒）。超えたら待つのをやめて課題を走らせ、
+  `setup.timed_out` に残す。
 
 ## 課題ファイル（TOML）
 
