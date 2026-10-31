@@ -15,6 +15,11 @@ Tier 1 のファイルからシード固定でランダムに選んだ対象で 
 ``confidence_level == "exact"`` だけの集計と、降格応答の集計も別に出す。測定中の ``stdout`` 純度と子プロセスは常に監視し、
 違反があればその実行（フィクスチャ）全体を不合格にする（§14.2）。
 
+LSP の ``exact`` 経路のツール（T-06・T-07・T-08。``Plan.cold_ms``）は、母集団を **冷**（そのツールがこの実行で初めて聞いた対象。
+探り・準備の呼び出しも「聞いた」に数える）と **温**（2 回目以降）に分け、冷は p95 < 1 秒（深さ 2 の T-07 は < 2 秒）、温は
+p95 < 50 ms で判定し、両方とも合格で合格（仕様書 §14.4・§17 OD-23 (b)）。結果 JSON のツールごとの ``cold`` / ``warm`` に両方を載せ、
+生の記録には ``first`` を付ける。
+
 結果: ``bench/results/<日時>-<OS>-latency.json``。
 """
 
@@ -53,6 +58,8 @@ CALL_TIMEOUT_S = 30.0
 
 FAST_MS = 50  # NFR-PERF-1: p95 < 50 ms
 VERIFY_MS = 500  # NFR-PERF-2: p95 < 500 ms
+COLD_LSP_MS = 1000  # NFR-PERF-1（OD-23 (b)）: LSP の exact 経路で、その実行で初めての対象の呼び出しは p95 < 1 秒
+COLD_LSP_DEEP_MS = 2000  # 同上、深さ 2 以上の T-07 は p95 < 2 秒（呼び出し元の数だけ LSP に 1 本ずつ聞く）
 
 # M1 の 14 ツール（§15.2）。M1-3 の被覆を出す
 M1_TOOLS = (
@@ -268,6 +275,9 @@ class Plan:
     tool: str
     path: str  # "fast" | "verification"
     args: ArgsFn
+    cold_ms: int | None = None
+    """LSP の exact 経路のツール（T-06・T-07・T-08。仕様書 §14.4・OD-23 (b)）: その実行で初めての対象の呼び出し（冷）はこの値で、
+    2 回目以降（温）は ``THRESHOLD_MS[path]`` で判定する。``None`` は全呼び出しを ``THRESHOLD_MS[path]`` で判定する。"""
 
 
 PLANS: tuple[Plan, ...] = (
@@ -277,9 +287,9 @@ PLANS: tuple[Plan, ...] = (
     Plan("search_workspace_symbols", "fast", _a_search),
     Plan("resolve_symbols", "fast", _a_resolve),
     Plan("get_symbol_bodies", "fast", _a_resolve),
-    Plan("find_references_and_implementations", "fast", _a_refs),
-    Plan("query_call_hierarchy", "fast", _a_calls),
-    Plan("get_diagnostics", "fast", _a_diag),
+    Plan("find_references_and_implementations", "fast", _a_refs, cold_ms=COLD_LSP_MS),
+    Plan("query_call_hierarchy", "fast", _a_calls, cold_ms=COLD_LSP_DEEP_MS),  # _a_calls は depth 2
+    Plan("get_diagnostics", "fast", _a_diag, cold_ms=COLD_LSP_MS),
     Plan("edit_symbol_body", "fast", _a_edit_body),  # T-10 (BUG-0059)
     Plan("rename_symbol", "fast", _a_rename),  # T-11 (BUG-0059)
     Plan("apply_code_action", "fast", _a_code_action),  # T-13 (BUG-0059)
@@ -446,6 +456,21 @@ def _pop(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def mark_first(targets_seen: set[str], samples: list[dict[str, Any]]) -> None:
+    """各記録に ``first``（その実行でこのツールが初めて聞いた対象か）を付ける。``targets_seen`` は探り・準備の呼び出しの対象（更新する）。"""
+    for rec in samples:
+        rec["first"] = rec["target"] not in targets_seen
+        targets_seen.add(rec["target"])
+
+
+def _verdict(p95: float | None, threshold: int, n: int, label: str) -> tuple[str, str]:
+    if not n:
+        return "no_samples", f"no successful non-degraded {label}responses to judge"
+    if p95 is not None and p95 < threshold:
+        return "pass", f"{label}server p95 {p95} ms < {threshold} ms"
+    return "fail", f"{label}server p95 {p95} ms >= {threshold} ms"
+
+
 def judge(plan: Plan, samples: list[dict[str, Any]]) -> dict[str, Any]:
     ok = [s for s in samples if s["ok"]]
     by_conf: dict[str, int] = {}
@@ -460,16 +485,25 @@ def judge(plan: Plan, samples: list[dict[str, Any]]) -> dict[str, Any]:
     degraded = [s for s in ok if s["degraded"] is not False]
     threshold = THRESHOLD_MS[plan.path]
     jp = _pop(judged)
-    p95 = jp["server_ms"].get("p95")
-    if not judged:
-        verdict, reason = "no_samples", "no successful non-degraded responses to judge"
-    elif p95 is not None and p95 < threshold:
-        verdict, reason = "pass", f"server p95 {p95} ms < {threshold} ms"
+    split: dict[str, Any] = {}
+    if plan.cold_ms is None:
+        verdict, reason = _verdict(jp["server_ms"].get("p95"), threshold, len(judged), "")
     else:
-        verdict, reason = "fail", f"server p95 {p95} ms >= {threshold} ms"
+        # OD-23 (b): 冷（その実行で初めての対象）と温（2 回目以降）に分けて判定する。両方とも合格で合格
+        cold = [s for s in judged if s.get("first")]
+        warm = [s for s in judged if not s.get("first")]
+        cp, wp = _pop(cold), _pop(warm)
+        cv, cr = _verdict(cp["server_ms"].get("p95"), plan.cold_ms, len(cold), "cold ")
+        wv, wr = _verdict(wp["server_ms"].get("p95"), threshold, len(warm), "warm ")
+        split = {"cold": {**cp, "threshold_ms": plan.cold_ms, "verdict": cv, "reason": cr},
+                 "warm": {**wp, "threshold_ms": threshold, "verdict": wv, "reason": wr}}  # fmt: skip
+        states = {cv, wv} - {"no_samples"}
+        verdict = "fail" if "fail" in states else ("pass" if states else "no_samples")
+        reason = f"{cr}; {wr}"
     return {
         "path": plan.path,
         "threshold_ms": threshold,
+        "cold_threshold_ms": plan.cold_ms,
         "verdict": verdict,
         "reason": reason,
         "low_population": 0 < len(judged) < 100,
@@ -478,6 +512,7 @@ def judge(plan: Plan, samples: list[dict[str, Any]]) -> dict[str, Any]:
         "errors": errors,
         "by_confidence": by_conf,
         "judged": jp,
+        **split,
         "exact_only": _pop(exact),
         "degraded": _pop(degraded),
         "all_ok": _pop(ok),
@@ -613,8 +648,10 @@ async def run_tool(
     # 1) 探り: 最初の呼び出し（コールド）。全部失敗するならスキップとして記録する
     first_ms: float | None = None
     probe_errors: list[dict[str, Any]] = []
+    seen: set[str] = set()  # このツールがこの実行で聞いた対象（冷・温の分け。OD-23 (b)）
     for attempt in range(6):
         a, tgt = plan.args(rng, pool)
+        seen.add(tgt)
         rec = await call_once(client, plan.tool, a, tgt)
         if attempt == 0:
             first_ms = rec["rtt_ms"]
@@ -635,6 +672,7 @@ async def run_tool(
     prime: list[dict[str, Any]] = []
     for _ in range(PRIME_CALLS):
         a, tgt = plan.args(rng, pool)
+        seen.add(tgt)
         prime.append(await call_once(client, plan.tool, a, tgt))
     # 3) 計測
     samples: list[dict[str, Any]] = []
@@ -643,6 +681,7 @@ async def run_tool(
         a, tgt = plan.args(rng, pool)
         rec = await call_once(client, plan.tool, a, tgt)
         rec["i"] = i
+        mark_first(seen, [rec])
         samples.append(rec)
         timeouts = timeouts + 1 if rec["error"] in ("CLIENT_TIMEOUT", "CONNECTION_CLOSED") else 0
         if timeouts >= 3:
@@ -699,6 +738,10 @@ def main() -> int:
                 "population_rule": "ok && !is_degraded (at the tool's ceiling, §5.5); exact-only and degraded reported separately",
                 "judged_on": "server timing_ms (integer ms); client round trip is reported alongside",
                 "thresholds_ms": THRESHOLD_MS,
+                "cold_lsp_thresholds_ms": {p.tool: p.cold_ms for p in PLANS if p.cold_ms is not None},
+                "cold_rule": "LSP exact tools (T-06/T-07/T-08, OD-23 (b)): a call is cold when its target was not asked "
+                "before by the same tool in this run (probe and prime calls count as asked); cold p95 < cold threshold "
+                "and warm p95 < fast threshold",
                 "calls_per_tool": args.calls,
                 "seed": args.seed,
                 "prime_calls": PRIME_CALLS,
