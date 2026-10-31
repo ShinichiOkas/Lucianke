@@ -419,10 +419,10 @@ def test_migration_10_to_11_reingests_ts_js_and_python_star_or_dynamic_all_files
         assert ensure_schema(conn) is SchemaAction.MIGRATED
         assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 11
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
-            "plain.py": "a" * 64,
+            "plain.py": "",  # v14（BUG-0117）は Python のファイルをすべて取り込み直す
             "star.py": "",
             "dyn.py": "",
-            "listed.py": "a" * 64,
+            "listed.py": "",
             "b.ts": "",
             "c.tsx": "",
             "d.js": "",
@@ -967,7 +967,7 @@ async def test_ts_member_type_edits_rebind_receivers(env: Env) -> None:
 
 def test_migration_12_to_13_reingests_ts_js_files(tmp_path: Path) -> None:
     """v12 の DB は表を変えず、TS / JS のファイルの ``sha256`` を空にする（型リテラルのメンバーのシンボル・メンバーの型の構成は取り込み
-    直さないと作れない。BUG-0113・BUG-0114）。Python と他の言語は取り込み直さない。"""
+    直さないと作れない。BUG-0113・BUG-0114）。他の言語は取り込み直さない（Python は続く v14 が取り込み直す。BUG-0117）。"""
     conn = open_writer(tmp_path / "paad.sqlite")
     try:
         ensure_schema(conn)
@@ -979,7 +979,7 @@ def test_migration_12_to_13_reingests_ts_js_files(tmp_path: Path) -> None:
         assert ensure_schema(conn) is SchemaAction.MIGRATED
         assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 13
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
-            "a.py": "a" * 64,
+            "a.py": "",  # v14（BUG-0117）
             "b.ts": "",
             "c.tsx": "",
             "d.js": "",
@@ -991,7 +991,7 @@ def test_migration_12_to_13_reingests_ts_js_files(tmp_path: Path) -> None:
 
 def test_migration_11_to_12_adds_type_aliases_and_reingests_ts_js_files(tmp_path: Path) -> None:
     """v11 の DB は ``_type_aliases`` を作り（BUG-0108）、TS / JS のファイルの ``sha256`` を空にする（既定の import の名前・別名の構成は
-    取り込み直さないと作れない。BUG-0109）。Python と他の言語は取り込み直さない。"""
+    取り込み直さないと作れない。BUG-0109）。他の言語は取り込み直さない（Python は続く v14 が取り込み直す。BUG-0117）。"""
     conn = open_writer(tmp_path / "paad.sqlite")
     try:
         ensure_schema(conn)
@@ -1005,7 +1005,7 @@ def test_migration_11_to_12_adds_type_aliases_and_reingests_ts_js_files(tmp_path
         assert conn.execute("SELECT schema_version FROM _meta").fetchone()[0] == current_schema_version() >= 12
         assert conn.execute("SELECT count(*) FROM _type_aliases").fetchone()[0] == 0
         assert dict(conn.execute("SELECT path, sha256 FROM files").fetchall()) == {
-            "a.py": "a" * 64,
+            "a.py": "",  # v14（BUG-0117）
             "b.ts": "",
             "c.tsx": "",
             "d.js": "",

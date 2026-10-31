@@ -820,6 +820,182 @@ def test_ts_receiver_annotations_are_read_precisely() -> None:
         assert hit.target_urn is None and hit.name_only, needle
 
 
+_PY_ANNOTATIONS = b'''\
+from __future__ import annotations
+
+import typing
+from typing import Annotated, Any, ClassVar, Final, List, Optional, Sequence, Type, TypeAlias, Union
+
+import pkg.models
+from pkg import models
+from pkg.models import A, B
+
+type AB = A | B
+type JustA = A | None
+OptA: TypeAlias = Optional[A]
+
+
+class Box:
+    def run(self) -> int:
+        return 0
+
+
+class Literal:
+    def run(self) -> int:
+        return 0
+
+
+def f(
+    u1: A | B, u2: Union[A, B], u3: "B | A", u4: Optional[A | B], u5: Union[A, Union[B, None]],
+    o1: A | None, o2: Optional[A], o3: Union[A, None], o4: "Optional[A]", o5: typing.Optional[A], o6: None | A,
+    o7: Optional["A"], o8: Union[A, None, None], q1: "A", q2: "models.A",
+    c1: list[A], c2: List[A], c3: Sequence[A], c4: dict[str, A], c5: Box[A],
+    t1: type[A], t2: Type[A], t3: typing.Type[A], t4: type[A | B], an: Annotated[A, "m"],
+    m1: models.A, m2: pkg.models.B, al1: AB, al2: JustA, al3: OptA, lit: Literal, cb: typing.Callable[[A], B],
+    w: "B |",
+):
+    u1.run()
+    u2.run()
+    u3.run()
+    u4.run()
+    u5.run()
+    o1.run()
+    o2.run()
+    o3.run()
+    o4.run()
+    o5.run()
+    o6.run()
+    o7.run()
+    o8.run()
+    q1.run()
+    q2.run()
+    c1.append()
+    c2.append()
+    c3.count()
+    c4.get()
+    c5.run()
+    t1.make()
+    t2.make()
+    t3.make()
+    t4.make()
+    an.run()
+    m1.run()
+    m2.run()
+    al1.run()
+    al2.run()
+    al3.run()
+    lit.run()
+    cb.run()
+    w.run()
+
+
+class C:
+    fa: Final[A] = A()
+    fb: Final = B()
+    cv: ClassVar[A | B]
+    u: A | B = A()
+    g: Any = B()
+
+    @property
+    def p(self) -> A | B:
+        return A()
+
+    @property
+    def q(self) -> Optional[A]:
+        return None
+
+    def m(self) -> None:
+        self.fa.run()
+        self.fb.run()
+        self.cv.run()
+        self.u.run()
+        self.g.run()
+        self.p.run()
+        self.q.run()
+'''
+
+
+def test_python_receiver_annotations_are_read_precisely() -> None:
+    """BUG-0117: Python の受け手の注釈を先頭の名前に縮めない。``A | None``・``Optional[A]``・``Union[A, None]``（文字列の前方参照も）は
+    ``A``、``None`` を除いて構成が 2 つ以上の合併（``A | B``・``Union[A, B]``・``"B | A"``・``type[A | B]``）は分からない（名前だけ）。
+    容器 ``list[A]``・``List[A]``・``dict``・``Sequence[A]``・総称のクラス ``Box[A]`` は容器の型、``type[A]`` / ``Type[A]`` はクラス ``A``、
+    ``Annotated[A, ...]``・``Final[A]`` は ``A``、点つきの ``models.A``・``pkg.models.B`` はモジュールの型、同じファイルの型の別名は値で
+    読む。同じファイルの ``class Literal`` は typing の ``Literal`` にしない。素の ``Final`` / ``Any`` は値の型に任せ、``x: A | B = A()`` は
+    値に任せない。"""
+    ext = "lk://_ext/typing"
+    names = {
+        "A": f"lk://{WS}/pkg/models.py#A",
+        "B": f"lk://{WS}/pkg/models.py#B",
+        "models": f"lk://{WS}/pkg/models.py",
+        "pkg": f"lk://{WS}/pkg/__init__.py",
+        "typing": ext,
+        **{n: f"{ext}#{n}" for n in ("Annotated", "Any", "ClassVar", "Final", "List", "Optional", "Sequence", "Type")},
+        **{n: f"{ext}#{n}" for n in ("TypeAlias", "Union")},
+    }
+    dotted = {"pkg": f"lk://{WS}/pkg/__init__.py", "pkg.models": f"lk://{WS}/pkg/models.py"}
+    parsed = _parsed("python", _PY_ANNOTATIONS)
+    language = _language("python")
+    symbols = extract(
+        parsed,
+        language_id="python",
+        language=language,
+        query_source=load_query_source("python"),
+        workspace_id=WS,
+        rel=RelPath("m.py"),
+    )
+    rels = extract_relations(
+        parsed,
+        language_id="python",
+        language=language,
+        symbols=symbols,
+        workspace_id=WS,
+        rel=RelPath("m.py"),
+        resolve_name=names.get,
+        builtins_package="builtins",
+        resolve_dotted=dotted.get,
+    )
+    lines = _PY_ANNOTATIONS.decode().splitlines()
+
+    def at(needle: str) -> RelationCandidate:
+        line = next(i for i, text in enumerate(lines) if text.strip() == needle)
+        name = needle.removesuffix("()").rsplit(".", 1)[1]
+        [hit] = [r for r in rels if r.call_site_line == line and r.target_name == name]
+        return hit
+
+    models_ = f"lk://{WS}/pkg/models.py#"
+    a_run, a_make = models_ + "A.run", models_ + "A.make"
+    expected = {
+        **{f"o{i}.run()": a_run for i in range(1, 9)},
+        "q1.run()": a_run,
+        "q2.run()": a_run,
+        "c1.append()": "lk://_ext/builtins#list.append",
+        "c2.append()": "lk://_ext/builtins#list.append",
+        "c3.count()": f"{ext}#Sequence.count",
+        "c4.get()": "lk://_ext/builtins#dict.get",
+        "c5.run()": f"lk://{WS}/m.py#Box.run",
+        "t1.make()": a_make,
+        "t2.make()": a_make,
+        "t3.make()": a_make,
+        "an.run()": a_run,
+        "m1.run()": a_run,
+        "m2.run()": models_ + "B.run",
+        "al2.run()": a_run,
+        "al3.run()": a_run,
+        "lit.run()": f"lk://{WS}/m.py#Literal.run",
+        "self.fa.run()": a_run,
+        "self.fb.run()": models_ + "B.run",
+        "self.g.run()": models_ + "B.run",
+        "self.q.run()": a_run,
+    }
+    for needle, target in expected.items():
+        hit = at(needle)
+        assert (hit.target_urn, hit.name_only) == (target, False), needle
+    unknown = ("u1.run()", "u2.run()", "u3.run()", "u4.run()", "u5.run()", "t4.make()", "al1.run()", "cb.run()", "w.run()")
+    for needle in (*unknown, "self.cv.run()", "self.u.run()", "self.p.run()"):
+        hit = at(needle)
+        assert hit.target_urn is None and hit.name_only, needle
+
+
 def _relations_unsupported() -> None:
     extract_relations(
         _parsed("python", b"x = 1\n"),

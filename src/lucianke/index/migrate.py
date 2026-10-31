@@ -243,6 +243,16 @@ def _migrate_12_to_13(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE files SET sha256 = '' WHERE language IN ('typescript', 'tsx', 'javascript', 'jsx')")
 
 
+def _migrate_13_to_14(conn: sqlite3.Connection) -> None:
+    """v14: Python の受け手の注釈を先頭の名前に縮めずに読む（``x: A | B`` の ``x.run()`` を ``A.run`` に結ばず名前の一致に任せる、
+    ``Optional[A]`` は ``A``、``list[A]`` は ``list``、``type[A]`` はクラス ``A``、点つきの ``mod.Foo``。BUG-0117。表は変えない）。
+
+    取り込みのときにしか直せない（``relations``・``_name_calls``・``_var_types`` の行）ので、Python のファイルの ``sha256`` を空にして、次の
+    差分走査で取り込み直させる（TS / JS のファイルは変わらない）。
+    """
+    conn.execute("UPDATE files SET sha256 = '' WHERE language = 'python'")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -256,6 +266,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     10: _migrate_10_to_11,
     11: _migrate_11_to_12,
     12: _migrate_12_to_13,
+    13: _migrate_13_to_14,
 }
 
 

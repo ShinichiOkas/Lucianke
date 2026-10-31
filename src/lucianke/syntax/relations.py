@@ -148,22 +148,21 @@ _KIND_OF = {
 _NOT_CONTAINERS = frozenset({Kind.VARIABLE, Kind.CONSTANT, Kind.FIELD})
 _CLASS_KINDS = frozenset({Kind.CLASS, Kind.INTERFACE, Kind.STRUCT, Kind.TRAIT, Kind.ENUM})
 _RECEIVER_SELF = frozenset({"self", "cls", "this"})
-_ANNOTATION_SKIP = frozenset(
-    {
-        "Optional",
-        "Union",
-        "Final",
-        "ClassVar",
-        "Annotated",
-        "Required",
-        "NotRequired",
-        "Literal",
-        "None",
-        "Self",
-        # ``x: Any`` は型が分からないのと同じ（``lk://_ext/typing#Any.name`` という実在しない外部メソッドに結ばない。BUG-0071）
-        "Any",
-    }
+# Python の受け手の注釈の読み方（BUG-0117。先頭の名前に縮めない: ``A | B``・``Union[A, B]`` は ``A`` ではなく分からない）。
+# 名前は typing の特別な形として読む（同じファイルの定義・ワークスペースの import に隠されていないとき。``typing.Optional`` も）
+_PY_MEMBERLESS = frozenset({"None", "NoReturn", "Never"})  # 合併に混ざってもメンバーを持たない構成
+# 型の手がかりにならない注釈（値 ``Foo()`` の型に任せる。``x: Any`` を ``lk://_ext/typing#Any.name`` に結ばない。BUG-0071）
+_PY_NO_INFO = frozenset({"Any", "Self", "TypeAlias", "Final", "ClassVar"})
+_PY_FIRST_ARG = frozenset({"Annotated", "Final", "ClassVar", "Required", "NotRequired", "ReadOnly", "type", "Type"})
+# 受け手の型にならない特別な形（``Literal["a"]``・``Callable[..., T]`` など。名前の一致に任せる）
+_PY_OPAQUE = frozenset(
+    {"Optional", "Union", "Literal", "LiteralString", "Callable", "Concatenate", "TypeGuard", "TypeIs", "Unpack", "Generic", "Protocol"}
 )
+# typing の古い綴りの容器は組み込みの型（``List[A]`` の ``xs.append()`` は ``lk://_ext/builtins#list.append``）
+_PY_BUILTIN_ALIASES = {"List": "list", "Dict": "dict", "Set": "set", "FrozenSet": "frozenset", "Tuple": "tuple", "Type": "type"}
+_PY_ANN_DEPTH = 4  # 前方参照の文字列・同じファイルの型の別名をたどる深さ
+# 前方参照の文字列（``"Optional[A]"``）の字句: 名前・入れ子の文字列・記号・それ以外（読まない印）
+_PY_ANN_TOKEN = re.compile(r"""\s*(?:(?P<name>[^\W\d]\w*)|(?P<str>'[^'\\]*'|"[^"\\]*")|(?P<op>[\[\],|.])|(?P<other>\S))""")
 
 _PY_FUNCTIONS = frozenset({"function_definition", "lambda"})
 # ``imports.extract_imports`` が関数の中の ``require`` を ``nested`` にする基準と同じ集合
@@ -428,7 +427,24 @@ class _TsType:
 
 
 type _TypeName = str | _TsType
-"""走査で控える型: Python と構築（``new Foo()``）は名前の綴り、TS の注釈は ``_TsType``。"""
+"""走査で控える型: Python と構築（``new Foo()``）は名前の綴り（Python の点つき ``mod.Foo`` はそのまま）、TS の注釈は ``_TsType``。
+Python の組み込みの容器（``list[A]``・``List[A]``）も ``_TsType(builtin=True)``（同じファイル・import の同名に隠されない。BUG-0117）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class _PyAnn:
+    """Python の注釈の形（BUG-0117。木と前方参照の文字列の両方から作り、``_Extractor._py_read`` が同じ規則で受け手の型に読む）。
+
+    * ``kind="name"``: 名前 ``name``（点つき ``mod.Foo`` のまま）。``kind="sub"``: ``name[args]``（``Optional[A]``・``list[A]``）。
+    * ``kind="or"``: 合併 ``args[0] | args[1] | ...``。``kind="none"``: ``None``。``kind="opaque"``: それ以外（読まない）。
+    """
+
+    kind: str
+    name: str = ""
+    args: tuple[_PyAnn, ...] = ()
+
+
+_PY_OPAQUE_ANN = _PyAnn("opaque")
 
 
 @dataclass(slots=True)
@@ -502,6 +518,9 @@ class _Extractor:
         # ノードの id → (最も近い囲みのスコープ〈関数・クラス・根〉, 祖先に読み飛ばす文があるか)。祖先を 1 回だけたどって覚える（BUG-0112）
         self._up_memo: dict[int, tuple[Node | None, bool]] = {}
         self._root_id = parsed.tree.root_node.id
+        # Python の同じファイルの型の別名（``type AB = A | B``・``OptA: TypeAlias = Optional[A]``）→ 値の形（注釈が別名を指すとき
+        # 値を同じ規則で読む。BUG-0117）
+        self.py_aliases: dict[str, _PyAnn] = {}
 
     # --- 名前解決の窓口 ---
 
@@ -878,8 +897,34 @@ class _Extractor:
     def _tname_ref(self, tname: _TypeName, chain: list[SymbolRecord], node: Node | None = None) -> tuple[str, str] | None:
         """走査で控えた型（名前の綴り・``_TsType``）→ ``("local", 修飾名)`` / ``("urn", URN)``。"""
         if isinstance(tname, str):
+            if "." in tname and self.family == _PYTHON:
+                return self._py_dotted_ref(tname, chain, node)
             return self._name_ref(tname, chain, node)
         return self._ts_ref(tname, chain, node)
+
+    def _py_dotted_ref(self, name: str, chain: list[SymbolRecord], node: Node | None) -> tuple[str, str] | None:
+        """Python の注釈の点つきの型 ``pkg.mod.Foo``（BUG-0117）: いちばん長いワークスペースのモジュール（``import pkg.mod`` の
+        ``pkg.mod``。``resolve_dotted``）の ``Foo``。モジュールに決まらなければ先頭の名前（``from pkg import models`` の ``models``・
+        同じファイルのクラス ``Outer.Inner``）からたどる。"""
+        parts = name.split(".")
+        head = parts[0]
+        if (
+            self._resolve_dotted_raw is not None
+            and head not in self.by_qualified
+            and (node is None or self._binding(head, node)[0] == "none")
+        ):
+            for i in range(len(parts) - 1, 0, -1):
+                dotted = ".".join(parts[:i])
+                if dotted not in self._dotted_cache:
+                    self._dotted_cache[dotted] = self._resolve_dotted_raw(dotted)
+                module = self._dotted_cache[dotted]
+                if module is None or module == NAMESPACE_PACKAGE:
+                    continue
+                urn: str | None = module
+                for seg in parts[i:]:
+                    urn = _append_member(urn, seg) if urn is not None else None
+                return ("urn", urn) if urn is not None else None
+        return self._dotted_type_ref(name, chain, node)
 
     def _ts_ref(self, spec: _TsType | None, chain: list[SymbolRecord], node: Node | None = None) -> tuple[str, str] | None:
         """``_TsType`` → ``("local", 修飾名)`` / ``("urn", URN)``。添字の型はメンバーの URN ``<型>.k``（ワークスペースの型だけ。
@@ -1599,30 +1644,187 @@ class _Extractor:
             for c in node.named_children:
                 yield from self._py_targets(c)
 
-    def _py_ann_name(self, node: Node | None) -> str | None:
-        """注釈の最初の型名（``Optional`` などの包みは飛ばす）。前方参照の文字列（``x: "Foo"``・``Optional["Foo"]``）は中身が
-        名前 1 つのときだけ読む（型の分からない名前の受け手を同じファイルの同名に当てなくなったので、注釈を書いた受け手は型で結ぶ。BUG-0085）。"""
+    def _py_ann_type(self, node: Node | None) -> tuple[_TypeName | None, bool]:
+        """Python の注釈 → ``(受け手の型, 注釈が決めたか)``（BUG-0117。前は最初の型の名前に縮め、``A | B`` も ``Union[A, B]`` も ``A``）。
+
+        * ``A | None``・``Optional[A]``・``Union[A, None]`` は ``A``。``None`` を除いて構成が 2 つ以上の合併（``A | B``・``Union[A, B]``）は
+          分からない（名前の一致。TS の受け手の合併〈BUG-0113〉と同じで、どちらか 1 つだけがメンバーを持つかは見ない）。
+        * 容器 ``list[A]``・``dict[K, V]``・``Sequence[A]``・総称のクラス ``Foo[T]`` は容器の型（``list``・``Sequence``・``Foo``。要素の
+          型 ``A`` にしない）。typing の古い綴り ``List[A]``・``Dict``・``Set``・``FrozenSet``・``Tuple`` は組み込みの型。
+        * ``type[A]`` / ``Type[A]`` はクラス ``A`` そのもの（``t.make()`` はクラスメソッド ``A.make``）。``Annotated[A, ...]``・``Final[A]``・
+          ``ClassVar[A]``・``Required[A]`` などは ``A``。
+        * 点つきの名前 ``mod.Foo``・``pkg.mod.Foo`` はモジュールの ``Foo``（前は最後の名前 ``Foo`` を同じファイルの名前として引いていた）。
+        * 前方参照の文字列（``"A"``・``"B | A"``・``Optional["A"]``）は中身を同じ規則で読む（BUG-0085）。
+        * 同じファイルの型の別名（``type AB = A | B``・``OptA: TypeAlias = Optional[A]``）は値を同じ規則で読む。別ファイルの別名は
+          索引に構成を書いていないので受け手の型にしない（整えが名前の一致に任せる）。
+        * ``Literal[...]``・``Callable[...]`` などは分からない。``Any``・``Self``・素の ``Final`` / ``ClassVar`` / ``TypeAlias`` は型の手がかりに
+          ならない（``注釈が決めたか`` が偽。代入の値 ``Foo()`` の型に任せる）。それ以外の分からない注釈は値に任せない（TS と同じく注釈が決める）。
+        """
         if node is None:
-            return None
-        stack = [node]
-        while stack:
-            n = stack.pop()
-            if n.type == "identifier":
-                name: str | None = self._text(n)
-            elif n.type == "attribute":
-                attr = n.child_by_field_name("attribute")
-                name = self._text(attr) if attr is not None else None
-            elif n.type == "string":
-                parts = [c for c in n.named_children if c.type == "string_content"]
-                text = self._text(parts[0]).strip() if len(parts) == 1 and len(n.named_children) == 3 else ""
-                name = text if text.isidentifier() else None
+            return None, False
+        state, tname = self._py_read(self._py_ann(node, 0), 0)
+        return tname, state != "noinfo"
+
+    def _py_ann(self, node: Node | None, depth: int) -> _PyAnn:
+        """注釈・型の式のノード → ``_PyAnn``。"""
+        while node is not None and node.type in ("type", "parenthesized_expression"):
+            node = next((c for c in node.named_children if c.type != "comment"), None)
+        if node is None:
+            return _PY_OPAQUE_ANN
+        t = node.type
+        if t == "none":
+            return _PyAnn("none")
+        if t in ("identifier", "attribute"):
+            dotted = self._py_dotted(node)
+            return _PyAnn("name", dotted) if dotted is not None else _PY_OPAQUE_ANN
+        if t == "binary_operator":
+            op = node.child_by_field_name("operator")
+            if op is None or self._text(op) != "|":
+                return _PY_OPAQUE_ANN
+            sides = (node.child_by_field_name("left"), node.child_by_field_name("right"))
+            return _py_union([self._py_ann(c, depth) for c in sides])
+        if t == "union_type":
+            return _py_union([self._py_ann(c, depth) for c in node.named_children if c.type != "comment"])
+        if t in ("generic_type", "subscript"):
+            if t == "generic_type":
+                base = next((c for c in node.named_children if c.type != "comment"), None)
+                params = next((c for c in node.named_children if c.type == "type_parameter"), None)
+                args = [c for c in params.named_children if c.type != "comment"] if params is not None else []
             else:
-                if n.type != "comment":
-                    stack.extend(reversed(n.children))
-                continue
-            if name and name not in _ANNOTATION_SKIP:
-                return name
-        return None
+                base = node.child_by_field_name("value")
+                args = node.children_by_field_name("subscript")
+            dotted = self._py_dotted(base) if base is not None else None
+            if dotted is None:
+                return _PY_OPAQUE_ANN
+            return _PyAnn("sub", dotted, tuple(self._py_ann(a, depth) for a in args))
+        if t == "string" and depth < _PY_ANN_DEPTH:
+            parts = [c for c in node.named_children if c.type == "string_content"]
+            if len(parts) == 1 and len(node.named_children) == 3:  # 始まり・中身・終わり（f 文字列の埋め込みは読まない）
+                return self._py_ann_text(self._text(parts[0]), depth + 1)
+        return _PY_OPAQUE_ANN
+
+    def _py_dotted(self, node: Node) -> str | None:
+        """識別子だけの連鎖（``Foo``・``mod.Foo``）の綴り。"""
+        parts: list[str] = []
+        cur: Node | None = node
+        while cur is not None and cur.type == "attribute":
+            attr = cur.child_by_field_name("attribute")
+            if attr is None or attr.type != "identifier":
+                return None
+            parts.append(self._text(attr))
+            cur = cur.child_by_field_name("object")
+        if cur is None or cur.type != "identifier":
+            return None
+        parts.append(self._text(cur))
+        return ".".join(reversed(parts))
+
+    def _py_ann_text(self, text: str, depth: int) -> _PyAnn:
+        """前方参照の文字列の中身（``B | A``・``Optional[A]``・``mod.Foo``）→ ``_PyAnn``。読めない綴りは ``opaque``。"""
+        tokens: list[tuple[str, str]] = []
+        for m in _PY_ANN_TOKEN.finditer(text):
+            kind = m.lastgroup or "other"
+            tokens.append((kind, m.group(kind)))
+        if not tokens or any(k == "other" for k, _ in tokens):
+            return _PY_OPAQUE_ANN
+        pos = 0
+
+        def peek() -> tuple[str, str]:
+            return tokens[pos] if pos < len(tokens) else ("end", "")
+
+        def expr() -> _PyAnn:
+            nonlocal pos
+            parts = [term()]
+            while peek() == ("op", "|"):
+                pos += 1
+                parts.append(term())
+            return parts[0] if len(parts) == 1 else _py_union(parts)
+
+        def term() -> _PyAnn:
+            nonlocal pos
+            kind, value = peek()
+            if kind == "str":
+                pos += 1
+                return self._py_ann_text(value[1:-1], depth + 1) if depth < _PY_ANN_DEPTH else _PY_OPAQUE_ANN
+            if kind != "name":
+                raise ValueError(value)
+            pos += 1
+            names = [value]
+            while peek() == ("op", "."):
+                pos += 1
+                kind, value = peek()
+                if kind != "name":
+                    raise ValueError(value)
+                pos += 1
+                names.append(value)
+            dotted = ".".join(names)
+            if peek() != ("op", "["):
+                return _PyAnn("none") if dotted == "None" else _PyAnn("name", dotted)
+            pos += 1
+            args = [expr()]
+            while peek() == ("op", ","):
+                pos += 1
+                args.append(expr())
+            if peek() != ("op", "]"):
+                raise ValueError(peek()[1])
+            pos += 1
+            return _PyAnn("sub", dotted, tuple(args))
+
+        try:
+            ann = expr()
+        except ValueError:
+            return _PY_OPAQUE_ANN
+        return ann if pos == len(tokens) else _PY_OPAQUE_ANN
+
+    def _py_special(self, dotted: str) -> str | None:
+        """typing・組み込みの特別な形として読む最後の名前（``Optional``・``typing.Optional``・``type``）。先頭の名前が同じファイルの
+        定義・ワークスペースの import（``from .compat import Optional``）なら特別な形にしない（``None``）。"""
+        head = dotted.partition(".")[0]
+        if head in self.by_qualified:
+            return None
+        urn = self.resolve(head)
+        if urn is not None and not urn.startswith(_EXTERNAL_PREFIX):
+            return None
+        return dotted.rsplit(".", 1)[-1]
+
+    def _py_read(self, ann: _PyAnn, depth: int) -> tuple[str, _TypeName | None]:
+        """``_PyAnn`` → ``(状態, 型)``。状態は ``type``（型が分かった）・``none``（``None`` だけ）・``noinfo``（型の手がかりにならない）・
+        ``unknown``（分からない。名前の一致）。"""
+        if ann.kind == "none":
+            return "none", None
+        if ann.kind == "or":
+            keep = [r for r in (self._py_read(a, depth) for a in ann.args) if r[0] != "none"]
+            if not keep:
+                return "none", None
+            return keep[0] if len(keep) == 1 and keep[0][0] == "type" else ("unknown", None)
+        if ann.kind not in ("name", "sub"):
+            return "unknown", None
+        special = self._py_special(ann.name)
+        if ann.kind == "name":
+            if special in _PY_MEMBERLESS:
+                return "none", None
+            if special in _PY_NO_INFO:
+                return "noinfo", None
+            if special in _PY_OPAQUE:
+                return "unknown", None
+            if special in _PY_BUILTIN_ALIASES:
+                return "type", _TsType(_PY_BUILTIN_ALIASES[special], builtin=True)
+            alias = self.py_aliases.get(ann.name)
+            if alias is not None:
+                return self._py_read(alias, depth + 1) if depth < _PY_ANN_DEPTH else ("unknown", None)
+            return "type", ann.name
+        if special == "Optional":
+            state, tname = self._py_read(ann.args[0], depth) if len(ann.args) == 1 else ("unknown", None)
+            return (state, tname) if state in ("type", "none") else ("unknown", None)
+        if special == "Union":
+            return self._py_read(_PyAnn("or", args=ann.args), depth)
+        if special in _PY_FIRST_ARG:
+            state, tname = self._py_read(ann.args[0], depth) if ann.args else ("unknown", None)
+            return (state, tname) if state == "type" else ("unknown", None)
+        if special in _PY_OPAQUE or special in _PY_NO_INFO or special in _PY_MEMBERLESS:
+            return "unknown", None
+        # 容器・総称のクラス（``list[A]``・``Sequence[A]``・``Foo[T]``）は容器の型（要素の型にしない）
+        state, tname = self._py_read(_PyAnn("name", ann.name), depth)
+        return (state, tname) if state == "type" else ("unknown", None)
 
     def _py_value_type(self, value: Node | None, scope: Node | None) -> _TypeName | None:
         if value is None:
@@ -1638,7 +1840,28 @@ class _Extractor:
             return self.scan.var_types.get(scope.id, {}).get(self._text(value))
         return None
 
+    def _py_collect_aliases(self, root: Node) -> None:
+        """モジュール直下の型の別名（``type AB = A | B``・``OptA: TypeAlias = ...``）の値を控える（注釈が前に書かれていても読めるよう、
+        走査の前に。BUG-0117）。型引数つきの別名（``type L[T] = list[T]``）は控えない。"""
+        for stmt in root.named_children:
+            if stmt.type == "type_alias_statement":
+                parts = [c for c in stmt.named_children if c.type == "type"]
+                name = parts[0].named_children[0] if len(parts) == 2 and parts[0].named_children else None
+                if name is not None and name.type == "identifier":
+                    self.py_aliases.setdefault(self._text(name), self._py_ann(parts[1], 0))
+            elif stmt.type == "expression_statement" and stmt.named_children:
+                assign = stmt.named_children[0]
+                left = assign.child_by_field_name("left")
+                ann = assign.child_by_field_name("type")
+                right = assign.child_by_field_name("right")
+                if assign.type != "assignment" or left is None or left.type != "identifier" or ann is None or right is None:
+                    continue
+                spec = self._py_ann(ann, 0)
+                if spec.kind == "name" and self._py_special(spec.name) == "TypeAlias":
+                    self.py_aliases.setdefault(self._text(left), self._py_ann(right, 0))
+
     def _scan_python(self, root: Node) -> None:
+        self._py_collect_aliases(root)
         # スタック要素: (ノード, 囲む関数, 囲むスコープ〈関数・クラス・ルート〉, 囲むクラス)
         stack: list[tuple[Node, Node | None, Node, Node | None]] = [(root, None, root, None)]
         while stack:
@@ -1653,7 +1876,7 @@ class _Extractor:
                     if cls is not None and scope.id == cls.id and self._py_is_property(node):
                         # 戻り値の注釈つきの property は属性として型を持つ（``a.b.m()`` の ``a.b``。BUG-0079）
                         self._set_attr_type(
-                            cls, self._text(name), self._py_ann_name(node.child_by_field_name("return_type"))
+                            cls, self._text(name), self._py_ann_type(node.child_by_field_name("return_type"))[0]
                         )
                 params = node.child_by_field_name("parameters")
                 child_fn = child_scope = node
@@ -1779,12 +2002,12 @@ class _Extractor:
                 first = next((c for c in p.named_children if c.type == "identifier"), None)
                 if first is not None:
                     self._bind(first, fn)
-                    self._set_var_type(fn, self._text(first), self._py_ann_name(p.child_by_field_name("type")))
+                    self._set_var_type(fn, self._text(first), self._py_ann_type(p.child_by_field_name("type"))[0])
             elif p.type in ("default_parameter", "typed_default_parameter"):
                 n = p.child_by_field_name("name")
                 if n is not None:
                     self._bind(n, fn)
-                    self._set_var_type(fn, self._text(n), self._py_ann_name(p.child_by_field_name("type")))
+                    self._set_var_type(fn, self._text(n), self._py_ann_type(p.child_by_field_name("type"))[0])
             elif p.type in ("list_splat_pattern", "dictionary_splat_pattern"):
                 for n in p.named_children:
                     if n.type == "identifier":
@@ -1794,9 +2017,11 @@ class _Extractor:
         left = node.child_by_field_name("left")
         if left is None:
             return
-        tname = self._py_ann_name(node.child_by_field_name("type")) or self._py_value_type(
-            node.child_by_field_name("right"), fn
-        )
+        # 注釈が決める（``x: A | B = A()`` の ``x`` は分からない）。型の手がかりにならない注釈（``Any``・素の ``Final``）と注釈の無い
+        # 代入は値（``Foo()``）の型（BUG-0117）
+        tname, decided = self._py_ann_type(node.child_by_field_name("type"))
+        if not decided:
+            tname = self._py_value_type(node.child_by_field_name("right"), fn)
         if left.type == "identifier":
             self._bind(left, fn)
             self._set_var_type(scope, self._text(left), tname)
@@ -2003,6 +2228,14 @@ class _Extractor:
 
 def _neg_pos(p: Position) -> tuple[int, int]:
     return (-p.line, -p.col)
+
+
+def _py_union(parts: list[_PyAnn]) -> _PyAnn:
+    """合併の構成を平らに並べる（``A | (B | None)`` の入れ子も 1 段に）。"""
+    flat: list[_PyAnn] = []
+    for p in parts:
+        flat.extend(p.args if p.kind == "or" else (p,))
+    return _PyAnn("or", args=tuple(flat))
 
 
 def _awaited(tname: _TypeName | None) -> _TypeName | None:
