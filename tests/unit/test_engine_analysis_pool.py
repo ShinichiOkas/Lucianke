@@ -128,3 +128,36 @@ async def test_broken_worker_falls_back_to_in_process_analysis(tmp_path: Path) -
     assert pool.broken
     assert prepared.degraded is None
     assert any(s.qualified_name == "PaymentProcessor" for s in prepared.facts.symbols)
+
+
+async def test_a_file_degraded_in_a_worker_is_logged_by_the_parent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """子の警告は子の stderr にしか出ないので、``files`` 行だけに落ちたファイルは親がログに書く。"""
+    import logging
+
+    from lucianke.core.model import Confidence, Tier
+    from lucianke.engine.indexer import _Prepared
+    from lucianke.index.ingest import FileFacts
+
+    indexer = Indexer.for_analysis(Workspace(workspace_id=WS_ID, root=tmp_path.resolve()))
+    rel = RelPath("broken.py")
+    facts = FileFacts(
+        workspace_id=WS_ID,
+        path=rel,
+        language="python",
+        tier=Tier.T1,
+        line_count=1,
+        byte_size=1,
+        sha256="0" * 64,
+        is_test=False,
+        confidence=Confidence.LEXICAL_FALLBACK,
+    )
+    remote: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    remote.set_result(_Prepared(facts, "RecursionError: too deep"))
+    with caplog.at_level(logging.WARNING, logger="lucianke.engine.indexer"):
+        prepared = await indexer._finish_remote(
+            rel, _Loaded(b"x", "0" * 64, 1, -1, b"x"), remote, AnalysisPool(1, len, ())
+        )
+    assert prepared.degraded == "RecursionError: too deep"
+    assert any("broken.py" in r.getMessage() and "in a worker" in r.getMessage() for r in caplog.records)

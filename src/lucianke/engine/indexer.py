@@ -42,6 +42,7 @@ import itertools
 import logging
 import os
 import stat
+import sys
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -1016,6 +1017,10 @@ class Indexer:
             pool.failed(exc)
             _log.warning("analysis worker failed for %s; analysing it in-process", rel, exc_info=True)
             return await self._analyze_loaded(rel, loaded)
+        if prepared is not None and prepared.degraded:  # 子の警告は子の stderr にしか出ないので、ログにも残す
+            _log.warning(
+                "analysis failed for %s in a worker; indexing the file row only (%s)", rel, prepared.degraded
+            )
         return prepared if prepared is not None else await self._outline(rel, loaded)
 
     async def _analyze_loaded(self, rel: RelPath, loaded: _Loaded) -> _Prepared:
@@ -1557,8 +1562,20 @@ _WORKER: Indexer | None = None
 
 
 def _analysis_worker_init(ws: Workspace, max_file_bytes: int) -> None:
-    """子プロセスの起動時に 1 回: 解析だけをする索引器を作る（pytest の設定の覚えは、走査ごとに起こす子の中で新しい）。"""
+    """子プロセスの起動時に 1 回: 解析だけをする索引器を作る（pytest の設定の覚えは、走査ごとに起こす子の中で新しい）。
+
+    子にはログの設定が無いので、警告以上を出所の分かる形で stderr に出す（stdout には出さない。親のログファイルには届かないので、
+    ``files`` 行だけに落ちたファイルは親が ``_finish_remote`` で書く）。
+    """
     global _WORKER
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter(f"lucianke analysis worker {os.getpid()}: %(levelname)s %(name)s: %(message)s")
+    )
+    root = logging.getLogger("lucianke")
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+    root.propagate = False
     _WORKER = Indexer.for_analysis(ws, max_file_bytes=max_file_bytes)
 
 
