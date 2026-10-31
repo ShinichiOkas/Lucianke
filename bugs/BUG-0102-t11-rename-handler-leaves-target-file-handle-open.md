@@ -17,3 +17,9 @@ src\lucianke\tools\t11_rename_symbol.py:650: ResourceWarning: unclosed file <_io
 
 - 呼び出しのたびに対象ファイルのハンドルが GC まで開いたまま残る。Windows では開いたハンドルがあるファイルの置き換え・削除が
   共有違反で失敗しうる（編集ツールの原子的な書き込みや、利用者のエディタの保存）。
+
+## 原因・直し方・確認（2026-10-31）
+
+- 原因: `handler` の先頭読み `to_abs(ws, rel).open("rb").read(HEAD_BYTES)` がファイルオブジェクトを閉じずに捨てていた（GC 任せ。CPython でも参照が残る間は閉じない）。
+- 直し方: `_read_head(path)` を足し、`with path.open("rb")` で読んで必ず閉じる。`src/` に同じ形（`open(...).read(` を閉じない）は他に無い（grep で確認）。
+- 確認: `uv run ruff check` clean。T-11 の契約テスト（rename を含む）が通る。

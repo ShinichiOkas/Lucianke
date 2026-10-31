@@ -45,6 +45,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field
@@ -641,13 +642,19 @@ def _build_output(svc: ToolServices, args: RenameSymbolArgs, result: EditResult,
 # --- ハンドラ -----------------------------------------------------------------------------------
 
 
+def _read_head(path: Path) -> bytes:
+    """先頭 ``HEAD_BYTES`` を読む。ハンドルは必ず閉じる（Windows では開いたままのハンドルが後の書き込みを妨げる。BUG-0102）。"""
+    with path.open("rb") as f:
+        return f.read(HEAD_BYTES)
+
+
 async def handler(ctx: ToolContext, args: RenameSymbolArgs) -> ToolOutput:
     svc = services_of(ctx.services)
     ws = svc.workspace(args.workspace_id)
     target, user_path = _target_of(args)
     rel = confine(ws, user_path, for_write=True, param="target")
     try:
-        head = await asyncio.to_thread(lambda: to_abs(ws, rel).open("rb").read(HEAD_BYTES))
+        head = await asyncio.to_thread(_read_head, to_abs(ws, rel))
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
         raise LuciankeError(
             ErrorCode.E_TARGET_NOT_FOUND, f"file not found: {rel}", details={"path": str(rel)}
