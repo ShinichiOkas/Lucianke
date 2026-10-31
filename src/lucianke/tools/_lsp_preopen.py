@@ -15,9 +15,14 @@ basedpyright は解析の対象の外）のうち対象の名前を含むもの�
   LSP に要求を送らない）に済み、``ready`` は本物の合図（進捗の終わり・最初の診断）で来る。``ready`` の後に開かせると、その重い
   1 回が ``ready`` 直後の呼び出しの要求とぶつかった（ky で 2.3 秒）。basedpyright は ``ready`` を待ってから（起動直後の解析の
   合図を変えない）。
-* **呼び出しを待たせない**: 合図（``LspPool.on_initialized``）はタスクを投げるだけ。索引の走査が終わるのを待ち（候補は索引から引く）、
-  候補の選び方と本文の読み込みはスレッドで、背景の印（``core.foreground.background``）を付けて走らせる（前景の呼び出しが忙しい
-  間は GIL を譲る）。送る前に、前景の呼び出しが落ち着くのを ``Foreground.apause`` の上限まで待つ。
+* **呼び出しを待たせない**: 合図（``LspPool.on_initialized``）はタスクを投げるだけ。候補は索引から引き、索引の走査の途中なら
+  走査の列挙（``Indexer.last_listing``）から同じ規則で選ぶ（走査が終わるのを待たない。ky で ``initialize`` から 2.3〜2.6 秒
+  待っていた）。候補の選び方と本文の読み込みはスレッドで、背景の印（``core.foreground.background``）を付けて走らせる（前景の
+  呼び出しが忙しい間は GIL を譲る）。送る前に、前景の呼び出しが落ち着くのを ``Foreground.apause`` の上限まで待つ。
+* **ready の直後に残る尾**: tsserver はプロジェクトを読んだ後、開いた文書の検査を一巡する（typescript-language-server の
+  ``geterr``。1 ファイルずつ、``references`` はその切れ目を待つ）。``ready`` の直後の数秒に来た冷えた要求は、その一巡と
+  ぶつかって 0.5〜1 秒かかることがある（LSP の側のもの）。一巡が済むまで ``ready`` にしない手は採らない（その間の呼び出しが
+  exact の代わりに構文木の答えになり、遅い時間を計測の外へ動かすだけになる）。
 * **組み直しを 1 回に**: ``didOpen`` は 1 回のイベントループの番でまとめて送る（``features.preload_documents``。途中で ``await``
   しないので、他の要求が間に入らない）。
 * **答えを変えない**: 先開きは「開いておく」だけ。先開きの途中に来た T-06・T-07 は、今までどおり自分の ``prime_set`` で足りない
@@ -31,11 +36,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from lucianke.core.foreground import FOREGROUND, Foreground, background
+from lucianke.core.model import RelPath
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle, LspState
 from lucianke.tools import _lsp_exact as lx
@@ -78,25 +84,30 @@ async def preopen(
     readers: Any,
     *,
     building: Callable[[], object | None] = lambda: None,
+    listing: Callable[[], Sequence[RelPath] | None] = lambda: None,
     foreground: Foreground = FOREGROUND,
     poll_s: float = POLL_S,
 ) -> PreopenReport:
     """``handle`` に、参照元になりうるファイルを背景でまとめて開かせる（``initialize`` を済ませたときの 1 回）。
 
     ``readers`` は索引の ``ReaderPool``（``reader()`` で接続を貸す）、``building`` は索引の走査の途中なら真を返す
-    （``Indexer.building``）。ハンドルが起動し直した・止まったら何もせずに戻る（起動し直した後にまた走る）。
+    （``Indexer.building``）、``listing`` は走査の列挙（``Indexer.last_listing``。列挙し終える前は ``None``）。候補は索引から
+    引くが、走査の途中なら列挙から同じ規則で選ぶ（走査が終わるのを待たない: tsserver の読み込みと検査を早く始めるほど、
+    ``ready`` の後に残る検査の一巡が短い）。列挙もまだなら列挙し終えるまで待つ。ハンドルが起動し直した・止まったら何もせずに
+    戻る（起動し直した後にまた走る）。
     """
     client = handle.client
     t0 = time.monotonic()
     early = handle.language_id in EARLY_LANGUAGES
     with background():
-        # 候補は索引から引く: 走査の途中なら終わるまで待つ。``ready`` を待つ言語は ``ready`` まで待つ
-        while building() is not None or (not early and handle.state is not LspState.READY):
+        # ``ready`` を待つ言語は ``ready`` まで待つ。走査の途中で列挙もまだなら、列挙し終えるまで待つ
+        while True:
             if not _alive(handle, client):
                 return PreopenReport(reason="restarted")
+            listed = listing() if building() is not None else None
+            if (early or handle.state is LspState.READY) and (listed is not None or building() is None):
+                break
             await asyncio.sleep(poll_s)
-        if not _alive(handle, client):
-            return PreopenReport(reason="restarted")
         documents = handle.documents
         open_now = set(documents.open_paths())
 
@@ -110,6 +121,7 @@ async def preopen(
                     open_count=len(open_now),
                     max_open=documents.max_open,
                     scope=getattr(handle, "analysis_scope", None),
+                    listing=listed,
                 )
 
         chosen = await asyncio.to_thread(plan)

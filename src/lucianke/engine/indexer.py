@@ -313,6 +313,8 @@ class Indexer:
         self._pool_min_files = pool_min_files
         self.pooled_files = 0  # 最後の走査で子プロセスが解析したファイル数（観測・試験用）
         self.on_listed: Callable[[Sequence[RelPath]], None] | None = None
+        self.last_listing: tuple[RelPath, ...] | None = None
+        """直近の走査が列挙したファイル（列挙し終えた時点で入る。走査の途中でも LSP に先に開かせるファイルを選べるように。BUG-0134）。"""
         """走査がファイルを列挙し終えたときに呼ぶ（列挙の結果を渡す。束が型サーバーを走査と並べて起こすのに使う。BUG-0127）。"""
         self._ws_ready = False
         self._ws_lock = asyncio.Lock()
@@ -554,6 +556,7 @@ class Indexer:
         self.forget_pytest_imports()  # この走査で解析するファイルは、いまの pytest の設定で import を解く（BUG-0082）
         listing, report.gitignore = await asyncio.to_thread(self._walk)
         report.files_seen = len(listing)
+        self.last_listing = tuple(listing)
         if self.on_listed is not None:
             try:
                 self.on_listed(listing)

@@ -270,13 +270,38 @@ async def test_preopen_waits_while_a_call_is_in_flight_and_does_not_reopen_what_
     assert len(uris) == len(set(uris)) == len(TS_ORDER)  # どのファイルも 1 回だけ
 
 
-async def test_preopen_waits_for_the_index_scan(ws: Workspace, listing: list[FileInfo]) -> None:
+async def test_preopen_during_the_scan_picks_from_the_listing_without_waiting(
+    ws: Workspace, listing: list[FileInfo]
+) -> None:
+    """走査の途中でも、列挙があれば待たずに列挙から選ぶ（tsserver の読み込みと検査を早く始める）。列挙もまだなら列挙を待つ。"""
+    listed: list[RelPath] | None = None
+    h = handle(ws, state=LspState.INDEXING)
+    task = asyncio.create_task(
+        po.preopen(h, Readers(), building=lambda: object(), listing=lambda: listed, poll_s=0.01)  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(0.05)
+    assert h.sent == [] and not task.done()  # 列挙し終えるまで待つ
+    listed = [RelPath(p) for p in FILES]  # 走査は続いている（building が真のまま）
+    report = await asyncio.wait_for(task, 10)
+    assert report.opened == len(TS_ORDER) and opened(h) == TS_ORDER
+
+
+def test_preopen_set_from_the_listing_is_the_same_as_from_the_index(ws: Workspace, listing: list[FileInfo]) -> None:
+    """列挙からの判定（拡張子・名前による言語とティア、is_test）は索引の記録と同じ集合・順を選ぶ。"""
+    from_index = lx.preopen_set(None, ws, "typescript", is_open=lambda rel: False, open_count=0)  # type: ignore[arg-type]
+    from_listing = lx.preopen_set(
+        None, ws, "typescript", is_open=lambda rel: False, open_count=0, listing=[RelPath(p) for p in FILES]  # type: ignore[arg-type]
+    )
+    assert from_listing == from_index
+
+
+async def test_preopen_after_the_scan_uses_the_index(ws: Workspace, listing: list[FileInfo]) -> None:
     scanning = [True]
-    planned: list[bool] = []
+    planned: list[object] = []
     real = lx.preopen_set
 
     def spy(*a: Any, **kw: Any) -> Any:
-        planned.append(scanning[0])
+        planned.append(kw.get("listing"))
         return real(*a, **kw)
 
     h = handle(ws)
@@ -286,10 +311,10 @@ async def test_preopen_waits_for_the_index_scan(ws: Workspace, listing: list[Fil
             po.preopen(h, Readers(), building=lambda: object() if scanning[0] else None, poll_s=0.01)  # type: ignore[arg-type]
         )
         await asyncio.sleep(0.05)
-        assert planned == [] and not task.done()
+        assert planned == [] and not task.done()  # 走査の途中で列挙も無い: 待つ
         scanning[0] = False
         report = await asyncio.wait_for(task, 10)
-    assert planned == [False] and report.opened == len(TS_ORDER)
+    assert planned == [None] and report.opened == len(TS_ORDER)  # 走査が済んだら索引から
 
 
 async def test_preopen_for_python_waits_until_ready(ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,7 +386,7 @@ async def test_hub_schedules_the_preopen_without_waiting_and_only_for_type_serve
     gate = asyncio.Event()
     calls: list[Any] = []
 
-    async def fake_preopen(h: Any, readers: Any, *, building: Any) -> po.PreopenReport:
+    async def fake_preopen(h: Any, readers: Any, **kw: Any) -> po.PreopenReport:
         calls.append(h)
         await gate.wait()
         return po.PreopenReport()

@@ -67,6 +67,8 @@ from lucianke.lsp.servers import servers_for
 from lucianke.syntax.relations import extract_relations
 from lucianke.syntax.support import get_support
 from lucianke.tools._services import analyze_file
+from lucianke.workspace.languages import detect
+from lucianke.workspace.languages import is_test as is_test_path
 from lucianke.workspace.paths import to_abs
 from lucianke.workspace.types import Workspace
 
@@ -281,19 +283,46 @@ class PrimeSet:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _Listed:
+    """走査の列挙から判定したファイル（``FileInfo`` のうち、開かせる候補を選ぶのに使う 4 つ）。"""
+
+    path: str
+    language: str
+    tier: Tier
+    is_test: bool
+
+
+def _listed(listing: Iterable[RelPath]) -> list[_Listed]:
+    """走査の列挙を、索引が記録するのと同じ判定（``workspace.languages.detect`` の拡張子・名前による言語とティア、
+    言語サポートの追加パターンつきの ``is_test``）で ``_Listed`` にする。中身は読まない（先頭のバイト列による判定〈シェバン・
+    バイナリ〉はしない）。"""
+    out: list[_Listed] = []
+    for rel in listing:
+        detected = detect(rel, b"")
+        support = get_support(detected.language_id)
+        extra = tuple(getattr(support, "test_path_globs", ()) or ())
+        out.append(_Listed(str(rel), detected.language_id, detected.tier, is_test_path(rel, extra)))
+    return out
+
+
 def _prime_pool(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     ws: Workspace,
     *,
     exclude: str,
     languages: frozenset[str],
     outside: Callable[[RelPath], bool] | None,
-) -> list[FileInfo]:
+    files: Sequence[FileInfo | _Listed] | None = None,
+) -> list[FileInfo | _Listed]:
     """開かせる候補になりうるファイル: 索引の Tier 1〜2 の ``languages`` のファイル（``exclude`` を除き、``outside`` を渡すと
-    それが真のものだけ）。テストを先に、次にパス順。"""
+    それが真のものだけ）。テストを先に、次にパス順。``files`` を渡すと索引の代わりにそれ（走査の列挙。``_listed``）から選ぶ。"""
+    source: Sequence[FileInfo | _Listed] = (
+        files if files is not None else queries.files_in_scope(conn, ws.workspace_id, ())  # type: ignore[arg-type]
+    )
     infos = [
         f
-        for f in queries.files_in_scope(conn, ws.workspace_id, ())
+        for f in source
         if f.language in languages
         and f.tier in (Tier.T1, Tier.T2)
         and str(f.path) != exclude
@@ -397,8 +426,12 @@ def preopen_set(
     open_count: int,
     max_open: int = LSP_OPEN_DOCS_MAX,
     scope: PyrightScope | None = None,
+    listing: Sequence[RelPath] | None = None,
 ) -> PrimeSet:
-    """LSP が ``ready`` になった直後に背景で開かせるファイル（BUG-0134）。ブロックする（スレッドで呼ぶ）。
+    """LSP が ``initialize`` を済ませた後に背景で開かせるファイル（BUG-0134）。ブロックする（スレッドで呼ぶ）。
+
+    ``listing``（索引の走査の列挙）を渡すと、索引の代わりにそれから同じ規則で選ぶ（走査の途中でも選べる。索引が記録するのと
+    同じ判定〈拡張子・名前による言語とティア、``is_test``〉）。
 
     ``prime_set`` がどれかの名前で選びうるファイルの和（同じ規則で、名前では絞らない。tsserver 系は同系のファイルすべて、Python は
     basedpyright の解析の対象の外の Python のファイル、ほかの言語は空）のうち、LSP がまだ開いていないもの。中身は読まない。
@@ -413,9 +446,10 @@ def preopen_set(
     if rule is None:
         return PrimeSet()
     languages, outside = rule
+    files = _listed(listing) if listing is not None else None
     infos = [
         f
-        for f in _prime_pool(conn, ws, exclude="", languages=languages, outside=outside)
+        for f in _prime_pool(conn, ws, exclude="", languages=languages, outside=outside, files=files)
         if not is_open(RelPath(str(f.path)))
     ]
     if len(infos) > max_open - open_count:

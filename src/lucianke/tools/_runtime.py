@@ -510,7 +510,7 @@ class RuntimeHub:
         if rt is None:
             return
         task = asyncio.get_running_loop().create_task(
-            preopen(handle, rt.readers, building=rt.indexer.building),
+            preopen(handle, rt.readers, building=rt.indexer.building, listing=lambda: rt.indexer.last_listing),
             name=f"lucianke-lsp-preopen-{handle.language_id}-{handle.ws.workspace_id}",
         )
         self._preopens.add(task)
