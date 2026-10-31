@@ -1,20 +1,8 @@
 name: ci
 on:
-  push:
-    branches: [main]
-    # 票・文書・作業記録・計測結果だけの push では走らせない（並行の直す役が 1 時間に何十回も push する。2026-10-31）
-    paths-ignore:
-      - "bugs/**"
-      - "docs/**"
-      - ".pair-agent/**"
-      - "**/*.md"
-      - "bench/results/**"
-      - "bench/e2e/records/**"
-  pull_request:
-  # 出口条件（exit-criteria・cross-os）は重いので push では走らせない。手動の起動と夜間（03:00 JST）だけ
+  # 自動では走らせない（師匠の判断 2026-10-31「そもそもCIしなくていいよ」）。配布は Windows の exe で、検証は手元の
+  # 全体テストで行う。3 OS の確認（M1-7）・ライセンス検査を走らせたいとき（OSS 公開の前など）だけ、Actions の画面から手動で起動する
   workflow_dispatch:
-  schedule:
-    - cron: "0 18 * * *"
 
 # 続けて push したときは、同じ ref の古い実行を取り消す（実行時間を使い過ぎない）
 concurrency:
@@ -22,7 +10,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # push ごとに走る速い検査（数十秒）。全体の試験（test）は 3 OS × 2 版 × 約 10 分なので、push ごとには走らせない
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -31,10 +18,7 @@ jobs:
       - run: uv sync --python 3.12
       - run: uv run ruff check
 
-  # 全体の試験は、プルリクエスト・手動の起動・夜間だけ（2026-10-31: 並行の直す役の push のたびに 6 ジョブが走って赤の通知が
-  # 大量に届いた。CI での赤の原因を直して安定したら、push ごとに戻すかを決める）
   test:
-    if: ${{ github.event_name != 'push' }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +55,7 @@ jobs:
   # （3 OS で入れ方を揃えられないと、差が製品の差か入れ方の差か分からなくなる）。無い LSP の試験は skip になり、
   # その件数と理由が結果 JSON と .pair-agent/acceptance/M1-exit-*.md に残る。
   exit-criteria:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -107,7 +91,7 @@ jobs:
 
   cross-os:
     needs: exit-criteria
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
