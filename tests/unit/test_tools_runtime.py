@@ -305,11 +305,16 @@ async def test_resolve_workspace_id_passes_none_through_while_no_root_is_known(p
 
 
 class _RecordingPool:
-    """``notify_watched`` と ``handles`` だけを持つ偽のプール。"""
+    """``notify_watched`` と ``handles`` と ``is_config_chain_file`` だけを持つ偽のプール。"""
 
-    def __init__(self, *, running: bool = True) -> None:
+    def __init__(self, *, running: bool = True, chain: tuple[str, ...] = ()) -> None:
         self.running = running
+        self.chain = chain
+        """``extends`` の鎖に入っている設定ファイル（根からの相対パス）。"""
         self.calls: list[list[tuple[str, int]]] = []
+
+    def is_config_chain_file(self, ws: Any, *rels: Any) -> bool:
+        return any(str(rel) in self.chain for rel in rels)
 
     def handles(self, ws: Any = None, language_id: Any = None) -> list[Any]:
         return [object()] if self.running else []
@@ -411,6 +416,28 @@ async def test_the_sink_tells_the_lsp_about_config_files_the_index_ignores(proje
         ]
         with rt.readers.reader() as conn:  # 索引には載らないまま
             assert conn.execute("SELECT count(*) FROM files WHERE path LIKE '%config.json'").fetchone()[0] == 0
+    finally:
+        await rt.aclose()
+
+
+async def test_the_sink_tells_the_lsp_about_an_ignored_extends_target(project: Path, tmp_path: Path) -> None:
+    """BUG-0135: ``pyrightconfig.json`` の ``extends`` の先（``LspPool.is_config_chain_file``）が索引に載らない（``.gitignore`` の対象）
+    ときも、内容が変われば LSP に知らせる。鎖に入っていないほかのファイルは知らせない。"""
+    from lucianke.lsp.pool import FileChangeType as K
+
+    (project / ".gitignore").write_text("shared.json\nother.json\n", encoding="utf-8")
+    pool = _RecordingPool(chain=("shared.json",))
+    rt = await _open_bundle(project, tmp_path, pool)
+    sink = rt.sink
+    assert sink is not None
+    try:
+        (project / "shared.json").write_text('{"include": ["pkg"]}', encoding="utf-8")
+        await sink.changed(RelPath("shared.json"))
+        (project / "shared.json").write_text('{"include": ["pkg", "tests"]}', encoding="utf-8")
+        await sink.changed(RelPath("shared.json"))
+        (project / "other.json").write_text("{}", encoding="utf-8")
+        await sink.changed(RelPath("other.json"))
+        assert pool.calls == [[("shared.json", int(K.CHANGED))], [("shared.json", int(K.CHANGED))]]
     finally:
         await rt.aclose()
 

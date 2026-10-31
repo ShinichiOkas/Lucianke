@@ -63,8 +63,9 @@ from lucianke.core.procs import ProcessRegistry
 from lucianke.lsp.client import LspClient, LspError
 from lucianke.lsp.diagnostics import PUBLISH_DIAGNOSTICS, DiagnosticsHub
 from lucianke.lsp.documents import DocumentRouter, DocumentSync
-from lucianke.lsp.pyright_scope import PyrightScope, pyright_scope
+from lucianke.lsp.pyright_scope import ConfigStamps, PyrightScope, changed_config_files, read_pyright_scope
 from lucianke.lsp.servers import (
+    PYRIGHT_ROOT_CONFIGS,
     LspServerDef,
     Role,
     build_initialization_options,
@@ -81,6 +82,10 @@ from lucianke.workspace.pyenv import touches_lsp_command_candidates
 from lucianke.workspace.types import Workspace
 
 _log = logging.getLogger("lucianke.lsp.pool")
+
+CONFIG_SETTLE_S = 10.0
+"""設定の変更をサーバーに届けてから、サーバーが読み直し終えるまでに見込む時間。この間は開かせる候補を前の対象でも決める
+（``LspHandle.priming_scope``。開かせすぎるだけで答えは変わらない）。"""
 
 TIMEOUTS_TO_UNAVAILABLE = 3
 """連続したタイムアウトがこの回数に達したら ``unavailable``（設計書 §7.5.2）。"""
@@ -173,9 +178,14 @@ def _client_settings(
     return build_settings(defn, python_path=python, extra_paths=extra, tsserver_path=tsserver, config_file=pinned)
 
 
-def _read_pyright_config(root: Path) -> tuple[Path | None, PyrightScope | None]:
-    """根の設定の明示の判断と解析の対象を読み直す（ブロックする。スレッドで呼ぶ）。"""
-    return pinned_pyright_config(root), pyright_scope(root, refresh=True)
+def _read_pyright_config(root: Path) -> tuple[Path | None, PyrightScope | None, ConfigStamps]:
+    """根の設定の明示の判断と解析の対象（と読んだ設定ファイル）を読み直す（ブロックする。スレッドで呼ぶ）。"""
+    read = read_pyright_scope(root, refresh=True)
+    return pinned_pyright_config(root), read.scope, read.files
+
+
+def _config_key(path: str | os.PathLike[str]) -> str:
+    return os.path.normcase(os.path.abspath(path))
 
 
 def _brief(text: str | None, limit: int = 300) -> str:
@@ -207,6 +217,12 @@ class LspHandle:
         # basedpyright / pyright が読んでいる解析の対象（include / exclude）。起動のたびと、根の設定の変更をサーバーに届けたとき
         # （``LspPool.notify_watched``）に引き直す。サーバーの読んだものに揃える（BUG-0132・BUG-0135）。Python の型解決のサーバーでなければ ``None``
         self.analysis_scope: PyrightScope | None = None
+        # 解析の対象を決めるのに読んだ設定ファイル（根の設定と ``extends`` の鎖。根の外のこともある）と読んだときの刻み。
+        # 変わったものを見つけてサーバーに届ける（``LspPool.sync_config_chain``・``notify_watched``）。Python の型解決のサーバーだけ
+        self.config_files: ConfigStamps = ()
+        # 設定を読み直す前の解析の対象と、それを使う期限（``_pool._clock()``）。サーバーが読み直し終えるまでの間、T-06・T-07 が開かせる
+        # 候補を前の対象でも決める（``priming_scope``。広げた設定を読み直す前に聞かれても取りこぼさない）
+        self._prior_scope: tuple[PyrightScope, float] | None = None
         # サーバーに明示している設定ファイル（``servers.pinned_pyright_config``。``analysis.configFilePath``）。明示していなければ ``None``
         self.pinned_config: Path | None = None
         self.client: LspClient | None = None
@@ -260,6 +276,15 @@ class LspHandle:
     def touch(self) -> None:
         """要求で使った（アイドル停止の判定を延ばす）。"""
         self.last_used = self._pool._clock()
+
+    @property
+    def priming_scope(self) -> PyrightScope | None:
+        """T-06・T-07 が開かせる候補を決める解析の対象。設定を読み直した直後は前の対象も合わせる（``CONFIG_SETTLE_S``）。"""
+        scope = self.analysis_scope
+        prior = self._prior_scope
+        if scope is not None and prior is not None and self._pool._clock() < prior[1]:
+            return scope.with_prior(prior[0])
+        return scope
 
     async def rebind(self, ws: Workspace) -> bool:
         """ワークスペースの設定が変わった（``set_python_env``・除外・``default_base_ref`` …）。新しい ``Workspace`` に差し替える。
@@ -784,7 +809,10 @@ class LspPool:
         # 根の pyproject.toml を設定ファイルとして明示し、親のディレクトリの pyright の設定を採らせない（BUG-0132）
         python_types = _is_python_types(defn)
         h.pinned_config = pinned_pyright_config(h.ws.root) if python_types else None
-        h.analysis_scope = pyright_scope(h.ws.root) if python_types else None
+        read = read_pyright_scope(h.ws.root) if python_types else None
+        h.analysis_scope = read.scope if read is not None else None
+        h.config_files = read.files if read is not None else ()
+        h._prior_scope = None
         client.set_settings(_client_settings(h.ws, defn, tsserver, h.pinned_config))
         h.diagnostics.attach(client)
         client.on_notification("$/progress", h._on_progress)
@@ -958,6 +986,9 @@ class LspPool:
         ``_reload_pyright_config``）。basedpyright 1.40.2 は ``didChangeWatchedFiles`` で根の設定を読み直すが、明示の判断が変わったとき
         （根に ``pyrightconfig.json`` を作った・消した）はそれだけでは足りないので、設定を差し替えて ``didChangeConfiguration`` を送る。
         そのハンドルには、設定ファイルの変更を ``didChangeWatchedFiles`` に入れない（古い明示のまま一度読み直させない）。
+        ``extends`` の先の設定ファイル（``LspHandle.config_files``）が根の下で変わったときも、解析の対象を読み直す（そのファイルの変更は
+        ``didChangeWatchedFiles`` で届ける。basedpyright は ``extends`` の先の変更もそれで読み直す）。根の外のものは
+        ``sync_config_chain``。
         """
         sent_at = time.perf_counter()
         changes = [(rel, int(kind)) for rel, kind in changes]
@@ -966,7 +997,8 @@ class LspPool:
         if any(touches_lsp_command_candidates(str(rel), fold=ws.case_insensitive) for rel, _ in changes):
             self.invalidate_commands()  # 監視が除外する場所のイベントはここに来ない（``Watcher`` が直接呼ぶ）。来たものは念のため
         configs = {rel for rel, _ in changes if is_pyright_root_config(str(rel), case_insensitive=ws.case_insensitive)}
-        repinned = await self._reload_pyright_config(ws) if configs else set()
+        chained = self.is_config_chain_file(ws, *(rel for rel, _ in changes if rel not in configs))
+        repinned = await self._reload_pyright_config(ws) if configs or chained else set()
         items = [{"uri": to_file_uri(ws, rel), "type": kind} for rel, kind in changes]
         others = [item for (rel, _), item in zip(changes, items, strict=True) if rel not in configs]
         for h in self.handles(ws):
@@ -981,6 +1013,49 @@ class LspPool:
             except ConnectionError:
                 _log.debug("didChangeWatchedFiles skipped: %s is disconnected", h.server_name)
         return sent_at
+
+    def is_config_chain_file(self, ws: Workspace, *rels: RelPath) -> bool:
+        """``rels`` のどれかが、``ws`` の basedpyright / pyright の解析の対象を決めた設定ファイル（``extends`` の鎖）か。
+        索引に載らないものも LSP に知らせるかの判断（``tools/_runtime.IndexerSink``）と、解析の対象を読み直すかの判断に使う。"""
+        if not rels:
+            return False
+        keys = {
+            _config_key(path)
+            for h in self.handles(ws)
+            if _is_python_types(h.defn)
+            for path, _ in h.config_files
+        }
+        return bool(keys) and any(_config_key(ws.root / str(rel)) in keys for rel in rels)
+
+    async def sync_config_chain(self, handle: LspHandle) -> bool:
+        """``handle`` の解析の対象を決めた設定ファイルのうち、読んだときから変わったもの（根の外の ``extends`` の先など。監視は根の下
+        しか見ない）をサーバーに届け、解析の対象を読み直す。変わったものがあれば真（BUG-0135）。
+
+        ``extends`` を使っていなければ ``config_files`` は根の設定だけで、刻みを引くだけで戻る。T-06・T-07 が LSP に聞く前に呼ぶ
+        （``tools/_lsp_exact.route_for``）。監視が先に届けて読み直していれば、刻みが新しいので何もしない。
+        """
+        if not _is_python_types(handle.defn) or not handle.config_files:
+            return False
+        changed = await asyncio.to_thread(changed_config_files, handle.config_files)
+        if not changed:
+            return False
+        ws = handle.ws
+        repinned = await self._reload_pyright_config(ws)
+        roots = {_config_key(ws.root / name) for name in PYRIGHT_ROOT_CONFIGS}
+        items = [(path, {"uri": path.resolve().as_uri(), "type": kind}) for path, kind in changed]
+        for h in self.handles(ws):
+            client = h.client
+            if not _is_python_types(h.defn) or client is None or h.state not in (LspState.INDEXING, LspState.READY):
+                continue
+            # 明示を変えたハンドルには根の設定の変更を入れない（``notify_watched`` と同じ）
+            sending = [item for path, item in items if h not in repinned or _config_key(path) not in roots]
+            if not sending:
+                continue
+            try:
+                client.notify("workspace/didChangeWatchedFiles", {"changes": sending})
+            except ConnectionError:
+                _log.debug("didChangeWatchedFiles skipped: %s is disconnected", h.server_name)
+        return True
 
     async def _reload_pyright_config(self, ws: Workspace) -> set[LspHandle]:
         """``ws`` の basedpyright / pyright の解析の対象と明示の判断を、根の設定の今の内容で読み直す（BUG-0135）。
@@ -998,15 +1073,19 @@ class LspPool:
             and h.state in (LspState.STARTING, LspState.INDEXING, LspState.READY)
         ]
         repinned: set[LspHandle] = set()
-        read: dict[Path, tuple[Path | None, PyrightScope | None]] = {}
+        read: dict[Path, tuple[Path | None, PyrightScope | None, ConfigStamps]] = {}
         for h, client, gen in targets:
             root = h.ws.root
             if root not in read:
                 read[root] = await asyncio.to_thread(_read_pyright_config, root)
-            pinned, scope = read[root]
+            pinned, scope, files = read[root]
             if h.client is not client or h._gen != gen or client is None or h.defn is None:
                 continue
+            old = h.analysis_scope
+            if old is not None and scope is not None and (old.include, old.exclude) != (scope.include, scope.exclude):
+                h._prior_scope = (old, h._pool._clock() + CONFIG_SETTLE_S)
             h.analysis_scope = scope
+            h.config_files = files
             if pinned == h.pinned_config:
                 continue
             _log.info(

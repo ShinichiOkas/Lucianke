@@ -219,6 +219,9 @@ async def route_for(services: Any, ws: Workspace, file: FileInfo, cap: Capabilit
         handle = pool.get(language, ws, role="types", start_if_needed=False)
         if handle is None:  # ready の合図の直後に落ちた
             choice = pick(LspStatus.UNAVAILABLE, None, st.server_name)
+        elif language == "python":
+            # 根の外の ``extends`` の先など、監視が見ない設定ファイルの変更を、聞く前にサーバーへ届けて対象を読み直す（BUG-0135）
+            await pool.sync_config_chain(handle)
     return LspRoute(choice, handle, file, cap)
 
 
@@ -1487,7 +1490,7 @@ class CallEdgeSource:
             exclude=str(sym.path),
             is_open=handle.documents.is_open,
             limit=PRIME_MAX,
-            scope=getattr(handle, "analysis_scope", None),
+            scope=getattr(handle, "priming_scope", None),
         )
 
     def _structural_count(self, urn: str, direction: str, conn: Any = None) -> int:

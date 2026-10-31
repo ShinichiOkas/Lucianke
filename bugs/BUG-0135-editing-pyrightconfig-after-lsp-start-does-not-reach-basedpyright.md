@@ -102,10 +102,31 @@ LSP が動いている間に、利用者（または AI）が `pyrightconfig.jso
 予算・補足の欄・import の根・TS の tsconfig の外〔TS の LSP が無く skip〕、T-04 の LSP、BUG-0132・BUG-0135 の試験）と見張り 4 本
 （`test_import_graph`・`test_server_launch_guard`・`test_stdout_purity`・`test_leak_guard`）が green。`uv run ruff check` クリーン。
 
+### `extends` の先の設定ファイルの変更（2026-10-31 追記。残ったことの 1 つ目を直した）
+
+#### 原因
+
+- basedpyright 1.40.2 は、`extends` の先の設定ファイルの変更も `workspace/didChangeWatchedFiles` で読み直す（実機: F-POLY の複製、根の `pyrightconfig.json` が `extends` だけ、先の `include` を `[src, tests]` → `[src]`。先が根の下〔`config/base.json`〕でも根の外〔`tmp_path/shared/base.json`〕でも、`didChangeWatchedFiles` を送ると 6 秒後に `process_charge` の参照が routes.py だけになり、何も送らないと 2 ファイルのまま。`didChangeConfiguration` は要らない）。
+- 足りなかったのは Lucianke の側: (1) 解析の対象を決めた設定ファイルのうち根の 2 つしか見ておらず、`extends` の先の変更で対象を読み直さない（`pyright_scope` の覚えも根の 2 つの刻みだけで引いていた）、(2) 先が根の下で索引に載らない（`.gitignore` の対象・JSON は索引に載らない）と LSP に知らせない、(3) 根の外の先は監視（根の下だけ）が見ない。広げたときはさらに、サーバーが読み直し終える前に聞かれると、Lucianke の対象は広がっているので開かせず、サーバーは狭いままなので広がった分の参照を落とした（`[src]` → `[src, tests]` の直後の T-06 が routes.py の 2 箇所だけ）。
+
+#### 直し方（決めたこと）
+
+- `pyright_scope.read_pyright_scope`: 解析の対象と、読んだ設定ファイル（根の設定と `extends` の鎖。読めなかったもの・まだ無い先も）を読む前の刻みつき（`ScopeRead.files`）で返す。覚えの鍵に先の刻みも使う。`changed_config_files(files)` が変わったもの（作成・変更・削除）を返す。`pyright_scope` は対象だけを返す今までの API。
+- `LspHandle.config_files` に覚える（起動のときと `_reload_pyright_config` で更新）。`LspPool.is_config_chain_file`: 根の下の先の変更を `notify_watched` が拾って対象を読み直す（そのファイルの変更はそのまま `didChangeWatchedFiles` で届く）。`IndexerSink._is_config` も鎖の先を設定ファイルに数える（索引に載らなくても知らせる）。
+- `LspPool.sync_config_chain(handle)`: 刻みが変わっていれば（根の外の先など）`didChangeWatchedFiles`（絶対パスの URI）で届けて対象を読み直す。T-06・T-07 が聞く前（`_lsp_exact.route_for`。Python のときだけ）に呼ぶ。要求ごとに数件の `stat` だけ。監視が先に届けていれば刻みが新しいので何もしない。根の設定が変わっていて明示が変わったハンドルには、根の設定を `didChangeWatchedFiles` に入れない（`notify_watched` と同じ）。
+- 読み直した直後の `CONFIG_SETTLE_S`（10 秒）は、`LspHandle.priming_scope`（`PyrightScope.with_prior`: 前と今の両方の内にあるファイルだけを内とみなす）で開かせる候補を決める。サーバーが読み直し終える前に聞かれても、広げた分を取りこぼさない（開かせすぎるだけで答えは LSP が見たものそのまま）。T-06・T-07 の `prime_set` に渡す対象はこれ。
+- ついでに: `include` / `exclude` に Windows のドライブつきの絶対パス（`C:/…`）を書くと、`posixpath.join` が相対とみなして設定のディレクトリに連結していた（`extends` の先は別のディレクトリなので絶対パスで書くことが多い）。ドライブつきは絶対パスとして扱う。
+- 仕様書 §12.3「Python の設定の根」の行（`extends` の先は読み直さない、を置き換えた）・§12.4 の 7、設計書 §7.3.6 の 5・§7.5.1（`notify_watched` の注記と `is_config_chain_file` / `sync_config_chain`）・対象の覚え方（`prime_set` の段）。
+
+#### 確認
+
+- 新しい `tests/contract/test_lsp_extends_chain_bug0135.py`（実機の basedpyright。無ければ skip）4 本: 先の `include` を `[src, tests]` → `[src]` に狭めると、サーバーも Lucianke の対象も狭まり、T-06 が `tests/test_payment.py` を含む 3 箇所を `exact` で返す（先が根の下・根の外の両方）。`[src]` → `[src, tests]` に広げた直後の T-06 が `tests/test_payment.py` を含む（両方）。直す前は 4 本とも赤（広げる側は、直す前は届かず・直した後も `priming_scope` が無いと落ちる）、直した後は緑（約 14 秒）。
+- 新しい `tests/unit/test_lsp_extends_chain_notify_bug0135.py` 7 本（読んだ設定ファイルと刻み・まだ無い先・読めない先・ドライブつきの絶対パスの `include`・`with_prior`、偽のサーバーが受けた通知: 根の下の先は `notify_watched` が対象を読み直して届ける、根の外の先は `sync_config_chain` が 1 回だけ届ける〔作成・変更・削除〕）。`tests/unit/test_tools_runtime.py` に 1 本（`.gitignore` の対象の先を知らせる。偽のプールに `is_config_chain_file` を足した）。
+- 関係する unit・contract（LSP、監視・実行時の束、T-04・T-06・T-07 の LSP・予算・json の辺、BUG-0132・BUG-0135 の試験）と見張り 5 本が green。`uv run ruff check` クリーン。
+
 ### 残ったこと
 
-- `extends` の先の設定ファイルの変更では、Lucianke の見る対象を読み直さない（根の設定を触るか、`reindex_scope: "lsp"` まで）。
-  basedpyright が `extends` の先の変更を読み直すかも確かめていない。
+- `extends` の先を、`rescan`（バースト）の後に見て回ってはいない（根の 2 つの設定だけ見て回る）。根の下の先が索引に載らないとき、バーストの間の変更は次に T-06・T-07 が聞いたとき `sync_config_chain` が拾う。
 - TypeScript の `tsconfig.json` の変更が TS の LSP に効くことは、この PC に TS の LSP が無く実機で確かめていない（Lucianke の側に読み直す
   状態は無い）。
 - Lucianke の編集ツールが TOML / JSON を書けるようになったら（Tier 3 の編集は M2）、その書き込みは監視のこだまとして捨てられ、TOML / JSON の

@@ -88,7 +88,8 @@ class IndexerSink:
     （``workspace/didChangeWatchedFiles``）で送る。basedpyright は作業ツリーで新しく作られたファイルを、これか ``didOpen`` を受けるまで
     自分では見つけず、rename の参照に含めない（T-11 の実機の観察）。バースト（``rescan``）は前後の ``files`` の差から送る。
 
-    LSP の設定ファイル（``servers.is_lsp_config``: 根の ``pyrightconfig.json`` / ``pyproject.toml``、``tsconfig.json`` など）は、索引に
+    LSP の設定ファイル（``servers.is_lsp_config``: 根の ``pyrightconfig.json`` / ``pyproject.toml``、``tsconfig.json`` など。
+    ``extends`` の先の設定ファイルも ``LspPool.is_config_chain_file``）は、索引に
     載らない（``.gitignore`` の対象など）ときも、内容（``sha256``）が前に知らせたものと違えば知らせる（BUG-0135。basedpyright は根の
     設定の変更をこれで読み直す。``LspPool.notify_watched`` が解析の対象と明示の判断も読み直す）。前に知らせた内容が分からない
     （起動の後の最初の変更）ときは知らせる。
@@ -135,7 +136,10 @@ class IndexerSink:
             await self._notify(_file_changes(before, after) + unindexed)
 
     def _is_config(self, rel: RelPath) -> bool:
-        return is_lsp_config(str(rel), case_insensitive=self._ws.case_insensitive)
+        if is_lsp_config(str(rel), case_insensitive=self._ws.case_insensitive):
+            return True
+        # ``pyrightconfig.json`` の ``extends`` の先（根の下にあるもの）も設定ファイル（BUG-0135）
+        return self._lsp is not None and self._lsp.is_config_chain_file(self._ws, rel)
 
     def _unindexed_config_changes(
         self, rels: Sequence[RelPath], indexed: set[str] | None = None, *, event: bool = True

@@ -19,11 +19,14 @@ incomingCalls にも出る）。T-06・T-07 は対象の外のファイルのう
   末尾は ``($|/)``（そのパス自身か、その下）。Windows は大文字小文字を区別しない。
 
 読めない設定（JSONC / TOML の構文の誤り、``include`` / ``exclude`` が配列でない、両方の節がある）は ``None``（判断しない。呼び手は
-開かせない = 今までどおり）。結果は根と設定ファイルの ``(mtime_ns, size)`` で覚える。
+開かせない = 今までどおり）。結果は根と、読んだ設定ファイル（``extends`` の先を含む。根の外のこともある）の ``(mtime_ns, size)`` で
+覚える。読んだ設定ファイルとその刻み（``ScopeRead.files``）は呼び手が持ち、``changed_config_files`` で変わったものを見つける
+（``extends`` の先の変更を LSP に届けて読み直す。BUG-0135）。
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import posixpath
@@ -36,19 +39,41 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["DEFAULT_EXCLUDES", "PyrightScope", "pyright_scope"]
+__all__ = [
+    "DEFAULT_EXCLUDES",
+    "ConfigStamps",
+    "PyrightScope",
+    "ScopeRead",
+    "changed_config_files",
+    "pyright_scope",
+    "read_pyright_scope",
+]
 
 DEFAULT_EXCLUDES = ("**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*")
 """basedpyright 1.40.2 が利用者の ``exclude`` に足す既定（``pathConsts.defaultExcludes``）。"""
 
 _CASE_INSENSITIVE = sys.platform == "win32"
 _MAX_EXTENDS = 16
+_DRIVE = re.compile(r"[A-Za-z]:/")
 # 文字列は温存し、// と /* */ のコメントと閉じ括弧の前の末尾のカンマを消す（pyrightconfig.json は JSONC。workspace/pyenv と同じ）
 _JSONC_NOISE = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/|,(?=\s*[}\]])', re.DOTALL)
 
 
 class _Unreadable(Exception):
     """設定が読めない（判断しない）。"""
+
+
+Stamp = tuple[int, int]
+ConfigStamps = tuple[tuple[Path, Stamp | None], ...]
+"""読んだ設定ファイル（根の設定と ``extends`` の鎖。まだ無い ``extends`` の先も入る）と、読む前の ``(mtime_ns, size)``（無ければ ``None``）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeRead:
+    """``read_pyright_scope`` の結果: 解析の対象（読めなければ ``None``）と、それを決めるのに読んだ設定ファイル。"""
+
+    scope: PyrightScope | None
+    files: ConfigStamps
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +88,18 @@ class PyrightScope:
     """利用者の設定が ``include`` か ``exclude`` を書いた（既定の除外だけなら ``False``: 対象の外はドットのディレクトリ・
     ``node_modules``・``__pycache__``・編集可能インストールの影の木だけで、呼び出し元を開かせる先にならない）。"""
 
+    prior: PyrightScope | None = None
+    """設定を読み直した直後、サーバーが読み直し終えるまでの間の、前の対象（``with_prior``）。両方の内にあるファイルだけを内とみなす
+    （どちらかの外なら開かせる: 広げた設定をサーバーが読み直す前に聞いても、広がった分を取りこぼさない）。"""
+
     def contains(self, path: str | os.PathLike[str]) -> bool:
         text = _posix(path)
-        return any(p.match(text) for p in self.include) and not any(p.match(text) for p in self.exclude)
+        inside = any(p.match(text) for p in self.include) and not any(p.match(text) for p in self.exclude)
+        return inside and (self.prior is None or self.prior.contains(path))
+
+    def with_prior(self, prior: PyrightScope) -> PyrightScope:
+        """``prior``（読み直す前の対象）も合わせた対象。``narrowed`` はどちらかが狭めていれば真。"""
+        return dataclasses.replace(self, prior=prior, narrowed=self.narrowed or prior.narrowed)
 
 
 def _posix(path: str | os.PathLike[str]) -> str:
@@ -86,7 +120,9 @@ def _segment(text: str) -> str:
 
 def _file_spec(base: str, spec: str) -> re.Pattern[str]:
     """pyright の ``getFileSpec(base, spec)`` の正規表現（``^(<パターン>)($|/)``）。"""
-    absolute = posixpath.normpath(posixpath.join(base, _posix(spec)))
+    text = _posix(spec)
+    # ``posixpath.join`` は ``C:/…`` を絶対パスとみなさないので、ドライブつきの絶対パスは自分で扱う（POSIX の ``/…`` は join が扱う）
+    absolute = posixpath.normpath(text if _DRIVE.match(text) else posixpath.join(base, text))
     parts = absolute.split("/")
     pattern = re.escape(parts[0])  # ドライブ（``C:``）か、POSIX の根の空文字列
     for part in parts[1:]:
@@ -139,8 +175,10 @@ def _primary(root: Path) -> Path | None:
     return pyproject if pyproject.is_file() else None
 
 
-def _chain(primary: Path) -> list[tuple[Path, Mapping[str, Any]]]:
-    """``primary`` から ``extends`` を辿った設定（根元が先）。``pyproject.toml`` に節が無ければ空。"""
+def _chain(primary: Path, files: list[tuple[Path, Stamp | None]]) -> list[tuple[Path, Mapping[str, Any]]]:
+    """``primary`` から ``extends`` を辿った設定（根元が先）。``pyproject.toml`` に節が無ければ空。
+
+    見た設定ファイル（読めなかったもの・まだ無いものも）を、読む前の刻みと一緒に ``files`` に足す。"""
     chain: list[tuple[Path, Mapping[str, Any]]] = []
     seen: set[str] = set()
     current: Path | None = primary
@@ -149,6 +187,7 @@ def _chain(primary: Path) -> list[tuple[Path, Mapping[str, Any]]]:
         if key in seen:
             break  # 循環（pyright もそこで止める）
         seen.add(key)
+        files.append((current, _stamp(current)))
         if not current.is_file():
             if chain:
                 break  # 辿れない extends（pyright はそこまでの設定を使う）
@@ -179,23 +218,24 @@ def _specs(chain: Sequence[tuple[Path, Mapping[str, Any]]], key: str) -> list[re
     return found
 
 
-def _compute(root: Path) -> PyrightScope | None:
+def _compute(root: Path) -> ScopeRead:
     base = _posix(os.path.abspath(root))
+    files: list[tuple[Path, Stamp | None]] = []
     try:
         primary = _primary(root)
-        chain = _chain(primary) if primary is not None else []
+        chain = _chain(primary, files) if primary is not None else []
         user_include = _specs(chain, "include")
         user_exclude = _specs(chain, "exclude")
         include = user_include or [_file_spec(base, ".")]
         exclude = (user_exclude or []) + [_file_spec(base, x) for x in DEFAULT_EXCLUDES]
     except (_Unreadable, OSError, ValueError):
-        return None
+        return ScopeRead(None, tuple(files))
     config = str(chain[-1][0]) if chain else None
     narrowed = user_include is not None or user_exclude is not None
-    return PyrightScope(tuple(include), tuple(exclude), config, narrowed)
+    return ScopeRead(PyrightScope(tuple(include), tuple(exclude), config, narrowed), tuple(files))
 
 
-def _stamp(path: Path) -> tuple[int, int] | None:
+def _stamp(path: Path) -> Stamp | None:
     try:
         st = path.stat()
     except OSError:
@@ -203,27 +243,44 @@ def _stamp(path: Path) -> tuple[int, int] | None:
     return (st.st_mtime_ns, st.st_size)
 
 
-_MEMO: dict[str, tuple[tuple[Any, ...], PyrightScope | None]] = {}
+def changed_config_files(files: ConfigStamps) -> list[tuple[Path, int]]:
+    """``files``（``ScopeRead.files``）のうち、読んだときから変わったもの（``(パス, LSP の FileChangeType: 1 作成・2 変更・3 削除)``）。
+    ファイルの刻みを引くだけ（ブロックしうるので、イベントループの上では ``asyncio.to_thread`` で呼ぶ）。"""
+    out: list[tuple[Path, int]] = []
+    for path, before in files:
+        now = _stamp(path)
+        if now == before:
+            continue
+        out.append((path, 1 if before is None else 3 if now is None else 2))
+    return out
+
+
+_MEMO: dict[str, tuple[tuple[Any, ...], ScopeRead]] = {}
 _MEMO_LOCK = threading.Lock()
 
 
-def pyright_scope(root: str | os.PathLike[str], *, refresh: bool = False) -> PyrightScope | None:
-    """ワークスペースの根 ``root`` の解析の対象。設定が読めなければ ``None``（判断しない）。
+def read_pyright_scope(root: str | os.PathLike[str], *, refresh: bool = False) -> ScopeRead:
+    """ワークスペースの根 ``root`` の解析の対象と、それを決めるのに読んだ設定ファイル。設定が読めなければ対象は ``None``（判断しない）。
 
-    根の ``pyrightconfig.json`` / ``pyproject.toml`` の ``(mtime_ns, size)`` が変わらない間は覚えた答えを返す（``extends`` の先の
-    変更は根の設定を触るまで反映しない）。``refresh`` は覚えを見ずに読み直す（監視が根の設定の変更を拾ったとき。同じ大きさで
-    時刻の刻みの内に書き換えられても取りこぼさない。BUG-0135）。ブロックする（ファイルを読む）ので、イベントループの上では呼ばない。
+    根の ``pyrightconfig.json`` / ``pyproject.toml`` と、読んだ設定ファイル（``extends`` の先）の ``(mtime_ns, size)`` が変わらない
+    間は覚えた答えを返す。``refresh`` は覚えを見ずに読み直す（監視が設定の変更を拾ったとき。同じ大きさで時刻の刻みの内に書き換えられても
+    取りこぼさない。BUG-0135）。ブロックする（ファイルを読む）ので、イベントループの上では呼ばない。
     """
     path = Path(root)
     key = os.path.normcase(os.path.abspath(path))
     stamp = (_stamp(path / "pyrightconfig.json"), _stamp(path / "pyproject.toml"))
     with _MEMO_LOCK:
         hit = None if refresh else _MEMO.get(key)
-        if hit is not None and hit[0] == stamp:
-            return hit[1]
-    scope = _compute(path)
+    if hit is not None and hit[0] == stamp and not changed_config_files(hit[1].files):
+        return hit[1]
+    read = _compute(path)
     with _MEMO_LOCK:
         if len(_MEMO) >= 64:
             _MEMO.clear()
-        _MEMO[key] = (stamp, scope)
-    return scope
+        _MEMO[key] = (stamp, read)
+    return read
+
+
+def pyright_scope(root: str | os.PathLike[str], *, refresh: bool = False) -> PyrightScope | None:
+    """``read_pyright_scope`` の解析の対象だけ（設定が読めなければ ``None``）。"""
+    return read_pyright_scope(root, refresh=refresh).scope

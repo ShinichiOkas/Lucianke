@@ -748,7 +748,7 @@ def _prime_set(db_path: Any, ws: Workspace, handle: Any, sym: SymbolRecord, lang
             name=sym.name,
             exclude=str(sym.path),
             is_open=handle.documents.is_open,
-            scope=getattr(handle, "analysis_scope", None),
+            scope=getattr(handle, "priming_scope", None),
         )
 
 
