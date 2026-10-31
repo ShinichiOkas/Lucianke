@@ -42,7 +42,7 @@ from lucianke.syntax.memo import BoundedMemo, content_key
 from lucianke.syntax.parsers import iter_matches
 from lucianke.syntax.types import ParsedFile
 
-__all__ = ["ExtractedSymbol", "Extraction", "extract", "extract_detailed", "load_query_source"]
+__all__ = ["ExtractedSymbol", "Extraction", "extract", "extract_detailed", "load_query_source", "remembered"]
 
 DOC_SUMMARY_MAX = 200
 
@@ -153,6 +153,23 @@ def extract(
         rel=rel,
     )
     return [s.record for s in result.symbols]
+
+
+def remembered(
+    source: bytes,
+    *,
+    language_id: str,
+    language: Language,
+    query_source: str,
+    workspace_id: str,
+    rel: RelPath,
+) -> Extraction | None:
+    """``extract_detailed`` が覚えている、同じ内容・言語・クエリ・ワークスペース・パスの結果。無ければ ``None``。
+
+    覚えているのは構文エラーの無い木の結果だけなので、当たれば解析しなくてよい（``extract_detailed`` は解析した木を受け取るので、
+    覚えから返すときも呼ぶ側が先に解析していた。T-11 は書き換える前の内容を呼び出しのたびに解析し直していた。BUG-0128）。
+    """
+    return _EXTRACT_MEMO.get((content_key(source), language_id, language, query_source, workspace_id, str(rel)))
 
 
 # --- 抽出 -------------------------------------------------------------------------------

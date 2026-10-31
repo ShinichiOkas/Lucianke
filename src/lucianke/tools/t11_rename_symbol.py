@@ -72,7 +72,7 @@ from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle
 from lucianke.syntax.parsers import parse_source
 from lucianke.syntax.support import get_support
-from lucianke.syntax.symbols import extract, load_query_source
+from lucianke.syntax.symbols import extract, load_query_source, remembered
 from lucianke.tools import _t11_degrade
 from lucianke.tools._base import CommonArgs, ToolContext, ToolSpec
 from lucianke.tools._edit_output import diag_line, diagnostics_json, diagnostics_kv
@@ -322,18 +322,27 @@ def _symbols_of(ws: Workspace, rel: RelPath, data: bytes) -> list[SymbolRecord] 
     spec = get_support(language_id)
     if spec is None or not callable(getattr(spec, "grammar", None)):
         return None
-    parsed, _timed_out = parse_source(data, language_id, hashlib.sha256(data).hexdigest())
     try:
-        found = extract(
-            parsed,
-            language_id=language_id,
-            language=spec.grammar(),  # pyright: ignore[reportAttributeAccessIssue]
-            query_source=load_query_source(language_id),
-            workspace_id=ws.workspace_id,
-            rel=rel,
-        )
+        query_source = load_query_source(language_id)
     except ValueError:
         return None
+    language = spec.grammar()  # pyright: ignore[reportAttributeAccessIssue]
+    # 書き換える前の内容は、索引や前の呼び出しが抽出済みのことが多い。覚えに当たれば解析しない（BUG-0128）
+    hit = remembered(
+        data, language_id=language_id, language=language, query_source=query_source,
+        workspace_id=ws.workspace_id, rel=rel,
+    )  # fmt: skip
+    if hit is not None:
+        found = [s.record for s in hit.symbols]
+    else:
+        parsed, _timed_out = parse_source(data, language_id, hashlib.sha256(data).hexdigest())
+        try:
+            found = extract(
+                parsed, language_id=language_id, language=language, query_source=query_source,
+                workspace_id=ws.workspace_id, rel=rel,
+            )  # fmt: skip
+        except ValueError:
+            return None
     return sorted(
         found,
         key=lambda s: (
