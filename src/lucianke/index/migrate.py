@@ -175,6 +175,28 @@ def _migrate_8_to_9(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_9_to_10(conn: sqlite3.Connection) -> None:
+    """v10: Python のモジュール直下の import が束ねた名前の内部表 ``_reexports`` と、それをたどって整えたファイルの依存の内部表
+    ``_reexport_deps``（``from pkg import flush`` の ``flush()`` を ``pkg/__init__.py`` が再び公開した定義元に結ぶ。BUG-0100）。
+
+    束ねた名前は取り込みのときにしか作れず、v9 までの取り込みは名前空間パッケージの読みを外部にしていた（BUG-0101）ので、Python の
+    ファイルの ``sha256`` を空にして、次の差分走査で取り込み直させる。
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _reexports ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " name TEXT NOT NULL, target_urn TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _reexports_name ON _reexports(file_id, name)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _reexport_deps ("
+        " file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,"
+        " path TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (file_id, path, name)) WITHOUT ROWID"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS _reexport_deps_path ON _reexport_deps(path, name)")
+    conn.execute("UPDATE files SET sha256 = '' WHERE language = 'python'")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
@@ -184,6 +206,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migrate_6_to_7,
     7: _migrate_7_to_8,
     8: _migrate_8_to_9,
+    9: _migrate_9_to_10,
 }
 
 

@@ -14,6 +14,11 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
   仕様書 §9.3）。パッケージは Python が最上位のモジュール名（``from os.path import join`` → ``lk://_ext/os#path.join``）、
   TS / JS が裸の指定子のパッケージ名（``@scope/name`` を含む。サブパスは捨てる）。TS / JS の既定 import・名前空間 import は
   モジュールそのもの（``lk://_ext/react``）。
+* ``namespace_name_map``: Python の名前空間パッケージ（``__init__.py`` の無いワークスペースのディレクトリ）を束ねた名前 → その
+  モジュールのパス（``import nsp.tools.fmt`` の ``nsp``・``import nsp.tools as nt``・``from nsp import tools``。BUG-0101）。
+  ``dotted_module_path`` は、そのディレクトリそのものを ``NAMESPACE_PACKAGE``（参照でも外部でもない）と答える。
+* ``module_all_names``: Python のモジュール直下の ``__all__``（文字列のリテラルだけで書かれたもの）。``from x import *`` が
+  再び公開する名前を決める（BUG-0100）。
 
 ``ImportFact.names`` の約束（``(name, alias)`` の列。``alias`` は無ければ ``None``）:
 
@@ -29,16 +34,17 @@ LSP なしの定義解決（T-04 処理規約 3）と呼び出し関係の ``str
 
 from __future__ import annotations
 
+import ast
 import functools
 import posixpath
 import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Final, Literal
 
 from tree_sitter import Node, Query, QueryCursor
 
-from lucianke.core.model import Range, RelPath
+from lucianke.core.model import Position, Range, RelPath
 from lucianke.core.urn import Urn
 from lucianke.syntax.support import get_support
 from lucianke.syntax.types import ParsedFile
@@ -47,9 +53,11 @@ from lucianke.workspace.pyenv import PytestImports
 
 __all__ = [
     "DEFAULT_SOURCE_ROOTS",
+    "NAMESPACE_PACKAGE",
     "PYTEST_PRELOADED",
     "ImportFact",
     "ImportKind",
+    "ImportResolver",
     "ImportRoot",
     "dotted_module_path",
     "external_name_map",
@@ -57,6 +65,8 @@ __all__ = [
     "imported_name_map",
     "js_require_bindings",
     "make_resolver",
+    "module_all_names",
+    "namespace_name_map",
     "python_import_roots",
     "resolve_module",
     "wildcard_sources",
@@ -65,6 +75,12 @@ __all__ = [
 ImportKind = Literal["import", "from", "es_import", "require"]
 
 DEFAULT_SOURCE_ROOTS: tuple[RelPath, ...] = (RelPath(""), RelPath("src"))  # "" = ワークスペースのルート
+
+NAMESPACE_PACKAGE: Final = "lk:namespace-package"
+"""``dotted_module_path`` の答えの 1 つ: その点つきのパスはワークスペースの名前空間パッケージのディレクトリ（``__init__.py`` の無い
+ディレクトリ。ファイルが無いのでシンボルでもファイルでもない）。呼び手は参照を作らず、外部にもしない（BUG-0101）。URN ではない。"""
+
+_NO_RANGE: Final = Range(Position(0, 0), Position(0, 0))  # 解くためだけに作る ImportFact の範囲（位置は使わない）
 
 _PY_FAMILY = frozenset({"python"})
 _JS_FAMILY = frozenset({"typescript", "tsx", "javascript", "jsx"})
@@ -623,6 +639,118 @@ def _resolve_js(spec: str, from_rel: RelPath, exists: Callable[[RelPath], bool])
     return _first_existing(dict.fromkeys(candidates), exists)
 
 
+class ImportResolver:
+    """1 つのファイルの import を解決する（``make_resolver`` が作る）。呼ぶと ``ImportFact`` → ファイル（``imported_name_map`` の
+    ``resolve``）。``namespace_dir`` は Python の名前空間パッケージのディレクトリ（BUG-0101）。
+
+    Python の絶対 import の根は、``source_roots`` を渡せばそれ、渡さなければ ``python_import_roots``（``pytest_imports`` は
+    プロジェクトのディレクトリ → pytest の設定。最初の絶対 import で 1 回だけ決める）。``exists`` / ``is_dir`` の答えはこの中で
+    覚えて使い回す（同じパスを何度も調べない）。
+    """
+
+    __slots__ = ("_computed", "_dirs", "_exists", "_from_rel", "_is_dir", "_known", "_language_id", "_pytest", "_roots")
+
+    def __init__(
+        self,
+        *,
+        from_rel: RelPath,
+        language_id: str,
+        exists: Callable[[RelPath], bool],
+        source_roots: Sequence[RelPath | ImportRoot] | None,
+        pytest_imports: Callable[[str], PytestImports] | None,
+        is_dir: Callable[[RelPath], bool] | None,
+    ) -> None:
+        self._from_rel = from_rel
+        self._language_id = language_id
+        self._exists = exists
+        self._roots = source_roots
+        self._pytest = pytest_imports
+        self._is_dir = is_dir
+        self._known: dict[str, bool] = {}
+        self._dirs: dict[str, bool] = {}
+        self._computed: tuple[ImportRoot, ...] | None = None
+
+    def exists(self, rel: RelPath) -> bool:
+        key = str(rel)
+        hit = self._known.get(key)
+        if hit is None:
+            hit = self._known[key] = bool(self._exists(rel))
+        return hit
+
+    def _dir(self, rel: str) -> bool:
+        if self._is_dir is None:
+            return False
+        hit = self._dirs.get(rel)
+        if hit is None:
+            hit = self._dirs[rel] = bool(self._is_dir(RelPath(rel)))
+        return hit
+
+    def _roots_for(self, relative: bool) -> Sequence[RelPath | ImportRoot] | None:
+        if self._roots is not None or self._language_id not in _PY_FAMILY or relative:
+            return self._roots
+        if self._computed is None:
+            self._computed = python_import_roots(self._from_rel, exists=self.exists, pytest_imports=self._pytest)
+        return self._computed
+
+    def __call__(self, fact: ImportFact) -> RelPath | None:
+        return resolve_module(
+            fact.module,
+            from_rel=self._from_rel,
+            language_id=self._language_id,
+            is_relative=fact.is_relative,
+            level=fact.level,
+            source_roots=self._roots_for(fact.is_relative or fact.level > 0),
+            exists=self.exists,
+        )
+
+    def namespace_dir(self, module: str) -> RelPath | None:
+        """絶対のモジュールのパス ``module`` がワークスペースの名前空間パッケージなら、そのディレクトリ（BUG-0101）。
+
+        Python の探し方と同じく、どの根にもファイル（``<mod>.py``・``<mod>/__init__.py``・``.pyi``）が無いときだけ、根の順に
+        ``<根>/<mod>`` がディレクトリで ``__init__.py(i)`` を持たない最初のもの（モジュール・普通のパッケージは後ろの根にあっても
+        名前空間パッケージの部分より勝つ）。標準ライブラリの名前は解かない（``json/`` があっても ``import json`` は標準ライブラリ）。
+        ``is_dir`` を渡さなかった resolver・Python 以外は常に ``None``。
+        """
+        parts = module.split(".") if module else []
+        if (
+            self._is_dir is None
+            or self._language_id not in _PY_FAMILY
+            or not parts
+            or any(not p.isidentifier() for p in parts)
+            or parts[0] in sys.stdlib_module_names
+        ):
+            return None
+        fact = ImportFact(module, [], False, 0, _NO_RANGE, "import")
+        if self(fact) is not None:
+            return None
+        roots = self._roots_for(False)
+        for root in DEFAULT_SOURCE_ROOTS if roots is None else roots:
+            if isinstance(root, ImportRoot) and not root.stdlib and parts[0] in PYTEST_PRELOADED:
+                continue
+            base = _norm_root(root.path if isinstance(root, ImportRoot) else str(root))
+            found = _namespace_dir_at(_join(base, *parts), self.exists, self._dir)
+            if found is not None:
+                return found
+        return None
+
+    def namespace_subdir(self, base: str, parts: Sequence[str]) -> RelPath | None:
+        """パッケージのディレクトリ ``base`` の下の ``parts`` が名前空間パッケージのディレクトリなら、そのパス（``import pkg`` の
+        ``pkg.nsdir``。``nsdir`` に ``__init__.py`` が無い）。"""
+        if any(not p.isidentifier() for p in parts):
+            return None
+        return _namespace_dir_at(_join(base, *parts), self.exists, self._dir)
+
+
+def _namespace_dir_at(
+    path: str, exists: Callable[[RelPath], bool], is_dir: Callable[[str], bool]
+) -> RelPath | None:
+    if not path or not is_dir(path):
+        return None
+    if exists(RelPath(_join(path, "__init__.py"))) or exists(RelPath(_join(path, "__init__.pyi"))):
+        return None
+    return RelPath(path)
+
+
 def make_resolver(
     *,
     from_rel: RelPath,
@@ -630,43 +758,20 @@ def make_resolver(
     exists: Callable[[RelPath], bool],
     source_roots: Sequence[RelPath | ImportRoot] | None = None,
     pytest_imports: Callable[[str], PytestImports] | None = None,
-) -> Callable[[ImportFact], RelPath | None]:
-    """``imported_name_map`` に渡す ``resolve`` を作る（1 つのファイルの import を解決する）。
+    is_dir: Callable[[RelPath], bool] | None = None,
+) -> ImportResolver:
+    """``imported_name_map`` に渡す ``resolve`` を作る（1 つのファイルの import を解決する。``ImportResolver``）。
 
-    Python の絶対 import の根は、``source_roots`` を渡せばそれ、渡さなければ ``python_import_roots``（``pytest_imports`` は
-    プロジェクトのディレクトリ → pytest の設定。最初の絶対 import で 1 回だけ決める）。``exists`` の答えはこの resolve の中で
-    覚えて使い回す（同じパスを何度も調べない）。
+    ``is_dir`` は名前空間パッケージのディレクトリを見分けるときだけ使う（``ImportResolver.namespace_dir``。渡さなければ見分けない）。
     """
-    known: dict[str, bool] = {}
-
-    def cached(rel: RelPath) -> bool:
-        key = str(rel)
-        hit = known.get(key)
-        if hit is None:
-            hit = known[key] = bool(exists(rel))
-        return hit
-
-    computed: list[tuple[ImportRoot, ...]] = []
-
-    def roots_for(fact: ImportFact) -> Sequence[RelPath | ImportRoot] | None:
-        if source_roots is not None or language_id not in _PY_FAMILY or fact.is_relative or fact.level > 0:
-            return source_roots
-        if not computed:
-            computed.append(python_import_roots(from_rel, exists=cached, pytest_imports=pytest_imports))
-        return computed[0]
-
-    def resolve(fact: ImportFact) -> RelPath | None:
-        return resolve_module(
-            fact.module,
-            from_rel=from_rel,
-            language_id=language_id,
-            is_relative=fact.is_relative,
-            level=fact.level,
-            source_roots=roots_for(fact),
-            exists=cached,
-        )
-
-    return resolve
+    return ImportResolver(
+        from_rel=from_rel,
+        language_id=language_id,
+        exists=exists,
+        source_roots=source_roots,
+        pytest_imports=pytest_imports,
+        is_dir=is_dir,
+    )
 
 
 # --- 名前の表 ---------------------------------------------------------------------------
@@ -713,6 +818,52 @@ def imported_name_map(
     return out
 
 
+def namespace_name_map(
+    facts: Iterable[ImportFact],
+    resolve: Callable[[ImportFact], RelPath | None],
+    *,
+    internal: Collection[str] = (),
+) -> dict[str, str]:
+    """名前空間パッケージ（ワークスペースの ``__init__.py`` の無いディレクトリ）を束ねた名前 → その絶対のモジュールのパス（BUG-0101）。
+
+    ``import nsp.tools.fmt`` の ``nsp`` → ``"nsp"``、``import nsp.tools as nt`` の ``nt`` → ``"nsp.tools"``、``from nsp import tools`` の
+    ``tools`` → ``"nsp.tools"``。``internal``（``imported_name_map`` の名前。ファイルに解けたもの）と相対 import・再エクスポートは入れない。
+
+    import したパスそのもの（最上位より下）がワークスペースにあるときだけ数える: ``import nsp.tools.fmt`` は ``nsp/tools/fmt.py`` が
+    ファイルか名前空間パッケージのディレクトリ、``import nsp.tools as nt`` / ``from nsp import tools`` は ``nsp/tools`` が名前空間
+    パッケージのディレクトリ。最上位だけ（``import packaging``）や、その下がワークスペースに無い（``import packaging.version``）ものは、
+    同名の外部のパッケージ（Python では普通のパッケージが名前空間パッケージの部分より勝つ）とみなして今までどおり外部にする
+    （Lucianke 自身の ``packaging/`` と外部の ``packaging``）。``resolve`` が ``ImportResolver`` で ``is_dir`` を持つときだけ見分ける
+    （それ以外は空）。Python のモジュール直下の import だけを渡す。
+    """
+    out: dict[str, str] = {}
+    if not isinstance(resolve, ImportResolver):
+        return out
+    for fact in facts:
+        if fact.reexport or fact.is_relative or fact.level > 0 or (fact.kind == "import" and "." not in fact.module):
+            continue
+        if fact.kind == "import" and not fact.names:
+            head = fact.module.split(".")[0]
+            full = ImportFact(fact.module, [], False, 0, _NO_RANGE, "import")
+            if (
+                head not in internal
+                and resolve.namespace_dir(head) is not None
+                and (resolve(full) is not None or resolve.namespace_dir(fact.module) is not None)
+            ):
+                out[head] = head
+            continue
+        if fact.kind == "import":
+            bindings = [(alias, fact.module) for name, alias in fact.names if name == "*" and alias]
+        elif fact.kind == "from" and fact.module:
+            bindings = [(alias or name, f"{fact.module}.{name}") for name, alias in fact.names if name != "*"]
+        else:
+            continue
+        for bound, module in bindings:
+            if bound and bound not in internal and resolve.namespace_dir(module) is not None:
+                out[bound] = module
+    return out
+
+
 def dotted_module_path(
     dotted: str,
     *,
@@ -720,38 +871,59 @@ def dotted_module_path(
     names: Mapping[str, tuple[RelPath, str]],
     resolve: Callable[[ImportFact], RelPath | None],
     exists: Callable[[RelPath], bool],
-) -> RelPath | None:
+    namespaces: Mapping[str, str] | None = None,
+) -> RelPath | str | None:
     """点つきのモジュールのパス ``dotted``（``pkg.helpers``。先頭はモジュール直下の import が束ねた名前）→ そのサブモジュールのファイル（BUG-0093）。
 
     * 先頭の名前がモジュールのファイルに束ねられている（``import pkg.x`` の ``pkg``・``import a.b as ab``・``from pkg import sub``。
       ``names`` は ``imported_name_map``）: そのファイルがパッケージ（``__init__.py(i)``）なら、そのディレクトリの下で残りの名前を
       ``<mod>.py`` → ``<mod>/__init__.py`` → ``<mod>.pyi`` → ``<mod>/__init__.pyi`` の順に探す（``import`` と同じ）。
-    * 先頭の名前が ``import head.x`` の ``head`` で、``head`` 自身はワークスペースのファイルに解けない（``__init__.py`` の無い名前空間
-      パッケージ）: ``dotted`` を絶対 import として解く（``resolve``）。標準ライブラリの名前は解かない（``os.path`` は外部のまま）。
+    * 先頭の名前が名前空間パッケージを束ねている（``namespaces``。``namespace_name_map``）か、``import head.x`` の ``head`` で
+      ``head`` 自身はワークスペースのファイルに解けない: 束ねたモジュールのパスに残りを足した点つきのパスを絶対 import として解く
+      （``resolve``）。標準ライブラリの名前は解かない（``os.path`` は外部のまま）。
 
-    見つからなければ ``None``（呼び手は今までどおり外部・名前だけにする）。Python 以外は呼ばない。
+    ファイルが無く、その点つきのパスがワークスペースの名前空間パッケージのディレクトリ（``__init__.py`` の無いディレクトリ）なら
+    ``NAMESPACE_PACKAGE``（参照でも外部でもない。BUG-0101）。先頭の名前だけ（``dotted`` に点が無い）は、名前空間パッケージを
+    束ねた名前なら ``NAMESPACE_PACKAGE``、それ以外は ``None``。ディレクトリを見分けるのは ``resolve`` が ``ImportResolver`` で
+    ``is_dir`` を持つときだけ。見つからなければ ``None``（呼び手は今までどおり外部・名前だけにする）。Python 以外は呼ばない。
     """
     head, _, rest = dotted.partition(".")
-    if not head or not rest:
+    if not head:
         return None
-    parts = rest.split(".")
+    parts = rest.split(".") if rest else []
     if any(not p.isidentifier() for p in parts):
         return None
     bound = names.get(head)
     if bound is not None:
+        if not parts:
+            return None
         path, original = bound
         if original != "*":
             return None  # 名前（クラス・関数・変数）の属性。モジュールではない
         base, leaf = posixpath.split(str(path))
         if leaf not in ("__init__.py", "__init__.pyi"):
             return None  # パッケージでないモジュールはサブモジュールを持たない
-        return _first_existing(_py_candidates(base, parts), exists)
-    if head in sys.stdlib_module_names:
+        found = _first_existing(_py_candidates(base, parts), exists)
+        if found is None and isinstance(resolve, ImportResolver) and resolve.namespace_subdir(base, parts) is not None:
+            return NAMESPACE_PACKAGE  # 普通のパッケージの下の名前空間パッケージ（``pkg/nsdir/`` に ``__init__.py`` が無い）
+        return found
+    if namespaces and head in namespaces:
+        module = namespaces[head]
+    elif head in sys.stdlib_module_names or not parts:
         return None
-    for fact in facts:
-        if fact.kind == "import" and not fact.names and fact.module.split(".")[0] == head and not fact.reexport:
-            return resolve(replace(fact, module=dotted))
-    return None
+    elif any(
+        f.kind == "import" and not f.names and f.module.split(".")[0] == head and not f.reexport for f in facts
+    ):
+        module = head
+    else:
+        return None
+    if not parts:
+        return NAMESPACE_PACKAGE  # 名前空間パッケージを束ねた名前そのもの（``namespaces`` が見分け済み）
+    full = ".".join([module, *parts])
+    found = resolve(ImportFact(full, [], False, 0, _NO_RANGE, "import"))
+    if found is None and isinstance(resolve, ImportResolver) and resolve.namespace_dir(full) is not None:
+        return NAMESPACE_PACKAGE
+    return found
 
 
 def wildcard_sources(
@@ -766,6 +938,67 @@ def wildcard_sources(
             if target is not None and target not in out:
                 out.append(target)
     return out
+
+
+def module_all_names(parsed: ParsedFile) -> tuple[str, ...] | None:
+    """Python のモジュール直下の ``__all__`` の名前（文書順・重複なし。BUG-0100 の ``from x import *`` の再公開）。
+
+    読む文: ``__all__ = [...]`` / ``(...)``（注釈つきも）、``__all__ += [...]``、``__all__.extend([...])``、``__all__.append("x")``。
+    どれも文字列のリテラルだけで書かれていればその名前、``__all__`` が無い・リテラルでない部分がある（``__all__ = base.__all__ + [...]``）
+    なら ``None``（呼び手は公開名〈``_`` で始まらない名前〉の規則に倒す）。
+    """
+    src = parsed.source
+    names: list[str] = []
+    seen = False
+    for stmt in parsed.tree.root_node.named_children:
+        if stmt.type != "expression_statement" or not stmt.named_children:
+            continue
+        expr = stmt.named_children[0]
+        value: Node | None = None
+        mode = ""
+        if expr.type in ("assignment", "augmented_assignment"):
+            left = expr.child_by_field_name("left")
+            if left is None or left.type != "identifier" or _text(left, src) != "__all__":
+                continue
+            value = expr.child_by_field_name("right")
+            if expr.type == "assignment":
+                mode = "set"
+            else:
+                op = expr.child_by_field_name("operator")
+                mode = "extend" if op is not None and _text(op, src) == "+=" else "bad"
+        elif expr.type == "call":
+            fn = expr.child_by_field_name("function")
+            obj = fn.child_by_field_name("object") if fn is not None and fn.type == "attribute" else None
+            attr = fn.child_by_field_name("attribute") if fn is not None and fn.type == "attribute" else None
+            if obj is None or attr is None or obj.type != "identifier" or _text(obj, src) != "__all__":
+                continue
+            mode = {"extend": "extend", "append": "append"}.get(_text(attr, src), "bad")
+            args = expr.child_by_field_name("arguments")
+            items = [a for a in args.named_children if a.type != "comment"] if args is not None else []
+            value = items[0] if len(items) == 1 else None
+        else:
+            continue
+        seen = True
+        literal = _literal(value, src)
+        if mode == "append" and isinstance(literal, str):
+            literal = [literal]
+        if mode == "bad" or not isinstance(literal, (list, tuple)) or not all(isinstance(x, str) for x in literal):
+            return None
+        if mode == "set":
+            names = []
+        for x in literal:
+            if x not in names:
+                names.append(x)
+    return tuple(names) if seen else None
+
+
+def _literal(node: Node | None, src: bytes) -> object:
+    if node is None:
+        return None
+    try:
+        return ast.literal_eval(_text(node, src))
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
 
 
 def _external_urn(package: str, qualified: str | None = None) -> str | None:

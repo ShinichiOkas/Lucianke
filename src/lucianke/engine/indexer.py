@@ -56,13 +56,14 @@ from lucianke.core.textpos import LineIndex
 from lucianke.core.urn import CodeSel, Urn, parse
 from lucianke.engine import reresolve
 from lucianke.engine.rank_scheduler import RANK_DEBOUNCE_S, RankScheduler
-from lucianke.index import inherited, queries, rank
+from lucianke.index import inherited, queries, rank, reexports
 from lucianke.index.connection import ReaderPool
 from lucianke.index.ingest import (
     AttrDefFact,
     FileFacts,
     IngestStats,
     NameCallFact,
+    ReexportFact,
     RelationFact,
     SuperRefFact,
     SymbolExtra,
@@ -76,12 +77,16 @@ from lucianke.index.writer import IndexWriter
 from lucianke.syntax import heuristic, relations
 from lucianke.syntax.builtin_names import BUILTINS_PACKAGE, GLOBALS_PACKAGE
 from lucianke.syntax.imports import (
+    NAMESPACE_PACKAGE,
     ImportFact,
     dotted_module_path,
     external_name_map,
     extract_imports,
     imported_name_map,
     make_resolver,
+    module_all_names,
+    namespace_name_map,
+    wildcard_sources,
 )
 from lucianke.syntax.parsers import TreeCache
 from lucianke.syntax.support import get_adapter, get_support
@@ -219,6 +224,7 @@ class _Extracted:
     super_refs: list[SuperRefFact]
     attr_defs: list[AttrDefFact]
     var_types: list[VarTypeFact]
+    reexports: list[ReexportFact] = field(default_factory=list)
 
 
 def _now() -> str:
@@ -433,8 +439,10 @@ class Indexer:
         existed = await asyncio.to_thread(self._known_sha, RelPath(path)) is not None
         if not existed:
             return False
-        # 消えたファイルを import していた側の関係を同じトランザクションで解き直す（BUG-0025）
-        importers = await reresolve.prepare_importers(self, [path])
+        # 消えたファイルを import していた側・そのファイルの名前をたどって整えた側（BUG-0100）の関係を同じトランザクションで解き直す（BUG-0025）
+        importers = await reresolve.prepare_importers(
+            self, [path], export_changes={path: {reexports.ALL_NAMES}}
+        )
 
         def job(conn: object) -> bool:
             removed = remove_file(conn, ws_id, path)  # type: ignore[arg-type]
@@ -511,6 +519,8 @@ class Indexer:
         ingested: set[str] = set()
         # 既存でシンボルの集合が変わったファイル（import している側を解き直す。BUG-0034）
         names_changed: list[str] = []
+        # 既存で「公開する名前」が変わったファイル → 変わった名前（その名前をたどって整えた側を解き直す。BUG-0100）
+        exports_changed: dict[str, frozenset[str]] = {}
 
         async def flush() -> None:
             nonlocal pending, batch
@@ -520,6 +530,8 @@ class Indexer:
                     ingested.add(s.path)
                     if s.symbol_set_changed and not s.file_created:
                         names_changed.append(s.path)
+                    if s.export_names_changed:
+                        exports_changed[s.path] = s.export_names_changed
                 pending = None
             if batch:
                 pending = asyncio.ensure_future(self._submit_batch(batch))
@@ -563,6 +575,7 @@ class Indexer:
                 removed=gone,
                 skip_file_ids=set(file_ids),
                 changed=names_changed,
+                export_changes=exports_changed,
                 configs=sorted(p for p in ingested if reresolve.is_pytest_config(p)),
             )
         if report.indexed or report.removed or not await asyncio.to_thread(self._ranks_ready):
@@ -889,6 +902,7 @@ class Indexer:
         super_refs: Sequence[SuperRefFact] = (),
         attr_defs: Sequence[AttrDefFact] = (),
         var_types: Sequence[VarTypeFact] = (),
+        reexports: Sequence[ReexportFact] = (),
     ) -> FileFacts:
         support = get_support(detected.language_id)
         extra_globs = tuple(getattr(support, "test_path_globs", ()) or ())
@@ -911,6 +925,7 @@ class Indexer:
             super_refs=tuple(super_refs),
             attr_defs=tuple(attr_defs),
             var_types=tuple(var_types),
+            reexports=tuple(reexports),
         )
 
     def _analyze_code(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
@@ -951,6 +966,7 @@ class Indexer:
             super_refs=extracted.super_refs,
             attr_defs=extracted.attr_defs,
             var_types=extracted.var_types,
+            reexports=extracted.reexports,
         )
 
     def _relations(
@@ -969,11 +985,16 @@ class Indexer:
         ``super().name``（``super_of``）は ``SuperRefFact``（内部表 ``_member_refs`` の ``via_super = 1``）にし、整えが基底の C3 線形化から
         先を決める（BUG-0081）。インスタンス属性の定義（``_attr_defs``。BUG-0095）とモジュール直下の変数の型（``_var_types``。BUG-0094）も添える。
         点つきのモジュールのパス（``pkg.helpers``）は、import 表とファイルの在り処からサブモジュールに解く（BUG-0093。調べたパスは語幹に残す）。
+        名前空間パッケージ（``__init__.py`` の無いディレクトリ）を束ねた名前とそのディレクトリは、参照にも外部にもしない（BUG-0101。
+        調べたディレクトリは ``?dir:`` の語幹に残す）。Python はモジュール直下の import が束ねた名前・``from x import *``・``__all__`` を
+        ``ReexportFact``（内部表 ``_reexports``）にし、整えが再び公開した名前を定義元までたどる（BUG-0100。``index/reexports.py``）。
         """
         ws_id = self._ws.workspace_id
         external: dict[str, str] = {}
+        namespaces: dict[str, str] = {}
         module_facts: list[ImportFact] = []
         resolver: Callable[[ImportFact], RelPath | None] | None = None
+        exports: list[ReexportFact] = []
         # def / class の中の import 文（開始位置ごと）
         nested: dict[relations.ImportKey, list[ImportFact]] = {}
         try:
@@ -990,6 +1011,7 @@ class Indexer:
                 language_id=lang,
                 exists=reresolve.ProbeRecorder(self._exists, probes),
                 pytest_imports=pytest_imports,
+                is_dir=reresolve.DirProbeRecorder(self._is_dir, probes),
             )
             module_facts = [f for f in facts if not f.nested]
             for f in facts:
@@ -997,6 +1019,9 @@ class Indexer:
                     nested.setdefault((f.range.start.line, f.range.start.col), []).append(f)
             name_map = imported_name_map(module_facts, resolver)
             external = external_name_map(module_facts, language_id=lang, internal=name_map)
+            if lang == "python":
+                namespaces = namespace_name_map(module_facts, resolver, internal=name_map)
+                exports = self._exports(parsed, module_facts, resolver, name_map, external)
         except Exception:
             _log.warning("import resolution failed for %s", rel, exc_info=True)
             name_map = {}
@@ -1028,8 +1053,11 @@ class Indexer:
                     names=name_map,
                     resolve=resolver,
                     exists=reresolve.ProbeRecorder(self._exists, probes),
+                    namespaces=namespaces,
                 )
-                return None if found is None else str(Urn(ws_id, str(found)))
+                if found is None or found == NAMESPACE_PACKAGE:
+                    return found
+                return str(Urn(ws_id, str(found)))
             except Exception:
                 _log.warning("dotted module resolution failed for %s in %s", dotted, rel, exc_info=True)
                 return None
@@ -1108,10 +1136,45 @@ class Indexer:
             AttrDefFact(class_urn=a.class_urn, name=a.name, line=a.line, col=a.col) for a in detailed.attr_defs
         ]
         var_types = [VarTypeFact(var_urn=v.var_urn, type_urn=v.type_urn) for v in detailed.var_types]
-        return _Extracted(rel_facts, name_calls, super_refs, attr_defs, var_types)
+        return _Extracted(rel_facts, name_calls, super_refs, attr_defs, var_types, exports)
+
+    def _exports(
+        self,
+        parsed: object,
+        module_facts: list[ImportFact],
+        resolver: Callable[[ImportFact], RelPath | None],
+        name_map: dict[str, tuple[RelPath, str]],
+        external: dict[str, str],
+    ) -> list[ReexportFact]:
+        """Python のモジュール直下の import が束ねた名前（他のファイルが ``from この import name`` で使える）・``from x import *`` の
+        ワークスペースの先・``__all__`` の名前（BUG-0100。内部表 ``_reexports``）。束ねた先は ``urn_of`` と同じ URN（モジュールは ``#`` なし）。"""
+        ws_id = self._ws.workspace_id
+        out: list[ReexportFact] = []
+        for name, (path, original) in name_map.items():
+            if original == "default":
+                continue
+            try:
+                urn = Urn(ws_id, str(path)) if original == "*" else Urn(ws_id, str(path), CodeSel(original))
+            except ValueError:
+                continue
+            out.append(ReexportFact(name=name, target_urn=str(urn), kind="import", ord=len(out)))
+        for name, urn_text in external.items():
+            out.append(ReexportFact(name=name, target_urn=urn_text, kind="import", ord=len(out)))
+        for source in wildcard_sources(module_facts, resolver):
+            try:
+                urn_text = str(Urn(ws_id, str(source)))
+            except ValueError:
+                continue
+            out.append(ReexportFact(name="*", target_urn=urn_text, kind="star", ord=len(out)))
+        for name in module_all_names(parsed) or ():  # type: ignore[arg-type]
+            out.append(ReexportFact(name=name, target_urn="", kind="all", ord=len(out)))
+        return out
 
     def _exists(self, rel: RelPath) -> bool:
         return (self._ws.root / str(rel)).is_file() and not is_excluded(self._ws, rel)
+
+    def _is_dir(self, rel: RelPath) -> bool:
+        return bool(str(rel)) and (self._ws.root / str(rel)).is_dir() and not is_excluded(self._ws, rel)
 
     def _analyze_adapter(self, rel: RelPath, loaded: _Loaded, data: bytes, detected: Detected) -> FileFacts:
         """Tier 3 と ``.ipynb``: ``files`` 行と、データ形式アダプタのシンボル（最上位の節。無ければ ``files`` 行だけ）。
@@ -1253,8 +1316,12 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
     * ``target_file_id`` を目標のシンボルの持ち主で埋める（目標のファイルが後から取り込まれた場合に備える）。
     * 消す前に、受け手のクラスに無いメンバー（``self.helper()`` の ``Sub.helper``）を指す行を ``_member_refs`` に退避し、最後に
       基底クラスを C3 の順にたどって結ぶ。整えるファイルのクラスの派生クラスを受け手にする退避行も結び直す（BUG-0075。``index/inherited.py``）。
+    * いちばん先に、再び公開した名前（``from pkg import flush`` の ``pkg/__init__.py#flush``）を定義元までたどって目標と変数の型を
+      書き換える（BUG-0100。``index/reexports.py``）。たどった先が継承したメンバーなら、続く退避で基底から結ばれる。
     """
+    exports = reexports.ReexportResolver(conn)  # type: ignore[arg-type]
     for file_id in file_ids:
+        reexports.redirect_reexports(conn, file_id, exports)  # type: ignore[arg-type]
         _redirect_overloads(conn, file_id)
         inherited.park_member_refs(conn, file_id)  # type: ignore[arg-type]
         conn.execute(  # type: ignore[attr-defined]

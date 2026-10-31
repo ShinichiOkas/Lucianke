@@ -45,7 +45,12 @@
 
   import した名前（``from conf import settings``）の ``settings.reload()`` は ``conf.py#settings.reload`` になる。``settings`` が変数なら、
   索引の整え（``index/inherited.py``）が定義元の変数の型（``var_types``。``settings = Settings()``・``settings: Settings = ...``）の
-  メンバーに結ぶか、型が分からなければ名前だけの呼び出し・参照にする（BUG-0094）。
+  メンバーに結ぶか、型が分からなければ名前だけの呼び出し・参照にする（BUG-0094）。``from pkg import flush`` の ``pkg/__init__.py#flush``
+  のような再び公開した名前は、整え（``index/reexports.py``）が定義元までたどる（BUG-0100）。
+
+  名前空間パッケージ（``__init__.py`` の無いワークスペースのディレクトリ）を束ねた名前とそのディレクトリ（``import nsp.tools.fmt`` の
+  ``nsp``・``nsp.tools``）は、``resolve_dotted`` が ``NAMESPACE_PACKAGE`` と答える。その読みは参照を作らず、外部にもせず、名前だけにも
+  しない。``import nsp.tools.fmt`` の import 文の行は import したモジュールのファイルへ（BUG-0101）。
 
 * 抽出の添え物（``extract_relations_detailed``）: インスタンス属性の定義（``self.x = ...`` / ``this.x = ...``。名前の一致の候補。
   BUG-0095）と、モジュール直下の変数の構文から分かる型（BUG-0094）。
@@ -75,7 +80,7 @@ from lucianke.core.mro import TRANSPARENT_EXTERNAL_BASES, c3_linearize
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
 from lucianke.syntax.builtin_names import JS_GLOBALS, PYTHON_BUILTINS
 from lucianke.syntax.guards import guard_for
-from lucianke.syntax.imports import JS_FUNCTION_NODES, js_require_bindings
+from lucianke.syntax.imports import JS_FUNCTION_NODES, NAMESPACE_PACKAGE, js_require_bindings
 from lucianke.syntax.types import ParsedFile
 
 __all__ = [
@@ -642,6 +647,13 @@ class _Extractor:
             target = resolve(name)
         if target is None and imp.module and imp.alias is None:
             target = resolve(name.split(".")[0])
+        if key is None and (target is None or target.startswith(_EXTERNAL_PREFIX)):
+            bound = imp.alias or (name.split(".")[0] if imp.module else name)
+            if self._namespace_name(bound):
+                # 名前空間パッケージ（BUG-0101）: 外部にしない。``import nsp.tools.fmt`` は import したモジュールのファイルへ
+                # （束ねる先頭の ``nsp`` にはファイルが無い）。ディレクトリそのもの（``import nsp.tools as nt``）は行を作らない
+                leaf = self._resolve_dotted_raw(name) if imp.module and imp.alias is None and "." in name else None
+                target = leaf if leaf is not None and leaf != NAMESPACE_PACKAGE else None
         container = self._container(chain)
         return RelationCandidate(
             source_urn=str(container.urn) if container is not None else self.file_urn,
@@ -765,6 +777,8 @@ class _Extractor:
         top = self.by_qualified.get(name)
         if top is not None:
             return False, str(top.urn)
+        if self._namespace_name(name):
+            return False, None  # 名前空間パッケージ（ワークスペースのディレクトリ）そのもの: 参照でも外部でもない（BUG-0101）
         return False, self.resolve(name) or self.resolve_builtin(name)
 
     def _is_local(self, name: str, node: Node) -> bool:
@@ -788,6 +802,8 @@ class _Extractor:
         whole = node.parent
         if whole is not None and whole.type == "attribute":
             module = self._dotted_module(whole, node)
+            if module == NAMESPACE_PACKAGE:
+                return None, True  # ``nsp.tools`` の ``tools`` は名前空間パッケージのディレクトリ: 参照でも外部でもない（BUG-0101）
             if module is not None:
                 return module, True  # ``pkg.helpers`` の ``helpers`` はサブモジュールそのものへの参照（BUG-0093）
         ref = self._type_ref(recv, node, chain)
@@ -954,8 +970,9 @@ class _Extractor:
             )  # クラス名・モジュール名そのもの（``Foo.create()``、``mod.f()``）
         if t in _ATTRIBUTE_NODES:
             module = self._dotted_module(recv, node)
-            if module is not None:
-                # ``import pkg.helpers`` の ``pkg.helpers.flush()``: 受け手はサブモジュール（``flush`` はその関数。BUG-0093）
+            if module is not None and module != NAMESPACE_PACKAGE:
+                # ``import pkg.helpers`` の ``pkg.helpers.flush()``: 受け手はサブモジュール（``flush`` はその関数。BUG-0093）。
+                # 名前空間パッケージのディレクトリ（``nsp.ext``）の先がワークスペースに無ければ、下の外部の連鎖（別の場所の部分）に倒す
                 return ("urn", module)
             # ``a.b`` の型は ``b`` の型（``a`` の型ではない。BUG-0079）。構文から分かるときだけ決める
             obj = recv.child_by_field_name("object")
@@ -1011,6 +1028,14 @@ class _Extractor:
         if dotted not in self._dotted_cache:
             self._dotted_cache[dotted] = self._resolve_dotted_raw(dotted)
         return self._dotted_cache[dotted]
+
+    def _namespace_name(self, name: str) -> bool:
+        """モジュール直下の import が名前空間パッケージ（``__init__.py`` の無いワークスペースのディレクトリ）を束ねた名前か（BUG-0101）。"""
+        if self._resolve_dotted_raw is None or self.family != _PYTHON:
+            return False
+        if name not in self._dotted_cache:
+            self._dotted_cache[name] = self._resolve_dotted_raw(name)
+        return self._dotted_cache[name] == NAMESPACE_PACKAGE
 
     def _looks_like_class(self, name: str) -> bool:
         local = self.by_qualified.get(name)

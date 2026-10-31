@@ -17,10 +17,14 @@ from tree_sitter import Language, Parser
 from lucianke.core.model import Position, RelPath
 from lucianke.core.textpos import LineIndex
 from lucianke.syntax.imports import (
+    NAMESPACE_PACKAGE,
     ImportFact,
+    dotted_module_path,
     extract_imports,
     imported_name_map,
     make_resolver,
+    module_all_names,
+    namespace_name_map,
     resolve_module,
     wildcard_sources,
 )
@@ -468,3 +472,71 @@ def test_facts_are_in_document_order() -> None:
 @pytest.mark.parametrize("language_id", ["python", "typescript", "tsx", "javascript"])
 def test_empty_source_has_no_imports(language_id: str) -> None:
     assert _facts(language_id, "") == []
+
+
+# --- Python: __all__（BUG-0100）・名前空間パッケージ（BUG-0101） -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('__all__ = ["a", "b"]\n', ("a", "b")),
+        ("__all__ = ('a',)\n__all__ += ['b']\n__all__.append('c')\n__all__.extend(['a', 'd'])\n", ("a", "b", "c", "d")),
+        ('__all__: list[str] = ["x"]\n__all__ = ["y"]\n', ("y",)),
+        ("__all__ = []\n", ()),
+        ("x = 1\n", None),
+        ('__all__ = ["a"] + base.__all__\n', None),
+        ('__all__ = ["a"]\n__all__ += names\n', None),
+        ('def f():\n    __all__ = ["inner"]\n', None),
+    ],
+)
+def test_module_all_names_reads_literal_all(source: str, expected: tuple[str, ...] | None) -> None:
+    assert module_all_names(_parsed("python", source)) == expected
+
+
+def test_namespace_packages_are_told_apart_from_files_and_externals() -> None:
+    """``nsp``・``nsp/tools`` に ``__init__.py`` が無いワークスペースのディレクトリは名前空間パッケージ（BUG-0101）。"""
+    files = {"nsp/tools/fmt.py", "pkg/__init__.py", "pkg/nsdir/mod.py", "src/deep/ns/leaf.py"}
+    dirs = {"nsp", "nsp/tools", "pkg", "pkg/nsdir", "src", "src/deep", "src/deep/ns", "json", "packaging"}
+    resolve = make_resolver(
+        from_rel=RelPath("use.py"),
+        language_id="python",
+        exists=_exists(*files),
+        is_dir=lambda rel: str(rel) in dirs,
+    )
+    assert resolve.namespace_dir("nsp") == "nsp"
+    assert resolve.namespace_dir("nsp.tools") == "nsp/tools"
+    assert resolve.namespace_dir("nsp.tools.fmt") is None  # ファイル
+    assert resolve.namespace_dir("pkg") is None  # 普通のパッケージ
+    assert resolve.namespace_dir("deep.ns") == "src/deep/ns"  # src の根
+    assert resolve.namespace_dir("json") is None  # 標準ライブラリの名前（``json/`` があっても標準ライブラリ）
+    assert resolve.namespace_dir("missing") is None
+    facts = _facts(
+        "python",
+        "import nsp.tools.fmt\nimport nsp.tools as nt\nfrom nsp import tools, gone\nimport pkg\nimport os.path\n"
+        "import packaging\nimport packaging.version\nimport packaging as pk\nfrom packaging import version\n",
+    )
+    names = imported_name_map(facts, resolve)
+    namespaces = namespace_name_map(facts, resolve, internal=names)
+    # ``packaging/`` はワークスペースのディレクトリでも、import したパス（最上位だけ・``packaging.version``）はワークスペースに
+    # 無いので、同名の外部のパッケージとみなす（外部のまま）
+    assert namespaces == {"nsp": "nsp", "nt": "nsp.tools", "tools": "nsp.tools"}
+
+    def dotted(path: str) -> str | None:
+        return dotted_module_path(
+            path, facts=facts, names=names, resolve=resolve, exists=_exists(*files), namespaces=namespaces
+        )
+
+    assert dotted("nsp") == NAMESPACE_PACKAGE
+    assert dotted("nsp.tools") == NAMESPACE_PACKAGE
+    assert dotted("nsp.tools.fmt") == "nsp/tools/fmt.py"
+    assert dotted("nt.fmt") == "nsp/tools/fmt.py"
+    assert dotted("tools.fmt") == "nsp/tools/fmt.py"
+    assert dotted("nsp.ext") is None  # ワークスペースに無い部分（呼び手は外部に倒す）
+    assert dotted("pkg.nsdir") == NAMESPACE_PACKAGE  # 普通のパッケージの下の名前空間パッケージ
+    assert dotted("pkg.nsdir.mod") == "pkg/nsdir/mod.py"
+    assert dotted("pkg") is None
+    assert dotted("os.path") is None
+    # is_dir を渡さない resolver は見分けない（今までどおり）
+    plain = make_resolver(from_rel=RelPath("use.py"), language_id="python", exists=_exists(*files))
+    assert namespace_name_map(facts, plain, internal=imported_name_map(facts, plain)) == {}

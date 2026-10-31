@@ -155,28 +155,31 @@ async def test_imported_object_with_a_known_type_binds_to_the_type_member(env: E
 
 
 async def test_imported_object_with_an_unknown_type_goes_to_name_matching(env: Env) -> None:
-    """``loose = make()``（型が分からない）の ``loose.reload()`` と、``pkg/__init__.py`` が再び公開した ``shared``（シンボルではない）の
-    ``shared.reload()`` は ``relations`` に無く、名前だけの呼び出し（``_name_calls``）になる（無い先にも結ばず、捨てもしない）。"""
+    """``loose = make()``（型が分からない）の ``loose.reload()`` は ``relations`` に無く、名前だけの呼び出し（``_name_calls``）になる
+    （無い先にも結ばず、捨てもしない）。``pkg/__init__.py`` が ``from pkg.conf import settings as shared`` で再び公開した ``shared`` の
+    ``shared.reload()`` は、定義元の ``settings``（``Settings()``）までたどって ``Settings.reload`` に ``structural``（BUG-0100）。"""
     loose, shared = line_of("use_conf.py", "loose.reload()"), line_of("use_conf.py", "shared.reload()")
-    assert not any(k == "CALLS" and ln in (loose, shared) for _, k, ln, _ in env.rels("use_conf.py#apply"))
-    assert env.name_rows("use_conf.py#apply") == [("reload", loose, "call"), ("reload", shared, "call")]
+    got = env.rels("use_conf.py#apply")
+    assert not any(k == "CALLS" and ln == loose for _, k, ln, _ in got)
+    assert ("pkg/conf.py#Settings.reload", "CALLS", shared, "structural") in got
+    assert ("pkg/conf.py#settings", "REFERENCES", shared, "structural") in got
+    assert env.name_rows("use_conf.py#apply") == [("reload", loose, "call")]
 
 
 async def test_editing_the_variable_rebinds_the_importer_without_reingesting_it(env: Env) -> None:
     """``loose`` の型が分かるようになれば ``_name_calls`` の行を消して ``Settings.reload`` に結び、分からなくなれば戻す
     （``use_conf.py`` は取り込み直さない）。"""
     line = line_of("use_conf.py", "loose.reload()")
-    shared = ("reload", line_of("use_conf.py", "shared.reload()"), "call")
     before = env.indexer.ingest_calls
     original = env.text("pkg/conf.py")
     env.write("pkg/conf.py", original.replace("loose = make()", "loose = Settings()"))
     await env.indexer.index_file("pkg/conf.py")
     assert ("pkg/conf.py#Settings.reload", "CALLS", line, "structural") in env.rels("use_conf.py#apply")
-    assert env.name_rows("use_conf.py#apply") == [shared]
+    assert env.name_rows("use_conf.py#apply") == []
     env.write("pkg/conf.py", original)
     await env.indexer.index_file("pkg/conf.py")
     assert not any(k == "CALLS" and ln == line for _, k, ln, _ in env.rels("use_conf.py#apply"))
-    assert env.name_rows("use_conf.py#apply") == [("reload", line, "call"), shared]
+    assert env.name_rows("use_conf.py#apply") == [("reload", line, "call")]
     assert env.indexer.ingest_calls == before + 2  # 取り込んだのは pkg/conf.py の 2 回だけ
     assert env.indexer.reingested_importers == 0
 

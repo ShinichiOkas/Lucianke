@@ -1,4 +1,4 @@
--- schema_version: 9
+-- schema_version: 10
 -- PaaD スキーマ。公開部分は仕様書 §9.2 の DDL の写し（差分は tests/unit/test_index_schema.py で検出）。
 -- PRAGMA は接続を開くときに設定する（index/connection.py）。ここには書かない。
 
@@ -272,6 +272,29 @@ CREATE TABLE _var_types (
 );
 CREATE INDEX _var_types_type ON _var_types(type_urn);
 CREATE INDEX _var_types_file ON _var_types(file_id);
+
+-- Python のモジュール直下の import が束ねた名前（BUG-0100。index/reexports.py）。`from pkg import flush` の `pkg/__init__.py#flush`
+-- （import はシンボルにならない）を、関係を整える段が束ねた先（`from .helpers import flush` の `pkg/helpers.py#flush`）までたどる。
+-- kind: import（name → target_urn。モジュールは `#` なし、外部は lk://_ext/...）/ star（`from x import *` の x。name は '*'）/
+-- all（`__all__` の名前。target_urn は空）。取り込みがファイルごとに全置換する。
+CREATE TABLE _reexports (
+  file_id    INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  target_urn TEXT NOT NULL,
+  kind       TEXT NOT NULL,                  -- import / star / all
+  ord        INTEGER NOT NULL                -- 書いた順（同じ名前は後のものが勝つ）
+);
+CREATE INDEX _reexports_name ON _reexports(file_id, name);
+
+-- 再び公開した名前をたどるときに引いた (ファイル, 名前)（見つからなかったものも。BUG-0100。index/reexports.py）。
+-- そのファイルの「公開する名前」が変わったら、依っていたファイル（file_id）を取り込み直す（engine/reresolve.py）。
+CREATE TABLE _reexport_deps (
+  file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,  -- 整えたファイル（たどった側）
+  path    TEXT NOT NULL,                     -- 束ねた名前を引いたファイルのパス（同じワークスペース）
+  name    TEXT NOT NULL,                     -- 引いた名前
+  PRIMARY KEY (file_id, path, name)
+) WITHOUT ROWID;
+CREATE INDEX _reexport_deps_path ON _reexport_deps(path, name);
 
 -- 受け手のクラスに無いメンバーへの参照（`self.helper()`・`s: Sub` の `s.helper()` で helper が基底クラスにある。BUG-0075。index/inherited.py）。
 -- 関係を整える段が relations から移し、受け手のクラスの C3 線形化（INHERITS 行）で最初に見つかったメンバーを先にした relations の行を作る。

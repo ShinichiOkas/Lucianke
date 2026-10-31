@@ -107,8 +107,8 @@ def park_member_refs(conn: sqlite3.Connection, file_id: int) -> int:
     """``file_id`` の行のうち、目標が無く、目標のクラスの部分がワークスペースのクラス・モジュール直下の変数（BUG-0094）である行を
     ``_member_refs`` に移す。移した行数。
 
-    目標のクラスの部分がシンボルでない（``from pkg import shared`` の ``shared`` を ``pkg/__init__.py`` が ``from .conf import settings
-    as shared`` で再び公開している、など）が、そのファイルは索引にある行は、受け手の型が分からないのと同じなので、名前だけの
+    目標のクラスの部分がシンボルでないが、そのファイルは索引にある行（再び公開した名前で、定義元までたどれなかったもの。たどれるものは
+    先に ``index/reexports.redirect_reexports`` が定義元に書き換えている。BUG-0100）は、受け手の型が分からないのと同じなので、名前だけの
     呼び出し・参照（``_name_calls``）にする（黙って捨てない。BUG-0094）。
     """
     marks = ", ".join("?" * len(_PARKED_KINDS))

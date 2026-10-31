@@ -14,7 +14,7 @@ BUG-0093・BUG-0094・BUG-0095 のフィクスチャ（`tests/unit/test_engine_i
 | `use_conf.py` `apply` | `loose.reload()`（`loose = make()`。型が分からない） | 名前だけの呼び出し（`_name_calls`）。T-06 は `heuristic` |
 | `use_conf.py` `apply` | `lock.acquire()`（`lock = Lock()`。外部の型） | `lk://_ext/threading#Lock.acquire` |
 | `use_conf.py` `apply` | `settings.debug`（読み） | `Settings.debug` に `structural` |
-| `use_conf.py` `apply` | `from pkg import shared` の `shared.reload()`（`pkg/__init__.py` が `from pkg.conf import settings as shared` で再び公開。シンボルではない） | 名前だけの呼び出し（`_name_calls`）。T-06 は `heuristic` |
+| `use_conf.py` `apply` | `from pkg import shared` の `shared.reload()`（`pkg/__init__.py` が `from pkg.conf import settings as shared` で再び公開。シンボルではない） | 定義元の `settings`（`Settings()`）までたどって `Settings.reload` に `structural`（BUG-0100。前は名前だけの呼び出し） |
 | `use_attrs.py` `tick` | `mon.stdout_lines += 1`（注釈の無い引数） | 名前だけの参照（`rw`）。`Monitor.stdout_lines` が唯一の候補なので T-06 は `heuristic`（BUG-0095） |
 | `use_attrs.py` `tick` | `mon.samples = mon.samples + 1` | 名前だけの参照（`w` と `r`）。唯一の候補はインスタンス属性 `Monitor.samples`（`self.samples = 0`） |
 | `use_attrs.py` `tick` | `mon.total`（`Monitor.total` とインスタンス属性 `Counter.total`） | 曖昧。T-06 の `Monitor.total` は件数と候補を `data.unattributed_refs` に書く |

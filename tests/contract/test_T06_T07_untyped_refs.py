@@ -137,17 +137,17 @@ async def test_t07_outgoing_lists_the_module_functions(pipeline: Pipeline) -> No
 
 async def test_t06_method_called_through_imported_objects(pipeline: Pipeline) -> None:
     """PC:T-06#2 ``Settings.reload`` の参照: ``settings.reload()``・``typed.reload()`` は型が分かるので ``structural``。
-    ``loose.reload()``（型が分からない）と再び公開した ``shared.reload()`` は名前の一致（``reload`` はワークスペースで唯一）で
-    ``heuristic``・``match: name``。"""
+    ``pkg/__init__.py`` が再び公開した ``shared`` の ``shared.reload()`` は定義元の ``settings`` までたどって ``structural``（BUG-0100）。
+    ``loose.reload()``（型が分からない）は名前の一致（``reload`` はワークスペースで唯一）で ``heuristic``・``match: name``。"""
     r = await refs(pipeline, "pkg/conf.py", "Settings.reload")
     assert sites(r) == {
         ("use_modules.py", line_of("use_modules.py", "conf.settings.reload()"), "call", "structural", None),
         ("use_conf.py", line_of("use_conf.py", "    settings.reload()"), "call", "structural", None),
         ("use_conf.py", line_of("use_conf.py", "typed.reload()"), "call", "structural", None),
         ("use_conf.py", line_of("use_conf.py", "loose.reload()"), "call", "heuristic", "name"),
-        ("use_conf.py", line_of("use_conf.py", "shared.reload()"), "call", "heuristic", "name"),
+        ("use_conf.py", line_of("use_conf.py", "shared.reload()"), "call", "structural", None),
     }
-    assert r.structured["data"]["totals"]["by_name"] == 2
+    assert r.structured["data"]["totals"]["by_name"] == 1
     assert any(
         "Settings.reload is the only method named 'reload' in the workspace" in w for w in r.structured["warnings"]
     ), r.structured["warnings"]

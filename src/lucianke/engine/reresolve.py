@@ -26,6 +26,14 @@ import 元 ``a.py`` を取り込んだあとで ``b.py`` が作られても、``
   設定ファイル（``PYTEST_CONFIG_NAMES``）が取り込まれた・作られた・消えたら、覚えた設定を捨てて読み直し、**いまと違う指紋で解いた
   ファイルだけ** を解き直す（``stale_config_importers``）。設定の中身が同じ（pytest に関係ない鍵だけの編集）なら何もしない。
   サーバーが止まっている間の編集も、次の差分走査が設定ファイルを取り込み直したときに同じ判定で拾う（指紋は索引に残っている）。
+* **名前空間パッケージのディレクトリ**（BUG-0101）: import の解決が「``__init__.py`` の無いディレクトリか」を調べたら、語幹
+  ``?dir:<ディレクトリ>``（``DirProbeRecorder``）を書く。ファイルが作られた・消えたら、その祖先のディレクトリの ``?dir:`` の語幹でも
+  引く（ディレクトリの最初のファイル・最後のファイルで、名前空間パッケージができる・無くなる）。
+* **再び公開した名前**（BUG-0100）: ファイルの取り込み・削除で、そのファイルの「公開する名前」（最上位のシンボル・束ねた名前の先・
+  ``*`` の先・``__all__``。``index/reexports.export_changes``）が変わったら、その名前を連鎖の途中でたどって整えたファイル
+  （``_reexport_deps``。``index/reexports.dependents``）も解き直す。取り込み直した側の「公開する名前」も変われば、その依存も続けて
+  引く（``reexports.MAX_HOPS`` 段まで。同じトランザクションに入れる）。``__init__.py`` の ``from .helpers import flush`` を
+  ``from .impl import flush`` に変えると、``from pkg import flush`` の側は ``pkg/impl.py#flush`` に結び直る。
 """
 
 from __future__ import annotations
@@ -33,10 +41,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Final
 
 from lucianke.core.model import RelPath
+from lucianke.index import reexports
 from lucianke.index.ingest import FileFacts, ingest_file
 from lucianke.workspace.pyenv import PYTEST_CONFIG_NAMES, PytestImports
 
@@ -47,9 +56,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "IMPORTER_BATCH_FILES",
+    "DirProbeRecorder",
     "ProbeRecorder",
     "after_scan",
     "config_stem",
+    "dir_stem",
+    "export_changes_of",
     "find_importers",
     "importers_to_redo",
     "ingest_importers",
@@ -68,6 +80,7 @@ IMPORTER_BATCH_FILES: Final = 50
 _SQL_CHUNK: Final = 500
 _COLLAPSED_NAMES: Final = frozenset({"__init__", "index"})
 _CONFIG_STEM: Final = "?pytest:"
+_DIR_STEM: Final = "?dir:"
 _CONFIG_NAMES: Final = frozenset(PYTEST_CONFIG_NAMES)
 
 
@@ -102,6 +115,34 @@ def stem_of(path: str) -> str:
     if base in _COLLAPSED_NAMES:
         return head
     return f"{head}/{base}" if head else base
+
+
+def dir_stem(path: str) -> str:
+    """ディレクトリ ``path`` を「名前空間パッケージか」と調べたことを表す語幹（``?dir:<path>``。パスの語幹とは重ならない）。"""
+    return f"{_DIR_STEM}{path}"
+
+
+def _ancestor_dir_stems(path: str) -> set[str]:
+    out: set[str] = set()
+    head = posixpath.dirname(str(path))
+    while head:
+        out.add(dir_stem(head))
+        head = posixpath.dirname(head)
+    return out
+
+
+class DirProbeRecorder:
+    """``is_dir`` を包み、調べたディレクトリの語幹 ``?dir:<path>`` を集める（``make_resolver(is_dir=...)`` に渡す。BUG-0101）。"""
+
+    __slots__ = ("_is_dir", "stems")
+
+    def __init__(self, is_dir: Callable[[RelPath], bool], sink: set[str]) -> None:
+        self._is_dir = is_dir
+        self.stems = sink
+
+    def __call__(self, rel: RelPath) -> bool:
+        self.stems.add(dir_stem(str(rel)))
+        return self._is_dir(rel)
 
 
 class ProbeRecorder:
@@ -139,15 +180,24 @@ def find_importers(
 
 
 async def prepare_importers(
-    ix: Indexer, paths: Iterable[str], *, skip_file_ids: Collection[int] = ()
+    ix: Indexer,
+    paths: Iterable[str],
+    *,
+    skip_file_ids: Collection[int] = (),
+    export_changes: Mapping[str, Collection[str]] | None = None,
 ) -> list[FileFacts]:
-    """``paths`` の語幹を調べて取り込まれたファイルを今のファイルシステムで解析し直した事実（DB には書かない）。
+    """``paths`` の語幹（と祖先のディレクトリの ``?dir:`` の語幹）を調べて取り込まれたファイル、``export_changes``（パス → 変わった
+    公開する名前）をたどって整えたファイル（BUG-0100）を、今のファイルシステムで解析し直した事実（DB には書かない）。
 
+    取り込み直す側の「公開する名前」も変わるなら、その名前に依るファイルも続けて加える（``reexports.MAX_HOPS`` 段まで）。
     読み込めない・消えた・解析に失敗した（``files`` 行だけに落ちる）ものは入れない（いまある行を壊さない。消えた分は監視の ``remove`` が来る）。
     """
     paths = [str(p) for p in paths]
     stems = {stem_of(p) for p in paths}
-    if not stems:
+    for p in paths:
+        stems |= _ancestor_dir_stems(p)
+    changes = {str(k): set(v) for k, v in (export_changes or {}).items() if v}
+    if not paths and not changes:
         return []
     ws_id = ix.workspace.workspace_id
     # pytest の設定ファイルが変わった・できた・消えた: 覚えた設定を捨てて読み直し、違う設定で解いた側も解き直す（BUG-0082）
@@ -157,27 +207,66 @@ async def prepare_importers(
 
     def lookup() -> list[tuple[int, str]]:
         with ix._readers.reader() as conn:  # noqa: SLF001
-            found = dict(find_importers(conn, ws_id, stems, skip_file_ids))
+            found = dict(find_importers(conn, ws_id, stems, skip_file_ids)) if stems else {}
             for project, stem in current.items():
                 found.update(stale_config_importers(conn, ws_id, project, stem, skip_file_ids))
+            found.update(reexports.dependents(conn, ws_id, changes, skip_file_ids))
             return sorted(found.items(), key=lambda kv: kv[1])
 
-    own = set(paths)
+    own = set(paths) | set(changes)
+    done: set[str] = set(own)
     out: list[FileFacts] = []
-    for _file_id, path in await asyncio.to_thread(lookup):
-        if path in own:
-            continue  # 自分自身は対象外（除外に変わっただけで実体が残るファイルを、消した直後に取り込み直さない）
-        try:
-            prepared = await ix._prepare(RelPath(path), None)  # noqa: SLF001
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _log.warning("reresolve: could not prepare %s", path, exc_info=True)
-            continue
-        if prepared is None or prepared == "gone" or prepared.degraded:
-            continue
-        out.append(prepared.facts)
+    todo = await asyncio.to_thread(lookup)
+    for _hop in range(reexports.MAX_HOPS + 1):
+        cascade: dict[str, set[str]] = {}
+        for _file_id, path in todo:
+            if path in done:
+                continue  # 自分自身は対象外（除外に変わっただけで実体が残るファイルを、消した直後に取り込み直さない）
+            done.add(path)
+            try:
+                prepared = await ix._prepare(RelPath(path), None)  # noqa: SLF001
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.warning("reresolve: could not prepare %s", path, exc_info=True)
+                continue
+            if prepared is None or prepared == "gone" or prepared.degraded:
+                continue
+            out.append(prepared.facts)
+            names = await export_changes_of(ix, path, prepared.facts)
+            if names:
+                cascade[path] = set(names)
+        if not cascade:
+            break
+
+        def more(cascade: dict[str, set[str]] = cascade) -> list[tuple[int, str]]:
+            with ix._readers.reader() as conn:  # noqa: SLF001
+                return reexports.dependents(conn, ws_id, cascade, skip_file_ids)
+
+        todo = await asyncio.to_thread(more)
     return out
+
+
+async def export_changes_of(ix: Indexer, path: str, facts: FileFacts) -> frozenset[str]:
+    """``path`` の取り込み済みの状態と、これから取り込む ``facts`` で「公開する名前」が変わった名前（BUG-0100。``reexports.export_changes``）。
+
+    まだ取り込まれていないファイルは ``ALL_NAMES``。書き込みの前に読み取り接続で調べる。
+    """
+    ws_id = ix.workspace.workspace_id
+
+    def lookup() -> frozenset[str]:
+        with ix._readers.reader() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT file_id FROM files WHERE workspace_id = ? AND path = ?", (ws_id, str(path))
+            ).fetchone()
+            return reexports.export_changes(
+                conn,
+                None if row is None else int(row[0]),
+                (rec.qualified_name for rec in facts.symbols),
+                facts.reexports,
+            )
+
+    return await asyncio.to_thread(lookup)
 
 
 async def symbols_changed(ix: Indexer, path: str, facts: FileFacts) -> bool:
@@ -202,11 +291,13 @@ async def importers_to_redo(ix: Indexer, path: str, facts: FileFacts, *, is_new:
     """``index_file`` が ``path`` と同じトランザクションで取り込み直す import 元の事実。
 
     ファイルが新しい（``is_new``）か、シンボルの集合が変わるか、pytest の設定ファイル（中身が変わった。設定が同じなら解き直す側は
-    無い）のときだけ作る（``[]`` なら import 元には触れない）。
+    無い）のときは import 元を、「公開する名前」が変わる（BUG-0100）ときはその名前をたどって整えた側を作る（``[]`` なら触れない）。
     """
-    if not is_new and not is_pytest_config(path) and not await symbols_changed(ix, path, facts):
+    names = frozenset({reexports.ALL_NAMES}) if is_new else await export_changes_of(ix, path, facts)
+    redo = is_new or is_pytest_config(path) or await symbols_changed(ix, path, facts)
+    if not redo and not names:
         return []
-    return await prepare_importers(ix, [path])
+    return await prepare_importers(ix, [path] if redo else [], export_changes={path: names} if names else None)
 
 
 def ingest_importers(conn: sqlite3.Connection, facts: Iterable[FileFacts]) -> list[int]:
@@ -222,9 +313,11 @@ async def after_scan(
     skip_file_ids: Collection[int],
     changed: Sequence[RelPath | str] = (),
     configs: Sequence[RelPath | str] = (),
+    export_changes: Mapping[str, Collection[str]] | None = None,
 ) -> None:
     """``scan`` の最後。この走査で新しく見つかった・消えた・シンボルの集合が変わった（``changed``。BUG-0034）ファイルを
-    import している側と、取り込み直した pytest の設定ファイル（``configs``）と違う設定で import を解いた側（BUG-0082）のうち、
+    import している側と、取り込み直した pytest の設定ファイル（``configs``）と違う設定で import を解いた側（BUG-0082）と、
+    「公開する名前」が変わった（``export_changes``。消えたファイルはすべての名前）名前をたどって整えた側（BUG-0100）のうち、
     この走査で取り込まなかったものを解き直す。
 
     失敗は握る（走査の成否に影響させない）。``data_version`` は進めない（この走査の取り込み・削除がすでに進めている）。
@@ -232,10 +325,14 @@ async def after_scan(
     from lucianke.engine.indexer import _settle_relations  # 循環 import を避けるため遅延
 
     try:
+        changes: dict[str, set[str]] = {str(k): set(v) for k, v in (export_changes or {}).items() if v}
+        for path in removed:
+            changes[str(path)] = {reexports.ALL_NAMES}
         facts = await prepare_importers(
             ix,
             dict.fromkeys((*map(str, created), *map(str, removed), *map(str, changed), *map(str, configs))),
             skip_file_ids=skip_file_ids,
+            export_changes=changes,
         )
         for start in range(0, len(facts), IMPORTER_BATCH_FILES):
             chunk = facts[start : start + IMPORTER_BATCH_FILES]

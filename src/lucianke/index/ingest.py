@@ -34,6 +34,7 @@ __all__ = [
     "FileFacts",
     "IngestStats",
     "NameCallFact",
+    "ReexportFact",
     "RelationFact",
     "SuperRefFact",
     "SymbolExtra",
@@ -162,6 +163,21 @@ class VarTypeFact:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ReexportFact:
+    """内部表 ``_reexports`` の 1 行分: Python のモジュール直下の import が束ねた名前（BUG-0100。``index/reexports.py``）。
+
+    ``kind``: ``import``（``name`` を ``target_urn`` に束ねた。モジュールは ``#`` なしの URN、外部は ``lk://_ext/...``）・``star``
+    （``from x import *`` のワークスペースの先。``name`` は ``*``、``target_urn`` は ``x`` のモジュール）・``all``（``__all__`` の名前。
+    ``target_urn`` は空）。``ord`` は書いた順（同じ名前は後のものが勝つ）。
+    """
+
+    name: str
+    target_urn: str
+    kind: str
+    ord: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SuperRefFact:
     """内部表 ``_member_refs`` の ``via_super = 1`` の 1 行分: ``super().name``（``super(C, self).name``・TS / JS の ``super.name``）の
     参照・呼び出し（BUG-0081）。``class_urn`` は ``C``（探し始めるのは ``C`` の C3 線形化の次のクラスから）。位置は 0 始まり。
@@ -230,6 +246,8 @@ class FileFacts:
     """インスタンス属性の定義（``_attr_defs``。BUG-0095）。``ingest_file`` がファイルごとに全置換する。"""
     var_types: Sequence[VarTypeFact] = field(default_factory=tuple)
     """モジュール直下の変数の型（``_var_types``。BUG-0094）。``ingest_file`` がファイルごとに全置換する。"""
+    reexports: Sequence[ReexportFact] = field(default_factory=tuple)
+    """Python のモジュール直下の import が束ねた名前・``*`` の先・``__all__``（``_reexports``。BUG-0100）。ファイルごとに全置換する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +266,8 @@ class IngestStats:
     external_symbols_added: int = 0
     diagnostics_added: int = 0
     path: str = ""
+    # 「公開する名前」が変わった名前（``*`` はすべて。``index/reexports.export_changes``）。それをたどって整えた側を取り込み直す（BUG-0100）
+    export_names_changed: frozenset[str] = frozenset()
 
     @property
     def symbols_changed(self) -> bool:
@@ -746,6 +766,12 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
             (*values, file_id),
         )
 
+    # 循環 import を避けるため遅延（reexports が ingest を使う）
+    from lucianke.index.reexports import export_changes
+
+    exports_changed = export_changes(
+        conn, None if created else file_id, (rec.qualified_name for rec in facts.symbols), facts.reexports
+    )
     added, updated, unchanged, removed, duplicate = _sync_symbols(conn, file_id, facts)
 
     relations_removed = conn.execute("DELETE FROM relations WHERE source_file_id = ?", (file_id,)).rowcount
@@ -827,6 +853,14 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
             "INSERT OR REPLACE INTO _var_types (file_id, var_urn, type_urn) VALUES (?, ?, ?)",
             [(file_id, v.var_urn, v.type_urn) for v in facts.var_types],
         )
+    conn.execute("DELETE FROM _reexports WHERE file_id = ?", (file_id,))
+    if facts.reexports:
+        conn.executemany(
+            "INSERT INTO _reexports (file_id, name, target_urn, kind, ord) VALUES (?, ?, ?, ?, ?)",
+            [(file_id, r.name, r.target_urn, r.kind, r.ord) for r in facts.reexports],
+        )
+    # 再び公開した名前をたどって引いた (ファイル, 名前) は、関係と一緒に作り直す（整えが足す。index/reexports.py）
+    conn.execute("DELETE FROM _reexport_deps WHERE file_id = ?", (file_id,))
 
     return IngestStats(
         file_id=file_id,
@@ -841,6 +875,7 @@ def ingest_file(conn: sqlite3.Connection, facts: FileFacts, *, now: str | None =
         relations_added=relations_added,
         external_symbols_added=external,
         diagnostics_added=diagnostics_added,
+        export_names_changed=exports_changed,
     )
 
 
