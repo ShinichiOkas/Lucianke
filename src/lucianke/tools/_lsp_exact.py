@@ -61,7 +61,7 @@ from lucianke.index.exact_marks import ExactMark
 from lucianke.index.ingest import RelationFact, upsert_exact_relations
 from lucianke.lsp import features
 from lucianke.lsp.pool import LspHandle
-from lucianke.lsp.pyright_scope import pyright_scope
+from lucianke.lsp.pyright_scope import PyrightScope
 from lucianke.lsp.servers import servers_for
 from lucianke.syntax.relations import extract_relations
 from lucianke.syntax.support import get_support
@@ -335,22 +335,23 @@ def prime_set(
     exclude: str,
     is_open: Callable[[RelPath], bool],
     limit: int = PRIME_MAX,
+    scope: PyrightScope | None = None,
 ) -> PrimeSet:
     """対象の言語 ``language`` で、参照元になりうるのに LSP が探さないファイル（``prime_candidates``）。ブロックする。
 
     * tsserver 系: 名前を含む tsserver 系のファイルすべて（``tsconfig`` の外かどうかは見ない。BUG-0047）。
-    * Python: 名前を含む Python のファイルのうち、basedpyright の解析の対象（``lsp/pyright_scope``）の外のもの（BUG-0132）。
-      利用者の設定が ``include`` / ``exclude`` を書いていない（既定の除外だけ）とき・設定が読めない（判断できない）ときは
-      開かせない（ファイルの一覧も引かない。今までどおり）。
+    * Python: 名前を含む Python のファイルのうち、basedpyright の解析の対象（``scope``。``LspHandle.analysis_scope`` = サーバーが
+      起動のときに読んだもの。``lsp/pyright_scope``）の外のもの（BUG-0132）。``scope`` が無い（設定が読めない・判断できない）とき・
+      利用者の設定が ``include`` / ``exclude`` を書いていない（既定の除外だけ）ときは開かせない（ファイルの一覧も引かない。今までどおり）。
     * ほかの言語: 空。
     """
     if language in TS_FAMILY:
         return prime_candidates(conn, ws, name=name, exclude=exclude, is_open=is_open, limit=limit)
     if language != "python":
         return PrimeSet()
-    scope = pyright_scope(ws.root)
     if scope is None or not scope.narrowed:
         return PrimeSet()
+    inside = scope.contains
     return prime_candidates(
         conn,
         ws,
@@ -359,7 +360,7 @@ def prime_set(
         is_open=is_open,
         limit=limit,
         languages=frozenset({"python"}),
-        outside=lambda rel: not scope.contains(to_abs(ws, rel)),
+        outside=lambda rel: not inside(to_abs(ws, rel)),
     )
 
 
@@ -1422,6 +1423,7 @@ class CallEdgeSource:
             exclude=str(sym.path),
             is_open=handle.documents.is_open,
             limit=PRIME_MAX,
+            scope=getattr(handle, "analysis_scope", None),
         )
 
     def _structural_count(self, urn: str, direction: str, conn: Any = None) -> int:

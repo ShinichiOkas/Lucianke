@@ -739,7 +739,13 @@ def _confirm(db_path: Any, ws_id: str, urn: str, rows: Sequence[queries.Referenc
 def _prime_set(db_path: Any, ws: Workspace, handle: Any, sym: SymbolRecord, language: str) -> lx.PrimeSet:
     with reader(db_path) as conn:
         return lx.prime_set(
-            conn, ws, language, name=sym.name, exclude=str(sym.path), is_open=handle.documents.is_open
+            conn,
+            ws,
+            language,
+            name=sym.name,
+            exclude=str(sym.path),
+            is_open=handle.documents.is_open,
+            scope=getattr(handle, "analysis_scope", None),
         )
 
 

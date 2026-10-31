@@ -226,6 +226,8 @@ def pyws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Workspace:
 
 
 def candidates(ws: Workspace, **kw) -> list[str]:
+    """``prime_set`` の候補。解析の対象は LSP の起動のときに覚えたもの（``LspHandle.analysis_scope``）の代わりにここで引く。"""
+    kw.setdefault("scope", ps.pyright_scope(ws.root))
     got = lx.prime_set(None, ws, "python", name="charge", exclude="src/shop/pay.py", is_open=lambda rel: False, **kw)  # type: ignore[arg-type]
     return [str(p) for p, _ in got.files]
 
@@ -233,8 +235,25 @@ def candidates(ws: Workspace, **kw) -> list[str]:
 def test_python_primes_only_files_outside_the_lsp_scope_that_mention_the_name(pyws: Workspace) -> None:
     write(pyws.root, "pyrightconfig.json", json.dumps({"include": ["src"]}))
     assert candidates(pyws) == ["tests/test_pay.py", "scripts/run.py"]  # テストが先。src は LSP が探す。TS は混ぜない
-    got = lx.prime_set(None, pyws, "python", name="charge", exclude="src/shop/pay.py", is_open=lambda rel: False)  # type: ignore[arg-type]
+    got = lx.prime_set(
+        None,  # type: ignore[arg-type]
+        pyws,
+        "python",
+        name="charge",
+        exclude="src/shop/pay.py",
+        is_open=lambda rel: False,
+        scope=ps.pyright_scope(pyws.root),
+    )
     assert {lid for _, lid in got.files} == {"python"}
+
+
+def test_python_follows_the_scope_the_server_loaded_not_later_edits(pyws: Workspace) -> None:
+    """basedpyright は起動した後の根の設定の編集を受け取らない。候補は渡された（起動のときの）対象で決める。"""
+    write(pyws.root, "pyrightconfig.json", json.dumps({"include": ["src"]}))
+    loaded = ps.pyright_scope(pyws.root)
+    write(pyws.root, "pyrightconfig.json", json.dumps({"include": ["src", "tests", "scripts"]}))
+    assert candidates(pyws, scope=loaded) == ["tests/test_pay.py", "scripts/run.py"]
+    assert candidates(pyws, scope=None) == []  # 対象が分からなければ開かせない
 
 
 def test_python_primes_nothing_when_the_whole_workspace_is_in_scope(pyws: Workspace) -> None:
@@ -269,6 +288,7 @@ def test_python_priming_skips_open_files_and_caps(pyws: Workspace) -> None:
         name="charge",
         exclude="src/shop/pay.py",
         is_open=lambda rel: str(rel) == "tests/test_pay.py",
+        scope=ps.pyright_scope(pyws.root),
     )
     assert [str(p) for p, _ in got.files] == ["scripts/run.py"]
     assert candidates(pyws, limit=1) == ["tests/test_pay.py"]

@@ -59,6 +59,7 @@ from lucianke.core.procs import ProcessRegistry
 from lucianke.lsp.client import LspClient, LspError
 from lucianke.lsp.diagnostics import PUBLISH_DIAGNOSTICS, DiagnosticsHub
 from lucianke.lsp.documents import DocumentRouter, DocumentSync
+from lucianke.lsp.pyright_scope import PyrightScope, pyright_scope
 from lucianke.lsp.servers import (
     LspServerDef,
     Role,
@@ -177,6 +178,9 @@ class LspHandle:
         self.progress: int | None = None
         self.server_name: str | None = None
         self.defn: LspServerDef | None = None
+        # basedpyright / pyright が起動のときに読んだ解析の対象（include / exclude）。起動のたびに引き直す（根の設定の編集は
+        # サーバーに届かないので、起動した後の編集には従わない。BUG-0132）。Python の型解決のサーバーでなければ ``None``
+        self.analysis_scope: PyrightScope | None = None
         self.client: LspClient | None = None
         self.restarts = 0
         self.timeouts = 0
@@ -707,7 +711,9 @@ class LspPool:
         python = env.interpreter if env is not None else None
         extra = [h.ws.root / p for p in env.extra_paths] if env is not None else []
         # 根の pyproject.toml を設定ファイルとして明示し、親のディレクトリの pyright の設定を採らせない（BUG-0132）
-        pinned = pinned_pyright_config(h.ws.root) if defn.language_id == "python" and defn.role == "types" else None
+        python_types = defn.language_id == "python" and defn.role == "types"
+        pinned = pinned_pyright_config(h.ws.root) if python_types else None
+        h.analysis_scope = pyright_scope(h.ws.root) if python_types else None
         client.set_settings(
             build_settings(
                 defn, python_path=python, extra_paths=extra, tsserver_path=tsserver, config_file=pinned

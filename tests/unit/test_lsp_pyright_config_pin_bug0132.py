@@ -153,7 +153,9 @@ async def registry():
     await reg.terminate_all(300, close=True)
 
 
-async def _answered_configuration(registry: ProcessRegistry, tmp_path: Path, root: Path) -> list[Any]:
+async def _answered_configuration(
+    registry: ProcessRegistry, tmp_path: Path, root: Path, seen: list[Any] | None = None
+) -> list[Any]:
     script = tmp_path / "asking_lsp.py"
     script.write_text(ASKING_SERVER, encoding="utf-8")
     log = tmp_path / "configuration.json"
@@ -171,6 +173,8 @@ async def _answered_configuration(registry: ProcessRegistry, tmp_path: Path, roo
         while not log.exists():
             assert time.monotonic() < deadline, pool.status("python", ws)
             await asyncio.sleep(0.02)
+        if seen is not None:
+            seen.extend(h.analysis_scope for h in pool.handles(ws))
         return json.loads(log.read_text(encoding="utf-8"))
     finally:
         await pool.shutdown_all(300)
@@ -194,3 +198,18 @@ async def test_the_pool_leaves_a_root_pyrightconfig_to_the_server(
     (root / "pyrightconfig.json").write_text("{}", encoding="utf-8")
     python, based = await _answered_configuration(registry, tmp_path, root)
     assert "configFilePath" not in based["analysis"] and "configFilePath" not in python["analysis"]
+
+
+async def test_the_handle_keeps_the_analysis_scope_the_server_loaded(
+    registry: ProcessRegistry, tmp_path: Path
+) -> None:
+    """起動のときの解析の対象（``include`` / ``exclude``）を覚える（T-06・T-07 が開かせる候補を決める。起動した後の編集はサーバーに
+    届かないので、編集に従わず起動のときのものを使う）。"""
+    root = Path(os.path.realpath(tmp_path / "proj"))
+    root.mkdir()
+    (root / "pyrightconfig.json").write_text(json.dumps({"include": ["src"]}), encoding="utf-8")
+    seen: list[Any] = []
+    await _answered_configuration(registry, tmp_path, root, seen)
+    (scope,) = seen
+    assert scope is not None and scope.narrowed
+    assert scope.contains(root / "src" / "a.py") and not scope.contains(root / "tests" / "t.py")
