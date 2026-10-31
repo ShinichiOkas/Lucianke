@@ -341,7 +341,7 @@ def prime_set(
 
     * tsserver 系: 名前を含む tsserver 系のファイルすべて（``tsconfig`` の外かどうかは見ない。BUG-0047）。
     * Python: 名前を含む Python のファイルのうち、basedpyright の解析の対象（``scope``。``LspHandle.analysis_scope`` = サーバーが
-      起動のときに読んだもの。``lsp/pyright_scope``）の外のもの（BUG-0132）。``scope`` が無い（設定が読めない・判断できない）とき・
+      読んでいるもの。起動のときと、根の設定の変更を届けたときに引く。``lsp/pyright_scope``）の外のもの（BUG-0132・BUG-0135）。``scope`` が無い（設定が読めない・判断できない）とき・
       利用者の設定が ``include`` / ``exclude`` を書いていない（既定の除外だけ）ときは開かせない（ファイルの一覧も引かない。今までどおり）。
     * ほかの言語: 空。
     """

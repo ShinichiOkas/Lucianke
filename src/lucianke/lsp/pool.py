@@ -26,6 +26,9 @@
 * ``LspHandle.started_at``（ISO 8601・UTC・ミリ秒）は直近に起動を始めた時刻（T-00 ``lsp_daemons[].started_at``）。再起動のたびに
   進み、止めると ``None``。``LspHandle.rebind(ws)`` / ``LspPool.rebind(ws)`` はワークスペースの設定変更を取り込む
   （Python のインタープリタが変わったら Python 系は再起動する。仕様書 T-00 事後条件 3）。
+* ``LspPool.notify_watched`` は外部変更を ``workspace/didChangeWatchedFiles`` で届ける。根の ``pyrightconfig.json`` /
+  ``pyproject.toml`` の変更なら、先に basedpyright / pyright の解析の対象（``LspHandle.analysis_scope``）と設定ファイルの明示
+  （``LspHandle.pinned_config``）を読み直し、明示が変わったら設定を差し替えて ``workspace/didChangeConfiguration`` を送る（BUG-0135）。
 * ``LspPool.router(ws)`` は言語ごとに正しいハンドルへ文書を振り分ける ``DocumentRouter``（1 言語に複数のサーバー〔basedpyright と ruff〕が
   あるとき、全サーバーに同期し、診断の待ちを合わせる。編集トランザクションには 1 組の口として渡す。BUG-0023）。
 * ``LspHandle.documents`` / ``.diagnostics`` はハンドルと同じ寿命で、再起動のたびに中身だけ空になる（呼び手が参照を持ち続けてよい）。
@@ -68,6 +71,7 @@ from lucianke.lsp.servers import (
     find_command,
     find_tsserver,
     host_venv,
+    is_pyright_root_config,
     pinned_pyright_config,
     servers_for,
 )
@@ -152,6 +156,26 @@ def default_resolver(defn: LspServerDef, ws: Workspace) -> list[str] | None:
     return find_command(defn, workspace_root=ws.root, venv=venv_root_of(ws), host_venv=host_venv())
 
 
+def _is_python_types(defn: LspServerDef | None) -> bool:
+    """basedpyright / pyright（Python の型解決のサーバー）か。根の設定の明示と解析の対象を持つのはこれだけ。"""
+    return defn is not None and defn.language_id == "python" and defn.role == "types"
+
+
+def _client_settings(
+    ws: Workspace, defn: LspServerDef, tsserver: Path | None, pinned: Path | None
+) -> dict[str, Any]:
+    """``workspace/configuration`` に答える設定木（``build_settings``）。インタープリタ・import の根は ``ws.python_env`` から。"""
+    env = ws.python_env
+    python = env.interpreter if env is not None else None
+    extra = [ws.root / p for p in env.extra_paths] if env is not None else []
+    return build_settings(defn, python_path=python, extra_paths=extra, tsserver_path=tsserver, config_file=pinned)
+
+
+def _read_pyright_config(root: Path) -> tuple[Path | None, PyrightScope | None]:
+    """根の設定の明示の判断と解析の対象を読み直す（ブロックする。スレッドで呼ぶ）。"""
+    return pinned_pyright_config(root), pyright_scope(root, refresh=True)
+
+
 def _brief(text: str | None, limit: int = 300) -> str:
     """ログ用に ``last_error``（切断の理由・stderr の末尾）を 1 行 ``limit`` 文字までに縮める。"""
     one = " ".join((text or "-").split())
@@ -178,9 +202,11 @@ class LspHandle:
         self.progress: int | None = None
         self.server_name: str | None = None
         self.defn: LspServerDef | None = None
-        # basedpyright / pyright が起動のときに読んだ解析の対象（include / exclude）。起動のたびに引き直す（根の設定の編集は
-        # サーバーに届かないので、起動した後の編集には従わない。BUG-0132）。Python の型解決のサーバーでなければ ``None``
+        # basedpyright / pyright が読んでいる解析の対象（include / exclude）。起動のたびと、根の設定の変更をサーバーに届けたとき
+        # （``LspPool.notify_watched``）に引き直す。サーバーの読んだものに揃える（BUG-0132・BUG-0135）。Python の型解決のサーバーでなければ ``None``
         self.analysis_scope: PyrightScope | None = None
+        # サーバーに明示している設定ファイル（``servers.pinned_pyright_config``。``analysis.configFilePath``）。明示していなければ ``None``
+        self.pinned_config: Path | None = None
         self.client: LspClient | None = None
         self.restarts = 0
         self.timeouts = 0
@@ -707,18 +733,11 @@ class LspPool:
         h.diagnostics.reset()
 
         client = LspClient(defn.name, no_cancel_methods=defn.no_cancel_methods)
-        env = h.ws.python_env
-        python = env.interpreter if env is not None else None
-        extra = [h.ws.root / p for p in env.extra_paths] if env is not None else []
         # 根の pyproject.toml を設定ファイルとして明示し、親のディレクトリの pyright の設定を採らせない（BUG-0132）
-        python_types = defn.language_id == "python" and defn.role == "types"
-        pinned = pinned_pyright_config(h.ws.root) if python_types else None
+        python_types = _is_python_types(defn)
+        h.pinned_config = pinned_pyright_config(h.ws.root) if python_types else None
         h.analysis_scope = pyright_scope(h.ws.root) if python_types else None
-        client.set_settings(
-            build_settings(
-                defn, python_path=python, extra_paths=extra, tsserver_path=tsserver, config_file=pinned
-            )
-        )
+        client.set_settings(_client_settings(h.ws, defn, tsserver, h.pinned_config))
         h.diagnostics.attach(client)
         client.on_notification("$/progress", h._on_progress)
         client.on_notification(PUBLISH_DIAGNOSTICS, h._on_first_publish)
@@ -883,17 +902,74 @@ class LspPool:
 
         ディスクだけを書き換えても basedpyright の依存元の診断は更新されない（S-04）ので、外部変更では必須。
         送信前の時刻（``time.perf_counter()``）を返す: ``DiagnosticsHub.wait_for(sent_at=...)`` にそのまま渡せる。
+
+        根の ``pyrightconfig.json`` / ``pyproject.toml``（``servers.is_pyright_root_config``）が変わったら、先に basedpyright / pyright の
+        解析の対象（``LspHandle.analysis_scope``）と設定ファイルの明示の判断（``LspHandle.pinned_config``）を読み直す（BUG-0135。
+        ``_reload_pyright_config``）。basedpyright 1.40.2 は ``didChangeWatchedFiles`` で根の設定を読み直すが、明示の判断が変わったとき
+        （根に ``pyrightconfig.json`` を作った・消した）はそれだけでは足りないので、設定を差し替えて ``didChangeConfiguration`` を送る。
+        そのハンドルには、設定ファイルの変更を ``didChangeWatchedFiles`` に入れない（古い明示のまま一度読み直させない）。
         """
         sent_at = time.perf_counter()
-        items = [{"uri": to_file_uri(ws, rel), "type": int(kind)} for rel, kind in changes]
-        if not items:
+        changes = [(rel, int(kind)) for rel, kind in changes]
+        if not changes:
             return sent_at
+        configs = {rel for rel, _ in changes if is_pyright_root_config(str(rel), case_insensitive=ws.case_insensitive)}
+        repinned = await self._reload_pyright_config(ws) if configs else set()
+        items = [{"uri": to_file_uri(ws, rel), "type": kind} for rel, kind in changes]
+        others = [item for (rel, _), item in zip(changes, items, strict=True) if rel not in configs]
         for h in self.handles(ws):
             client = h.client
             if h.state not in (LspState.INDEXING, LspState.READY) or client is None:
                 continue
+            sending = others if h in repinned else items
+            if not sending:
+                continue
             try:
-                client.notify("workspace/didChangeWatchedFiles", {"changes": items})
+                client.notify("workspace/didChangeWatchedFiles", {"changes": sending})
             except ConnectionError:
                 _log.debug("didChangeWatchedFiles skipped: %s is disconnected", h.server_name)
         return sent_at
+
+    async def _reload_pyright_config(self, ws: Workspace) -> set[LspHandle]:
+        """``ws`` の basedpyright / pyright の解析の対象と明示の判断を、根の設定の今の内容で読み直す（BUG-0135）。
+
+        起動中（``starting``）のハンドルは覚えを直すだけ（``initialize`` の前に通知を送らない。サーバーは起動の後に設定を引く）。
+        ``indexing`` / ``ready`` で明示の判断が変わったら ``workspace/configuration`` の設定を差し替えて
+        ``workspace/didChangeConfiguration`` を送る（サーバーは設定を引き直し、根の設定を読み直す）。送ったハンドルを返す。
+        読んでいる間に起動し直したハンドルは触らない（起動が読み直している）。
+        """
+        targets = [
+            (h, h.client, h._gen)
+            for h in self.handles(ws)
+            if _is_python_types(h.defn)
+            and h.client is not None
+            and h.state in (LspState.STARTING, LspState.INDEXING, LspState.READY)
+        ]
+        repinned: set[LspHandle] = set()
+        read: dict[Path, tuple[Path | None, PyrightScope | None]] = {}
+        for h, client, gen in targets:
+            root = h.ws.root
+            if root not in read:
+                read[root] = await asyncio.to_thread(_read_pyright_config, root)
+            pinned, scope = read[root]
+            if h.client is not client or h._gen != gen or client is None or h.defn is None:
+                continue
+            h.analysis_scope = scope
+            if pinned == h.pinned_config:
+                continue
+            _log.info(
+                "LSP %s: the root pyright config changed; configFilePath %s -> %s",
+                h.server_name, h.pinned_config, pinned,
+                extra={"event": "lsp_config_repinned"},
+            )  # fmt: skip
+            h.pinned_config = pinned
+            client.set_settings(_client_settings(h.ws, h.defn, None, pinned))
+            if h.state not in (LspState.INDEXING, LspState.READY):
+                continue
+            try:
+                client.notify("workspace/didChangeConfiguration", {"settings": None})
+            except ConnectionError:
+                _log.debug("didChangeConfiguration skipped: %s is disconnected", h.server_name)
+                continue
+            repinned.add(h)
+        return repinned

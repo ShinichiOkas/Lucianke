@@ -248,7 +248,8 @@ def test_python_primes_only_files_outside_the_lsp_scope_that_mention_the_name(py
 
 
 def test_python_follows_the_scope_the_server_loaded_not_later_edits(pyws: Workspace) -> None:
-    """basedpyright は起動した後の根の設定の編集を受け取らない。候補は渡された（起動のときの）対象で決める。"""
+    """候補は渡された（サーバーが読んだ）対象で決め、ディスクの設定を読み直さない（サーバーに届いていない編集に先回りしない。
+    届けたときは ``LspPool.notify_watched`` がハンドルの対象を引き直す。BUG-0135）。"""
     write(pyws.root, "pyrightconfig.json", json.dumps({"include": ["src"]}))
     loaded = ps.pyright_scope(pyws.root)
     write(pyws.root, "pyrightconfig.json", json.dumps({"include": ["src", "tests", "scripts"]}))

@@ -207,17 +207,18 @@ _MEMO: dict[str, tuple[tuple[Any, ...], PyrightScope | None]] = {}
 _MEMO_LOCK = threading.Lock()
 
 
-def pyright_scope(root: str | os.PathLike[str]) -> PyrightScope | None:
+def pyright_scope(root: str | os.PathLike[str], *, refresh: bool = False) -> PyrightScope | None:
     """ワークスペースの根 ``root`` の解析の対象。設定が読めなければ ``None``（判断しない）。
 
     根の ``pyrightconfig.json`` / ``pyproject.toml`` の ``(mtime_ns, size)`` が変わらない間は覚えた答えを返す（``extends`` の先の
-    変更は根の設定を触るまで反映しない）。ブロックする（ファイルを読む）ので、イベントループの上では呼ばない。
+    変更は根の設定を触るまで反映しない）。``refresh`` は覚えを見ずに読み直す（監視が根の設定の変更を拾ったとき。同じ大きさで
+    時刻の刻みの内に書き換えられても取りこぼさない。BUG-0135）。ブロックする（ファイルを読む）ので、イベントループの上では呼ばない。
     """
     path = Path(root)
     key = os.path.normcase(os.path.abspath(path))
     stamp = (_stamp(path / "pyrightconfig.json"), _stamp(path / "pyproject.toml"))
     with _MEMO_LOCK:
-        hit = _MEMO.get(key)
+        hit = None if refresh else _MEMO.get(key)
         if hit is not None and hit[0] == stamp:
             return hit[1]
     scope = _compute(path)

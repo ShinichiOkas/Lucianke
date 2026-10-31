@@ -318,6 +318,16 @@ def build_initialization_options(
 
 
 PYRIGHT_CONFIG_NAME = "pyrightconfig.json"
+PYRIGHT_ROOT_CONFIGS = (PYRIGHT_CONFIG_NAME, "pyproject.toml")
+"""basedpyright / pyright が設定として読む、ワークスペースの根のファイル（この順に探す）。"""
+
+
+def is_pyright_root_config(rel: str, *, case_insensitive: bool = False) -> bool:
+    """``rel``（根からの ``/`` 区切り）が根の ``pyrightconfig.json`` / ``pyproject.toml`` か（下のディレクトリのものは読まれない）。"""
+    name = rel.replace("\\", "/")
+    if case_insensitive:
+        return name.casefold() in PYRIGHT_ROOT_CONFIGS
+    return name in PYRIGHT_ROOT_CONFIGS
 
 
 def pinned_pyright_config(workspace_root: str | os.PathLike[str]) -> Path | None:
@@ -335,7 +345,9 @@ def pinned_pyright_config(workspace_root: str | os.PathLike[str]) -> Path | None
     * どちらも無い → ``None``（このときサーバーは親を探さない。存在しないパスを渡すと、ディレクトリを設定として読もうとして
       エラーをログに出す）。
 
-    起動のときだけ引く（根の設定を後から作る・消すと、LSP を起動し直すまで反映されない。サーバーの監視の登録は受けていない）。
+    起動のときと、監視が根の設定ファイル（``is_pyright_root_config``）の変更を拾ったときに引く。判断が変わったら
+    ``LspPool.notify_watched`` が ``workspace/configuration`` の設定を差し替えて ``workspace/didChangeConfiguration`` を送る（明示した
+    ままでは根に作った ``pyrightconfig.json`` を読まず、明示しないまま根の ``pyrightconfig.json`` を消すと親の設定を採る。BUG-0135）。
     """
     root = Path(workspace_root)
     try:
