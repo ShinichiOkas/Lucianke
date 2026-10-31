@@ -286,7 +286,7 @@ Lucianke は、コーディングエージェント（Claude Code、Cline、Curs
 
 LSP は起動時には立ち上げない。該当言語への最初の要求で遅延起動する（§12.3）。
 
-手順 4 の索引（と T-00 `reindex`、§12.4 のバーストの差分索引）の走査が終わるまでも、ツールは待たずに答える。対象のファイルは §5.3 規則 6 のとおりその場で索引する。索引から答えるツール（T-01・T-03・T-04・T-06・T-07・T-08・T-20）は得られた分で答え、`warnings[]` に進みを入れる（MUST。例 `index building: 412/1300 files (31%); results may be incomplete - call again when done`、列挙の前は `listing files`。全ファイルを見た後も関係の整えが終わるまで 99% にとどめる）。索引の途中の 0 件の検索は、これで本当の 0 件と見分けられる。走査を終えた後は付けない。理由: 呼ぶ側の AI が「無い」と「まだ索引していない」を応答だけで区別し、呼び直す時期を決められるようにする（BUG-0070）。
+手順 4 の索引（と T-00 `reindex`、§12.4 のバーストの差分索引）の走査が終わるまでも、ツールは待たずに答える。索引の重さでツールの呼び出しが数秒を超えて待たされてはならない（MUST。走査は背景の仕事で、ツールの呼び出しの間は区切りごとに譲る。BUG-0112）。対象のファイルは §5.3 規則 6 のとおりその場で索引する。索引から答えるツール（T-01・T-03・T-04・T-06・T-07・T-08・T-20）は得られた分で答え、`warnings[]` に進みを入れる（MUST。例 `index building: 412/1300 files (31%); results may be incomplete - call again when done`、列挙の前は `listing files`。全ファイルを見た後も関係の整えが終わるまで 99% にとどめ、その間は段を足す: `4222/4222 files (99%), settling relations 12/170`・`ranking symbols` など。BUG-0112）。索引の途中の 0 件の検索は、これで本当の 0 件と見分けられる。走査を終えた後は付けない。理由: 呼ぶ側の AI が「無い」と「まだ索引していない」を応答だけで区別し、呼び直す時期を決められるようにする（BUG-0070）。
 
 ### 4.3.2 読み取り要求
 
@@ -1333,7 +1333,7 @@ json の `data`:
 | `workspaces[]` | object[] | `workspace_id`, `root_path`, `languages[] {language, tier, file_count}`, `python_env {interpreter, version, manager}`, `git {branch, head_sha, dirty_files}`, `exclude_globs[]`, `default_base_ref`, `sub_projects[] {path, marker}` |
 | `lsp_daemons[]` | object[] | `language`, `server`, `status`（§5.5 の `lsp_status`）, `progress`, `pid`, `started_at` |
 | `cache` | object | `files`, `symbols`, `relations`, `last_sync_at` |
-| `jobs[]` | object[] | `job_id`, `kind`, `state`, `progress`, `started_at`, `finished_at`, `error` |
+| `jobs[]` | object[] | `job_id`, `kind`, `state`, `progress`, `phase`, `started_at`, `finished_at`, `error`。`phase` は走っている索引のジョブの、全ファイルを取り込んだ後の段（`settling relations 12/170`・`re-resolving importers`・`ranking symbols`。それ以外は `null`。compact の `jobs:` 行は `job_0001 reindex running 97% (settling relations 12/170)`。BUG-0112） |
 
 **エラー**:
 

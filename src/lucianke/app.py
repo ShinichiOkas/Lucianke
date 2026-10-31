@@ -140,6 +140,52 @@ def register_shutdown_steps(lifecycle: Lifecycle, hub: RuntimeHub, pool: LspPool
     add("index_close", hub.close_storage, order=ShutdownOrder.INDEX_CLOSE, timeout_ms=t(ShutdownOrder.INDEX_CLOSE))
 
 
+CRASH_LOG_NAME = "crash.log"
+_crash_file: Any = None  # faulthandler が書くファイル（プロセスの終わりまで開いておく）
+
+
+def install_crash_diagnostics(settings: Settings, log: logging.Logger) -> None:
+    """プロセスが黙って落ちないようにする（BUG-0112: 大きなワークスペースの初回の索引の途中で、ログに何も残さず終わった）。
+
+    * ``faulthandler``: 致命的なエラー（アクセス違反・``abort``・スタックの溢れ）で、全スレッドの Python のスタックを
+      ``<log_dir>/crash.log`` に書く（ログのハンドラが使えない状態でも書ける）。
+    * ``threading.excepthook`` / ``sys.excepthook``: どこにも拾われなかった例外をログに残す（書き手スレッドなどが例外で止まったとき）。
+    * ``atexit``: 終了の印をログに残す（ログの最後の行で、正常な終了か、印の無いまま消えた〈外から止められた・C の層で落ちた〉かを見分ける）。
+
+    どれも失敗しても起動は止めない（診断は付加）。
+    """
+    import atexit
+    import faulthandler
+    import threading
+
+    global _crash_file
+    try:
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        _crash_file = (settings.log_dir / CRASH_LOG_NAME).open("a", encoding="utf-8")  # noqa: SIM115  終了まで開いておく
+        _crash_file.write(f"--- lucianke pid {os.getpid()} started\n")
+        _crash_file.flush()
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except OSError as exc:
+        log.warning("crash log disabled: %s", exc, extra={"event": "crash_log_disabled"})
+
+    def thread_hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread is not None else "?"
+        log.critical(
+            "uncaught exception in thread %s", name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback), extra={"event": "crash"},
+        )  # fmt: skip
+
+    def main_hook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+        log.critical("uncaught exception", exc_info=(exc_type, exc, tb), extra={"event": "crash"})
+        sys.__excepthook__(exc_type, exc, tb)
+
+    threading.excepthook = thread_hook
+    sys.excepthook = main_hook
+    atexit.register(lambda: log.info("process exiting", extra={"event": "exit"}))
+
+
 def run_stdio() -> int:
     """ホストから子プロセスとして起動され、stdio で MCP を話す。``stdin`` の EOF で終わり、終了コード 0（ADR-16）。
 
@@ -150,6 +196,7 @@ def run_stdio() -> int:
     fds = bootstrap_io()  # 最初の 1 バイトの前。以降 print / os.write(1) / 子プロセスの fd 1 は stderr へ
     settings = load_settings()
     log = setup_logging(settings)
+    install_crash_diagnostics(settings, log)
 
     import anyio
 

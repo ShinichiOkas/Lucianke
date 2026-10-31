@@ -43,6 +43,7 @@ from typing import Any
 import tree_sitter
 
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.foreground import FOREGROUND, cooperate
 from lucianke.core.limits import (
     MAX_FILE_BYTES,
     STRUCTURAL_SEARCH_MS,
@@ -61,6 +62,7 @@ __all__ = [
     "TreeCache",
     "TreeCacheStats",
     "estimate_tree_bytes",
+    "iter_matches",
     "parse_source",
 ]
 
@@ -73,6 +75,8 @@ PARSE_CHUNK_BYTES = (
 ERROR_RANGES_MAX = (
     10_000  # 壊れた巨大ファイルで ERROR が際限なく出るのを抑える。超えた分は数えない（has_errors は立つ）
 )
+QUERY_WINDOW_BYTES = 256 * 1024
+"""``iter_matches`` がこれより大きいソースをこの幅のバイト範囲ごとに照合する（BUG-0112）。"""
 
 # 木のメモリ ÷ ソースのバイト数（S-02 run_memory.py の実測。python 20.3、json 25.3、markdown 25.9 を切り上げ）
 _TREE_MEMORY_FACTOR: dict[str, int] = {"python": 21, "json": 26, "markdown": 26}
@@ -115,7 +119,7 @@ def _parse_with_deadline(
 ) -> tuple[tree_sitter.Tree, int | None]:
     """``read_callback`` 版の解析。``(木, 打ち切った位置)``。打ち切らなければ位置は ``None``。"""
     n = len(source)
-    t_end = None if deadline_ms is None else time.perf_counter() + deadline_ms / 1000.0
+    t_end: list[float | None] = [None if deadline_ms is None else time.perf_counter() + deadline_ms / 1000.0]
     stopped: list[int | None] = [None]
     parsing = [True]
     # 直近に返した塊をつなぎとめる（BUG-0051）。py-tree-sitter 0.26.0 の ``Node.text`` は、コールバックの戻り値の ``bytes`` を
@@ -131,9 +135,14 @@ def _parse_with_deadline(
         if parsing[0]:
             if stopped[0] is not None:
                 return b""
-            if t_end is not None and time.perf_counter() >= t_end:
-                stopped[0] = offset
-                return b""
+            # 背景の索引の解析なら、前景のツールの呼び出しの間は塊ごとに眠って譲る。眠った分は期限を延ばす（譲って打ち切られない。BUG-0112）
+            slept = FOREGROUND.pause()
+            deadline = t_end[0]
+            if deadline is not None:
+                deadline = t_end[0] = deadline + slept
+                if time.perf_counter() >= deadline:
+                    stopped[0] = offset
+                    return b""
         chunk = last[0] = source[offset : offset + PARSE_CHUNK_BYTES]
         return chunk
 
@@ -153,6 +162,28 @@ def _iter_error_spans(root: tree_sitter.Node) -> Iterator[tuple[int, int]]:
             yield node.start_byte, node.end_byte
         elif node.has_error:
             stack.extend(reversed(node.children))
+
+
+def iter_matches(
+    query: tree_sitter.Query, root: tree_sitter.Node, source_len: int
+) -> Iterator[tuple[int, dict[str, list[tree_sitter.Node]]]]:
+    """``QueryCursor(query).matches(root)`` と同じ照合の結果を返す。``QUERY_WINDOW_BYTES`` より大きいソースは、その幅のバイト範囲
+    （``set_byte_range``）ごとに照合し、範囲の間で背景の索引なら前景に譲る（``core/foreground.cooperate``。BUG-0112）。
+
+    1 回の ``matches`` は照合と結果の組み立ての全体で GIL を握る。圧縮した JS の 1 行 4.5 MB では 70 万件・2〜10 秒になり、その間
+    イベントループもツールの呼び出しも止まっていた。範囲をまたぐ一致は両方の範囲で返る（同じ一致が 2 度来る）ので、受け手は
+    同じノードを 2 度受けても結果が変わらない使い方にすること（``relations._collect`` と ``symbols`` の抽出は、ノードの開始位置・
+    ``id`` で引いて上書きしない・同じ値で上書きする）。範囲ごとの照合と全体の照合の一致の集合が同じことは実ファイル
+    （圧縮した JS・Lucianke 自身）で確かめている。
+    """
+    cursor = tree_sitter.QueryCursor(query)
+    if source_len <= QUERY_WINDOW_BYTES:
+        yield from cursor.matches(root)
+        return
+    for start in range(0, source_len, QUERY_WINDOW_BYTES):
+        cooperate()
+        cursor.set_byte_range(start, min(source_len, start + QUERY_WINDOW_BYTES))
+        yield from cursor.matches(root)
 
 
 def parse_source(

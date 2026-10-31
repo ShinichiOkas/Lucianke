@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.foreground import FOREGROUND
 from lucianke.core.limits import SNIPPET_MAX_CHARS
 from lucianke.core.records import ResolutionMeta
 from lucianke.mcp.budget import CursorCodec, Packer
@@ -150,7 +151,8 @@ class Pipeline:
         confidence: str | None = None
         error_code: str | None = None
         try:
-            rendered, meta = await self._run(spec, raw, request_id, log, state, t0)
+            with FOREGROUND.active():  # 背景の索引は、この呼び出しの間（始まってから窓の秒数まで）区切りごとに譲る（BUG-0112）
+                rendered, meta = await self._run(spec, raw, request_id, log, state, t0)
             confidence = str(meta.confidence_level)
         except LuciankeError as err:
             error_code = err.code.value

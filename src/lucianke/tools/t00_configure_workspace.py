@@ -122,6 +122,7 @@ class _BoardJob:
             "workspace_id": self.workspace_id,
             "state": self.state,
             "progress": self.progress,
+            "phase": None,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "error": self.error,
@@ -415,6 +416,7 @@ def _jobs_of(hub: Any, workspaces: Sequence[Workspace]) -> list[dict[str, Any]]:
                     "workspace_id": ws.workspace_id,
                     "state": js.state,
                     "progress": js.progress,
+                    "phase": js.phase,
                     "started_at": js.started_at,
                     "finished_at": js.finished_at,
                     "error": js.error,
@@ -467,7 +469,10 @@ def _lsp_text(daemons: Sequence[dict[str, Any]]) -> str:
 def _jobs_text(jobs: Sequence[dict[str, Any]]) -> str:
     if not jobs:
         return "(none)"
-    return "; ".join(f"{j['job_id']} {j['kind']} {j['state']} {j['progress']}%" for j in jobs)
+    return "; ".join(
+        f"{j['job_id']} {j['kind']} {j['state']} {j['progress']}%" + (f" ({j['phase']})" if j.get("phase") else "")
+        for j in jobs
+    )
 
 
 def _entry(ws: Workspace, active_id: str | None) -> dict[str, Any]:

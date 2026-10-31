@@ -44,6 +44,7 @@ import posixpath
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Final
 
+from lucianke.core.foreground import FOREGROUND
 from lucianke.core.model import RelPath
 from lucianke.index import reexports
 from lucianke.index.ingest import FileFacts, ingest_file
@@ -224,6 +225,7 @@ async def prepare_importers(
                 continue  # 自分自身は対象外（除外に変わっただけで実体が残るファイルを、消した直後に取り込み直さない）
             done.add(path)
             try:
+                await FOREGROUND.apause()  # 走査の後の解き直し（背景）なら、前景のツールの呼び出しに譲る（BUG-0112）
                 prepared = await ix._prepare(RelPath(path), None)  # noqa: SLF001
             except asyncio.CancelledError:
                 raise

@@ -45,7 +45,8 @@ def building_of(services: object, workspace_id: str | None) -> ScanProgress | No
 def progress_text(p: ScanProgress) -> str:
     if p.files_total is None:
         return "listing files"
-    return f"{p.files_done}/{p.files_total} files ({p.percent}%)"
+    text = f"{p.files_done}/{p.files_total} files ({p.percent}%)"
+    return text if p.phase is None else f"{text}, {p.phase}"  # 全ファイルの後の段（止まっていないと分かるように。BUG-0112）
 
 
 def building_warning(p: ScanProgress) -> str:

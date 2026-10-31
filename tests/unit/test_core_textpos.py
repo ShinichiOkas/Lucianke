@@ -251,6 +251,65 @@ def test_roundtrips_against_python_reference() -> None:
                 assert li.offset_to_position(off.value) == Clamped(Position(n, col), False)
 
 
+# --- 長い行（BUG-0112） --------------------------------------------------------------------
+
+
+class _LineByLine(LineIndex):
+    """形を覚えない ``LineIndex``（変換のたびに行を切り出してデコードする、従来の変換）。長い行の答えの基準にする。"""
+
+    __slots__ = ()
+
+    def _shape(self, line: int) -> None:
+        return None
+
+
+def test_long_lines_answer_the_same_as_the_line_by_line_conversion() -> None:
+    """``SHAPE_MIN_BYTES`` 以上の行は形を覚えて二分探索で答える。列のすべて（行末の先・文字の途中・サロゲートペアの途中・
+    BOM・UTF-8 として不正なバイトを含む行）で、従来の変換と同じ答え・同じ丸めの印になる。"""
+    rng = random.Random(1031)
+    pieces = ["a", "b", " ", "é", "あ", "😀", "\U00010348", "xyz", "ß", "é"]
+    bad = [b"\xff", b"\x80", b"\xc3", b"\xed\xa0\x80"]
+    for _ in range(40):
+        lines = []
+        for _ in range(rng.randint(1, 3)):
+            line = "".join(rng.choice(pieces) for _ in range(rng.choice([5, 120, 300]))).encode("utf-8")
+            if rng.random() < 0.25:
+                pos = rng.randrange(len(line) + 1)
+                line = line[:pos] + rng.choice(bad) + line[pos:]
+            lines.append(line)
+        data = (BOM if rng.random() < 0.3 else b"") + rng.choice([b"\n", b"\r\n"]).join(lines)
+        fast, slow = LineIndex(data), _LineByLine(data)
+        for n in range(fast.line_count):
+            for unit in Unit:
+                assert fast.line_length(n, unit) == slow.line_length(n, unit)
+            end = slow.line_length(n, B) + 3
+            cols = {*range(min(end, 40)), *range(max(0, end - 40), end), *rng.sample(range(end), min(end, 120))}
+            for src in Unit:
+                for dst in Unit:
+                    for col in sorted(cols):
+                        assert fast.convert_col(n, col, src, dst) == slow.convert_col(n, col, src, dst), (n, col, src, dst)
+        for off in range(0, len(data) + 1, 3):
+            assert fast.offset_to_position(off) == slow.offset_to_position(off)
+
+
+def test_long_line_conversions_do_not_rescan_the_line() -> None:
+    """圧縮した JS の 1 行（数 MB・非 ASCII を含む）で位置の変換を何万回しても、行の長さに比例して遅くならない。
+    従来は変換のたびに行全体を切り出してデコードし、1 ファイルの取り込みが数十分かかった（BUG-0112）。"""
+    import time
+
+    chunk = 'function f(t){return g(t)+"é😀"}'.encode()
+    line = chunk * (2_000_000 // len(chunk))
+    li = LineIndex(b"// header\n" + line + b"\n")
+    start = li.line_start(1)
+    offsets = [start + (i * 7919) % len(line) for i in range(100_000)]
+    t0 = time.perf_counter()
+    for off in offsets:
+        li.offset_to_position(off)
+    assert time.perf_counter() - t0 < 10.0  # 実測 0.3 秒前後。従来の変換では 100 秒を超える
+    last = li.offset_to_position(start + len(line))
+    assert last == Clamped(Position(1, len(line.decode("utf-8"))), False)
+
+
 # --- 検出 ---------------------------------------------------------------------------------
 
 

@@ -834,3 +834,27 @@ def _relations_unsupported() -> None:
 def test_syntax_errors_do_not_break_extraction():
     rels = _relations("python", b"def f(:\n    g(1)\n\ndef h():\n    k(2)\n", "e.py")
     assert {"k"} <= {r.target_name for r in rels}
+
+
+# --- 大きなファイルの費用（BUG-0112） --------------------------------------------------------
+
+
+def test_many_sibling_definitions_and_deep_nesting_stay_linear() -> None:
+    """並んだ定義が数千（圧縮した JS の関数）・入れ子が深い（即時関数）ファイルでも、関係の抽出は定義の数・深さの 2 乗に
+    比例しない。修正前は、囲みの定義の絞り込みが参照ごとに積み上がった定義の全部を見て（参照の数 × 定義の数）、祖先の走査が
+    参照ごとに根まで ``Node.parent`` をたどり（参照の数 × 深さ × 深さ）、1 ファイルに数分〜数時間かかった。"""
+    import time
+
+    n = 4000
+    flat = "".join(f"function a{i}(t){{return a{max(i - 1, 0)}(t)+t.length}}" for i in range(n))
+    depth = 300
+    nested = "(function(){" * depth + "var z=1;" + "".join(f"z=a{i}(z);" for i in range(200)) + "})();" * depth
+    source = (flat + nested + "\n").encode()
+    t0 = time.perf_counter()
+    rels = _relations("javascript", source, "vendor/bundle.min.js")
+    elapsed = time.perf_counter() - t0
+    calls = [r for r in rels if r.relation_kind == "CALLS" and r.target_name.startswith("a")]
+    sourced = {(r.source_urn.rsplit("#", 1)[-1], r.target_name) for r in calls}
+    assert ("a10", "a9") in sourced and (f"a{n - 1}", f"a{n - 2}") in sourced  # 呼び出し元は囲みの関数
+    assert sum(1 for r in calls if "#" not in r.source_urn) == 200  # 深い入れ子の中の呼び出しはモジュール直下から
+    assert elapsed < 15.0  # 実測 1 秒前後。修正前は 1 分を超える

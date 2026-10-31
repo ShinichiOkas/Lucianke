@@ -611,3 +611,34 @@ def test_node_text_after_the_parse_deadline_does_not_spin() -> None:
         [sys.executable, "-c", _TEXT_AFTER_DEADLINE_SCRIPT], capture_output=True, text=True, timeout=60, check=False
     )  # fmt: skip
     assert cp.returncode == 0 and cp.stdout.strip() == "OK", cp.stderr
+
+
+# --- 大きなソースの照合（BUG-0112） --------------------------------------------------------
+
+
+@pytest.mark.parametrize("language_id", ["javascript", "python"])
+def test_iter_matches_in_byte_windows_finds_the_same_matches(monkeypatch: pytest.MonkeyPatch, language_id: str) -> None:
+    """大きなソースはバイト範囲ごとに照合する（範囲の間で前景に譲る）。一致の集合は全体の照合と同じ（範囲をまたぐ一致は 2 度来てよい）。"""
+    from lucianke.syntax.relations import _compile as relations_query
+    from lucianke.syntax.symbols import _compile as symbols_query
+    from lucianke.syntax.symbols import load_query_source
+
+    if language_id == "javascript":
+        source = "".join(f"function a{i}(t){{return a{i - 1}(t)+t.x.y}}" for i in range(1, 2000)).encode()
+    else:
+        source = "".join(
+            f"class C{i}(Base):\n    def m(self, x):\n        return helper(x).y + self.z\n\n" for i in range(800)
+        ).encode()
+    parsed, _ = parse_source(source, language_id, "0" * 64, deadline_ms=None)
+    language = get_support(language_id).grammar()  # type: ignore[union-attr]
+    root = parsed.tree.root_node
+
+    def keys(matches: Any) -> set[tuple[Any, ...]]:
+        return {(i, tuple(sorted((c, tuple(n.id for n in ns)) for c, ns in caps.items()))) for i, caps in matches}
+
+    for query in (relations_query(language, language_id), symbols_query(language, load_query_source(language_id))):
+        whole = keys(tree_sitter.QueryCursor(query).matches(root))
+        monkeypatch.setattr(parsers, "QUERY_WINDOW_BYTES", 1000)  # 数十の範囲に割る
+        windowed = keys(parsers.iter_matches(query, root, len(source)))
+        monkeypatch.undo()
+        assert whole and windowed == whole

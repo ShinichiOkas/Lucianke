@@ -29,7 +29,8 @@ from lucianke.config import Settings
 
 _LEVELS = {"error": logging.ERROR, "warn": logging.WARNING, "info": logging.INFO, "debug": logging.DEBUG}
 _LOG_NAME_RE = re.compile(r"^lucianke-(\d{4}-\d{2}-\d{2})\.log$")
-_ATTACHED = ("lucianke", "mcp")  # 自前と SDK のロガーに同じハンドラを付ける
+# 自前と SDK のロガーに同じハンドラを付ける。asyncio（拾われなかったタスクの例外・ループの例外）も警告以上を残す（BUG-0112）
+_ATTACHED = ("lucianke", "mcp", "asyncio")
 
 # extra= で渡されたらそのまま JSON に載せる項目（設計書 §9.2「必ず残すフィールド」。lsp は lsp_language -> "lsp.language"）
 _FIELDS = ("tool", "workspace_id", "timing_ms", "confidence", "error_code", "edit_id", "log_ref")

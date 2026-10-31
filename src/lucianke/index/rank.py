@@ -33,6 +33,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
+from lucianke.core.foreground import cooperate
+
 __all__ = [
     "DAMPING",
     "DEFAULT_PER_FILE",
@@ -102,6 +104,7 @@ def pagerank(
     rank = [1.0 / n] * n
     teleport = (1.0 - damping) / n
     for _ in range(max_iterations):
+        cooperate()  # 背景の計算なら、反復ごとに前景のツールの呼び出しに GIL を譲る（BUG-0112）
         base = teleport + damping * sum(rank[i] for i in dangling) / n
         nxt = [base] * n
         for i in sources:

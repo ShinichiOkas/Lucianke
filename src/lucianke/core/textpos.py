@@ -24,11 +24,11 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, NamedTuple
+from typing import Final, Literal, NamedTuple
 
 from lucianke.core.model import Position
 
@@ -53,16 +53,122 @@ class Clamped[T](NamedTuple):
 
 
 _TERMINATOR_RE = re.compile(rb"\r\n|\n|\r")
+_LEAD_RE = re.compile(rb"[\xc0-\xff]")  # 正しい UTF-8 の複数バイト文字の先頭バイト
+
+SHAPE_MIN_BYTES: Final = 256
+"""これ以上長い行は、行の形（``_LineShape``）を 1 回だけ調べて覚え、列の変換を二分探索で答える（BUG-0112）。
+
+短い行は従来どおり、変換のたびに行を切り出してデコードする（覚える費用の方が高い）。長い行（圧縮した JS の 1 行 数 MB）で
+変換のたびに行全体を切り出し・デコードすると、変換の回数 × 行の長さになり、1 ファイルの取り込みが数十分かかっていた。"""
+
+
+class _LineShape(NamedTuple):
+    """1 行の内容（行 0 は BOM の後ろ）の形。``valid`` が偽（UTF-8 として不正）の行は従来の変換に任せる。
+
+    ``mb_bytes`` は複数バイト文字の先頭バイトの位置（行の内容の先頭から）、``mb_cp`` はそのコードポイント位置、``mb_extra`` は
+    その文字までの（その文字を含む）余分なバイト数（文字のバイト数 - 1）の累計。``astral_cp`` / ``astral_u16`` は 4 バイト文字
+    （UTF-16 でサロゲートペア）のコードポイント位置と UTF-16 の位置。
+    """
+
+    length: int
+    ascii: bool
+    valid: bool
+    cp_len: int
+    u16_len: int
+    mb_bytes: list[int]
+    mb_cp: list[int]
+    mb_extra: list[int]
+    astral_cp: list[int]
+    astral_u16: list[int]
+
+
+def _line_shape(raw: bytes) -> _LineShape:
+    n = len(raw)
+    if raw.isascii():
+        return _LineShape(n, True, True, n, n, [], [], [], [], [])
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _LineShape(n, False, False, 0, 0, [], [], [], [], [])
+    mb_bytes: list[int] = []
+    mb_cp: list[int] = []
+    mb_extra: list[int] = []
+    astral_cp: list[int] = []
+    extra = 0
+    for m in _LEAD_RE.finditer(raw):
+        b = m.start()
+        lead = raw[b]
+        width = 2 if lead < 0xE0 else 3 if lead < 0xF0 else 4
+        cp = b - extra
+        mb_bytes.append(b)
+        mb_cp.append(cp)
+        extra += width - 1
+        mb_extra.append(extra)
+        if width == 4:
+            astral_cp.append(cp)
+    cp_len = n - extra
+    astral_u16 = [cp + i for i, cp in enumerate(astral_cp)]
+    return _LineShape(n, False, True, cp_len, cp_len + len(astral_cp), mb_bytes, mb_cp, mb_extra, astral_cp, astral_u16)
+
+
+def _shaped_convert(shape: _LineShape, col: int, src: Unit, dst: Unit, skip: int) -> Clamped[int]:
+    """``LineIndex.convert_col`` の、形を調べた行（ASCII か正しい UTF-8）の版。答えは従来の変換と同じ。"""
+    if shape.ascii:
+        limit = shape.length
+        if src is Unit.UTF8:
+            col -= skip
+            if col < 0:
+                return Clamped(skip if dst is Unit.UTF8 else 0, True)
+        return Clamped(min(col, limit) + (skip if dst is Unit.UTF8 else 0), col > limit)
+
+    clamped = False
+    # src → コードポイント位置
+    if src is Unit.CODEPOINT:
+        cp = col
+        if cp > shape.cp_len:
+            cp, clamped = shape.cp_len, True
+    elif src is Unit.UTF8:
+        b = col - skip
+        if b < 0:
+            b, clamped = 0, True
+        if b > shape.length:
+            b, clamped = shape.length, True
+        k = bisect_right(shape.mb_bytes, b) - 1  # b 以前に始まる最後の複数バイト文字
+        if k >= 0 and b != shape.mb_bytes[k]:
+            width = shape.mb_extra[k] - (shape.mb_extra[k - 1] if k else 0) + 1
+            if b < shape.mb_bytes[k] + width:  # 文字の途中 → その文字の先頭
+                b, clamped = shape.mb_bytes[k], True
+        j = bisect_left(shape.mb_bytes, b)  # b より前に始まる複数バイト文字の数
+        cp = b - (shape.mb_extra[j - 1] if j else 0)
+    else:  # UTF16
+        u = col
+        if u > shape.u16_len:
+            cp, clamped = shape.cp_len, True
+        else:
+            j = bisect_left(shape.astral_u16, u)  # u より前に始まる 4 バイト文字の数
+            cp = u - j
+            clamped = j > 0 and shape.astral_u16[j - 1] + 1 == u  # サロゲートペアの途中 → その文字の先頭
+
+    # コードポイント位置 → dst
+    if dst is Unit.CODEPOINT:
+        value = cp
+    elif dst is Unit.UTF8:
+        j = bisect_left(shape.mb_cp, cp)
+        value = cp + (shape.mb_extra[j - 1] if j else 0) + skip
+    else:
+        value = cp + bisect_left(shape.astral_cp, cp)
+    return Clamped(value, clamped)
 
 
 class LineIndex:
     """UTF-8 のバイト列から作る、行頭バイトオフセット表と位置変換。
 
     行ごとの変換は、その行のバイト列から必要になったときに計算する（3 つの単位の表を全行ぶん持たない）。
-    ASCII だけの行は 3 つの単位がすべて等しいので、デコードせずに答える。
+    ASCII だけの行は 3 つの単位がすべて等しいので、デコードせずに答える。``SHAPE_MIN_BYTES`` 以上の長い行は、
+    行の形を 1 回だけ調べて覚え、変換を二分探索で答える（変換のたびに行全体を切り出さない。BUG-0112）。
     """
 
-    __slots__ = ("_data", "_ends", "_starts", "bom_len")
+    __slots__ = ("_data", "_ends", "_shapes", "_starts", "bom_len")
 
     def __init__(self, data: bytes) -> None:
         self._data = data
@@ -75,6 +181,18 @@ class LineIndex:
         ends.append(len(data))
         self._starts = starts
         self._ends = ends
+        self._shapes: dict[int, _LineShape] = {}
+
+    def _shape(self, line: int) -> _LineShape | None:
+        """長い行（``SHAPE_MIN_BYTES`` 以上）の形。短い行・UTF-8 として不正な行は ``None``（従来の変換）。"""
+        start = self.bom_len if line == 0 else self._starts[line]
+        end = self._ends[line]
+        if end - start < SHAPE_MIN_BYTES:
+            return None
+        shape = self._shapes.get(line)
+        if shape is None:
+            shape = self._shapes[line] = _line_shape(self._data[start:end])
+        return shape if shape.valid else None
 
     @classmethod
     def from_bytes(cls, data: bytes) -> LineIndex:
@@ -126,6 +244,12 @@ class LineIndex:
 
     def line_length(self, line: int, unit: Unit = Unit.CODEPOINT) -> int:
         """行の内容の長さ（``unit`` 単位。``Unit.UTF8`` は行 0 の BOM を含む = 行の終端の列）。"""
+        self._check_line(line)
+        shape = self._shape(line)
+        if shape is not None:
+            if unit is Unit.UTF8:
+                return shape.length + (self.bom_len if line == 0 else 0)
+            return shape.u16_len if unit is Unit.UTF16 else shape.cp_len
         raw = self.line_bytes(line)
         if unit is Unit.UTF8:
             return len(raw) + (self.bom_len if line == 0 else 0)
@@ -144,8 +268,12 @@ class LineIndex:
         """
         if col < 0:
             raise ValueError(f"column must be non-negative: {col}")
-        raw = self.line_bytes(line)  # 範囲外の行はここで ValueError
+        self._check_line(line)  # 範囲外の行はここで ValueError
         skip = self.bom_len if line == 0 else 0  # 行頭から内容の開始位置まで（UTF8 の列だけが BOM を数える）
+        shape = self._shape(line)
+        if shape is not None:
+            return _shaped_convert(shape, col, src, dst, skip)
+        raw = self.line_bytes(line)
 
         if raw.isascii():
             limit = len(raw)

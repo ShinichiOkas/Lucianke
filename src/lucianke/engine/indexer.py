@@ -50,6 +50,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
 
+from lucianke.core.foreground import FOREGROUND, background
 from lucianke.core.limits import MAX_FILE_BYTES
 from lucianke.core.model import Confidence, RelPath, SymbolRecord, Tier
 from lucianke.core.textpos import LineIndex
@@ -102,6 +103,7 @@ from lucianke.workspace.types import Workspace
 
 __all__ = [
     "INGEST_BATCH_FILES",
+    "SETTLE_BATCH_FILES",
     "Indexer",
     "JobState",
     "JobStatus",
@@ -112,6 +114,9 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 INGEST_BATCH_FILES: Final = 50  # 設計書 §7.6.1 項 4: 起動時の差分索引は 1 トランザクションに最大 50 ファイル
+SETTLE_BATCH_FILES: Final = 50
+"""走査の後の関係の整えを、この数のファイルずつの短い書き込みのジョブに割る（BUG-0112。1 ジョブで全ファイルを整えると、
+大きなワークスペースで書き手を長くふさぎ、その間の先取り・編集の書き込みが待たされる）。"""
 _CHUNK: Final = 1024 * 1024
 _HEAD_BYTES: Final = 8 * 1024
 _SYNTAX_ERROR_MESSAGE: Final = "syntax error"
@@ -146,10 +151,12 @@ class ScanProgress:
     """走査（初回・差分の索引）の途中の進み（``Indexer.building``。BUG-0070）。
 
     ``files_total`` は列挙の前は ``None``。``percent`` は終わるまで 99 で止める（全ファイルを見た後も、関係の整えと順位の計算が残る）。
+    ``phase`` は全ファイルを取り込んだ後の段（``settling relations 3/170`` など。BUG-0112）。ファイルの取り込みの間は ``None``。
     """
 
     files_done: int
     files_total: int | None
+    phase: str | None = None
 
     @property
     def percent(self) -> int:
@@ -170,6 +177,7 @@ class JobStatus:
     finished_at: str | None
     error: str | None
     report: ScanReport | None
+    phase: str | None = None  # 走っている走査の、ファイルの取り込みの後の段（``ScanProgress.phase``。BUG-0112）
 
 
 @dataclass(slots=True)
@@ -183,7 +191,7 @@ class _Job:
     error: str | None = None
     report: ScanReport | None = None
 
-    def snapshot(self) -> JobStatus:
+    def snapshot(self, phase: str | None = None) -> JobStatus:
         return JobStatus(
             self.job_id,
             self.kind,
@@ -193,6 +201,7 @@ class _Job:
             self.finished_at,
             self.error,
             self.report,
+            phase if self.state == "running" else None,
         )
 
 
@@ -302,6 +311,7 @@ class Indexer:
         self._scans = 0  # 走っている ``scan`` の数（ジョブと監視のバーストの走査が重なりうる）
         self._scan_done = 0
         self._scan_total: int | None = None
+        self._scan_phase: str | None = None  # ファイルの取り込みの後の段（``ScanProgress.phase``）
         self._ahead: set[str] = set()  # 先取りしたが、まだ走査が取り込み直して整えていないパス
         self._scan_ingested: set[str] = set()  # 最後に終わった走査が取り込んだパス
         # プロジェクトのディレクトリ（ワークスペースのルート ``""``・テストフィクスチャのルート）→ pytest の設定のうち import の根に
@@ -393,7 +403,7 @@ class Indexer:
         ジョブを投入してから走査が始まるまで（``queued``）は ``ScanProgress(0, None)``。
         """
         if self._scans:
-            return ScanProgress(self._scan_done, self._scan_total)
+            return ScanProgress(self._scan_done, self._scan_total, self._scan_phase)
         if any(j.state in ("queued", "running") for j in self._jobs.values()):
             return ScanProgress(0, None)
         return None
@@ -469,14 +479,20 @@ class Indexer:
         """
         self._scans += 1
         if self._scans == 1:
-            self._scan_done, self._scan_total = 0, None
+            self._scan_done, self._scan_total, self._scan_phase = 0, None, None
         try:
-            report = await self._scan(progress_cb)
-            if self._scans == 1:  # 最後の走査（重なっていない）。整え終わるまで ``building()`` は進みを返し続ける
-                await self._settle_ahead()
+            # 走査は背景の仕事: 区切りごとに、前景（ツールの呼び出し）に譲る（core/foreground.py。BUG-0112）
+            with background():
+                report = await self._scan(progress_cb)
+                if self._scans == 1:  # 最後の走査（重なっていない）。整え終わるまで ``building()`` は進みを返し続ける
+                    if self._ahead:
+                        self._scan_phase = "settling files ingested ahead"
+                    await self._settle_ahead()
             return report
         finally:
             self._scans -= 1
+            if not self._scans:
+                self._scan_phase = None
 
     async def _settle_ahead(self) -> None:
         """先取りしたが走査が取り込み直さなかったファイルを、新しいファイルとして取り込み直す（その間に先取りされた分も）。"""
@@ -545,6 +561,7 @@ class Indexer:
                 batch = []
 
         for i, rel in enumerate(listing, 1):
+            await FOREGROUND.apause()  # 前景のツールの呼び出しの間は、次のファイルの解析を始めない（BUG-0112）
             try:
                 prepared = await self._prepare(rel, known.get(rel))
             except Exception as exc:  # 1 ファイルの失敗で走査全体を止めない
@@ -568,12 +585,9 @@ class Indexer:
         self._scan_ingested |= ingested
         report.unchanged -= len(report.errors)  # 失敗は「変わらなかった」に数えない
         if file_ids:
-            await self._writer.asubmit(
-                lambda conn: _settle_relations(conn, file_ids),  # type: ignore[arg-type]
-                bumps_version=False,
-                label="settle_relations",
-            )
+            await self._settle_in_batches(file_ids, lambda done, total: progress(95 + (done * 3) // max(total, 1)))
         if known:  # 初回の全体走査は、取り込む側が最後のファイルシステムを見て解決済み。差分のときだけ、取り込まなかった側を解き直す
+            self._scan_phase = "re-resolving importers"
             created = [r for r in listing if r not in known]
             await reresolve.after_scan(
                 self,
@@ -585,10 +599,39 @@ class Indexer:
                 configs=sorted(p for p in ingested if reresolve.is_pytest_config(p)),
             )
         if report.indexed or report.removed or not await asyncio.to_thread(self._ranks_ready):
+            progress(99)
+            self._scan_phase = "ranking symbols"
+            await FOREGROUND.apause()
             await self.refresh_ranks_quietly()  # 全体の取り込みの後に 1 回（index/rank.py。T-01 の順位）
         progress(100)
         report.duration_s = time.monotonic() - t0
         return report
+
+    async def _settle_in_batches(self, file_ids: Sequence[int], on_step: Callable[[int, int], None]) -> None:
+        """走査で取り込んだファイルの関係を整える（``_settle_relations`` と同じ結果）。``SETTLE_BATCH_FILES`` ずつの短いジョブに割り、
+        ジョブの間で前景に譲る（BUG-0112）。
+
+        段は 2 つ: (1) ファイルごとの整え（再び公開した名前・オーバーロード・継承したメンバーの退避・無い目標の削除・``target_file_id``）
+        をすべてのバッチで、(2) 退避した行を基底から結ぶ（``inherited.resolve_member_refs``）をすべてのバッチで。(2) は (1) が全ファイルを
+        終えてから（別のファイルの ``INHERITS`` 行の書き換えを見てから結ぶ）。(2) をバッチに割っても結ぶ行の和集合は同じで（各バッチの
+        ファイルの退避行と、そのクラス・派生クラス・変数を受け手にする退避行）、2 回結ばれる行は同じ答えになる。
+        """
+        chunks = list(_chunks(list(file_ids), SETTLE_BATCH_FILES))
+        steps: list[tuple[str, Callable[[object, Sequence[int]], object], list[int]]] = [
+            ("settle_relations", _settle_files, chunk) for chunk in chunks
+        ] + [("settle_member_refs", inherited.resolve_member_refs, chunk) for chunk in chunks]  # type: ignore[misc]
+        total = len(steps)
+        for step, (label, fn, chunk) in enumerate(steps):
+            self._scan_phase = f"settling relations {step}/{total}"
+            on_step(step, total)
+            await FOREGROUND.apause()
+            await self._writer.asubmit(
+                lambda conn, fn=fn, chunk=chunk: fn(conn, chunk),  # type: ignore[misc]
+                bumps_version=False,
+                label=label,
+            )
+        self._scan_phase = f"settling relations {total}/{total}"
+        on_step(total, total)
 
     async def refresh_ranks(self) -> int:
         """参照グラフの重要度（PageRank・fan_in）を計算し直して書く（``index/rank.py``）。書いたシンボルの行数を返す。
@@ -644,11 +687,11 @@ class Indexer:
     def job_status(self, job_id: str) -> JobStatus | None:
         """ジョブの状態。未知の ``job_id`` は ``None``。"""
         job = self._jobs.get(job_id)
-        return None if job is None else job.snapshot()
+        return None if job is None else job.snapshot(self._scan_phase)
 
     def jobs(self) -> list[JobStatus]:
         """全ジョブの状態（新しい順）。"""
-        return [j.snapshot() for j in reversed(self._jobs.values())]
+        return [j.snapshot(self._scan_phase) for j in reversed(self._jobs.values())]
 
     async def wait_job(self, job_id: str) -> JobStatus | None:
         """ジョブが ``done`` / ``failed`` になるまで待つ（テストと終了処理用）。"""
@@ -1381,6 +1424,12 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
     * いちばん先に、再び公開した名前（``from pkg import flush`` の ``pkg/__init__.py#flush``）を定義元までたどって目標と変数の型を
       書き換える（BUG-0100。``index/reexports.py``）。たどった先が継承したメンバーなら、続く退避で基底から結ばれる。
     """
+    _settle_files(conn, file_ids)
+    inherited.resolve_member_refs(conn, file_ids)  # type: ignore[arg-type]
+
+
+def _settle_files(conn: object, file_ids: Sequence[int]) -> None:
+    """``_settle_relations`` のうち、ファイルごとの段（退避した行を基底から結ぶ前まで）。"""
     exports = reexports.ReexportResolver(conn)  # type: ignore[arg-type]
     for file_id in file_ids:
         reexports.redirect_reexports(conn, file_id, exports)  # type: ignore[arg-type]
@@ -1396,7 +1445,6 @@ def _settle_relations(conn: object, file_ids: Sequence[int]) -> None:
             " WHERE source_file_id = ? AND target_file_id IS NULL",
             (file_id,),
         )
-    inherited.resolve_member_refs(conn, file_ids)  # type: ignore[arg-type]
 
 
 def _redirect_overloads(conn: object, file_id: int) -> None:

@@ -33,11 +33,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from importlib import resources
 
-from tree_sitter import Language, Node, Query, QueryCursor
+from tree_sitter import Language, Node, Query
 
+from lucianke.core.foreground import cooperate
 from lucianke.core.model import Confidence, Kind, Range, RelPath, SymbolRecord
 from lucianke.core.urn import CodeSel, Urn, normalize_signature, sighash
 from lucianke.syntax.memo import BoundedMemo, content_key
+from lucianke.syntax.parsers import iter_matches
 from lucianke.syntax.types import ParsedFile
 
 __all__ = ["ExtractedSymbol", "Extraction", "extract", "extract_detailed", "load_query_source"]
@@ -207,7 +209,7 @@ def _extract_uncached(
     root = parsed.tree.root_node
 
     found: dict[int, tuple[Node, Node, str]] = {}
-    for _pattern, caps in QueryCursor(_compile(language, query_source)).matches(root):
+    for _pattern, caps in iter_matches(_compile(language, query_source), root, len(parsed.source)):
         names = caps.get("name")
         if not names:
             continue
@@ -219,6 +221,7 @@ def _extract_uncached(
     kept: dict[int, _Def] = {}
     defs: list[_Def] = []
     for node, name_node, tag in ordered:
+        cooperate()  # 背景の索引なら、前景のツールの呼び出しに GIL を譲る（BUG-0112）
         parent, crossed = ctx.enclosing(node, kept)
         d = ctx.build(node, name_node, tag, parent, crossed)
         if d is None:

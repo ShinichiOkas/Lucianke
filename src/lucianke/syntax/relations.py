@@ -83,14 +83,16 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 
-from tree_sitter import Language, Node, Query, QueryCursor
+from tree_sitter import Language, Node, Query
 
+from lucianke.core.foreground import cooperate
 from lucianke.core.model import Confidence, Kind, Position, RelPath, SymbolRecord
 from lucianke.core.mro import TRANSPARENT_EXTERNAL_BASES, c3_linearize
 from lucianke.core.urn import EXTERNAL_WORKSPACE_ID, SCHEME, CodeSel, Urn, parse
 from lucianke.syntax.builtin_names import JS_GLOBALS, PYTHON_BUILTINS
 from lucianke.syntax.guards import guard_for
 from lucianke.syntax.imports import JS_FUNCTION_NODES, NAMESPACE_PACKAGE, js_require_bindings
+from lucianke.syntax.parsers import iter_matches
 from lucianke.syntax.types import ParsedFile
 
 __all__ = [
@@ -497,6 +499,9 @@ class _Extractor:
         # TS の型注釈つきのメンバー（インターフェース・型リテラルのプロパティ、クラスのフィールド）。``type_aliases`` がメンバーの
         # 型の構成を書く（受け手 ``r: Opts['retry']`` ・``o.retry.limit`` の型。BUG-0113）
         self.member_nodes: list[Node] = []
+        # ノードの id → (最も近い囲みのスコープ〈関数・クラス・根〉, 祖先に読み飛ばす文があるか)。祖先を 1 回だけたどって覚える（BUG-0112）
+        self._up_memo: dict[int, tuple[Node | None, bool]] = {}
+        self._root_id = parsed.tree.root_node.id
 
     # --- 名前解決の窓口 ---
 
@@ -562,7 +567,12 @@ class _Extractor:
         pending = iter(self.symbols)
         nxt = next(pending, None)
         for position, what, item in items:
+            cooperate()  # 背景の索引なら、前景のツールの呼び出しに GIL を譲る（BUG-0112）
             while nxt is not None and nxt.range.start <= position:
+                # 積む前に、nxt より前に終わった定義を降ろす（以後のどの位置も囲まない）。降ろさないと、並んだ定義（圧縮した JS の
+                # 数千の関数）が積み上がり、参照ごとの囲みの絞り込みが定義の数に比例して、参照の数 × 定義の数になる（BUG-0112）
+                while stack and not (nxt.range.start < stack[-1].range.end):
+                    stack.pop()
                 stack.append(nxt)
                 nxt = next(pending, None)
             while stack and not (position < stack[-1].range.end):
@@ -949,7 +959,8 @@ class _Extractor:
             elif _PRIORITY[category] == _PRIORITY[cur.category] and cur.recv is None and recv is not None:
                 cur.recv = recv
 
-        for _pattern, caps in QueryCursor(_compile(self.language, self.language_id)).matches(root):
+        for _pattern, caps in iter_matches(_compile(self.language, self.language_id), root, len(self.parsed.source)):
+            cooperate()
             for key, nodes in caps.items():
                 if key == "type.annotation":
                     for n in nodes:
@@ -1091,6 +1102,43 @@ class _Extractor:
                 return s
         return None
 
+    # --- 祖先（覚えて使い回す） ---
+
+    def _up(self, node: Node) -> tuple[Node | None, bool]:
+        """``(node の最も近い囲みのスコープ, node の祖先に読み飛ばす文〈skip_ancestors〉があるか)``。
+
+        スコープは関数・クラス・根（``node`` 自身は数えない。根の囲みは ``None``）。祖先をたどった結果をノードごとに覚え、次は覚えた
+        祖先で止まる（BUG-0112）。``Node.parent`` は木の根から下りて親を探すので、参照ごとに根まで登ると、深く入れ子になった
+        圧縮済みの JS（1 ファイル 数 MB）で参照の数 × 深さ × 深さになり、1 ファイルの関係の抽出に数分かかっていた。
+        """
+        memo = self._up_memo
+        hit = memo.get(node.id)
+        if hit is not None:
+            return hit
+        chain = [node]
+        while True:
+            parent = chain[-1].parent
+            if parent is None:  # 根
+                memo[chain[-1].id] = (None, False)
+                break
+            if parent.id in memo:
+                chain.append(parent)
+                break
+            chain.append(parent)
+        for i in range(len(chain) - 2, -1, -1):
+            parent = chain[i + 1]
+            scope_above, skipped_above = memo[parent.id]
+            is_scope = parent.type in self.functions or parent.type in self.classes or parent.id == self._root_id
+            memo[chain[i].id] = (parent if is_scope else scope_above, skipped_above or parent.type in self.skip_ancestors)
+        return memo[node.id]
+
+    def _scopes(self, node: Node) -> Iterator[Node]:
+        """``node`` を囲むスコープ（関数・クラス・根）を内側から外へ（``node`` 自身は含まない）。"""
+        scope = self._up(node)[0]
+        while scope is not None:
+            yield scope
+            scope = self._up(scope)[0]
+
     # --- 構文上の位置の判定 ---
 
     def _is_member_name(self, node: Node) -> bool:
@@ -1115,12 +1163,7 @@ class _Extractor:
                 return True
         if parent.type == "type_parameter":  # TS ``<T>``
             return True
-        anc: Node | None = parent
-        while anc is not None:
-            if anc.type in self.skip_ancestors:
-                return True
-            anc = anc.parent
-        return False
+        return self._up(node)[1]
 
     def _call_node(self, name_node: Node) -> Node | None:
         """名前ノードを関数位置（``new`` の constructor）に持つ呼び出しノード。"""
@@ -1149,8 +1192,7 @@ class _Extractor:
         クラス直下（間に関数が無い）のときだけ見える。``global`` で宣言された名前はモジュールの名前。
         """
         innermost = True
-        anc = node.parent
-        while anc is not None:
+        for anc in self._scopes(node):
             if anc.type in self.functions:
                 if name in self.scan.globals.get(anc.id, ()):
                     return "none", None
@@ -1166,7 +1208,6 @@ class _Extractor:
                     if key is not None:
                         return "import", key
                 innermost = False
-            anc = anc.parent
         return "none", None
 
     def _resolve_bare(self, name: str, node: Node, chain: list[SymbolRecord]) -> tuple[bool, str | None]:
@@ -1493,11 +1534,9 @@ class _Extractor:
         return None
 
     def _class_node(self, node: Node) -> Node | None:
-        anc = node.parent
-        while anc is not None:
+        for anc in self._scopes(node):
             if anc.type in self.classes:
                 return anc
-            anc = anc.parent
         return None
 
     def _class_ref(self, cls: Node) -> tuple[str, str] | None:
@@ -1508,17 +1547,14 @@ class _Extractor:
         return ("local", sym.qualified_name) if sym is not None else None
 
     def _variable_type(self, name: str, node: Node) -> _TypeName | None:
-        anc: Node | None = node.parent
-        while anc is not None:
-            if anc.type in self.functions or anc.type in self.classes or anc.parent is None:
-                got = self.scan.var_types.get(anc.id, {}).get(name)
-                if got is not None:
-                    return got
-                if anc.type in self.functions and (
-                    name in self.scan.locals.get(anc.id, ()) or name in self.scan.imports.get(anc.id, {})
-                ):
-                    return None  # 型の分からないローカル（import を含む）が外側の同名変数を隠す
-            anc = anc.parent
+        for anc in self._scopes(node):  # 関数・クラス・根
+            got = self.scan.var_types.get(anc.id, {}).get(name)
+            if got is not None:
+                return got
+            if anc.type in self.functions and (
+                name in self.scan.locals.get(anc.id, ()) or name in self.scan.imports.get(anc.id, {})
+            ):
+                return None  # 型の分からないローカル（import を含む）が外側の同名変数を隠す
         return None
 
     # --- 走査: 束縛と型 ---
@@ -1607,6 +1643,7 @@ class _Extractor:
         stack: list[tuple[Node, Node | None, Node, Node | None]] = [(root, None, root, None)]
         while stack:
             node, fn, scope, cls = stack.pop()
+            cooperate()
             t = node.type
             child_fn, child_scope, child_cls = fn, scope, cls
             if t == "function_definition":
@@ -1839,6 +1876,7 @@ class _Extractor:
         stack: list[tuple[Node, Node | None, Node, Node | None]] = [(root, None, root, None)]
         while stack:
             node, fn, scope, cls = stack.pop()
+            cooperate()
             t = node.type
             child_fn, child_scope, child_cls = fn, scope, cls
             if t in self.functions:
