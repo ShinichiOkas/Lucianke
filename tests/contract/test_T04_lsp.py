@@ -487,7 +487,8 @@ async def test_fake_timeout_degrades_to_structural_and_skips_the_rest_of_the_cal
         m = meta(r)
         assert (m["confidence_level"], m["is_degraded"], m["lsp_status"]) == ("structural", True, "ready")
         assert m["engine_used"] == "tree-sitter+imports"
-        assert m["accuracy_warning"] == selector.warning_text("lsp_timeout", timeout_ms=3000)
+        # 警告は実際に切れた期限を言う（BUG-0091 以降。ここで差し替えた 300 ms。BUG-0103）
+        assert m["accuracy_warning"] == selector.warning_text("lsp_timeout", timeout_ms=features.LSP_TIMEOUT_DEFINITION_MS)
         assert len(env.requests("textDocument/definition")) == 1  # 2 件目は LSP に聞かない
         assert env.requests("textDocument/hover") == []
         assert env.cache_rows() == []  # 失敗は書き戻さない

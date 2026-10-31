@@ -22,3 +22,9 @@ E             + LSP の応答が 300 ms 内に得られなかったため構文�
 ## 困ること
 
 - T-04 の契約テストがいつも 1 件赤い（全体テストで毎回落ちる。他の役が自分の変更で落ちたのかを見分けにくい）。
+
+## 原因・直し方・確認（2026-10-31）
+
+- 原因: BUG-0091（`d2ac0fc`）で `lsp_timeout` の警告が実際に切れた期限の値を言うようになった。この試験は `LSP_TIMEOUT_DEFINITION_MS` を 300 ms に差し替えているのに、期待値を既定の 3000 ms で作っていた（製品は正しい）。
+- 直し方: 期待値を差し替えた値（`features.LSP_TIMEOUT_DEFINITION_MS`）から作る。
+- 確認: `uv run pytest -q tests/contract/test_T04_lsp.py` が通る。`uv run ruff check` clean。
