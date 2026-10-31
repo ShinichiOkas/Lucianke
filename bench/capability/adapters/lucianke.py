@@ -41,6 +41,8 @@ _CURSOR = re.compile(r"^# more: cursor=(\S+)", re.M)
 _REF = re.compile(r"^\s*([^\s:#][^\s:]*\.\w+):(\d+):(\d+)\s", re.M)  # path:line:col  (references, rename)
 _DIAG = re.compile(r"^[EWIH] (\S+?):(\d+):(\d+) ", re.M)
 _SEARCH = re.compile(r"^\[\w+\] (\S+?)#([\w.]+)(.*?) @L(\d+)", re.M)  # [Kind] path#Qual(sig) @Lx-y
+# BUG-0078 shrink note: "...; whole file: max_tokens>=M with this path alone"
+_WHOLE_FILE = re.compile(r"whole file: max_tokens>=(\d+)")
 _SKEL = re.compile(r"^\s*\[(\w+)\]\s+(?:pub|priv)\s+(?:async\s+)?([A-Za-z_]\w*)", re.M)
 _INCOMING = re.compile(r"<-\s+(\S+)(?:\s+\(external\))?\s+@(\S+?):(\d+)")
 _OUTGOING = re.compile(r"->\s+(\S+)(\s+\(external\))?\s+@(\S+?):(\d+)")
@@ -197,6 +199,11 @@ class LuciankeAdapter(Adapter):
     async def kind_skeleton(self, task: dict[str, Any]) -> tuple[list[Call], Answer]:
         calls: list[Call] = []
         text = await self._call(calls, "get_file_skeleton", {"paths": [task["path"]]})
+        whole = _WHOLE_FILE.search(text)
+        if whole:  # the skeleton was shrunk; an agent that needs every member re-asks with the size the reply names
+            text = await self._call(
+                calls, "get_file_skeleton", {"paths": [task["path"]], "max_tokens": int(whole.group(1))}
+            )
         return calls, Answer(names=[m.group(2) for m in _SKEL.finditer(text)], text=text)
 
     async def kind_definition(self, task: dict[str, Any]) -> tuple[list[Call], Answer]:
