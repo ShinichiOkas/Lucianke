@@ -11,7 +11,7 @@
 
 ```powershell
 git pull
-uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `13535ff` で 4402 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
+uv run pytest -q                     # 期待: 全 green（0 failed。2026-10-31 の `d3c676e` で 4402 passed / 30 skipped）。新しい .venv でもこれだけでよい（BUG-0062 で手順を不要にした）
 uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 passed（旧 BUG-0061 の確認）
 ```
 
@@ -28,7 +28,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 |---|---|
 | ブランチ | `main`（`origin/main` と同期） |
 | スプリント | `m1-impl-20261029`（`.pair-agent/sprints/m1-impl-20261029.json`）。M1 実装 第 1 ラウンド |
-| 全体テスト | `4402 passed, 30 skipped, 0 failed`（2026-10-31・`13535ff` に固定した作業ツリー・15 分 31 秒。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
+| 全体テスト | `4402 passed, 30 skipped, 0 failed`（2026-10-31・`d3c676e` に固定した作業ツリー・13 分 47 秒。`13535ff` も同じ。その前の `a3df079` も 4334 passed・0 failed）。skip 30 件は環境由来（TS の LSP なし・POSIX のみ・symlink 権限・ctags なし・notices 検査の lxml）。**長い全体テストは固定の作業ツリー（`.claude/worktrees/` の下・パスが短い所）で流す**（実行中に同じ作業ツリーで pull すると偽の赤が出る） |
 | 索引 DB のスキーマ | **v15**（v5 `_name_calls`=BUG-0071、v6 `_member_refs`=BUG-0075、v7 `via_super`=BUG-0081、v8=BUG-0085、v9 `_attr_defs`・`_var_types`=BUG-0093〜0095、v10 `_reexports`=BUG-0100、v11=BUG-0104/0105、v12 `_type_aliases`=BUG-0108/0109、v13=BUG-0113/0114、v14=BUG-0117、v15=BUG-0122）。古い索引は移行で再取り込みする |
 | 配布 | exe（PyInstaller onedir）。`.\build.ps1`（§6） |
 
@@ -60,7 +60,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 
 - 速さ
   - BUG-0127（`e90ec54`・`ef5eb80`・`417ce34`）: 初回の索引の解析を spawn の子プロセスに並べる（`engine/analysis_pool.py`。`LUCIANKE_INDEX_WORKERS`、既定は論理 CPU の半分・最大 8・64 ファイル超の走査だけ）・書き手のページキャッシュ 128 MiB・取り込みの文をまとめ書き・200 ファイル以上なら型サーバーを走査と並べて起こす。Mnemo の準備 243 秒 → 62 秒（§7）。exe でも動く（`tools/smoke_exe.py` の 6 段目で確かめる。`8753573`）
-  - BUG-0058（`7e66c64`〜`0965fec`）: T-06/T-07 は対象ごとに最初の診断を待たない・T-08 は届かない診断と同じ QuickFix を待たない。**仕様書 OD-23 を決定 (b)**（`3c015c9`。T-06・T-07・T-08 は冷 p95 < 1 秒〈深さ 2 以上の T-07 は < 2 秒〉と温 p95 < 50 ms に分けて判定。冷えた LSP の exact を 50 ms に入れるのは全部を先に計算するしかなく、ベンチの数字を作るだけになるため。`bench/run_latency.py` も冷・温で判定）
+  - BUG-0058（`7e66c64`〜`0965fec`）: T-06/T-07 は対象ごとに最初の診断を待たない・T-08 は届かない診断と同じ QuickFix を待たない。**仕様書 OD-23 を決定 (b)**（`3c015c9`・T-11 の dry_run も `d3c676e`。T-06・T-07・T-08・T-11 は冷 p95 < 1 秒〈深さ 2 以上の T-07 は < 2 秒〉と温 p95 < 50 ms に分けて判定。冷えた LSP の exact を 50 ms に入れるのは全部を先に計算するしかなく、ベンチの数字を作るだけになるため。`bench/run_latency.py` も冷・温で判定）
   - BUG-0128（`7925923`〜`4eb054b`）: T-19 の表ごとのスレッドをやめる・T-00 の Git の状態を覚える・T-01 は要る列だけ読む・tags.scm を 1 度だけ読む・T-11/T-10 の解析の覚え。BUG-0131（`90b20b4`・`48c4547`）: data_version はメモリの値（25 ms ごとに `PRAGMA data_version` で他プロセスの書き込みを検知）・編集の lsp_status は起動コマンドを探さない
   - BUG-0125（`b42429a`）: T-20 の `timeout_ms` は既定を索引の大きさで決める（1 MB あたり 60 ms・300 ms〜10 秒）・上限 30 秒・公開接続のページキャッシュ 64 MiB・打ち切りに `suggested_timeout_ms` などの手がかり。実物の Mnemo（250 MB）で集計 56〜225 ms
 - LSP の正しさ
@@ -88,7 +88,7 @@ uv run pytest tests/contract_fixtures/test_fx_db_T19_T20.py -q   # 期待: 6 pas
 ## 3. 次にやること（優先順）
 
 1. **能力測定の基準（§7）で点数を見ながら使い勝手を上げる。** 2026-10-31 の `8b39591` で Lucianke 15/15 合格・平均 0.993・19,068 トークン・cold 624 ms / warm 24 ms・**準備 62.4 秒**（`cdc9257` は 243 秒。Serena 13/15・0.946・準備 8.3 秒、grep 7/15・0.782）
-2. M1-3（応答時間。OD-23 (b) の冷・温の判定）: F-POLY は全部合格。F-TS の T-06 の冷は tsserver の references そのものが残り（node でも同程度）、BUG-0134 の票に計測がある。この PC には node が無く、TS の LSP はベンチで bun 経由
+2. M1-3（応答時間。OD-23 (b) の冷・温の判定）: F-POLY は全部合格、F-PY も合格（`d3c676e`）。F-TS は T-06 の冷だけ不合格（14 件中 1 件、tsserver が開かせたファイルでプロジェクトを組み直す回の references そのもの 1.1〜2.5 秒。node 22 でも同程度。BUG-0134）。受入の機材の値で判断する。この PC には node が無く、TS の LSP はベンチで bun 経由
 3. 票の「残ったこと」: BUG-0135（`extends` の先の設定の変更は読み直さない・TS の tsconfig の変更は実機で未確認・M2 の Tier 3 の編集で TOML/JSON を書くときは編集から `notify_watched` が要る）、BUG-0131（T-00・T-08 の `status` は名前のために毎回 `find_command`）
 4. 正式なリリース `v0.0.1` は師匠の判断で（試しの `v0.0.1-rc1` は成功・§6）。CI は手動の起動だけ（3 OS の確認が要るときに Actions から）。Actions の結果は公開 API（`api.github.com/repos/ShinichiOkas/Lucianke/actions/runs`）で読める。ログの本文は `gh auth login` が要る
 4. 他 OS: WSL の Ubuntu は外へのネットワークがつながらない（VPN）。手元で Linux を回すには WSL の設定（例 `networkingMode=mirrored`）が要る
