@@ -535,6 +535,7 @@ def build_record(
     visible = limit_depth(nodes, max(1, opts.max_depth))
     rank = _bfs_rank(visible)
     steps = len(rank) - len(visible)  # 1 件ずつ落とせるノードの数（最上位は残す）
+    last = steps + 2 if steps > 0 else 0  # 段の数。最後の 2 段は最上位だけの版の注を縮める（下限を以前の大きさに保つ）
     wholes: dict[str, int] = {}  # 丸ごとの大きさ（形式ごと。取り直しの目安）
 
     def hint(form: str) -> int:
@@ -544,26 +545,29 @@ def build_record(
             wholes[form] = est(text)
         return -(-(wholes[form] + HINT_MARGIN_TOKENS) // 100) * 100
 
-    def sentence(omitted: int, containers: dict[str, int], form: str) -> str:
+    def sentence(omitted: int, containers: dict[str, int], form: str, *, brief: bool = False) -> str:
         items = [(TOP_LEVEL if k == "" else k, v) for k, v in containers.items()]
         if len(items) > TRUNCATED_CONTAINERS_MAX:
             rest = sum(c for _, c in items[TRUNCATED_CONTAINERS_MAX - 1 :])
             items = [*items[: TRUNCATED_CONTAINERS_MAX - 1], (OTHERS, rest)]
-        where = ": " + ", ".join(f"{c} {n}" for c, n in items) if items else ""
+        where = ": " + ", ".join(f"{c} {n}" for c, n in items) if items and not brief else ""
         again = f"whole file: max_tokens>={hint(form)} with this path alone"
         return f"truncated: {omitted} members omitted{where}; {again}"
 
     def render(t: int, with_json_note: bool = True) -> Record:
-        """``t`` 件落とした段（0 は丸ごと）。``with_json_note=False`` は行の大きさを見積もるとき（json の注の目安を作らない）。"""
+        """段 ``t``（0 は丸ごと、``steps`` は最上位だけ、その先の 2 段は注を縮める）。``with_json_note=False`` は行の大きさを
+        見積もるとき（json の注の目安を作らない）。"""
         dropped: dict[str, int] = {}
-        shown = visible if t == 0 else _prune(visible, len(rank) - t, rank, None, dropped)
+        gone = min(t, steps)
+        extra = t - gone  # 最上位だけの版から: 1 = 入れ物の内訳を注から（compact）・truncated_note を json から、2 = json の内訳も
+        shown = visible if gone == 0 else _prune(visible, len(rank) - gone, rank, None, dropped)
         body = [note(n) for n in notes]
         symbols = _emit(shown, 0, body)
         omitted = sum(dropped.values())
         json_note: str | None = None
         if t:
-            body.append(note(sentence(omitted, dropped, "compact")))
-            if with_json_note:
+            body.append(note(sentence(omitted, dropped, "compact", brief=extra > 0)))
+            if with_json_note and extra == 0:
                 json_note = sentence(omitted, dropped, "json")
         header = file_block_header(rel, lines=line_count, skeleton_lines=len(body), sha12=sha256)
         data = {
@@ -578,7 +582,8 @@ def build_record(
             "symbols": symbols,
             "truncated_members": omitted,
             "truncated_by_container": [
-                {"container": TOP_LEVEL if k == "" else k, "omitted": v} for k, v in dropped.items()
+                {"container": TOP_LEVEL if k == "" else k, "omitted": v}
+                for k, v in (dropped.items() if extra < 2 else ())
             ],
             "truncated_note": json_note,
             "confidence_level": Confidence.STRUCTURAL.value,
@@ -611,9 +616,9 @@ def build_record(
     def shallowest(size: Callable[[int], int], budget: int) -> int | None:
         """``size(t) <= budget`` の最も浅い段 ``t``（二分探索。調べる位置は範囲と各位置の判定だけで決まり、判定は ``budget`` に
         ついて単調なので、結果の段も ``budget`` について単調）。最も深い段も収まらなければ ``None``。"""
-        if size(steps) > budget:
+        if size(last) > budget:
             return None
-        lo, hi = 1, steps  # size(hi) <= budget を保つ
+        lo, hi = 1, last  # size(hi) <= budget を保つ
         while lo < hi:
             mid = (lo + hi) // 2
             if size(mid) <= budget:

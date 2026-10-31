@@ -55,8 +55,8 @@ F-TS の複製元 `bench/.cache/ky` の `package.json`（丸ごとの応答 1,67
   | 1007 | 660（66%・45 落とす） | 996（99%・31 落とす） |
   | 1343 | 1317（98%・14） | 1334（99%・16） |
   | 1595 | 1317（83%・14） | 1587（99%・6） |
+  | 671 | 659（98%） | 669（100%・45。最上位だけ） |
   | 760 | 659 | 758（100%・45） |
-  | 671〜740 | 659（98%） | 1 件も返らない（警告） |
 
-  最も小さい版（最上位だけ）の json が、`truncated_by_container` と `truncated_note` の分だけ約 660 → 約 750 トークンに増えた（コードの骨格と同じ欄）。この帯の予算では以前は最上位だけが返ったが、今は 1 件も返らず警告が `max_tokens` を勧める。
-- 新しい試験 `tests/contract/test_T02_data_shrink.py`（5 件）: package.json 風のファイルで予算を掃引し、compact・json とも利用率 9 割以上・予算に単調・注の形（`whole file: max_tokens>=` で取り直すと丸ごと）・json の `truncated_by_container` の和が `truncated_members`。直す前は 4 件が赤（compact の 783 で 189 トークン、など）。単体の `test_syntax_adapters.py::test_shrink_drops_one_member_at_a_time_deepest_and_last_first` と契約 `test_T02_data_files.py::test_shrink_reduces_depth_and_says_so` を新しい注に直した。
+  鎖の最後に、最上位だけの版から注を縮める 2 段を足した（compact の注は件数と `whole file: max_tokens>=M` だけ、json は `truncated_note` を `null`、次に `truncated_by_container` を `[]`。`truncated_members` は残る）。最初の直し（`truncated_by_container` と `truncated_note` を常に付けた）では最上位だけの版が約 750 トークンになり、671〜740 の帯が 1 件も返らなかったが、今は最小の版が約 669 トークン（以前は 659）で、671 でも最上位だけが返る。
+- 新しい試験 `tests/contract/test_T02_data_shrink.py`（7 件。最後の 2 件は「以前に最上位が返っていた最小の予算で最上位が返る」）: package.json 風のファイルで予算を掃引し、compact・json とも利用率 9 割以上・予算に単調・注の形（`whole file: max_tokens>=` で取り直すと丸ごと）・json の `truncated_by_container` の和が `truncated_members`。直す前は 4 件が赤（compact の 783 で 189 トークン、など）。単体の `test_syntax_adapters.py::test_shrink_drops_one_member_at_a_time_deepest_and_last_first` と契約 `test_T02_data_files.py::test_shrink_reduces_depth_and_says_so` を新しい注に直した。

@@ -116,3 +116,23 @@ async def test_note_names_containers_and_whole_file_budget(pipeline: Pipeline) -
     assert item["truncated_members"] > 0
     assert sum(c["omitted"] for c in item["truncated_by_container"]) == item["truncated_members"]
     assert "whole file: max_tokens>=" in item["truncated_note"]
+
+
+@pytest.mark.parametrize("fmt", ["compact", "json"])
+async def test_top_level_only_version_still_fits_where_it_did_before(pipeline: Pipeline, fmt: str) -> None:
+    """最上位だけの版の注は件数と ``whole file: max_tokens>=M`` だけに縮む。以前（深さ 1 に縮退）に返っていた最小の予算
+    （最上位だけ〈max_depth=1〉の大きさ + 注の約 20 トークン）で最上位が返り、1 件も返らない帯を作らない（BUG-0084）。"""
+    flat = await pipeline.call_tool(
+        "get_file_skeleton", {"format": fmt, "paths": [PATH], "max_tokens": 100_000, "max_depth": 1}
+    )
+    budget = _used(fmt, flat) + 20
+    r = await _call(pipeline, fmt, budget)
+    assert _used(fmt, r) <= budget
+    top = list(_package_json())
+    if fmt == "json":
+        item = r.structured["data"]["items"][0]
+        assert [s["name"] for s in item["symbols"]] == top
+        assert item["truncated_members"] > 0
+    else:
+        assert [ln.split()[1] for ln in r.text.splitlines() if ln.startswith("[Key]")] == top
+        assert re.search(r"- truncated: \d+ members omitted; whole file: max_tokens>=\d+ ", r.text)

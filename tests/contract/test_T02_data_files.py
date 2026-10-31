@@ -176,8 +176,7 @@ async def test_shrink_reduces_depth_and_says_so(pipeline: Pipeline) -> None:
     assert "[Key] max_attempts" in full.text and "truncated" not in full.text
     assert g.validate(small.text) == []
     assert (
-        "- truncated: 5 members omitted: service 2, features 3; whole file: max_tokens>=400 with this path alone"
-        in small.text
+        "- truncated: 5 members omitted; whole file: max_tokens>=400 with this path alone" in small.text
     )
     assert (
         "[Key] features @L20-25 { ...3 nodes omitted }" in small.text
