@@ -1,6 +1,6 @@
 [project]
 name = "lucianke"
-version = "0.0.1"
+version = "0.1.0"
 description = "Deterministic code-knowledge MCP server for coding agents (Tree-sitter + LSP + SQLite)"
 readme = "README.md"
 requires-python = ">=3.12"
