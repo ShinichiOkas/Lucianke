@@ -644,6 +644,20 @@ def count_references_to(
     return int(conn.execute(sql, params).fetchone()[0])
 
 
+def referencing_paths(
+    conn: sqlite3.Connection, target_urn: Urn | str, kinds: Iterable[str] | None = None, *, limit: int = 16
+) -> list[str]:
+    """``references_to`` と同じ条件の参照元のファイルのパス（重複なし・参照の多い順・``limit`` 件まで）。"""
+    where, params = _reference_where(target_urn, kinds, None, True)
+    params["limit"] = max(0, int(limit))
+    sql = (
+        "SELECT f.path FROM relations r JOIN files f ON f.file_id = r.source_file_id"
+        + where
+        + " GROUP BY f.path ORDER BY count(*) DESC, f.path LIMIT :limit"
+    )
+    return [str(row[0]) for row in conn.execute(sql, params)]
+
+
 # --- 受け手の型が分からない属性呼び出し（内部表 _name_calls。BUG-0071） ---------------------------------
 
 

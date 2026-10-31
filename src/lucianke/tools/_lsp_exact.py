@@ -643,6 +643,11 @@ class SiteIndex:
     _cache: dict[str, dict[tuple[int, int], SiteInfo]] = field(default_factory=dict)
     _loading: dict[str, asyncio.Future[dict[tuple[int, int], SiteInfo]]] = field(default_factory=dict)
 
+    def start(self, rel: str) -> None:
+        """``rel`` の分類を始めておく（待たない。後の ``of`` が同じ分類を待つ。LSP の要求の待ちと重ねる。BUG-0134）。"""
+        if rel not in self._cache and rel not in self._loading:
+            self._loading[rel] = asyncio.ensure_future(self._load(rel))
+
     async def of(self, rel: str) -> dict[tuple[int, int], SiteInfo]:
         if rel in self._cache:
             return self._cache[rel]
@@ -1854,6 +1859,9 @@ class CallEdgeSource:
         if self._stop:
             raise _NotAsked
         sym, direction, prime = job.sym, job.key[1], job.prime
+        # tsserver 系の incoming は references でプロジェクトをまたぐ呼び出しも取る（BUG-0133。basedpyright の callHierarchy は
+        # 解析の対象と開いた文書をすべて探すので要らない）
+        by_refs = direction == "incoming" and self.route.file.language in TS_FAMILY
         # BUG-0058: LSP 経路の各段の所要（秒）。合計が閾値を超えた呼び出しだけ内訳をログに落とす（閾値ガード付き）。
         spans: dict[str, float] = {}
         t = time.monotonic()
@@ -1883,7 +1891,7 @@ class CallEdgeSource:
                     next((i for i in items if i.rel == path), None),
                 )
             spans["prepare"], t = time.monotonic() - t, time.monotonic()
-            if item is None and prime is None:
+            if item is None and not by_refs:
                 raise LuciankeError(
                     ErrorCode.E_LSP_UNAVAILABLE,
                     f"the LSP has no call hierarchy item for {sym.qualified_name}",
@@ -1895,7 +1903,7 @@ class CallEdgeSource:
                 edges = await call(handle, item, **self._root_limits(job))
             spans["calls"], t = time.monotonic() - t, time.monotonic()
             locs: list[features.RefLocation] = []
-            if prime is not None:
+            if by_refs:
                 # tsserver の callHierarchy は対象のファイルの既定のプロジェクト（tsconfig の include）の中しか探さない
                 # （``provideCallHierarchyIncomingCalls`` は ``getFileAndProject`` の 1 つのプロジェクト）。開いた test/ などの別の
                 # プロジェクトの呼び出しは references（プロジェクトをまたぐ）で集め、構文木で呼び出しと分かる箇所を足す（BUG-0133）。

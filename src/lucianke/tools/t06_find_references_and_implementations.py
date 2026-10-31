@@ -563,6 +563,8 @@ class _Pre:
     structural_hits: int = 0  # relations にある参照の数（LSP が 0 件と答えたときの突き合わせ用）
     # exact 経路で足す警告（LSP に開かせるファイルの上限など）
     warnings: list[str] = field(default_factory=list)
+    # relations で参照している（LSP の答えに入りそうな）ファイル。references を待つ間に参照箇所の分類を始める（BUG-0134）
+    likely_files: list[str] = field(default_factory=list)
 
 
 def _refs_wanted(args: FindReferencesArgs) -> bool:
@@ -586,7 +588,8 @@ def _pre(db_path: Any, ws: Workspace, args: FindReferencesArgs) -> _Pre:
             else None
         )
         hits = queries.count_references_to(conn, str(sym.urn), _REF_KINDS) if cached is None else 0
-        return _Pre(sym, info, token, cached, hits)
+        likely = queries.referencing_paths(conn, str(sym.urn), _REF_KINDS) if hits else []
+        return _Pre(sym, info, token, cached, hits, likely_files=likely)
 
 
 def _work(
@@ -785,6 +788,12 @@ async def _exact_references(
         settled = await lx.await_first_diagnostic(route.handle, sym.path, timeout_s=budget.left_s())
     spans["settle"], t = time.monotonic() - t, time.monotonic()
     sel = sym.selection or sym.range
+    sites = lx.SiteIndex(ctx.services, ws)
+    # 索引で対象を参照しているファイル（LSP の答えに入りそうなもの）の参照箇所の分類を、references を送ってから答えを待つ間に
+    # 進める（BUG-0134。大きなテストファイルの初回の分類は 1 ファイル 150〜300 ms。分類は Python で GIL を持つので、開かせる
+    # ファイルを探す prime の前に始めると prime が遅れて要求を送るのが遅れる。答えに入らなかったファイルも内容ごとに覚えて使う）
+    for rel in pre.likely_files:
+        sites.start(rel)
     locs = await features.references(
         route.handle,
         sym.path,
@@ -794,7 +803,6 @@ async def _exact_references(
     )
     spans["references"], t = time.monotonic() - t, time.monotonic()
     target_urn = str(sym.urn)
-    sites = lx.SiteIndex(ctx.services, ws)
     # 参照元のファイルの分類は並行に（構文木はスレッド。内容が同じなら前の問い合わせの分類を使い回す。BUG-0058）
     rels = sorted({str(loc.rel) for loc in locs})
     infos = dict(zip(rels, await asyncio.gather(*(sites.of(r) for r in rels)), strict=True))
