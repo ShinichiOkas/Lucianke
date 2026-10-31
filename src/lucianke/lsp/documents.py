@@ -83,6 +83,11 @@ class DocumentSync:
     def is_open(self, path: RelPath) -> bool:
         return path in self._docs
 
+    @property
+    def max_open(self) -> int:
+        """開いておける文書の上限（超えたら古い順に ``didClose``）。"""
+        return self._max_open
+
     def open_paths(self) -> list[RelPath]:
         """開いている文書（古い順）。"""
         return list(self._docs)

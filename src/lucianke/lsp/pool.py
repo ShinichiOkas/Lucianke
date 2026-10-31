@@ -396,6 +396,7 @@ class LspHandle:
     # --- 内部: 状態 -----------------------------------------------------------------
 
     def _set_state(self, state: LspState, reason: str | None = None) -> None:
+        initialized = state is LspState.INDEXING and self.state is not LspState.INDEXING
         if state is not self.state:
             self.history.append(state)
             _log.debug(
@@ -414,6 +415,8 @@ class LspHandle:
         for fut in waiters:
             if not fut.done():
                 fut.set_result(None)
+        if initialized:
+            self._pool._initialized(self)
 
     async def _wait_state(self, done: Callable[[], bool], timeout_s: float) -> bool:
         """``done()`` が真になるまで状態の変化を待つ。時間切れで ``False``。"""
@@ -527,6 +530,7 @@ class LspPool:
         indexing_max_s: float = 300.0,
         stable_after_s: float = 60.0,
         grace_ms: int = 500,
+        on_initialized: Callable[[LspHandle], Any] | None = None,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -548,6 +552,10 @@ class LspPool:
         self._sleep = sleep
         self._clock = clock
         self._wall_clock = wall_clock
+        self.on_initialized = on_initialized
+        """ハンドルが ``initialize`` を済ませて ``indexing`` に入るたび（起動し直した後も。文書を受け付けられるようになった）に
+        呼ぶ（同期。待たない。例外はログに落として握る）。合成ルートが ``RuntimeHub.on_lsp_initialized``（参照元になりうるファイルを
+        背景で先に開かせる。BUG-0134）を結ぶ。"""
         self._handles: dict[tuple[str, str, Role], LspHandle] = {}
         self._command_gen = 0
         """起動コマンドの探索の結果が変わりうる出来事（``invalidate_commands``）の数。``_name_memo`` の覚えは、書いたときの値と
@@ -576,6 +584,16 @@ class LspPool:
         if h is None:
             h = self._handles[key] = LspHandle(self, language_id, ws, role)
         return h
+
+    def _initialized(self, h: LspHandle) -> None:
+        """``h`` が ``indexing`` に入った（``LspHandle._set_state`` から）。``on_initialized`` に知らせる（状態機械を止めない）。"""
+        callback = self.on_initialized
+        if callback is None:
+            return
+        try:
+            callback(h)
+        except Exception:  # noqa: BLE001  合図の受け手の失敗で LSP の状態機械を止めない
+            _log.warning("on_initialized failed for %s/%s", h.language_id, h.role, exc_info=True)
 
     def _spawn_bg(self, coro: Awaitable[Any]) -> None:
         task = asyncio.ensure_future(coro)

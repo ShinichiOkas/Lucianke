@@ -37,6 +37,7 @@ from lucianke.lsp.action_store import CodeActionStore
 from lucianke.lsp.pool import FileChangeType, LspHandle, LspPool
 from lucianke.lsp.servers import PYRIGHT_ROOT_CONFIGS, is_lsp_config
 from lucianke.syntax.parsers import TreeCache
+from lucianke.tools._lsp_preopen import preopen, wants_preopen
 from lucianke.tools._services import ToolServices
 from lucianke.tools.t00_configure_workspace import load_known_roots, restore_settings
 from lucianke.workspace.context import WorkspaceContext
@@ -354,6 +355,7 @@ class RuntimeHub:
         self._lock = asyncio.Lock()
         self._applied: tuple[str, ...] | None = None
         self._started = asyncio.Event()  # 最初の sync_roots が終わった（束が開いた・開けなかった、のどちらでも）
+        self._preopens: set[asyncio.Task[Any]] = set()  # LSP の先開き（on_lsp_ready）
 
     @property
     def started(self) -> bool:
@@ -496,6 +498,38 @@ class RuntimeHub:
                 _log.warning("could not rebind the LSP handle %s", handle.language_id, exc_info=True)
         return restarted
 
+    # --- LSP が initialize を済ませた → 参照元になりうるファイルを背景で先に開かせる（BUG-0134） ---
+
+    def on_lsp_initialized(self, handle: LspHandle) -> None:
+        """``LspPool`` の ``on_initialized``。型解決のサーバー（tsserver 系・basedpyright）が ``initialize`` を済ませたら、参照元に
+        なりうるファイルを背景でまとめて開かせる（``tools/_lsp_preopen.preopen``。tsserver 系はすぐ、basedpyright は ``ready`` の後）。
+        タスクを投げるだけで待たない（呼び出しの経路に時間を乗せない）。束が無い（開けなかった・畳まれた）ワークスペースでは何もしない。"""
+        if not wants_preopen(handle):
+            return
+        rt = self._runtimes.get(handle.ws.workspace_id)
+        if rt is None:
+            return
+        task = asyncio.get_running_loop().create_task(
+            preopen(handle, rt.readers, building=rt.indexer.building),
+            name=f"lucianke-lsp-preopen-{handle.language_id}-{handle.ws.workspace_id}",
+        )
+        self._preopens.add(task)
+        task.add_done_callback(self._preopen_done)
+
+    def _preopen_done(self, task: asyncio.Task[Any]) -> None:
+        self._preopens.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:  # 先開きの失敗は答えを変えない（呼び出しが今までどおり自分で開かせる）
+            _log.warning("pre-opening files for the LSP failed: %r", exc, exc_info=exc)
+
+    async def cancel_preopens(self) -> None:
+        tasks = list(self._preopens)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     # --- LSP の診断 → PaaD ---
 
     async def on_diagnostics(
@@ -525,6 +559,7 @@ class RuntimeHub:
     # --- 終了の段（Lifecycle へ登録する。現在の束の集合を回るので、後から増えた分も含む） ---
 
     async def stop_watchers(self) -> None:
+        await self.cancel_preopens()  # 索引の読み手を使うので、書き手を閉じる前に止める
         await asyncio.gather(*(rt.stop_watcher() for rt in self._runtimes.values()), return_exceptions=True)
 
     async def stop_indexers(self) -> None:

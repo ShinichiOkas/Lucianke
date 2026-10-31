@@ -44,6 +44,7 @@ from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.foreground import cooperate
 from lucianke.core.limits import (
     LSP_TIMEOUT_CALL_HIERARCHY_MS,
     LSP_TIMEOUT_CODE_ACTION_MS,
@@ -380,6 +381,57 @@ async def open_documents(handle: LspHandle, files: Iterable[tuple[RelPath, str]]
         opened += 1
     if opened:
         handle.touch()
+    return opened
+
+
+def read_documents(ws: Workspace, files: Iterable[tuple[RelPath, str]]) -> list[tuple[RelPath, str, str]]:
+    """``files``（``(RelPath, languageId)``）の本文を読んで ``(RelPath, languageId, 本文)`` にする。ブロックする（スレッドで呼ぶ）。
+
+    ``preload_documents`` に渡す下ごしらえ（読み込みをイベントループの外に出す）。読めないファイルは飛ばす。1 ファイルごとに
+    ``cooperate``（背景の印のある文脈なら、前景の呼び出しが忙しい間 GIL を譲る。BUG-0112）。
+    """
+    out: list[tuple[RelPath, str, str]] = []
+    for rel, language_id in files:
+        cooperate()
+        try:
+            out.append((rel, language_id, _text_of(_read(ws, rel))))
+        except LuciankeError:
+            continue
+    return out
+
+
+def preload_documents(handle: LspHandle, docs: Sequence[tuple[RelPath, str, str]], client: LspClient | None) -> int:
+    """読み済みの ``docs``（``read_documents``）を ``didOpen`` する。新しく開いた件数を返す。**同期**（途中で ``await`` しない）。
+
+    LSP が ``initialize`` を済ませた後の背景の先開き（BUG-0134）のためのもの。途中に他の要求が割り込まないので、tsserver が推定
+    プロジェクトを組み直すのは、まとめて開いたこの 1 回だけになる（1 ファイルずつ要求の間に開くと、そのたびに組み直す）。
+
+    * 開いている文書は飛ばす（前景の呼び出しが先に開いた分も）。開いておける上限（``DocumentSync.max_open``）を超えては
+      開かない（前景が開いた文書を追い出さない）。
+    * ``client`` は先開きを決めたときのクライアント。ハンドルが ``indexing`` / ``ready`` でない・起動し直した（クライアントが
+      変わった）・切断されていれば何もしない（0。起動し直した後にまた先開きが走る）。送信が切断で失敗したらそこで止める。
+    * ``touch`` しない（先開きでアイドル停止を延ばさない）。
+    """
+    if (
+        client is None
+        or handle.state not in (LspState.INDEXING, LspState.READY)
+        or handle.client is not client
+        or not client.is_connected
+    ):
+        return 0
+    documents = handle.documents
+    room = documents.max_open - len(documents)
+    opened = 0
+    for rel, language_id, text in docs:
+        if opened >= room:
+            break
+        if documents.is_open(rel):
+            continue
+        try:
+            documents.did_open(rel, text, language_id)
+        except ConnectionError:
+            break
+        opened += 1
     return opened
 
 

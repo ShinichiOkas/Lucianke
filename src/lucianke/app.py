@@ -214,7 +214,7 @@ def run_stdio() -> int:
     trees = TreeCache()
     procs = ProcessRegistry()
     hub = RuntimeHub(settings.cache_root, trees)
-    pool = LspPool(procs, on_diagnostics=hub.on_diagnostics)
+    pool = LspPool(procs, on_diagnostics=hub.on_diagnostics, on_initialized=hub.on_lsp_initialized)
     hub.lsp_pool = pool
     decision = RootsDecision(hub, roots, log)
     lifecycle = Lifecycle()

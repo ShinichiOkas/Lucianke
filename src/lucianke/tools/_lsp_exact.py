@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from lucianke.core.errors import ErrorCode, LuciankeError
+from lucianke.core.limits import LSP_OPEN_DOCS_MAX
 from lucianke.core.model import (
     Capability,
     Confidence,
@@ -102,6 +103,7 @@ __all__ = [
     "prime_candidates",
     "prime_documents",
     "prime_set",
+    "preopen_set",
     "degraded_choice",
     "is_lsp_failure",
     "log_slow_spans",
@@ -279,6 +281,33 @@ class PrimeSet:
         )
 
 
+def _prime_pool(
+    conn: sqlite3.Connection,
+    ws: Workspace,
+    *,
+    exclude: str,
+    languages: frozenset[str],
+    outside: Callable[[RelPath], bool] | None,
+) -> list[FileInfo]:
+    """開かせる候補になりうるファイル: 索引の Tier 1〜2 の ``languages`` のファイル（``exclude`` を除き、``outside`` を渡すと
+    それが真のものだけ）。テストを先に、次にパス順。"""
+    infos = [
+        f
+        for f in queries.files_in_scope(conn, ws.workspace_id, ())
+        if f.language in languages
+        and f.tier in (Tier.T1, Tier.T2)
+        and str(f.path) != exclude
+        and (outside is None or outside(RelPath(str(f.path))))
+    ]
+    infos.sort(key=lambda f: (not f.is_test, str(f.path)))
+    return infos
+
+
+def _document_language_id(language: str) -> str:
+    defs = servers_for(language, "types")
+    return defs[0].document_language_id if defs else language
+
+
 def prime_candidates(
     conn: sqlite3.Connection,
     ws: Workspace,
@@ -300,18 +329,9 @@ def prime_candidates(
         pattern = re.compile(rb"(?<![\w$])" + re.escape(name.encode("utf-8")) + rb"(?![\w$])")
     except re.error:
         return PrimeSet()
-    infos = [
-        f
-        for f in queries.files_in_scope(conn, ws.workspace_id, ())
-        if f.language in languages
-        and f.tier in (Tier.T1, Tier.T2)
-        and str(f.path) != exclude
-        and (outside is None or outside(RelPath(str(f.path))))
-    ]
-    infos.sort(key=lambda f: (not f.is_test, str(f.path)))
     hits: list[tuple[RelPath, str]] = []
     skipped = 0
-    for info in infos:
+    for info in _prime_pool(conn, ws, exclude=exclude, languages=languages, outside=outside):
         rel = RelPath(str(info.path))
         if is_open(rel):
             continue
@@ -324,9 +344,20 @@ def prime_candidates(
         if len(hits) >= limit:
             skipped += 1
             continue
-        defs = servers_for(info.language, "types")
-        hits.append((rel, defs[0].document_language_id if defs else info.language))
+        hits.append((rel, _document_language_id(info.language)))
     return PrimeSet(tuple(hits), skipped)
+
+
+def _prime_rule(
+    ws: Workspace, language: str, scope: PyrightScope | None
+) -> tuple[frozenset[str], Callable[[RelPath], bool] | None] | None:
+    """``language`` の LSP に開かせる候補の言語と絞り込み（``prime_set`` / ``preopen_set`` の共通の規則）。開かせないなら ``None``。"""
+    if language in TS_FAMILY:
+        return TS_FAMILY, None
+    if language != "python" or scope is None or not scope.narrowed:
+        return None
+    inside = scope.contains
+    return frozenset({"python"}), lambda rel: not inside(to_abs(ws, rel))
 
 
 def prime_set(
@@ -348,23 +379,53 @@ def prime_set(
       利用者の設定が ``include`` / ``exclude`` を書いていない（既定の除外だけ）ときは開かせない（ファイルの一覧も引かない。今までどおり）。
     * ほかの言語: 空。
     """
-    if language in TS_FAMILY:
-        return prime_candidates(conn, ws, name=name, exclude=exclude, is_open=is_open, limit=limit)
-    if language != "python":
+    rule = _prime_rule(ws, language, scope)
+    if rule is None:
         return PrimeSet()
-    if scope is None or not scope.narrowed:
-        return PrimeSet()
-    inside = scope.contains
+    languages, outside = rule
     return prime_candidates(
-        conn,
-        ws,
-        name=name,
-        exclude=exclude,
-        is_open=is_open,
-        limit=limit,
-        languages=frozenset({"python"}),
-        outside=lambda rel: not inside(to_abs(ws, rel)),
+        conn, ws, name=name, exclude=exclude, is_open=is_open, limit=limit, languages=languages, outside=outside
     )
+
+
+def preopen_set(
+    conn: sqlite3.Connection,
+    ws: Workspace,
+    language: str,
+    *,
+    is_open: Callable[[RelPath], bool],
+    open_count: int,
+    max_open: int = LSP_OPEN_DOCS_MAX,
+    scope: PyrightScope | None = None,
+) -> PrimeSet:
+    """LSP が ``ready`` になった直後に背景で開かせるファイル（BUG-0134）。ブロックする（スレッドで呼ぶ）。
+
+    ``prime_set`` がどれかの名前で選びうるファイルの和（同じ規則で、名前では絞らない。tsserver 系は同系のファイルすべて、Python は
+    basedpyright の解析の対象の外の Python のファイル、ほかの言語は空）のうち、LSP がまだ開いていないもの。中身は読まない。
+
+    * 開いている ``open_count`` 件と合わせて、開いておける上限 ``max_open``（``LSP_OPEN_DOCS_MAX`` = 200）に収まるなら全部
+      （テストが先、次にパス順）。以後の参照検索の ``prime_set`` は開くファイルが無くなり、tsserver が組み直さない。
+    * 収まらなければ、1 回の問い合わせが開かせる分（``PRIME_MAX``）の余地を残した ``max_open - PRIME_MAX - open_count`` 件を、
+      索引の関係（呼び出し・参照・import）を多く持つファイルから選ぶ（多くの名前を含むので、どの対象の ``prime_set`` にも入りやすい）。
+      残りは ``skipped`` に数える（問い合わせのたびに ``prime_set`` が今までどおり開かせる）。
+    """
+    rule = _prime_rule(ws, language, scope)
+    if rule is None:
+        return PrimeSet()
+    languages, outside = rule
+    infos = [
+        f
+        for f in _prime_pool(conn, ws, exclude="", languages=languages, outside=outside)
+        if not is_open(RelPath(str(f.path)))
+    ]
+    if len(infos) > max_open - open_count:
+        keep = max(0, max_open - PRIME_MAX - open_count)
+        weight = queries.relation_counts_by_source(conn, ws.workspace_id)
+        infos.sort(key=lambda f: -weight.get(str(f.path), 0))  # 安定ソート: 同数はテストが先、次にパス順のまま
+        chosen, skipped = infos[:keep], len(infos) - keep
+    else:
+        chosen, skipped = infos, 0
+    return PrimeSet(tuple((RelPath(str(f.path)), _document_language_id(f.language)) for f in chosen), skipped)
 
 
 async def prime_documents(handle: LspHandle, prime: PrimeSet) -> int:

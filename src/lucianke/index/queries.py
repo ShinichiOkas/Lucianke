@@ -658,6 +658,17 @@ def referencing_paths(
     return [str(row[0]) for row in conn.execute(sql, params)]
 
 
+def relation_counts_by_source(conn: sqlite3.Connection, workspace_id: str) -> dict[str, int]:
+    """ファイルごとの、そのファイルを出どころ（``source_file_id``）とする関係の行数（行の無いファイルは入らない）。
+
+    LSP に先に開かせるファイルを上限の中で選ぶ順（関係の多いファイルほど多くの名前を含む。BUG-0134）。"""
+    sql = (
+        "SELECT f.path, count(*) FROM relations r JOIN files f ON f.file_id = r.source_file_id"
+        " WHERE f.workspace_id = ? GROUP BY f.path"
+    )
+    return {str(path): int(n) for path, n in conn.execute(sql, (workspace_id,))}
+
+
 # --- 受け手の型が分からない属性呼び出し（内部表 _name_calls。BUG-0071） ---------------------------------
 
 
