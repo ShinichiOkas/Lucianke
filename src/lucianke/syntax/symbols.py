@@ -111,8 +111,13 @@ class Extraction:
     warnings: tuple[str, ...] = ()
 
 
+@functools.cache
 def load_query_source(language_id: str) -> str:
-    """``queries/<言語>/tags.scm`` の原文。``tsx`` は typescript、``jsx`` は javascript のものを使う。"""
+    """``queries/<言語>/tags.scm`` の原文。``tsx`` は typescript、``jsx`` は javascript のものを使う。
+
+    パッケージに同梱した変わらないファイルなので、言語ごとに 1 度だけ読む（BUG-0128。以前は T-04・T-10・T-11 の呼び出しのたびに
+    1〜3 回ファイルを開いて読んでいた。ウイルス対策の検査がファイルを開くたびに挟まり、CPU が混むと 1 回で数 ms かかる）。
+    """
     try:
         directory = _QUERY_DIRS[language_id]
     except KeyError:
